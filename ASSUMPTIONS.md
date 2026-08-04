@@ -81,3 +81,77 @@ ONE place. Listed with how to correct it when the answer lands.
   not part of today's Part-A scope.
 - **Audit retention/encryption (90+ days)** — deployment/log-collector config,
   not code.
+
+## 10. Cost gate (Gate 4) + Redis — DEFERRED, not built
+- **Status:** deferred, pending Redis availability. Chosen to skip Redis this
+  session (no credentials yet).
+- **Impact — read this:** there is currently NO enforced token/spend cap. The
+  429 quota gate is absent from the dependency chain. This is safe today only
+  because nothing calls the LLM yet.
+- **Must do before it matters:** build the Redis client + cost gate BEFORE any
+  unit (A/B/C) makes real LLM calls, or LLM spend is uncapped.
+- **How to build when unblocked:** local Redis needs no credentials
+  (`redis://localhost:6379`); the client is config-driven and fail-closed so the
+  production URL swaps in with no code change. Per-tenant + per-user counters,
+  atomic INCR/EXPIRE, 429 on breach, placed in the chain AFTER the three gates,
+  reading tenant/user from RequestContext. Wire an audit deny line on 429.
+
+## 11. Input size limit — DEFERRED to last, home undecided
+- **Status:** built once as ASGI middleware, then removed — it caused a
+  regression (forced eager config load at construction; tangled middleware
+  ordering with the error handler).
+- **Decision pending:** where it should live. Options: middleware, or closer to
+  the route, or alongside the request-id middleware when that is built (both are
+  always-on edge concerns).
+- **How to correct:** re-add LAST, on its own, run the full suite immediately,
+  and watch the error/chain/audit tests. Read the cap lazily (never call
+  get_settings() in middleware __init__). Config field `max_request_body_bytes`
+  already exists as a placeholder (1 MB) if it was kept.
+
+## 12. Per-unit prompt-injection hardening — deferred to each unit
+- **Built now:** the injection-resistant prompt BUILDER (server-side assembly,
+  trusted/untrusted split, delimiter neutralisation) and its structural tests.
+  This is generic and reused by every unit.
+- **Deferred:** each unit's REAL versioned prompt and its task-specific
+  adversarial injection tests. These depend on what the unit does and cannot be
+  finished until the unit exists.
+- **How to correct:** when a unit is built, add (a) its real prompt file in
+  prompts/ and (b) adversarial injection tests against that prompt. The builder
+  and its boundary do not change.
+- **Caveat:** the delimiter boundary is defense-in-depth, not a perfect
+  guarantee — no scheme makes an LLM fully injection-proof. It establishes the
+  structural boundary and removes easy escapes; hardening is layered and evolves.
+
+## 13. Placeholder config values added this session
+- **Watchdog** (`core/config.py`): `external_call_timeout_seconds = 10.0`,
+  `external_call_retry_once = True`. Placeholders — tune to real LLM/tool
+  latency later.
+- **Input size** (if the field was kept): `max_request_body_bytes = 1_000_000`
+  (1 MB). Placeholder — tune to real payload sizes.
+- **How to correct:** set the matching `DODEAL_*` env vars; no code change.
+
+## 14. Watchdog retry vs non-idempotent writes
+- **Assumed:** retry-once is safe for READS.
+- **Risk:** for a non-idempotent WRITE (the future note-writeback, a POST) a
+  blind retry could double-execute (e.g. create two notes).
+- **Seam:** `core/resilience.py::call_with_watchdog` accepts `retry=False`.
+- **How to correct:** when wrapping the note-writeback, pass `retry=False` or
+  make the operation idempotent. Do not retry writes blindly.
+
+## 15. Sample schema + sample prompt are placeholders
+- **`schemas/lead_v1.py`** (LeadV1: id/name/status, extra="forbid") is a SAMPLE
+  to build/test the validator. Real lead shape is confirmed when the backend
+  tool client is built (blocked). Replace as `lead_v2` or edit the file.
+- **`prompts/unit_a_v1.txt`** is a SAMPLE to build/test the prompt builder. Real
+  Unit A prompt replaces it when the unit is built.
+- The validator and the builder themselves are production-ready; only the
+  sample contract/template are provisional.
+
+## 16. Global error handler is ASGI middleware (not an exception handler)
+- **Why:** Starlette 1.3.1's ServerErrorMiddleware re-raises after handling,
+  which under the test client bypasses an installed 500 handler. The catch-all
+  is implemented as outermost middleware so behaviour matches in tests and prod.
+- **Note for future middleware:** middleware is applied in reverse registration
+  order (last registered = outermost). Register the error catch-all last.
+- **request_id in error responses** is currently `"unknown"` until the
+  request-id middleware exists (same placeholder as the gates).

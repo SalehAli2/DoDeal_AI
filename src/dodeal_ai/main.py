@@ -5,6 +5,7 @@ from fastapi.responses import JSONResponse
 
 from dodeal_ai.api.routes import _probe
 from dodeal_ai.core.config import ConfigError, get_settings
+from dodeal_ai.core.errors import register_error_handlers
 
 
 @asynccontextmanager
@@ -22,6 +23,8 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+#register_body_size_limit(app)
+register_error_handlers(app)
 @app.get("/ready")
 def ready():
     try:
@@ -29,3 +32,4 @@ def ready():
     except ConfigError:
         return JSONResponse(status_code=503, content={"status": "not ready"})
     return {"status": "ready"}
+

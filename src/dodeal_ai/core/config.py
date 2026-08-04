@@ -56,7 +56,14 @@ class Settings(BaseSettings):
     claim_tenant_id: str = "tenant_id"
     claim_subject: str = "sub"
     claim_roles: str = "roles"
-
+    # --- Input guard: max request body size in bytes (config-driven) ---------
+    # Placeholder cap; tune per real payload sizes later. Guards memory/cost
+    # abuse before any tool/LLM work happens.
+    #max_request_body_bytes: int = 1_000_000
+    # --- Watchdog: timeout + retry policy for external calls (§6) -----------
+    # Placeholder values; tune per real LLM/tool latency later.
+    external_call_timeout_seconds: float = 10.0
+    external_call_retry_once: bool = True
 
 def _build_settings(**overrides) -> Settings:
     """Construct Settings, converting a missing/invalid-config failure into a
