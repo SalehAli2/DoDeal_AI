@@ -46,23 +46,21 @@ def client():
         _env_file=None,
         jwt_signing_key=tokens.TEST_SECRET,
         jwt_algorithm=tokens.TEST_ALG,
-        jwt_issuer=tokens.TEST_ISS,
-        jwt_audience=tokens.TEST_AUD,
     )
     app.dependency_overrides[get_verifier] = lambda: JwtVerifier(test_settings)
     yield TestClient(app)
     app.dependency_overrides.clear()
 
-
 def test_cross_tenant_deny_emits_warning_line(client, caplog):
-    token = tokens.mint_token(tenant_id="tenant-a")
+    token = tokens.mint_token(subdomain="nasir3")
     with caplog.at_level("WARNING", logger="dodeal_ai.audit"):
         r = client.get(
             "/_probe/protected",
-            headers={"Authorization": f"Bearer {token}", "X-Tenant-ID": "tenant-b"},
+            headers={"Authorization": f"Bearer {token}",
+                     "Host": "other.dodealcrm.com"},
         )
     assert r.status_code == 403
-    deny_lines = [json.loads(rec.message) for rec in caplog.records
-                  if rec.levelname == "WARNING"]
+    denies = [json.loads(rec.message) for rec in caplog.records
+              if rec.levelname == "WARNING"]
     assert any(d["gate"] == "tenancy" and d["decision"] == "deny"
-               and d["reason_code"] == "tenant_mismatch" for d in deny_lines)
+               and d["reason_code"] == "tenant_mismatch" for d in denies)

@@ -1,4 +1,10 @@
-"""Gate 3: role->permission resolution and default-deny enforcement."""
+"""Gate 3: role->permission resolution and default-deny enforcement.
+
+Gate 3 is currently parked out of the live chain (the token carries no roles and
+the permission model is undecided). These unit tests exercise the resolution and
+enforcement logic directly, so it stays proven and ready to wire when the model
+is confirmed.
+"""
 from __future__ import annotations
 
 import pytest
@@ -12,8 +18,14 @@ from dodeal_ai.core.authz.permissions import (
 from dodeal_ai.core.context import RequestContext
 
 
-def _context(roles, request_id="req-1", tenant_id="tenant-a"):
-    ident = Identity(tenant_id=tenant_id, subject="user-1", roles=tuple(roles))
+def _identity(roles, tenant="nasir3"):
+    return Identity(
+        tenant=tenant, subject="42", database="crm_nasir3", roles=tuple(roles)
+    )
+
+
+def _context(roles, request_id="req-1"):
+    ident = _identity(roles)
     perms = resolve_permissions(ident)
     return RequestContext.from_identity(
         ident, permissions=perms, request_id=request_id
@@ -21,7 +33,7 @@ def _context(roles, request_id="req-1", tenant_id="tenant-a"):
 
 
 def test_agent_resolves_expected_permissions():
-    perms = resolve_permissions(Identity("tenant-a", "user-1", ("agent",)))
+    perms = resolve_permissions(_identity(("agent",)))
     assert perms == frozenset({"lead:read", "note:read", "note:write"})
 
 
@@ -45,8 +57,6 @@ def test_no_roles_is_default_deny():
 
 
 def test_unknown_role_grants_nothing():
-    # An unrecognised role isn't an error; it simply contributes no permissions,
-    # and default-deny refuses the request.
     ctx = _context(("superadmin",))
     assert ctx.permissions == frozenset()
     with pytest.raises(PermissionDeniedError):
@@ -54,5 +64,5 @@ def test_unknown_role_grants_nothing():
 
 
 def test_multiple_roles_union_permissions():
-    perms = resolve_permissions(Identity("tenant-a", "user-1", ("viewer", "agent")))
+    perms = resolve_permissions(_identity(("viewer", "agent")))
     assert perms == frozenset({"lead:read", "note:read", "note:write"})

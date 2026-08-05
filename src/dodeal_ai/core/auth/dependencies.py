@@ -1,23 +1,23 @@
 """The gate chain, as FastAPI dependencies.
 
-Each gate is a SEPARATE small Depends() so the exit demo can prove them in
-isolation. They run in order and thread state forward:
+Each gate is a separate Depends() so it can be tested in isolation. They run in
+order and thread state forward:
 
-    verify (Gate 1)  -> Identity        | 401 on failure
-    tenant (Gate 2)  -> tenant_id       | 403 on mismatch
-    role   (Gate 3)  -> RequestContext  | 403 on missing permission
+    Gate 1 (auth)     verify token   -> Identity          | 401 on failure
+    Gate 2 (tenancy)  subdomain match-> Identity          | 403 on mismatch
+    Gate 3 (authz)    permission     -> RequestContext     | PARKED (see below)
 
-The dependencies are thin adapters: they pull raw values off the HTTP request
-(Authorization header, X-Tenant-ID header) and call the already-tested gate
-functions. All real logic lives in verify.py / tenancy.py / permissions.py and
-is unit-tested without HTTP.
+The dependencies are thin adapters: they read raw values from the request (the
+Authorization and Host headers) and call the gate functions in verify.py and
+tenancy.py, which hold the logic and are unit-tested without HTTP.
 
-Failures are converted to GENERIC HTTPExceptions here — the client sees 401/403
-with a bland detail; the specific reason_code goes to the audit log (Step 8),
-never to the client.
+Failures are converted to generic HTTPExceptions here; the client sees 401/403
+with a bland detail, and the specific reason code goes only to the audit log.
 
-Per-endpoint permission: a route declares what it needs via
-require_context(permission). See _probe.py for the pattern.
+Gate 3 (permissions) is currently parked: the token carries no roles and the
+permission model is undecided, so the live chain ends at build_context (auth +
+tenancy). require_context / require_permission remain here, tested in isolation,
+ready to wire when the permission model is confirmed.
 """
 from __future__ import annotations
 
@@ -80,7 +80,7 @@ def gate1_identity(
         gate="auth",
         request_id=request_id,
         reason_code="ok",
-        tenant_id=identity.tenant_id,
+        tenant_id=identity.tenant,
     )
     return identity
 
@@ -88,18 +88,18 @@ def gate1_identity(
 def gate2_tenant(
     request: Request,
     identity: Annotated[Identity, Depends(gate1_identity)],
-    x_tenant_id: Annotated[str | None, Header()] = None,
+    host: Annotated[str | None, Header()] = None,
 ) -> Identity:
     request_id = getattr(request.state, "request_id", "unknown")
     try:
-        check_tenant(identity, x_tenant_id)
+        check_tenant(identity, host)
     except TenantMismatchError as exc:
         audit(
             decision="deny",
             gate="tenancy",
             request_id=request_id,
             reason_code=exc.reason_code,
-            tenant_id=identity.tenant_id,  # authoritative token tenant, safe
+            tenant_id=identity.tenant,
         )
         raise HTTPException(status_code=403, detail="Forbidden")
     audit(
@@ -107,20 +107,18 @@ def gate2_tenant(
         gate="tenancy",
         request_id=request_id,
         reason_code="ok",
-        tenant_id=identity.tenant_id,
+        tenant_id=identity.tenant,
     )
     return identity
-
 
 def build_context(
     request: Request,
     identity: Annotated[Identity, Depends(gate2_tenant)],
 ) -> RequestContext:
-    """Assemble the immutable RequestContext once Gates 1-2 have passed.
-    Permissions are resolved here (Gate 3's table); the per-endpoint permission
-    check happens in require_context below. request_id comes from middleware
-    (request.state.request_id) if present, else a placeholder until middleware
-    lands."""
+    # Gate 3 (permissions) is PARKED: the token carries no roles and the
+    # permission-enforcement approach is not yet decided. Until it is, the chain
+    # runs Gate 1 (auth) and Gate 2 (tenancy) only. resolve_permissions returns
+    # an empty set here; no permission is enforced on the live route.
     permissions = resolve_permissions(identity)
     request_id = getattr(request.state, "request_id", "unknown")
     return RequestContext.from_identity(
@@ -141,7 +139,7 @@ def require_context(permission: str):
                 gate="authz",
                 request_id=context.request_id,
                 reason_code=exc.reason_code,
-                tenant_id=context.tenant_id,
+                tenant_id=context.tenant,
             )
             raise HTTPException(status_code=403, detail="Forbidden")
         audit(
@@ -149,7 +147,7 @@ def require_context(permission: str):
             gate="authz",
             request_id=context.request_id,
             reason_code="ok",
-            tenant_id=context.tenant_id,
+            tenant_id=context.tenant,
         )
         return context
 

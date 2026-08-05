@@ -18,8 +18,9 @@ from dodeal_ai.core.auth.claims import Identity
 
 @dataclass(frozen=True)
 class RequestContext:
-    tenant_id: str
+    tenant: str
     subject: str
+    database: str
     roles: tuple[str, ...]
     permissions: frozenset[str]
     request_id: str
@@ -40,8 +41,9 @@ class RequestContext:
         granted' never blur.
         """
         return cls(
-            tenant_id=identity.tenant_id,
+            tenant=identity.tenant,
             subject=identity.subject,
+            database=identity.database,
             roles=identity.roles,
             permissions=permissions,
             request_id=request_id,

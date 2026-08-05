@@ -38,11 +38,11 @@ class Settings(BaseSettings):
     )
 
     # --- Gate 1: JWT verification parameters (read by core/auth/verify.py) ---
-    # ASSUMPTION: token is a JWT, HS256. UNCONFIRMED (may be Sanctum or a signed
-    # service context). Algorithm is config-driven so a swap is one env change.
+    # CONFIRMED: Tymon JWT, HS256 (RS256 requested & agreed,
+    # awaiting provisioning). Token carries NO iss and NO aud — those checks are
+    # removed. exp IS present and still verified.
     jwt_algorithm: str = "HS256"
-    jwt_issuer: str = "hikal-test-issuer"   # test placeholder
-    jwt_audience: str = "dodeal-ai-test"    # test placeholder
+
 
     # Required, NO default -> fail-closed if absent. In dev/test this is the
     # self-generated TEST key; in prod it is injected from a secret manager.
@@ -50,20 +50,26 @@ class Settings(BaseSettings):
     jwt_signing_key: str
 
     # --- Claim-name mapping: the ONE place (read by core/auth/claims.py) ---
-    # ASSUMPTION: tenant_id / sub / roles. UNCONFIRMED (may be org_id / user_id /
-    # role). When backend sends real sample JSON, change these in exactly one
-    # place — here, or via env — and nothing else moves.
-    claim_tenant_id: str = "tenant_id"
+    #Tymon JWT carries sub (user id) + subdomain (tenant) +
+    #database. NO roles claim exists in the token. Names are still config-driven
     claim_subject: str = "sub"
-    claim_roles: str = "roles"
+    claim_subdomain: str = "subdomain"
+    claim_database: str = "database"
     # --- Input guard: max request body size in bytes (config-driven) ---------
     # Placeholder cap; tune per real payload sizes later. Guards memory/cost
     # abuse before any tool/LLM work happens.
     #max_request_body_bytes: int = 1_000_000
+    
+    # Backend tool client (service-to-service data fetch).
+    # DD-API-KEY is a per-tenant key; real per-tenant provisioning is pending,
+    # so this is a placeholder default for local/mock use only.
+    dd_api_key: str = "test-dd-api-key"
+    backend_base_domain: str = "dodealcrm.com"
     # --- Watchdog: timeout + retry policy for external calls (§6) -----------
     # Placeholder values; tune per real LLM/tool latency later.
     external_call_timeout_seconds: float = 10.0
     external_call_retry_once: bool = True
+
 
 def _build_settings(**overrides) -> Settings:
     """Construct Settings, converting a missing/invalid-config failure into a

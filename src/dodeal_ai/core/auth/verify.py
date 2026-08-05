@@ -42,48 +42,52 @@ class TokenVerifier(Protocol):
 
 
 class JwtVerifier:
-    """JWT HS256 verifier — today's assumed mechanism (UNCONFIRMED).
+    """Tymon JWT verifier — HS256 today (RS256 later via config, no code change).
 
-    All parameters come from Settings; nothing hardcoded. alg:none is rejected
-    structurally because we pass an explicit algorithms allow-list to PyJWT and
-    'none' is never in it.
+    CONFIRMED: token has NO iss/aud, so those are not verified. We verify the
+    signature, expiry, and reject alg:none via an explicit algorithms allow-list.
+    Required-claim presence (sub, subdomain) is enforced by the claim-mapping
+    layer downstream, so verify() only asserts what PyJWT checks natively here.
     """
 
     def __init__(self, settings: Settings | None = None):
         self._settings = settings or get_settings()
+
     @property
     def settings(self) -> Settings:
         return self._settings
+
     def verify(self, token: str) -> dict:
         s = self._settings
         try:
             return jwt.decode(
                 token,
                 s.jwt_signing_key,
-                algorithms=[s.jwt_algorithm],  # allow-list; 'none' excluded
-                issuer=s.jwt_issuer,
-                audience=s.jwt_audience,
+                algorithms=[s.jwt_algorithm],
                 options={
-                    "require": ["exp", "iss", "aud"],
+                    # The token does not carry `iss` or `aud`; those checks are
+                    # disabled. `exp` is present and enforced.
+                    #
+                    # `sub` is an integer in this token format. PyJWT requires
+                    # `sub` to be a string and will reject the token otherwise,
+                    # so its `sub` check is disabled here. Claim validation and
+                    # normalisation are handled in core/auth/claims.py.
+                    "require": ["exp"],
                     "verify_signature": True,
                     "verify_exp": True,
-                    "verify_iss": True,
-                    "verify_aud": True,
+                    "verify_iss": False,
+                    "verify_aud": False,
+                    "verify_sub": False,
                 },
             )
         except jwt.ExpiredSignatureError as exc:
             raise AuthError("token_expired") from exc
-        except jwt.InvalidAudienceError as exc:
-            raise AuthError("bad_audience") from exc
-        except jwt.InvalidIssuerError as exc:
-            raise AuthError("bad_issuer") from exc
         except jwt.MissingRequiredClaimError as exc:
             raise AuthError("missing_required_claim") from exc
         except jwt.InvalidAlgorithmError as exc:
             raise AuthError("bad_algorithm") from exc
         except jwt.InvalidTokenError as exc:
-            # Catch-all for PyJWT (bad signature, malformed, alg:none, etc.)
-            # AFTER the specific cases above. Generic reason on purpose.
+            # Catch-all (bad signature, malformed, alg:none) AFTER specific cases.
             raise AuthError("invalid_token") from exc
 
 

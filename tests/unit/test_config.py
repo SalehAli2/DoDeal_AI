@@ -19,31 +19,27 @@ def test_required_key_present_yields_defaults(monkeypatch):
     s = get_settings()
     assert s.jwt_signing_key == "test-key-abc"
     assert s.jwt_algorithm == "HS256"
-    assert s.jwt_issuer == "hikal-test-issuer"
-    assert s.jwt_audience == "dodeal-ai-test"
 
 
-def test_claim_name_defaults_are_the_assumed_names(monkeypatch):
+def test_claim_name_defaults_are_the_confirmed_names(monkeypatch):
     monkeypatch.setenv("DODEAL_JWT_SIGNING_KEY", "test-key-abc")
     s = get_settings()
-    assert s.claim_tenant_id == "tenant_id"
     assert s.claim_subject == "sub"
-    assert s.claim_roles == "roles"
-
+    assert s.claim_subdomain == "subdomain"
+    assert s.claim_database == "database"
 
 def test_env_overrides_apply(monkeypatch):
-    # Simulates the backend confirming org_id / user_id / role + RS256:
-    # one env change, no code edits.
+    # A future rename (or RS256) is a config change, not a code edit.
     monkeypatch.setenv("DODEAL_JWT_SIGNING_KEY", "test-key-abc")
     monkeypatch.setenv("DODEAL_JWT_ALGORITHM", "RS256")
-    monkeypatch.setenv("DODEAL_CLAIM_TENANT_ID", "org_id")
     monkeypatch.setenv("DODEAL_CLAIM_SUBJECT", "user_id")
-    monkeypatch.setenv("DODEAL_CLAIM_ROLES", "role")
+    monkeypatch.setenv("DODEAL_CLAIM_SUBDOMAIN", "tenant_sub")
+    monkeypatch.setenv("DODEAL_CLAIM_DATABASE", "db")
     s = get_settings()
     assert s.jwt_algorithm == "RS256"
-    assert s.claim_tenant_id == "org_id"
     assert s.claim_subject == "user_id"
-    assert s.claim_roles == "role"
+    assert s.claim_subdomain == "tenant_sub"
+    assert s.claim_database == "db"
 
 
 def test_settings_are_frozen(monkeypatch):

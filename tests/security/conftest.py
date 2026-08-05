@@ -18,10 +18,7 @@ def settings() -> Settings:
         _env_file=None,
         jwt_signing_key=tokens.TEST_SECRET,
         jwt_algorithm=tokens.TEST_ALG,
-        jwt_issuer=tokens.TEST_ISS,
-        jwt_audience=tokens.TEST_AUD,
     )
-
 
 @pytest.fixture
 def verifier(settings):

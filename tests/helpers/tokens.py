@@ -15,42 +15,33 @@ import base64
 import json
 import secrets
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import jwt  # PyJWT
 
 # Stable per-process test key. Test-only; never used anywhere near prod.
 TEST_SECRET = secrets.token_hex(32)
 TEST_ALG = "HS256"
-TEST_ISS = "hikal-test-issuer"
-TEST_AUD = "dodeal-ai-test"
 
 
 @dataclass
 class TokenClaims:
-    """The claim set we assume the backend sends. Names here are our ASSUMED
-    wire names (tenant_id / sub / roles) — the mapping layer in Step 2 is what
-    lets us swap them without touching this file."""
+    """The CONFIRMED Tymon claim set. sub is an INTEGER. No iss, no aud."""
 
-    tenant_id: str = "tenant-a"
-    sub: str = "user-123"
-    roles: list[str] = field(default_factory=lambda: ["agent"])
-    iss: str = TEST_ISS
-    aud: str = TEST_AUD
-    ttl_seconds: int = 300  # negative => already expired
+    sub: int = 42
+    subdomain: str = "nasir3"
+    database: str = "crm_nasir3"
+    ttl_seconds: int = 43200  # 12h, the confirmed lifetime; negative => expired
 
     def to_payload(self) -> dict:
         now = int(time.time())
         return {
-            "tenant_id": self.tenant_id,
             "sub": self.sub,
-            "roles": self.roles,
-            "iss": self.iss,
-            "aud": self.aud,
+            "subdomain": self.subdomain,
+            "database": self.database,
             "iat": now,
             "exp": now + self.ttl_seconds,
         }
-
 
 def mint_token(
     claims: TokenClaims | None = None,
@@ -73,10 +64,10 @@ def mint_token(
 def mint_expired_token(**overrides) -> str:
     return mint_token(TokenClaims(ttl_seconds=-60), **overrides)
 
-
+"""
 def mint_wrong_aud_token(**overrides) -> str:
     return mint_token(TokenClaims(aud="not-dodeal-ai"), **overrides)
-
+"""
 
 def _b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode()

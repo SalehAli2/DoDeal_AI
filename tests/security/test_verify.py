@@ -1,6 +1,8 @@
-"""Gate 1: signature, exp, iss, aud, alg:none, and claim-presence all enforced."""
+"""Gate 1: signature, exp, alg:none, and confirmed-claim presence.
+iss/aud are NOT checked (Tymon token doesn't carry them)."""
 from __future__ import annotations
 
+import jwt
 import pytest
 
 from dodeal_ai.core.auth.claims import Identity
@@ -9,70 +11,59 @@ from tests.helpers import tokens
 
 
 def test_valid_token_yields_identity(verifier, settings):
-    token = tokens.mint_token(tenant_id="tenant-a", sub="user-1")
+    token = tokens.mint_token(subdomain="nasir3", sub=42)
     ident = verify_token(token, verifier, settings)
     assert isinstance(ident, Identity)
-    assert ident.tenant_id == "tenant-a"
-    assert ident.subject == "user-1"
-    assert ident.roles == ("agent",)
+    assert ident.tenant == "nasir3"
+    assert ident.subject == "42"
+    assert ident.database == "crm_nasir3"
+
+
+def test_token_without_iss_aud_still_passes(verifier, settings):
+    # The confirmed token has no iss/aud; it must NOT be rejected for that.
+    token = tokens.mint_token()
+    ident = verify_token(token, verifier, settings)
+    assert ident.tenant == "nasir3"
 
 
 def test_expired_token_rejected(verifier, settings):
-    token = tokens.mint_expired_token()
     with pytest.raises(AuthError) as exc:
-        verify_token(token, verifier, settings)
+        verify_token(tokens.mint_expired_token(), verifier, settings)
     assert exc.value.reason_code == "token_expired"
 
 
-def test_wrong_audience_rejected(verifier, settings):
-    token = tokens.mint_wrong_aud_token()
-    with pytest.raises(AuthError) as exc:
-        verify_token(token, verifier, settings)
-    assert exc.value.reason_code == "bad_audience"
-
-
 def test_alg_none_rejected(verifier, settings):
-    token = tokens.mint_alg_none_token()
     with pytest.raises(AuthError):
-        verify_token(token, verifier, settings)
+        verify_token(tokens.mint_alg_none_token(), verifier, settings)
 
 
 def test_bad_signature_rejected(verifier, settings):
-    # Mint with a different secret; signature won't validate against Settings'.
-    token = tokens.mint_token(secret="a-different-secret")
+    token = tokens.mint_token(secret="a-different-secret-that-is-at-least-32-bytes-long")
     with pytest.raises(AuthError) as exc:
         verify_token(token, verifier, settings)
     assert exc.value.reason_code == "invalid_token"
-
-
-def test_missing_tenant_claim_rejected(verifier, settings):
-    # Valid signature, but drop the tenant claim -> mapping failure -> AuthError.
-    token = tokens.mint_token(tenant_id="x")
-    # Re-mint without tenant_id by overriding the payload directly:
-    import jwt
-
+    
+def test_missing_subdomain_claim_rejected(verifier, settings):
     payload = tokens.TokenClaims().to_payload()
-    del payload["tenant_id"]
+    del payload["subdomain"]
     token = jwt.encode(payload, tokens.TEST_SECRET, algorithm=tokens.TEST_ALG)
     with pytest.raises(AuthError) as exc:
         verify_token(token, verifier, settings)
-    assert exc.value.reason_code == "missing_tenant"
+    assert exc.value.reason_code == "missing_subdomain"
 
 
 def test_verifier_swap_is_isolated(settings):
-    # Proves the protocol seam: a stub verifier feeds a payload, mapping still
-    # runs. Confirms callers depend on TokenVerifier, not on JWT specifically.
     class StubVerifier:
-        def __init__(self, settings):
-            self._settings = settings
+        def __init__(self, s):
+            self._settings = s
 
         @property
         def settings(self):
             return self._settings
 
         def verify(self, token: str) -> dict:
-            return {"tenant_id": "tenant-z", "sub": "user-9", "roles": ["viewer"]}
+            return {"sub": 99, "subdomain": "beta", "database": "crm_beta"}
 
     ident = verify_token("ignored", StubVerifier(settings), settings)
-    assert ident.tenant_id == "tenant-z"
-    assert ident.roles == ("viewer",)
+    assert ident.tenant == "beta"
+    assert ident.subject == "99"

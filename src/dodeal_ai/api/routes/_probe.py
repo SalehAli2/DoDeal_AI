@@ -1,8 +1,8 @@
-"""TEMPORARY probe route — SCAFFOLDING, delete before any real feature ships.
+"""Temporary probe route exercising the gate chain over HTTP. Scaffolding;
+remove before the first real feature route.
 
-Exists only to exercise the gate chain end-to-end over HTTP for the Phase 0
-exit demo. It returns nothing sensitive: just proof that the chain ran and the
-RequestContext it produced. No feature logic, no tool calls, no data access.
+Runs Gate 1 (auth) and Gate 2 (tenancy). Gate 3 (permissions) is parked pending
+a confirmed permission model, so no permission is required here yet.
 """
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends
 
-from dodeal_ai.core.auth.dependencies import require_context
+from dodeal_ai.core.auth.dependencies import build_context
 from dodeal_ai.core.context import RequestContext
 
 router = APIRouter(prefix="/_probe", tags=["scaffolding"])
@@ -18,13 +18,11 @@ router = APIRouter(prefix="/_probe", tags=["scaffolding"])
 
 @router.get("/protected")
 def protected(
-    context: Annotated[RequestContext, Depends(require_context("lead:read"))],
+    context: Annotated[RequestContext, Depends(build_context)],
 ) -> dict:
-    """Requires a valid token, consistent tenant, and the lead:read permission.
-    Echoes back non-sensitive context fields to prove the chain executed."""
     return {
-        "tenant_id": context.tenant_id,
+        "tenant": context.tenant,
         "subject": context.subject,
-        "roles": list(context.roles),
+        "database": context.database,
         "request_id": context.request_id,
     }

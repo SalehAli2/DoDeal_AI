@@ -1,30 +1,25 @@
 """The ONE place that maps our internal names to actual JWT claim keys.
 
-Internal names (tenant_id, subject, roles) are what the rest of the service
-speaks. The wire claim keys the backend actually sends are UNCONFIRMED
-(tenant_id/sub/roles vs org_id/user_id/role). This module is the sole reader of
-the claim-name config in core/config.py, so when the backend sends real sample
-JSON, exactly one thing changes (the DODEAL_CLAIM_* env vars / config defaults)
-and nothing else in the codebase moves.
+CONFIRMED: the token is a Tymon JWT (HS256 today; RS256 requested &
+agreed, awaiting provisioning). It carries:
+  - sub        -> our subject (user id) — an INTEGER (e.g. 42), normalised to str
+  - subdomain  -> our tenant (authoritative; Host header must also match, Gate 2)
+  - database   -> the tenant's database name (carried for the tool layer later)
+Plus standard iat/exp/nbf/jti/prv. NO role/permission claims.
 
-No gate, no other module, ever reaches into a raw claim dict by key name. They
-call extract_identity() and get back internal names only.
+Roles are PARKED, not removed: the permission-enforcement approach is undecided
+(role-filtering behavior unknown). Identity keeps a roles field, defaulted empty,
+so downstream shapes (RequestContext, Gate 3) don't break while we wait. When the
+approach is confirmed, roles get sourced in ONE place — here or a backend fetch.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from dodeal_ai.core.config import Settings, get_settings
 
 
 class ClaimMappingError(Exception):
-    """A required claim was absent or the wrong shape in the token payload.
-
-    Raised with a short, non-sensitive reason code — never the claim value.
-    Gate 1 turns this into a generic 401; the reason code is for the audit line,
-    not the client.
-    """
-
     def __init__(self, reason_code: str):
         self.reason_code = reason_code
         super().__init__(reason_code)
@@ -32,13 +27,17 @@ class ClaimMappingError(Exception):
 
 @dataclass(frozen=True)
 class Identity:
-    """Internal-name view of a token's identity claims. Intermediate result of
-    the mapping step — RequestContext (Step 3) is the richer downstream object.
+    """Internal-name view of a verified token's identity.
+
+    tenant is the subdomain (authoritative). database is carried for the tool
+    layer later. roles is always empty for now (token has none) and is kept only
+    so downstream shapes don't break — see module docstring.
     """
 
-    tenant_id: str
+    tenant: str
     subject: str
-    roles: tuple[str, ...]
+    database: str
+    roles: tuple[str, ...] = field(default=())
 
 
 def _require_str(payload: dict, key: str, reason_code: str) -> str:
@@ -48,28 +47,33 @@ def _require_str(payload: dict, key: str, reason_code: str) -> str:
     return value
 
 
-def _require_roles(payload: dict, key: str, reason_code: str) -> tuple[str, ...]:
+def _require_subject(payload: dict, key: str, reason_code: str) -> str:
+    """sub is an INTEGER in the Tymon token (e.g. 42). Accept int or str,
+    normalise to str. Reject absent/empty. Guard against bool (bool is an int
+    subclass in Python, so True would otherwise slip through as 'True')."""
     value = payload.get(key)
-    # Absent roles -> empty tuple is a legitimate "authenticated but no roles"
-    # state; authz (Gate 3) is what turns that into a deny. Missing is fine;
-    # wrong *shape* (not a list of strings) is a mapping error.
-    if value is None:
-        return ()
-    if not isinstance(value, list) or not all(isinstance(r, str) for r in value):
+    if value is None or value == "":
         raise ClaimMappingError(reason_code)
-    return tuple(value)
+    if isinstance(value, bool):
+        raise ClaimMappingError(reason_code)
+    if isinstance(value, (int, str)):
+        return str(value)
+    raise ClaimMappingError(reason_code)
 
 
 def extract_identity(payload: dict, settings: Settings | None = None) -> Identity:
     """Read internal identity from a verified token payload via the configured
-    claim-name mapping. `settings` is injectable for tests; defaults to the
-    shared cached Settings.
+    claim-name mapping. Reason codes are generic and audit-safe.
 
-    Reason codes are deliberately generic ('missing_tenant', etc.) — safe to log,
-    reveal nothing to the client.
+    roles are intentionally NOT read — the token has none. Identity.roles stays
+    empty until the permission approach is confirmed.
     """
     settings = settings or get_settings()
-    tenant_id = _require_str(payload, settings.claim_tenant_id, "missing_tenant")
-    subject = _require_str(payload, settings.claim_subject, "missing_subject")
-    roles = _require_roles(payload, settings.claim_roles, "malformed_roles")
-    return Identity(tenant_id=tenant_id, subject=subject, roles=roles)
+    tenant = _require_str(payload, settings.claim_subdomain, "missing_subdomain")
+    subject = _require_subject(payload, settings.claim_subject, "missing_subject")
+    # database is confirmed-present but not gate-critical (it's for the tool
+    # layer); default gracefully rather than failing auth if it's ever absent.
+    database = payload.get(settings.claim_database, "")
+    if not isinstance(database, str):
+        database = ""
+    return Identity(tenant=tenant, subject=subject, database=database)

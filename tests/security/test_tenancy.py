@@ -1,35 +1,47 @@
-"""Gate 2: token tenant is authoritative; header is a cross-check only."""
+"""Gate 2: host subdomain must match the token's authoritative subdomain."""
 from __future__ import annotations
 
 import pytest
 
 from dodeal_ai.core.auth.claims import Identity
-from dodeal_ai.core.tenancy import TenantMismatchError, check_tenant
+from dodeal_ai.core.tenancy import (
+    TenantMismatchError,
+    check_tenant,
+    subdomain_from_host,
+)
 
 
-def _identity(tenant_id: str = "tenant-a") -> Identity:
-    return Identity(tenant_id=tenant_id, subject="user-1", roles=("agent",))
+def _identity(tenant: str = "nasir3") -> Identity:
+    return Identity(tenant=tenant, subject="42", database="crm_nasir3")
 
 
-def test_no_header_passes_with_token_tenant():
-    assert check_tenant(_identity("tenant-a"), None) == "tenant-a"
+def test_matching_subdomain_passes():
+    assert check_tenant(_identity("nasir3"), "nasir3.dodealcrm.com") == "nasir3"
 
 
-def test_matching_header_passes():
-    assert check_tenant(_identity("tenant-a"), "tenant-a") == "tenant-a"
+def test_matching_subdomain_with_port_passes():
+    assert check_tenant(_identity("nasir3"), "nasir3.dodealcrm.com:8000") == "nasir3"
 
 
-def test_mismatched_header_denied():
-    # The cross-tenant tripwire: token says A, header says B -> 403.
+def test_mismatched_subdomain_denied():
     with pytest.raises(TenantMismatchError) as exc:
-        check_tenant(_identity("tenant-a"), "tenant-b")
+        check_tenant(_identity("nasir3"), "other.dodealcrm.com")
     assert exc.value.reason_code == "tenant_mismatch"
 
 
-def test_header_is_never_the_identity_source():
-    # Even a present, different header cannot promote itself to authoritative;
-    # the returned tenant is always the token's, never the header's.
+def test_absent_host_denied():
     with pytest.raises(TenantMismatchError):
-        check_tenant(_identity("tenant-a"), "tenant-b")
-    # And when they agree, the value returned is the token's tenant.
-    assert check_tenant(_identity("tenant-a"), "tenant-a") == "tenant-a"
+        check_tenant(_identity("nasir3"), None)
+
+
+def test_host_without_subdomain_denied():
+    with pytest.raises(TenantMismatchError):
+        check_tenant(_identity("nasir3"), "dodealcrm.com")
+
+
+def test_subdomain_parsing():
+    assert subdomain_from_host("nasir3.dodealcrm.com") == "nasir3"
+    assert subdomain_from_host("nasir3.dodealcrm.com:8000") == "nasir3"
+    assert subdomain_from_host("dodealcrm.com") is None
+    assert subdomain_from_host("localhost") is None
+    assert subdomain_from_host(None) is None
