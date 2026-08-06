@@ -1,4 +1,5 @@
 """Gate 2: host subdomain must match the token's authoritative subdomain."""
+
 from __future__ import annotations
 
 import pytest

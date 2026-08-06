@@ -1,4 +1,5 @@
 """Config layer: defaults, env overrides, and fail-closed behaviour."""
+
 from __future__ import annotations
 
 import pytest
@@ -27,6 +28,7 @@ def test_claim_name_defaults_are_the_confirmed_names(monkeypatch):
     assert s.claim_subject == "sub"
     assert s.claim_subdomain == "subdomain"
     assert s.claim_database == "database"
+
 
 def test_env_overrides_apply(monkeypatch):
     # A future rename (or RS256) is a config change, not a code edit.

@@ -1,5 +1,6 @@
 """Leads client: builds tenant URL, sends DD-API-KEY, reads posts.data,
 validates the response, and fails closed on a malformed one."""
+
 from __future__ import annotations
 
 import pytest
@@ -14,10 +15,12 @@ from dodeal_ai.tools.leads import LeadsClient
 def _config(monkeypatch):
     monkeypatch.setenv("DODEAL_JWT_SIGNING_KEY", "test-key")
     from dodeal_ai.core.config import get_settings
+
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
-    
+
+
 def _settings() -> Settings:
     return Settings(
         _env_file=None,

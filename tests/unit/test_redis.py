@@ -1,5 +1,6 @@
 """Redis client: named connections read the configured URLs; readiness reflects
 ping results. Redis itself is mocked so tests need no running server."""
+
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
@@ -13,11 +14,13 @@ from dodeal_ai.core import redis as redis_module
 def _config(monkeypatch):
     monkeypatch.setenv("DODEAL_JWT_SIGNING_KEY", "test-key")
     from dodeal_ai.core.config import get_settings
+
     get_settings.cache_clear()
     _clear_caches()
     yield
     get_settings.cache_clear()
     _clear_caches()
+
 
 def _clear_caches():
     redis_module.get_queue_client.cache_clear()

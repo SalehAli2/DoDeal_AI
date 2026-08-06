@@ -1,5 +1,6 @@
 """Claim mapping: confirmed Tymon claims (sub int / subdomain / database),
 no roles from token, integer sub normalised, swap stays config-only."""
+
 from __future__ import annotations
 
 import pytest
@@ -56,8 +57,12 @@ def test_bool_sub_rejected():
 
 
 def test_roles_never_sourced_from_token():
-    payload = {"sub": 42, "subdomain": "nasir3", "database": "crm_nasir3",
-               "roles": ["agent"]}
+    payload = {
+        "sub": 42,
+        "subdomain": "nasir3",
+        "database": "crm_nasir3",
+        "roles": ["agent"],
+    }
     ident = extract_identity(payload, _settings())
     assert ident.roles == ()
 

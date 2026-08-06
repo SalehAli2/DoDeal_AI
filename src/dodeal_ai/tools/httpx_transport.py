@@ -4,6 +4,7 @@ Not exercised by unit tests (no live network in the suite). Provided so the
 client has a real transport to use once the backend endpoint and per-tenant key
 are provisioned.
 """
+
 from __future__ import annotations
 
 import httpx

@@ -9,6 +9,7 @@ RequestContext, it isn't authoritative.
 Frozen: once constructed it cannot be mutated. This is a security property, not
 a convenience — a request's tenant must not be reassignable mid-flight.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass

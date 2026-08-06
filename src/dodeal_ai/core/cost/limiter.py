@@ -37,6 +37,7 @@ current usage without affecting it.
 This is a real cap only against real Redis; counters must persist across
 requests and workers, which in-memory storage cannot do.
 """
+
 from __future__ import annotations
 
 import logging

@@ -4,6 +4,7 @@ Aligns the runtime signing key/iss/aud with the test-token helper's constants,
 so tokens minted by tests/helpers/tokens.py verify against a real Settings
 object. Test-only wiring — no real secret involved.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -19,6 +20,7 @@ def settings() -> Settings:
         jwt_signing_key=tokens.TEST_SECRET,
         jwt_algorithm=tokens.TEST_ALG,
     )
+
 
 @pytest.fixture
 def verifier(settings):

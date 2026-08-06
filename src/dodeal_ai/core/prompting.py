@@ -14,6 +14,7 @@ data section.
 Nothing calls the LLM yet — this builds the assembled prompt string; sending it
 is future work in core/llm/.
 """
+
 from __future__ import annotations
 
 from pathlib import Path

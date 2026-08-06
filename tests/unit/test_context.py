@@ -1,4 +1,5 @@
 """RequestContext: immutability and faithful construction from an Identity."""
+
 from __future__ import annotations
 
 import dataclasses
@@ -23,7 +24,9 @@ def _ctx(**overrides) -> RequestContext:
 
 
 def test_from_identity_carries_all_fields():
-    ident = Identity(tenant="nasir3", subject="42", database="crm_nasir3", roles=("agent",))
+    ident = Identity(
+        tenant="nasir3", subject="42", database="crm_nasir3", roles=("agent",)
+    )
     ctx = RequestContext.from_identity(
         ident, permissions=frozenset({"lead:read"}), request_id="req-123"
     )
@@ -33,6 +36,7 @@ def test_from_identity_carries_all_fields():
     assert ctx.roles == ("agent",)
     assert ctx.permissions == frozenset({"lead:read"})
     assert ctx.request_id == "req-123"
+
 
 def test_context_is_frozen():
     ctx = _ctx()

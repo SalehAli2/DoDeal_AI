@@ -11,6 +11,7 @@ Why generic outward: an exception message can carry a file path, a query, a
 secret fragment. The client gets none of it. The audit/error log gets enough to
 debug (request_id + the real error, server-side only).
 """
+
 from __future__ import annotations
 
 import logging
@@ -51,7 +52,9 @@ def register_error_handlers(app: FastAPI) -> None:
 
     # Keep deliberate HTTP errors exactly as they are — shaped, not swallowed.
     @app.exception_handler(StarletteHTTPException)
-    async def _http_exception_passthrough(request: Request, exc: StarletteHTTPException):
+    async def _http_exception_passthrough(
+        request: Request, exc: StarletteHTTPException
+    ):
         from fastapi.exception_handlers import http_exception_handler
 
         return await http_exception_handler(request, exc)

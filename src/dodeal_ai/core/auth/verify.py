@@ -13,6 +13,7 @@ Security rules enforced here:
 On ANY failure -> AuthError, which the dependency layer (Step 7) turns into a
 GENERIC 401. The specific reason is for the audit line only, never the client.
 """
+
 from __future__ import annotations
 
 from typing import Protocol
@@ -36,6 +37,7 @@ class TokenVerifier(Protocol):
     """The swap seam. An implementation takes a raw token string and returns the
     verified claim payload, or raises AuthError. It does NOT do claim mapping —
     that stays in claims.py so there's still one mapping place."""
+
     @property
     def settings(self) -> Settings: ...
     def verify(self, token: str) -> dict: ...

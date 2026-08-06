@@ -19,13 +19,17 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="DODEAL AI Intelligence Layer", lifespan=lifespan)
 
 app.include_router(_probe.router)
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-#register_body_size_limit(app)
+# register_body_size_limit(app)
 register_error_handlers(app)
+
+
 @app.get("/ready")
 def ready():
     try:

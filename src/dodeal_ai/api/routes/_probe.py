@@ -4,6 +4,7 @@ remove before the first real feature route.
 Runs Gate 1 (auth) and Gate 2 (tenancy). Gate 3 (permissions) is parked pending
 a confirmed permission model, so no permission is required here yet.
 """
+
 from __future__ import annotations
 
 from typing import Annotated

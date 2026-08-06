@@ -11,6 +11,7 @@ What is safe to log and why: tenant and request_id are identifiers, not
 secrets; reason_code is a fixed vocabulary we defined (never a claim value or a
 token fragment). Everything else stays out.
 """
+
 from __future__ import annotations
 
 import json

@@ -1,4 +1,5 @@
 """Global error handler: unexpected errors fail closed; deny paths untouched."""
+
 from __future__ import annotations
 
 import pytest
@@ -27,7 +28,8 @@ def client():
     yield TestClient(app, raise_server_exceptions=False)
     # remove the test router so it doesn't leak into other tests
     app.router.routes = [
-        r for r in app.router.routes
+        r
+        for r in app.router.routes
         if getattr(r, "path", "").startswith("/_boom") is False
     ]
 

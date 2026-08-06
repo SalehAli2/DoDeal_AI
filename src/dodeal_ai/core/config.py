@@ -12,6 +12,7 @@ without the ability to verify tokens.
 See ASSUMPTIONS.md for the UNCONFIRMED items encoded here (token type, claim
 names, iss/aud placeholders).
 """
+
 from __future__ import annotations
 
 from functools import lru_cache
@@ -43,23 +44,22 @@ class Settings(BaseSettings):
     # removed. exp IS present and still verified.
     jwt_algorithm: str = "HS256"
 
-
     # Required, NO default -> fail-closed if absent. In dev/test this is the
     # self-generated TEST key; in prod it is injected from a secret manager.
     # NEVER a real backend secret committed here.
     jwt_signing_key: str
 
     # --- Claim-name mapping: the ONE place (read by core/auth/claims.py) ---
-    #Tymon JWT carries sub (user id) + subdomain (tenant) +
-    #database. NO roles claim exists in the token. Names are still config-driven
+    # Tymon JWT carries sub (user id) + subdomain (tenant) +
+    # database. NO roles claim exists in the token. Names are still config-driven
     claim_subject: str = "sub"
     claim_subdomain: str = "subdomain"
     claim_database: str = "database"
     # --- Input guard: max request body size in bytes (config-driven) ---------
     # Placeholder cap; tune per real payload sizes later. Guards memory/cost
     # abuse before any tool/LLM work happens.
-    #max_request_body_bytes: int = 1_000_000
-    
+    # max_request_body_bytes: int = 1_000_000
+
     # Backend tool client (service-to-service data fetch).
     # DD-API-KEY is a per-tenant key; real per-tenant provisioning is pending,
     # so this is a placeholder default for local/mock use only.
@@ -80,6 +80,7 @@ class Settings(BaseSettings):
     cost_per_tenant_limit: int = 10000
     cost_per_user_limit: int = 1000
     cost_window_seconds: int = 86400  # 24h
+
 
 def _build_settings(**overrides) -> Settings:
     """Construct Settings, converting a missing/invalid-config failure into a

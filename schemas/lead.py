@@ -15,6 +15,7 @@ Leads are read from `posts.data`. Fields below are the confirmed lead fields.
 send, since this is an external response we do not control. The meaning of
 `feedback` is not yet confirmed and is modelled as an optional string only.
 """
+
 from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict

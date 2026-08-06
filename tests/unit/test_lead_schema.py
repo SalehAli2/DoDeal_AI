@@ -1,4 +1,5 @@
 """Confirmed lead schema: parses the wrapped response, reads leads from posts.data."""
+
 from __future__ import annotations
 
 import pytest
@@ -20,8 +21,10 @@ def _lead_payload(**overrides) -> dict:
 
 
 def _response_payload(leads: list[dict]) -> dict:
-    return {"status": True, "posts": {"current_page": 1, "total": len(leads),
-                                      "data": leads}}
+    return {
+        "status": True,
+        "posts": {"current_page": 1, "total": len(leads), "data": leads},
+    }
 
 
 def test_parses_wrapped_response_and_reads_leads_from_posts_data():
@@ -53,7 +56,9 @@ def test_optional_lead_fields_may_be_absent():
 def test_lead_requires_id():
     bad = {"leadName": "No ID"}  # missing id
     with pytest.raises(OutputValidationError):
-        validate_output(LeadListResponse, _response_payload([bad]), label="tool.get_leads")
+        validate_output(
+            LeadListResponse, _response_payload([bad]), label="tool.get_leads"
+        )
 
 
 def test_wrong_wrapper_shape_rejected():

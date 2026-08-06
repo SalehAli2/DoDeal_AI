@@ -12,6 +12,7 @@ IDEMPOTENCY NOTE: retry-once is safe for READS. For a non-idempotent WRITE (the
 future note-writeback) a blind retry could double-execute. Callers wrapping a
 write must pass retry=False or make the operation idempotent. See ASSUMPTIONS.md.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -21,8 +22,6 @@ from collections.abc import Awaitable, Callable
 from dodeal_ai.core.config import get_settings
 
 _logger = logging.getLogger("dodeal_ai.resilience")
-
-
 
 
 class ExternalCallError(Exception):

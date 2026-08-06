@@ -11,6 +11,7 @@ Isolation is enforced backend-side by tenant database, keyed on subdomain; lead
 records carry no tenant field. The check here is therefore a subdomain match,
 not a comparison of a field on returned data.
 """
+
 from __future__ import annotations
 
 from dodeal_ai.core.auth.claims import Identity

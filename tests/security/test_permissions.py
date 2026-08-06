@@ -5,6 +5,7 @@ the permission model is undecided). These unit tests exercise the resolution and
 enforcement logic directly, so it stays proven and ready to wire when the model
 is confirmed.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -27,9 +28,7 @@ def _identity(roles, tenant="nasir3"):
 def _context(roles, request_id="req-1"):
     ident = _identity(roles)
     perms = resolve_permissions(ident)
-    return RequestContext.from_identity(
-        ident, permissions=perms, request_id=request_id
-    )
+    return RequestContext.from_identity(ident, permissions=perms, request_id=request_id)
 
 
 def test_agent_resolves_expected_permissions():

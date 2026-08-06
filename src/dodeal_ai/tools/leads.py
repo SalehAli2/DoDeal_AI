@@ -16,6 +16,7 @@ Request flow:
     read from posts.data.
   - The call is wrapped by the watchdog (timeout, retry-once, fail closed).
 """
+
 from __future__ import annotations
 
 from typing import Protocol
@@ -57,7 +58,5 @@ class LeadsClient:
             return await self._transport.get_json(url, self._headers())
 
         raw = await call_with_watchdog(_fetch, label="tool.get_leads")
-        response = validate_output(
-            LeadListResponse, raw, label="tool.get_leads"
-        )
+        response = validate_output(LeadListResponse, raw, label="tool.get_leads")
         return response.posts.data

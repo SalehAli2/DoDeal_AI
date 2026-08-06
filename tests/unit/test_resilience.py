@@ -1,4 +1,5 @@
 """Watchdog: succeeds first try, succeeds on retry, fails closed, respects timeout."""
+
 from __future__ import annotations
 
 import asyncio

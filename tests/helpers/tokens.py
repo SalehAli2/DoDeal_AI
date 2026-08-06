@@ -9,6 +9,7 @@ backend turns out to send a Sanctum token or a signed service context instead,
 only the verifier changes (behind the TokenVerifier interface) — these helpers
 stay test-only either way.
 """
+
 from __future__ import annotations
 
 import base64
@@ -43,6 +44,7 @@ class TokenClaims:
             "exp": now + self.ttl_seconds,
         }
 
+
 def mint_token(
     claims: TokenClaims | None = None,
     *,
@@ -64,10 +66,12 @@ def mint_token(
 def mint_expired_token(**overrides) -> str:
     return mint_token(TokenClaims(ttl_seconds=-60), **overrides)
 
+
 """
 def mint_wrong_aud_token(**overrides) -> str:
     return mint_token(TokenClaims(aud="not-dodeal-ai"), **overrides)
 """
+
 
 def _b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode()

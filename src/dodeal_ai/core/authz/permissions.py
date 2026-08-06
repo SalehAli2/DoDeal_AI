@@ -11,6 +11,7 @@ sign-off on the real role names and grants (Q4: we heard ~9 roles, exact names
 unconfirmed). It lives in ONE place; when the real table lands, this dict (or a
 config/fetch source) is the single thing that changes.
 """
+
 from __future__ import annotations
 
 from dodeal_ai.core.auth.claims import Identity

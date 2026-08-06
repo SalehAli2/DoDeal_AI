@@ -19,6 +19,7 @@ permission model is undecided, so the live chain ends at build_context (auth +
 tenancy). require_context / require_permission remain here, tested in isolation,
 ready to wire when the permission model is confirmed.
 """
+
 from __future__ import annotations
 
 from typing import Annotated
@@ -114,6 +115,7 @@ def gate2_tenant(
         tenant=identity.tenant,
     )
     return identity
+
 
 def build_context(
     request: Request,

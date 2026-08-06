@@ -1,4 +1,5 @@
 """Gate chain over HTTP: auth + tenancy (Gate 3 parked)."""
+
 from __future__ import annotations
 
 import pytest
@@ -26,9 +27,10 @@ class _FakeCostRedis:
         return counts
 
 
-@pytest.fixture(autouse=True)                             
+@pytest.fixture(autouse=True)
 def _fake_cost(monkeypatch):
     monkeypatch.setattr(cost_limiter, "get_cost_client", lambda: _FakeCostRedis())
+
 
 @pytest.fixture
 def client(monkeypatch):
@@ -69,7 +71,9 @@ def test_missing_auth_header_401(client):
 
 
 def test_bad_token_401(client):
-    r = client.get("/_probe/protected", headers={**_auth("not-a-token"), **_host("nasir3")})
+    r = client.get(
+        "/_probe/protected", headers={**_auth("not-a-token"), **_host("nasir3")}
+    )
     assert r.status_code == 401
 
 
@@ -82,5 +86,7 @@ def test_cross_tenant_host_403(client):
 
 def test_missing_host_subdomain_403(client):
     token = tokens.mint_token(subdomain="nasir3")
-    r = client.get("/_probe/protected", headers={**_auth(token), "Host": "dodealcrm.com"})
+    r = client.get(
+        "/_probe/protected", headers={**_auth(token), "Host": "dodealcrm.com"}
+    )
     assert r.status_code == 403

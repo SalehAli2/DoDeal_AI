@@ -2,6 +2,7 @@
 counted separately, atomic incr-by-amount, read-only usage, and Redis-down
 fails OPEN with a warning (leaving neither counter touched). Redis is faked
 in-memory so tests need no server."""
+
 from __future__ import annotations
 
 import pytest

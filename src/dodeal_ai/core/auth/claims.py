@@ -12,6 +12,7 @@ Roles are PARKED, not removed: the permission-enforcement approach is undecided
 so downstream shapes (RequestContext, Gate 3) don't break while we wait. When the
 approach is confirmed, roles get sourced in ONE place — here or a backend fetch.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field

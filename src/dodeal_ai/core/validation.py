@@ -8,6 +8,7 @@ caller or fed downstream.
 
 Reusable: pass any schema and any raw dict. Nothing feature-specific here.
 """
+
 from __future__ import annotations
 
 import logging
@@ -15,7 +16,6 @@ import logging
 from pydantic import BaseModel, ValidationError
 
 _logger = logging.getLogger("dodeal_ai.validation")
-
 
 
 class OutputValidationError(Exception):

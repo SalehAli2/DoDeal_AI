@@ -4,6 +4,7 @@ Proves the faker mints the confirmed Tymon shape (sub int, subdomain, database,
 no iss/aud), so gate tests can trust it. Gate behaviour is tested in
 tests/security/.
 """
+
 from __future__ import annotations
 
 import jwt

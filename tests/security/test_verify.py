@@ -1,5 +1,6 @@
 """Gate 1: signature, exp, alg:none, and confirmed-claim presence.
 iss/aud are NOT checked (Tymon token doesn't carry them)."""
+
 from __future__ import annotations
 
 import jwt
@@ -38,11 +39,14 @@ def test_alg_none_rejected(verifier, settings):
 
 
 def test_bad_signature_rejected(verifier, settings):
-    token = tokens.mint_token(secret="a-different-secret-that-is-at-least-32-bytes-long")
+    token = tokens.mint_token(
+        secret="a-different-secret-that-is-at-least-32-bytes-long"
+    )
     with pytest.raises(AuthError) as exc:
         verify_token(token, verifier, settings)
     assert exc.value.reason_code == "invalid_token"
-    
+
+
 def test_missing_subdomain_claim_rejected(verifier, settings):
     payload = tokens.TokenClaims().to_payload()
     del payload["subdomain"]

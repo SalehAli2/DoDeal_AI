@@ -14,6 +14,7 @@ Clients are created lazily and cached. Creating a client does not open a socket;
 the first command does. A liveness check (ping) is exposed for the readiness
 endpoint.
 """
+
 from __future__ import annotations
 
 from functools import lru_cache
