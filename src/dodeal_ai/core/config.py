@@ -69,7 +69,17 @@ class Settings(BaseSettings):
     # Placeholder values; tune per real LLM/tool latency later.
     external_call_timeout_seconds: float = 10.0
     external_call_retry_once: bool = True
-
+    # Redis connections. Two named connections so code never guesses which
+    # instance it is using: a queue connection and a cost/quota connection.
+    # Local Redis by default; real hosts come from DevOps later. Different
+    # logical DBs (0 and 1) keep the two namespaces separate.
+    redis_queue_url: str = "redis://localhost:6379/0"
+    redis_cost_url: str = "redis://localhost:6379/1"
+    # Cost/quota caps (placeholder values; tune to real budgets later).
+    # Counters reset each window. A request over either cap is denied (429).
+    cost_per_tenant_limit: int = 10000
+    cost_per_user_limit: int = 1000
+    cost_window_seconds: int = 86400  # 24h
 
 def _build_settings(**overrides) -> Settings:
     """Construct Settings, converting a missing/invalid-config failure into a

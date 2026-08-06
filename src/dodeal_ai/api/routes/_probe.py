@@ -10,7 +10,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends
 
-from dodeal_ai.core.auth.dependencies import build_context
+from dodeal_ai.core.auth.dependencies import gate4_cost
 from dodeal_ai.core.context import RequestContext
 
 router = APIRouter(prefix="/_probe", tags=["scaffolding"])
@@ -18,7 +18,7 @@ router = APIRouter(prefix="/_probe", tags=["scaffolding"])
 
 @router.get("/protected")
 def protected(
-    context: Annotated[RequestContext, Depends(build_context)],
+    context: Annotated[RequestContext, Depends(gate4_cost)],
 ) -> dict:
     return {
         "tenant": context.tenant,

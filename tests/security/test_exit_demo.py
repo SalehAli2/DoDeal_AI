@@ -7,11 +7,29 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
+import dodeal_ai.core.cost.limiter as cost_limiter
 from dodeal_ai.core.auth.dependencies import get_verifier
 from dodeal_ai.core.auth.verify import JwtVerifier
 from dodeal_ai.core.config import Settings, get_settings
 from dodeal_ai.main import app
 from tests.helpers import tokens
+
+
+class _FakeCostRedis:                                        
+    def __init__(self):
+        self.store = {}
+
+    def incr(self, key):
+        self.store[key] = self.store.get(key, 0) + 1
+        return self.store[key]
+
+    def expire(self, key, window):
+        pass
+
+
+@pytest.fixture(autouse=True)                               
+def _fake_cost(monkeypatch):
+    monkeypatch.setattr(cost_limiter, "get_cost_client", lambda: _FakeCostRedis())
 
 
 @pytest.fixture

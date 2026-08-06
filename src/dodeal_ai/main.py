@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse
 from dodeal_ai.api.routes import _probe
 from dodeal_ai.core.config import ConfigError, get_settings
 from dodeal_ai.core.errors import register_error_handlers
+from dodeal_ai.core.redis import check_redis_ready
 
 
 @asynccontextmanager
@@ -31,5 +32,8 @@ def ready():
         get_settings()
     except ConfigError:
         return JSONResponse(status_code=503, content={"status": "not ready"})
+    if not check_redis_ready():
+        return JSONResponse(
+            status_code=503, content={"status": "not ready", "reason": "redis"}
+        )
     return {"status": "ready"}
-

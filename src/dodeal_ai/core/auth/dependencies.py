@@ -39,6 +39,10 @@ from dodeal_ai.core.authz.permissions import (
     resolve_permissions,
 )
 from dodeal_ai.core.context import RequestContext
+from dodeal_ai.core.cost.limiter import (
+    CostLimitError,
+    enforce_cost,
+)
 from dodeal_ai.core.tenancy import TenantMismatchError, check_tenant
 
 
@@ -152,3 +156,29 @@ def require_context(permission: str):
         return context
 
     return _dependency
+
+
+def gate4_cost(
+    request: Request,
+    context: Annotated[RequestContext, Depends(build_context)],
+) -> RequestContext:
+    request_id = getattr(request.state, "request_id", "unknown")
+    try:
+        enforce_cost(context.tenant, context.subject)
+    except CostLimitError as exc:
+        audit(
+            decision="deny",
+            gate="cost",
+            request_id=request_id,
+            reason_code=exc.reason_code,
+            tenant_id=context.tenant,
+        )
+        raise HTTPException(status_code=429, detail="Too Many Requests")
+    audit(
+        decision="allow",
+        gate="cost",
+        request_id=request_id,
+        reason_code="ok",
+        tenant_id=context.tenant,
+    )
+    return context
