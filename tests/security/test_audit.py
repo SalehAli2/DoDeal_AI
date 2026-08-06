@@ -17,9 +17,9 @@ from tests.helpers import tokens
 def test_allow_is_info_deny_is_warning(caplog):
     with caplog.at_level("INFO", logger="dodeal_ai.audit"):
         audit(decision="allow", gate="auth", request_id="r1",
-              reason_code="ok", tenant_id="tenant-a")
+              reason_code="ok", tenant="tenant-a")
         audit(decision="deny", gate="authz", request_id="r2",
-              reason_code="permission_denied", tenant_id="tenant-a")
+              reason_code="permission_denied", tenant="tenant-a")
     levels = {r.levelname for r in caplog.records}
     assert "INFO" in levels
     assert "WARNING" in levels
@@ -28,15 +28,15 @@ def test_allow_is_info_deny_is_warning(caplog):
 def test_audit_line_is_valid_json_with_no_secrets(caplog):
     with caplog.at_level("INFO", logger="dodeal_ai.audit"):
         audit(decision="allow", gate="auth", request_id="r1",
-              reason_code="ok", tenant_id="tenant-a")
+              reason_code="ok", tenant="tenant-a")
     payload = json.loads(caplog.records[-1].message)
     assert payload["decision"] == "allow"
-    assert payload["tenant_id"] == "tenant-a"
+    assert payload["tenant"] == "tenant-a"
     assert payload["request_id"] == "r1"
     assert payload["reason_code"] == "ok"
     # No token, claims, or secret fields ever present.
     assert set(payload.keys()) == {
-        "event", "decision", "gate", "tenant_id", "request_id", "reason_code",
+        "event", "decision", "gate", "tenant", "request_id", "reason_code",
     }
 
 

@@ -70,13 +70,13 @@ def gate1_identity(
     try:
         identity = verify_token(token, verifier)
     except AuthError as exc:
-        # tenant_id unknown here: token not trusted, so we log null, not a guess.
+        # tenant unknown here: token not trusted, so we log null, not a guess.
         audit(
             decision="deny",
             gate="auth",
             request_id=request_id,
             reason_code=exc.reason_code,
-            tenant_id=None,
+            tenant=None,
         )
         raise HTTPException(status_code=401, detail="Unauthorized")
     audit(
@@ -84,7 +84,7 @@ def gate1_identity(
         gate="auth",
         request_id=request_id,
         reason_code="ok",
-        tenant_id=identity.tenant,
+        tenant=identity.tenant,
     )
     return identity
 
@@ -103,7 +103,7 @@ def gate2_tenant(
             gate="tenancy",
             request_id=request_id,
             reason_code=exc.reason_code,
-            tenant_id=identity.tenant,
+            tenant=identity.tenant,
         )
         raise HTTPException(status_code=403, detail="Forbidden")
     audit(
@@ -111,7 +111,7 @@ def gate2_tenant(
         gate="tenancy",
         request_id=request_id,
         reason_code="ok",
-        tenant_id=identity.tenant,
+        tenant=identity.tenant,
     )
     return identity
 
@@ -143,7 +143,7 @@ def require_context(permission: str):
                 gate="authz",
                 request_id=context.request_id,
                 reason_code=exc.reason_code,
-                tenant_id=context.tenant,
+                tenant=context.tenant,
             )
             raise HTTPException(status_code=403, detail="Forbidden")
         audit(
@@ -151,7 +151,7 @@ def require_context(permission: str):
             gate="authz",
             request_id=context.request_id,
             reason_code="ok",
-            tenant_id=context.tenant,
+            tenant=context.tenant,
         )
         return context
 
@@ -171,7 +171,7 @@ def gate4_cost(
             gate="cost",
             request_id=request_id,
             reason_code=exc.reason_code,
-            tenant_id=context.tenant,
+            tenant=context.tenant,
         )
         raise HTTPException(status_code=429, detail="Too Many Requests")
     audit(
@@ -179,6 +179,6 @@ def gate4_cost(
         gate="cost",
         request_id=request_id,
         reason_code="ok",
-        tenant_id=context.tenant,
+        tenant=context.tenant,
     )
     return context

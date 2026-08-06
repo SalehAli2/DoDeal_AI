@@ -26,13 +26,23 @@ from dodeal_ai.core.config import get_settings
 @lru_cache
 def get_queue_client() -> redis.Redis:
     """The work-queue connection. Cached so one client is reused."""
-    return redis.from_url(get_settings().redis_queue_url, decode_responses=True)
+    return redis.from_url(
+        get_settings().redis_queue_url,
+        decode_responses=True,
+        socket_connect_timeout=2.0,
+        socket_timeout=2.0,
+    )
 
 
 @lru_cache
 def get_cost_client() -> redis.Redis:
     """The cost/quota connection. Cached so one client is reused."""
-    return redis.from_url(get_settings().redis_cost_url, decode_responses=True)
+    return redis.from_url(
+        get_settings().redis_cost_url,
+        decode_responses=True,
+        socket_connect_timeout=2.0,
+        socket_timeout=2.0,
+    )
 
 
 def check_redis_ready() -> bool:

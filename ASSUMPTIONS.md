@@ -82,19 +82,34 @@ ONE place. Listed with how to correct it when the answer lands.
 - **Audit retention/encryption (90+ days)** — deployment/log-collector config,
   not code.
 
-## 10. Cost gate (Gate 4) + Redis — DEFERRED, not built
-- **Status:** deferred, pending Redis availability. Chosen to skip Redis this
-  session (no credentials yet).
-- **Impact — read this:** there is currently NO enforced token/spend cap. The
-  429 quota gate is absent from the dependency chain. This is safe today only
-  because nothing calls the LLM yet.
-- **Must do before it matters:** build the Redis client + cost gate BEFORE any
-  unit (A/B/C) makes real LLM calls, or LLM spend is uncapped.
-- **How to build when unblocked:** local Redis needs no credentials
-  (`redis://localhost:6379`); the client is config-driven and fail-closed so the
-  production URL swaps in with no code change. Per-tenant + per-user counters,
-  atomic INCR/EXPIRE, 429 on breach, placed in the chain AFTER the three gates,
-  reading tenant/user from RequestContext. Wire an audit deny line on 429.
+## 10. Cost gate (Gate 4) + Redis — BUILT, atomic, placeholder caps
+- **Status:** built and wired into the gate chain (`gate4_cost` in
+  `core/auth/dependencies.py`). Per-tenant and per-user counters live in
+  Redis and are incremented together in ONE atomic Lua script execution
+  (`EVAL`, `core/cost/limiter.py::enforce_cost`) — both counters always move
+  together (with expiry set on first creation), or, on a Redis failure,
+  neither does.
+- **Fail-open, unchanged by the atomicity work:** if Redis is unreachable,
+  `enforce_cost` still allows the request and logs `cost_cap_bypassed`
+  (WARNING, `dodeal_ai.cost` logger). Money guard, not a security guard —
+  Auth and Tenancy stay fail-closed.
+- **`amount` hook:** `enforce_cost(tenant, subject, amount=1)` — a future
+  caller can pass a real token/dollar cost once one exists; both counters
+  increment by `amount` in the same atomic step. Nothing calls the LLM yet,
+  so only tests exercise anything but the default.
+- **Read-only metering:** `get_usage(tenant, subject) -> (tenant_count,
+  user_count)` reads current counts without incrementing (plain `MGET`).
+  Unlike `enforce_cost` it does NOT fail open — a Redis error here
+  propagates, since a reporting read isn't a request-blocking decision. Not
+  wired into any route yet.
+- **Still placeholder:** `cost_per_tenant_limit` (10000), `cost_per_user_limit`
+  (1000), `cost_window_seconds` (86400s / 24h) in `core/config.py` — unvalidated
+  against real usage.
+- **How to correct:** set `DODEAL_COST_PER_TENANT_LIMIT` /
+  `DODEAL_COST_PER_USER_LIMIT` / `DODEAL_COST_WINDOW_SECONDS`; no code change.
+  Wiring `amount` to a real per-call token count is a call-site change in
+  whichever unit eventually calls the LLM — `enforce_cost`'s signature
+  already supports it.
 
 ## 11. Input size limit — DEFERRED to last, home undecided
 - **Status:** built once as ASGI middleware, then removed — it caused a
@@ -126,6 +141,11 @@ ONE place. Listed with how to correct it when the answer lands.
 - **Watchdog** (`core/config.py`): `external_call_timeout_seconds = 10.0`,
   `external_call_retry_once = True`. Placeholders — tune to real LLM/tool
   latency later.
+- **Redis client timeouts** (`core/redis.py`): `socket_connect_timeout=2.0`,
+  `socket_timeout=2.0` on both named clients, added so a hung Redis can't
+  block a request indefinitely. Placeholder — unlike the other values in this
+  list, NOT config-driven today (hardcoded); promote to `Settings` fields if
+  they need tuning without a code change.
 - **Input size** (if the field was kept): `max_request_body_bytes = 1_000_000`
   (1 MB). Placeholder — tune to real payload sizes.
 - **How to correct:** set the matching `DODEAL_*` env vars; no code change.

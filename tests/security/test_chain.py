@@ -12,16 +12,18 @@ from dodeal_ai.main import app
 from tests.helpers import tokens
 
 
-class _FakeCostRedis:                                       
+class _FakeCostRedis:
     def __init__(self):
         self.store = {}
 
-    def incr(self, key):
-        self.store[key] = self.store.get(key, 0) + 1
-        return self.store[key]
-
-    def expire(self, key, window):
-        pass
+    def eval(self, script, numkeys, *keys_and_args):
+        keys = keys_and_args[:numkeys]
+        amount = int(keys_and_args[numkeys])
+        counts = []
+        for key in keys:
+            self.store[key] = self.store.get(key, 0) + amount
+            counts.append(self.store[key])
+        return counts
 
 
 @pytest.fixture(autouse=True)                             
