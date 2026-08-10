@@ -10,7 +10,8 @@ those calls when they exist. Built and tested in isolation.
 
 IDEMPOTENCY NOTE: retry-once is safe for READS. For a non-idempotent WRITE (the
 future note-writeback) a blind retry could double-execute. Callers wrapping a
-write must pass retry=False or make the operation idempotent. See ASSUMPTIONS.md.
+write must pass retry=False, or apply an idempotency key per FUTURE_PATTERNS.md
+item 1 before enabling retry. See ASSUMPTIONS.md.
 """
 
 from __future__ import annotations

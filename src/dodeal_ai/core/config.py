@@ -16,6 +16,7 @@ names, iss/aud placeholders).
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -80,6 +81,12 @@ class Settings(BaseSettings):
     cost_per_tenant_limit: int = 10000
     cost_per_user_limit: int = 1000
     cost_window_seconds: int = 86400  # 24h
+
+    # --- Logging (core/logging_config.py) ------------------------------
+    # Effective level for the "dodeal_ai" logger tree (audit, error, cost,
+    # resilience, validation, ...). Third-party libraries are unaffected --
+    # they stay at the root logger's WARNING default.
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
 
 
 def _build_settings(**overrides) -> Settings:

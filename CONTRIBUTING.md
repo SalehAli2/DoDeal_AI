@@ -45,6 +45,25 @@ current list and status of every provisional decision.
 - **The broad `except Exception` in `core/errors.py`'s catch-all is
   intentional.** It's the outermost fail-closed boundary; don't narrow it.
 
+## Security checkpoint per feature
+
+Before any new feature or tool ships, ask which of the
+[OWASP LLM Top 10](https://genai.owasp.org/llm-top-10/) apply to THIS feature
+and confirm each is handled. A full pass happens before the pilot (Phase 4).
+The foundation already covers some structurally: the cost gate (unbounded
+consumption), the validation layer (improper output handling), the
+server-side prompt builder (injection), tenant isolation + safe logging
+(sensitive-info disclosure), and clean prompts with no secrets (system-prompt
+leakage). See `docs/FUTURE_PATTERNS.md` item 8 for the full checklist and
+when to run it.
+
+## Future patterns — read at the right phase
+
+`docs/FUTURE_PATTERNS.md` collects patterns worth adopting later, each tagged
+with WHEN it becomes relevant so nothing is built too early or forgotten.
+Trigger comments in the code (e.g. `core/resilience.py`, `core/prompting.py`)
+point back to the matching item at the seam where that work will happen.
+
 ## Commit style
 
 [Conventional Commits](https://www.conventionalcommits.org/): `feat:`, `fix:`,

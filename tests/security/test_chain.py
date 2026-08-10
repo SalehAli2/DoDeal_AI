@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -90,3 +92,35 @@ def test_missing_host_subdomain_403(client):
         "/_probe/protected", headers={**_auth(token), "Host": "dodealcrm.com"}
     )
     assert r.status_code == 403
+
+
+def test_request_id_is_real_not_unknown(client, caplog):
+    token = tokens.mint_token(subdomain="nasir3", sub=42)
+    with caplog.at_level("INFO", logger="dodeal_ai.audit"):
+        r = client.get("/_probe/protected", headers={**_auth(token), **_host("nasir3")})
+    assert r.status_code == 200
+    request_ids = {json.loads(rec.message)["request_id"] for rec in caplog.records}
+    assert "unknown" not in request_ids
+    assert all(request_ids)
+
+
+def test_incoming_x_request_id_header_is_honored(client):
+    token = tokens.mint_token(subdomain="nasir3", sub=42)
+    r = client.get(
+        "/_probe/protected",
+        headers={
+            **_auth(token),
+            **_host("nasir3"),
+            "X-Request-ID": "caller-supplied-id",
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["request_id"] == "caller-supplied-id"
+    assert r.headers["X-Request-ID"] == "caller-supplied-id"
+
+
+def test_response_carries_generated_request_id_header(client):
+    token = tokens.mint_token(subdomain="nasir3", sub=42)
+    r = client.get("/_probe/protected", headers={**_auth(token), **_host("nasir3")})
+    assert r.status_code == 200
+    assert r.headers["X-Request-ID"] == r.json()["request_id"]

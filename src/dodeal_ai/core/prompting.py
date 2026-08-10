@@ -13,6 +13,11 @@ data section.
 
 Nothing calls the LLM yet — this builds the assembled prompt string; sending it
 is future work in core/llm/.
+
+CACHING NOTE: build_prompt() already puts the trusted, stable system template
+first and the variable caller data last -- the STABLE PREFIX + VARIABLE SUFFIX
+shape prompt caching needs (FUTURE_PATTERNS.md item 4). Keep new prompt
+sections in that order; don't interleave stable and variable content.
 """
 
 from __future__ import annotations
