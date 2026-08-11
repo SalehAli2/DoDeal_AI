@@ -41,6 +41,7 @@ No feature logic ships yet. The feature units (structured intelligence, call int
 - Feature units under `src/dodeal_ai/units/` are placeholders. They stay empty until the Phase 0 exit demo criteria are met.
 - `src/dodeal_ai/api/routes/_probe.py` is temporary scaffolding used to exercise the gate chain end to end. It is removed before the first real feature route ships.
 - Every unconfirmed fact about the backend integration (token type, claim names, role model, tenant indicator, response shapes) is recorded in `ASSUMPTIONS.md`, along with the exact seam to change when the real answer is confirmed.
+- RS256 (Gate 1's JWT signing algorithm) is confirmed unrelated to the lead/notes integration, which authenticates with `DD-API-KEY` instead. It is sequenced separately and is not a blocker for the data-layer work.
 
 ## Architecture
 
@@ -115,7 +116,6 @@ dodeal-ai/
 ├── .github/workflows/ci.yml
 ├── .pre-commit-config.yaml
 ├── ASSUMPTIONS.md
-├── Assumptions_2.md
 ├── CONTRIBUTING.md
 ├── docker-compose.yml
 ├── docs/
@@ -128,6 +128,8 @@ dodeal-ai/
 │   ├── sales_automation/
 │   └── structured_intelligence/
 ├── pyproject.toml
+├── scripts/
+│   └── real_fetch_check.py
 ├── schemas/
 │   └── lead.py
 ├── src/dodeal_ai/
@@ -155,6 +157,7 @@ dodeal-ai/
 ├── study.py
 ├── tests/
 │   ├── helpers/{tokens.py,test_tokens.py}
+│   ├── integration/{fake_backend.py,test_leads_e2e.py}
 │   ├── security/
 │   └── unit/
 └── uv.lock
@@ -172,8 +175,7 @@ dodeal-ai/
 | `.env` | Local environment variables. Not committed. Must be UTF-8 with no byte order mark. |
 | `.pre-commit-config.yaml` | Local git hooks: ruff lint, ruff format check, and mypy, all run through `uv run` so they use the exact versions locked in `uv.lock`. |
 | `docker-compose.yml` | Starts a local Redis 7 container on port 6379 for the cost gate. |
-| `ASSUMPTIONS.md` | The seam ledger. Every unconfirmed fact about the backend integration, what is assumed, why, where the seam lives in code, and how to correct it once the real answer is known. |
-| `Assumptions_2.md` | A second pass over the same integration facts, organized by status: confirmed, parked, pending, or deferred. Kept separate from `ASSUMPTIONS.md` by design; the two are not automatically kept in sync. |
+| `ASSUMPTIONS.md` | The single seam ledger for the service. Every provisional decision, organized by status (confirmed, built, parked, pending, deferred), the seam it lives behind, and how to correct it when the real answer lands. |
 | `CONTRIBUTING.md` | The contributor guide: local setup, architectural rules that tooling cannot enforce, deliberate decisions not to reverse, the OWASP LLM Top 10 checkpoint habit, and commit style. |
 | `study.py` | Personal reference notes on Pydantic behavior (type coercion, `Field` constraints, `BaseSettings`). Not part of the application and not imported anywhere. |
 
@@ -201,7 +203,13 @@ dodeal-ai/
 
 | File | Purpose |
 | --- | --- |
-| `lead.py` | The confirmed Pydantic response contract for the lead-list endpoint: `Lead`, `LeadPosts`, and `LeadListResponse`. Leads are read from `posts.data`. Unlisted fields from the backend are tolerated rather than rejected, since this is an external response the service does not control. |
+| `lead.py` | The confirmed Pydantic response contracts for the lead and note endpoints: `Lead`, `PageMeta`, `LeadListResponse`, `LeadNote`, `LeadNotesResponse`, and `LeadResponse` (single lead; envelope shape unconfirmed, modelled by analogy). Leads and notes are read from `data`, with pagination in `meta`. Unlisted fields from the backend are tolerated rather than rejected, since this is an external response the service does not control. |
+
+### `scripts/`
+
+| File | Purpose |
+| --- | --- |
+| `real_fetch_check.py` | A manual, one-shot script for the real, credentialed verification call against the live backend, run by hand for the joint session with the backend team. Not a pytest test and never runs in CI. Dry-runs by default against a guaranteed-unreachable fake host (no real network call); the real call requires an explicit `--live` flag, with a defense-in-depth guard that refuses to target a `dodealcrm.com` host without it. |
 
 ### `src/dodeal_ai/` (top level)
 
@@ -266,7 +274,7 @@ dodeal-ai/
 
 | File | Purpose |
 | --- | --- |
-| `leads.py` | `LeadsClient`, the only path this service has to lead data. Builds the request URL from the caller's authoritative tenant subdomain, sends the per-tenant service key, validates the response against the confirmed schema, and runs the call through the resilience watchdog. |
+| `leads.py` | `LeadsClient`, the only path this service has to lead data. Builds request URLs under `/api/service/...` from the caller's authoritative tenant subdomain, sends the per-tenant service key, validates each response against the confirmed schema, and runs every call through the resilience watchdog. Exposes `get_leads` (list), `get_lead` (single lead by id), and `get_lead_notes` (a lead's notes). |
 | `httpx_transport.py` | The production `httpx`-based transport used by `LeadsClient`. Not exercised by the test suite, which supplies a mock transport instead. |
 
 ### `src/dodeal_ai/units/`
@@ -316,11 +324,20 @@ Tests for the gate chain and everything that enforces it, run over HTTP with `Te
 | `test_cost.py` | The cost gate: under and over both caps, tenants counted separately, atomic failure leaving neither counter touched, the `amount` parameter, and the read-only usage function. Uses an in-memory fake Redis. |
 | `test_redis.py` | The named Redis client accessors and the cost-only readiness check, with Redis mocked. |
 | `test_resilience.py` | The watchdog: success on the first attempt, success on retry, failing closed after retry, honoring `retry=False`, and respecting the timeout. |
-| `test_lead_schema.py` | The lead response schema: parsing the wrapped response and failing closed on a malformed one. |
-| `test_leads_client.py` | `LeadsClient`: URL construction from the tenant subdomain, the service key header, reading `posts.data`, and failing closed on a malformed response. |
+| `test_lead_schema.py` | The lead and note response schemas: parsing the `data`-wrapped shape, the single-lead and notes envelopes, and failing closed on a malformed one. |
+| `test_leads_client.py` | `LeadsClient`: URL construction under `/api/service/...` from the tenant subdomain, the service key header, `get_leads`/`get_lead`/`get_lead_notes` reading `data`, and failing closed on a malformed response. |
 | `test_prompting.py` | The prompt builder: server-side assembly and that caller-supplied data can never become an instruction. |
 | `test_logging_config.py` | The structured logging setup: an allow line actually reaching standard output under the real configuration, a deny line at warning level, the cost-bypass warning reaching the same stream, third-party loggers staying quiet, and the configuration being called from the application lifespan. |
 | `test_health.py` | `/health` and `/ready`: config missing returns 503, Redis down returns 200 with a degraded body, and Redis up returns 200 with an ok body. |
+
+### `tests/integration/`
+
+Excluded from the default test run (see Testing below).
+
+| File | Purpose |
+| --- | --- |
+| `fake_backend.py` | A small FastAPI app standing in for the real backend: serves the confirmed lead/note shapes at the real paths and enforces `DD-API-KEY`, returning 401 without it. Test fixture code, not production code. |
+| `test_leads_e2e.py` | Runs `LeadsClient` through the real `HttpxTransport` (not the mocked transport the hermetic suite uses), wired to `fake_backend.py` via `httpx.ASGITransport` so no real socket, DNS, or TLS is involved. Proves the real HTTP code path end to end: leads parsed, the API key sent, empty notes handled as a valid result, and a malformed response failing closed. |
 
 ## Configuration reference
 
@@ -344,11 +361,15 @@ All configuration is read through `Settings` in `core/config.py`. Every variable
 | `DODEAL_COST_WINDOW_SECONDS` | `86400` | The cost counter window, in seconds. |
 | `DODEAL_LOG_LEVEL` | `INFO` | The effective level for the `dodeal_ai` logger tree. Third-party libraries are unaffected. |
 
+`scripts/real_fetch_check.py` (a manual tool, not part of the test suite) also reads `DODEAL_CHECK_TENANT`, a plain environment variable rather than a `Settings` field, as an alternative to passing the tenant subdomain as a command-line argument.
+
 ## Testing
 
 - Run the full suite with `uv run pytest`. Coverage runs by default and the build fails if total coverage drops below the floor configured in `pyproject.toml`.
 - The suite is fully hermetic: no test opens a live Redis connection, makes a network call, or calls an LLM. Redis is mocked or faked in every test; `tests/unit/test_cost.py`'s `FakeRedis` is the reference pattern for a new test that needs Redis behavior.
 - Security-focused tests live under `tests/security/` and exercise the gate chain over HTTP with `TestClient`. Everything else lives under `tests/unit/`.
+- `tests/integration/` is excluded from the default run via a registered `integration` marker (`pyproject.toml`), so it stays out of `uv run pytest` and CI. Run it explicitly with `uv run pytest -m integration --no-cov` (`--no-cov`: the coverage gate is sized for the full hermetic suite, not this handful of tests).
+- `scripts/real_fetch_check.py` is a separate, manual, non-pytest script for the one real credentialed call to the live backend, used for joint verification with the backend team. It dry-runs against a guaranteed-unreachable fake host by default; the real call requires an explicit `--live` flag. See the script's own docstring for usage.
 
 ## Code quality and tooling
 
@@ -377,8 +398,7 @@ All configuration is read through `Settings` in `core/config.py`. Every variable
 
 | Document | Contents |
 | --- | --- |
-| `ASSUMPTIONS.md` | Every unconfirmed integration fact, the seam it lives behind, and how to correct it. |
-| `Assumptions_2.md` | The same integration facts organized by status: confirmed, parked, pending, or deferred. |
+| `ASSUMPTIONS.md` | The single seam ledger: every provisional decision, organized by status (confirmed, built, parked, pending, deferred), the seam it lives behind, and how to correct it. |
 | `docs/architecture.md` | The recorded directory tree and Phase 0 build order. |
 | `docs/FUTURE_PATTERNS.md` | Patterns to adopt at specific later phases, referenced by trigger comments in the code. |
 | `CONTRIBUTING.md` | Local setup, architectural rules, deliberate decisions, the security checkpoint habit, and commit style. |
