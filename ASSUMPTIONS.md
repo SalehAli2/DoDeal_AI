@@ -1,177 +1,305 @@
 # ASSUMPTIONS
 
-Every item here is UNCONFIRMED and built behind a seam so the real answer changes
-ONE place. Listed with how to correct it when the answer lands.
+The single seam ledger for the service. Every provisional decision, its status,
+the seam it lives behind, and how to correct it when the real answer lands.
 
-## 1. Token type = JWT, HS256
-- **Assumed:** the backend sends a JWT we verify with a symmetric HS256 key.
-- **Reality:** UNCONFIRMED. The Hikal README says both "JWT-based" and
-  `auth:sanctum` — different mechanisms. May instead be a Sanctum token or a
-  signed service context (Q1).
-- **Seam:** `core/auth/verify.py` — the `TokenVerifier` protocol. `JwtVerifier`
-  is today's implementation.
-- **How to correct:** write a new `TokenVerifier` (e.g. `SanctumVerifier`,
-  `ServiceContextVerifier`) with the same `verify()`/`settings` interface and
-  return it from `get_verifier()` in `core/auth/dependencies.py`. Gates, mapping,
-  and context are untouched.
+Status meanings:
+- CONFIRMED — verified with the backend (Waqas).
+- PENDING — awaiting a backend or product answer.
+- PARKED — built and tested, but not wired into the live path, awaiting a decision.
+- BUILT — built, wired, and working (may still hold placeholder values).
+- DEFERRED — deliberately not built yet.
 
-## 2. Algorithm = HS256 (symmetric)
-- **Assumed:** HS256, key held by us.
-- **Risk:** a symmetric key can MINT tokens, not just verify — if confirmed,
-  push for RS256 (verify-only public key) or treat key protection as critical.
-- **Seam:** `core/config.py` — `jwt_algorithm` (config-driven).
-- **How to correct:** set `DODEAL_JWT_ALGORITHM` (e.g. `RS256`) and supply the
-  verifying key via `DODEAL_JWT_SIGNING_KEY`. No code change.
+---
 
-## 3. Claim names = tenant_id / sub / roles
-- **Assumed:** internal names map to these wire claim keys.
-- **Reality:** UNCONFIRMED — may be org_id / user_id / role (Q4).
-- **Seam:** `core/auth/claims.py`, reading `core/config.py`
-  (`claim_tenant_id` / `claim_subject` / `claim_roles`). The ONLY place claim
-  keys are named.
-- **How to correct:** set `DODEAL_CLAIM_TENANT_ID` / `DODEAL_CLAIM_SUBJECT` /
-  `DODEAL_CLAIM_ROLES` to the real keys. No code change.
+## CONFIRMED (verified with backend, Waqas)
 
-## 4. iss / aud = test placeholders
-- **Assumed:** `iss=hikal-test-issuer`, `aud=dodeal-ai-test`.
-- **Seam:** `core/config.py` — `jwt_issuer`, `jwt_audience`.
-- **How to correct:** set `DODEAL_JWT_ISSUER` / `DODEAL_JWT_AUDIENCE` to the real
-  values.
+### 1. Token type — Tymon JWT, verified offline
+- The inbound token is a Tymon JWT, verified offline against a shared secret.
+  It is not a Sanctum token.
+- Seam: `core/auth/verify.py` (the `TokenVerifier` protocol; `JwtVerifier` is
+  today's implementation).
+- How to correct (if it ever changes): write a new `TokenVerifier` with the same
+  interface and return it from `get_verifier()` in `core/auth/dependencies.py`.
+  Gates, claim mapping, and context are untouched.
 
-## 5. Role table = agent, viewer only (placeholder)
-- **Assumed:** `agent` -> lead:read/note:read/note:write; `viewer` ->
-  lead:read/note:read.
-- **Reality:** UNCONFIRMED — Product hasn't signed off; ~9 real roles expected
-  (Q4). Permissions may also need fetching via `/api/getPermissions` rather than
-  a static table.
-- **Seam:** `core/authz/permissions.py` — the `_ROLE_PERMISSIONS` dict.
-- **How to correct:** replace that one dict with the real roles/grants, or point
-  `resolve_permissions` at a config/backend-fetch source. Default-deny means
+### 2. Algorithm — HS256 today, RS256 requested and agreed
+- HS256 (symmetric shared secret) is in use now. RS256 has been requested and
+  agreed with the backend, but the public key is not yet provisioned. On the
+  local test key until the real key is provided.
+- Note: with HS256 the held secret can MINT tokens, not only verify them. RS256
+  removes that risk (the private key stays with the backend). This is why RS256
+  was requested.
+- Seam: `core/config.py` `jwt_algorithm` (config-driven).
+- How to correct: set `DODEAL_JWT_ALGORITHM=RS256` and point the key config at
+  the public key. No code change.
+- Unrelated to the lead/notes integration (item 7/8): RS256 provisioning is a
+  Gate 1 (our own JWT verification) concern only. The lead/note endpoints use
+  DD-API-KEY, not a JWT, so RS256's status does not block or affect that
+  integration. Track them separately.
+
+### 3. Claim names — sub / subdomain / database
+- The token carries `sub` (user id), `subdomain` (tenant), and `database`, plus
+  standard iat/exp (and nbf/jti/prv). `sub` is an INTEGER (e.g. 42), normalised
+  to a string internally. The token carries NO role or permission claims.
+- Seam: `core/auth/claims.py` reads names from `core/config.py`
+  (`claim_subject`, `claim_subdomain`, `claim_database`).
+- How to correct: set `DODEAL_CLAIM_SUBJECT` / `DODEAL_CLAIM_SUBDOMAIN` /
+  `DODEAL_CLAIM_DATABASE`. A rename is a config change, not a code change.
+
+### 4. No iss / no aud
+- The token carries neither `iss` nor `aud`. Those checks are removed. `exp` is
+  present and verified.
+
+### 5. Integer sub handling
+- PyJWT rejects a token whose `sub` is not a string. The Tymon `sub` is an
+  integer, so PyJWT's `sub` check is disabled (`verify_sub: False`) and the
+  claim layer validates and normalises `sub` instead.
+- DO NOT re-enable PyJWT's `sub` verification; it would reject valid tokens.
+
+### 6. Tenant — subdomain, authoritative, Host must match
+- The tenant is the `subdomain` claim, and it is authoritative. The request also
+  arrives at a tenant host (`<subdomain>.dodealcrm.com`); the Host subdomain must
+  match the token subdomain, or the request is denied (403).
+- Isolation is enforced backend-side by tenant database, keyed on subdomain.
+  Lead records carry no tenant field, so the re-check is a subdomain match, not a
+  field comparison.
+- An absent or subdomain-less Host is a hard 403 (deliberate). Consequence:
+  `localhost` fails Gate 2; local testing needs a tenant Host header
+  (e.g. `nasir3.dodealcrm.com`).
+- Seam: `core/tenancy.py` (logic) and `gate2_tenant` in
+  `core/auth/dependencies.py` (reads the Host header).
+
+### 7. Lead + note integration — CONFIRMED (was: posts.data wrapper, guesses)
+- Lead list, single lead, and notes endpoints are CONFIRMED (backend
+  integration guide). Base `https://<tenant>.dodealcrm.com/api/service`:
+  `GET /leads` (paginated, newest first), `GET /leads/{id}` (single lead, 404
+  if missing, 422 if id not numeric), `GET /leads/{id}/notes` (that lead's
+  notes, newest first; empty `data: []` with a 200 is valid, not an error).
+- Lead-list and notes-list response shape is `{status, data, meta}`. `data`
+  holds the array directly. The earlier `posts.data` wrapper assumption (and
+  the `{success, message, data, meta}` one before that) were both wrong.
+- Confirmed lead fields: id (required), name, phone, email, leadType,
+  enquiryType, project, status, source, feedback, priority, language,
+  leadFor, country, assignedToManager, assignedToSales, bookedAmount,
+  createdAt, updatedAt. Every field except id may be null.
+  - `bookedAmount`'s exact type is still unconfirmed (nullable; modelled as
+    an optional float).
+  - `phone` comes back masked for the service credential (deliberate,
+    confirmed backend behaviour, not a bug in this service).
+  - `createdAt`/`updatedAt` are confirmed ISO-8601 with a timezone offset;
+    kept as `str`, not parsed to `datetime`, since nothing downstream needs
+    them parsed yet.
+  - `extra="ignore"` on every model: unlisted fields the backend may add are
+    tolerated, not rejected (external response we do not control; the
+    backend has said its data is frequently incomplete).
+- Single-lead response envelope (`GET /leads/{id}`) is UNCONFIRMED. The guide
+  documents the list and notes shapes but not this one. Modelled by analogy
+  as `{status, data}` (a single lead, no `meta`) in
+  `schemas.lead.LeadResponse`. Revisit if a real response contradicts this.
+- Notes response shape is CONFIRMED: `{status, data, meta}`, each note
+  `{id, note, author, author_id, createdAt}`. Only `author` is nullable
+  (null if the original author's account was deleted).
+- Seam: `schemas/lead.py` (contracts), `tools/leads.py` (`LeadsClient`).
+
+### 8. Service-to-service auth — DD-API-KEY only, no JWT
+- Data fetches (leads, single lead, notes) use a per-tenant `DD-API-KEY`
+  header against `https://<subdomain>.dodealcrm.com/api/service/...`,
+  subdomain taken from the request's authoritative context. These endpoints
+  take NO JWT — DD-API-KEY is the only credential, confirmed.
+- No role filtering at the API level: the DD-API-KEY service credential
+  returns the WHOLE tenant's lead/note data; the backend does not scope
+  results by role or by assigned user. See item 12 (Gate 3) — this does not
+  resolve the role model, but confirms any role-based filtering has to
+  happen application-side, not by relying on the backend.
+- Seam: `tools/leads.py`; key and base domain in `core/config.py` (placeholder
+  key until per-tenant provisioning).
+
+---
+
+## BUILT (built, wired, working — may hold placeholder values)
+
+### 9. Cost gate (Gate 4) + Redis — atomic, metered, fail-open
+- Built and wired into the gate chain (`gate4_cost` in
+  `core/auth/dependencies.py`). Per-tenant and per-user counters live in Redis
+  and increment together in ONE atomic Lua script (`EVAL`,
+  `core/cost/limiter.py::enforce_cost`) — both move together (expiry set on first
+  creation), or on a Redis failure neither does.
+- Fail-open: if Redis is unreachable, `enforce_cost` allows the request and logs
+  `cost_cap_bypassed` (WARNING). Money guard, not a security guard — auth and
+  tenancy stay fail-closed.
+- `amount` hook: `enforce_cost(tenant, subject, amount=1)` — a future caller
+  passes a real token count once one exists; both counters increment by `amount`
+  in the same atomic step. Nothing calls the LLM yet.
+- Read-only metering: `get_usage(tenant, subject)` reads current counts without
+  incrementing (`MGET`). Unlike `enforce_cost` it does NOT fail open — a Redis
+  error propagates, since a reporting read is not a request-blocking decision.
+- Placeholder caps: `cost_per_tenant_limit` (10000), `cost_per_user_limit`
+  (1000), `cost_window_seconds` (86400) in `core/config.py`. Correct via the
+  matching `DODEAL_*` env var; no code change.
+
+### 10. Request-id middleware + structured logging
+- Request-id middleware is built (`middleware/request_id.py`): reads an inbound
+  `X-Request-ID` or generates one, sets `request.state.request_id`, echoes it on
+  the response, and carries a `RequestObservability` object with the fuller id
+  set (trace_id today; prompt_version/model_version/workflow_version reserved).
+  So `request_id` is now a real value everywhere, not "unknown".
+- Structured logging is configured (`core/logging_config.py`, called from the
+  lifespan): one JSON line per record to stdout, `dodeal_ai` tree at
+  `DODEAL_LOG_LEVEL` (default INFO) so audit `allow` lines are not dropped.
+  `cost_cap_bypassed` flows through this same pipeline.
+
+### 11. Global error handler is ASGI-level (not an exception handler)
+- The fail-closed catch-all runs inside Starlette's own outermost
+  ServerErrorMiddleware, before the gate chain. Deliberate 401/403/429 pass
+  through untouched; anything else is logged internally at ERROR with the
+  request_id and returned as a generic 500.
+- Why: Starlette's ServerErrorMiddleware re-raises after handling, which under
+  the test client bypasses an installed 500 handler. Placing the catch-all at
+  the ASGI boundary makes behaviour match in tests and prod.
+- Note for future middleware: middleware is applied in reverse registration
+  order (last registered = outermost). Middleware ordering has caused two
+  regressions — add new middleware alone and run the full suite immediately.
+
+---
+
+## PARKED (built and tested, not wired; awaiting a decision)
+
+### 12. Gate 3 — permission enforcement
+- The token carries no roles, so the permission model is undecided. CONFIRMED
+  (item 8): DD-API-KEY-fetched leads/notes are NOT role-filtered by the
+  backend — a service credential always returns the whole tenant. This
+  narrows what Gate 3 needs to decide (any per-role scoping is ours to build,
+  not inherited from the backend) but does not resolve the role table itself.
+- The live chain ends at auth + tenancy (`build_context`).
+  `resolve_permissions` / `require_permission` remain in
+  `core/authz/permissions.py`, unit-tested in isolation, ready to wire when the
+  model is confirmed. Identity and RequestContext keep an empty `roles` field so
+  shapes are stable.
+- Role table today is a placeholder (`agent`, `viewer`) in the
+  `_ROLE_PERMISSIONS` dict; ~9 real roles expected. Permissions may need
+  fetching via a backend endpoint rather than a static table. Default-deny means
   unmapped roles stay safe until then.
+- How to correct: replace the dict with the real roles/grants (or point
+  `resolve_permissions` at a config/backend source) AND wire the gate into the
+  chain — do both together so a real user is not under/over-granted.
 
-## 6. Tenant cross-check = optional X-Tenant-ID header
-- **Assumed:** tenant arrives (if at all) as an `X-Tenant-ID` header, used only
-  to cross-check the authoritative token tenant. Absent header = token stands.
-- **Reality:** UNCONFIRMED — tenancy is subdomain-based on their side; the
-  indicator that reaches us may be a subdomain/host (Q2).
-- **Seam:** `core/tenancy.py::check_tenant` (logic) + `gate2_tenant` in
-  `core/auth/dependencies.py` (where the value is read off the request).
-- **How to correct:** extract the real indicator (e.g. subdomain) in
-  `gate2_tenant` and pass it as the cross-check arg. If a tenant indicator is
-  ALWAYS sent, tighten `check_tenant` so absent -> deny. Logic seam unchanged.
+---
 
-## 7. request_id = placeholder until middleware exists
-- **Assumed:** `request.state.request_id`, falling back to `"unknown"`.
-- **Reality:** the always-on request-id middleware (`middleware/`) isn't built
-  yet (not in Phase 0 Part-A scope).
-- **Seam:** `build_context` in `core/auth/dependencies.py`.
-- **How to correct:** when request-id middleware lands, it sets
-  `request.state.request_id`; the fallback stops being used. No gate change.
+## PENDING (awaiting a backend or product answer)
 
-## 8. Scaffolding to remove before feature work
-- `src/dodeal_ai/api/routes/_probe.py` is a TEMPORARY probe route that exists
-  only to exercise the gate chain for the exit demo. **Delete it before the
-  first real feature route ships.**
+- RS256 public-key provisioning (item 2). Unrelated to the lead/notes
+  integration (item 7/8), which uses DD-API-KEY, not a JWT.
+- Permission model: real role names and grants (item 12). Role-FILTERING
+  behaviour is now confirmed: none, at the API level (item 8).
+- Per-tenant DD-API-KEY provisioning (item 8).
+- Real end-to-end fetch — PENDING deploy and per-tenant key provisioning, not
+  blocked. The client (`tools/leads.py`), schema (`schemas/lead.py`), and
+  tests are complete; only a live key against a real tenant is needed to
+  exercise it end to end. This is the one item blocking formal Phase 0
+  closure (exit-demo criterion 3).
+- Single-lead (`get_lead`) response ENVELOPE is unconfirmed (item 7) — the
+  method itself is built and tested against an assumed `{status, data}`
+  shape.
+- `dd_api_key` has a non-fail-closed default (`test-dd-api-key`), unlike the
+  signing key. Give it the same fail-closed treatment once it is load-bearing
+  (inert today; `tools/leads.py` is not wired to a route).
 
-## 9. Out of scope today (by instruction, not oversight)
-- **Backend tool client / `get_lead`** — blocked on Q4; not built.
-- **Security Part B** (component-to-component auth) — stub/interface only per
-  spec; no second internal component exists yet.
-- **Cost controls / quota (Gate 4, 429)** — architecture lists it in the chain;
-  not part of today's Part-A scope.
-- **Audit retention/encryption (90+ days)** — deployment/log-collector config,
-  not code.
+---
 
-## 10. Cost gate (Gate 4) + Redis — BUILT, atomic, placeholder caps
-- **Status:** built and wired into the gate chain (`gate4_cost` in
-  `core/auth/dependencies.py`). Per-tenant and per-user counters live in
-  Redis and are incremented together in ONE atomic Lua script execution
-  (`EVAL`, `core/cost/limiter.py::enforce_cost`) — both counters always move
-  together (with expiry set on first creation), or, on a Redis failure,
-  neither does.
-- **Fail-open, unchanged by the atomicity work:** if Redis is unreachable,
-  `enforce_cost` still allows the request and logs `cost_cap_bypassed`
-  (WARNING, `dodeal_ai.cost` logger). Money guard, not a security guard —
-  Auth and Tenancy stay fail-closed.
-- **`amount` hook:** `enforce_cost(tenant, subject, amount=1)` — a future
-  caller can pass a real token/dollar cost once one exists; both counters
-  increment by `amount` in the same atomic step. Nothing calls the LLM yet,
-  so only tests exercise anything but the default.
-- **Read-only metering:** `get_usage(tenant, subject) -> (tenant_count,
-  user_count)` reads current counts without incrementing (plain `MGET`).
-  Unlike `enforce_cost` it does NOT fail open — a Redis error here
-  propagates, since a reporting read isn't a request-blocking decision. Not
-  wired into any route yet.
-- **Still placeholder:** `cost_per_tenant_limit` (10000), `cost_per_user_limit`
-  (1000), `cost_window_seconds` (86400s / 24h) in `core/config.py` — unvalidated
-  against real usage.
-- **How to correct:** set `DODEAL_COST_PER_TENANT_LIMIT` /
-  `DODEAL_COST_PER_USER_LIMIT` / `DODEAL_COST_WINDOW_SECONDS`; no code change.
-  Wiring `amount` to a real per-call token count is a call-site change in
-  whichever unit eventually calls the LLM — `enforce_cost`'s signature
-  already supports it.
+## DEFERRED (deliberately not built yet)
 
-## 11. Input size limit — DEFERRED to last, home undecided
-- **Status:** built once as ASGI middleware, then removed — it caused a
-  regression (forced eager config load at construction; tangled middleware
-  ordering with the error handler).
-- **Decision pending:** where it should live. Options: middleware, or closer to
-  the route, or alongside the request-id middleware when that is built (both are
-  always-on edge concerns).
-- **How to correct:** re-add LAST, on its own, run the full suite immediately,
-  and watch the error/chain/audit tests. Read the cap lazily (never call
-  get_settings() in middleware __init__). Config field `max_request_body_bytes`
-  already exists as a placeholder (1 MB) if it was kept.
+### Input size limit — home undecided
+- Built once as ASGI middleware, then removed after a regression (forced eager
+  config load; middleware-ordering conflict with the error handler).
+- Re-add LAST, on its own, run the full suite immediately, and watch the
+  error/chain/audit tests. Read the cap LAZILY — never call `get_settings()` in
+  middleware `__init__`. A `max_request_body_bytes` placeholder (1 MB) may exist
+  in config.
 
-## 12. Per-unit prompt-injection hardening — deferred to each unit
-- **Built now:** the injection-resistant prompt BUILDER (server-side assembly,
+### Per-unit prompt-injection hardening
+- BUILT now: the injection-resistant prompt BUILDER (server-side assembly,
   trusted/untrusted split, delimiter neutralisation) and its structural tests.
-  This is generic and reused by every unit.
-- **Deferred:** each unit's REAL versioned prompt and its task-specific
-  adversarial injection tests. These depend on what the unit does and cannot be
-  finished until the unit exists.
-- **How to correct:** when a unit is built, add (a) its real prompt file in
-  prompts/ and (b) adversarial injection tests against that prompt. The builder
-  and its boundary do not change.
-- **Caveat:** the delimiter boundary is defense-in-depth, not a perfect
-  guarantee — no scheme makes an LLM fully injection-proof. It establishes the
-  structural boundary and removes easy escapes; hardening is layered and evolves.
+  Generic, reused by every unit.
+- DEFERRED: each unit's REAL versioned prompt and its task-specific adversarial
+  injection tests — they depend on what the unit does. When a unit is built, add
+  its prompt in `prompts/` and adversarial tests against it. The builder and its
+  boundary do not change.
+- Caveat: the delimiter boundary is defense-in-depth, not a perfect guarantee —
+  no scheme makes an LLM fully injection-proof.
 
-## 13. Placeholder config values added this session
-- **Watchdog** (`core/config.py`): `external_call_timeout_seconds = 10.0`,
-  `external_call_retry_once = True`. Placeholders — tune to real LLM/tool
-  latency later.
-- **Redis client timeouts** (`core/redis.py`): `socket_connect_timeout=2.0`,
-  `socket_timeout=2.0` on both named clients, added so a hung Redis can't
-  block a request indefinitely. Placeholder — unlike the other values in this
-  list, NOT config-driven today (hardcoded); promote to `Settings` fields if
-  they need tuning without a code change.
-- **Input size** (if the field was kept): `max_request_body_bytes = 1_000_000`
-  (1 MB). Placeholder — tune to real payload sizes.
-- **How to correct:** set the matching `DODEAL_*` env vars; no code change.
+### /ready vs fail-open consistency
+- FIXED: `/ready` returns 200 with a degraded body when Redis is down (matching
+  the cost gate's fail-open policy), 503 only when required config is missing,
+  and checks only the cost Redis (not the unused queue connection). Kept here as
+  the record of the decision.
 
-## 14. Watchdog retry vs non-idempotent writes
-- **Assumed:** retry-once is safe for READS.
-- **Risk:** for a non-idempotent WRITE (the future note-writeback, a POST) a
-  blind retry could double-execute (e.g. create two notes).
-- **Seam:** `core/resilience.py::call_with_watchdog` accepts `retry=False`.
-- **How to correct:** when wrapping the note-writeback, pass `retry=False` or
-  make the operation idempotent. Do not retry writes blindly.
+### Lead-list query parameters — not implemented
+- The confirmed spec documents `page`, `per_page` (default 25, max 100 -> 422
+  over), `since` (ISO-8601, filters on `updatedAt`), `feedback`, `leadStatus`,
+  `leadSource` as query parameters on `GET /leads` (item 7/8). None of these
+  are wired into `LeadsClient.get_leads()` today — it takes no parameters and
+  always fetches the default page.
+- Deliberately out of scope for the initial integration (not requested); add
+  as keyword arguments to `get_leads()`, forwarded as query params, when a
+  caller needs pagination or filtering.
 
-## 15. Sample schema + sample prompt are placeholders
-- **`schemas/lead_v1.py`** (LeadV1: id/name/status, extra="forbid") is a SAMPLE
-  to build/test the validator. Real lead shape is confirmed when the backend
-  tool client is built (blocked). Replace as `lead_v2` or edit the file.
-- **`prompts/unit_a_v1.txt`** is a SAMPLE to build/test the prompt builder. Real
-  Unit A prompt replaces it when the unit is built.
-- The validator and the builder themselves are production-ready; only the
-  sample contract/template are provisional.
+### Per-endpoint error handling for get_lead / get_lead_notes
+- The confirmed spec documents specific status codes for `GET /leads/{id}`
+  (404 if missing, 422 if id not numeric). `LeadsClient` does not surface
+  these distinctly today — any non-2xx response fails through the watchdog
+  into a generic `ExternalCallError`, the same as every other transport
+  failure, matching the existing pattern used by `get_leads()`.
+- If a caller needs to distinguish "lead not found" from a generic failure,
+  add that handling deliberately in `tools/leads.py`, not by weakening the
+  watchdog's fail-closed default.
 
-## 16. Global error handler is ASGI middleware (not an exception handler)
-- **Why:** Starlette 1.3.1's ServerErrorMiddleware re-raises after handling,
-  which under the test client bypasses an installed 500 handler. The catch-all
-  is implemented as outermost middleware so behaviour matches in tests and prod.
-- **Note for future middleware:** middleware is applied in reverse registration
-  order (last registered = outermost). Register the error catch-all last.
-- **request_id in error responses** is currently `"unknown"` until the
-  request-id middleware exists (same placeholder as the gates).
+---
+
+## Deliberate decisions — DO NOT reverse
+
+- Gate 3 parked (item 12).
+- PyJWT `verify_sub` disabled — integer sub (item 5).
+- Cost gate enforcement fails OPEN; reporting (`get_usage`) fails LOUD (item 9).
+- Auth and tenancy fail CLOSED.
+- The error handler catches broad `Exception` on purpose (item 11).
+- `.env` holds only a throwaway LOCAL signing key; it is gitignored. The real key
+  comes from the backend (shared secret if HS256, or a public key if RS256),
+  injected via a secret manager. Never commit real secrets. The `.env` file must
+  be UTF-8 with NO BOM (a BOM corrupts the variable name on Windows).
+- `LeadNote` fields are modelled stricter than `Lead` fields: only `author` is
+  nullable; `note`, `author_id`, `createdAt` are required. The spec's "treat
+  all as optional except id" instruction was scoped to leads only and was not
+  repeated for notes (item 7) — do not loosen notes to match leads' blanket
+  optionality without a confirmed reason.
+
+---
+
+## Watchdog retry vs non-idempotent writes
+- retry-once is safe for READS. A non-idempotent WRITE (a future note-writeback)
+  could double-execute on retry.
+- Seam: `core/resilience.py::call_with_watchdog` accepts `retry=False`.
+- How to correct: when wrapping the note-writeback, pass `retry=False` or make
+  the operation idempotent (see FUTURE_PATTERNS item 1, idempotency keys). Do not
+  retry writes blindly.
+
+---
+
+## Placeholder config values
+- Watchdog (`core/config.py`): `external_call_timeout_seconds = 10.0`,
+  `external_call_retry_once = True`.
+- Redis client timeouts (`core/redis.py`): `socket_connect_timeout=2.0`,
+  `socket_timeout=2.0` on both clients — NOT config-driven today (hardcoded);
+  promote to `Settings` if they need tuning without a code change.
+- Backend client: `dd_api_key = "test-dd-api-key"`, `backend_base_domain =
+  "dodealcrm.com"`.
+- Correct any config-driven value via the matching `DODEAL_*` env var; no code
+  change.
+
+---
+
+## Scaffolding to remove before feature work
+- `src/dodeal_ai/api/routes/_probe.py` is a temporary route that exercises the
+  gate chain for the exit demo. Delete it before the first real feature route.
+- `study.py` is personal Pydantic notes, not part of the application. Remove it
+  from the repo.

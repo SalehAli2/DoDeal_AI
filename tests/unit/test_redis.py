@@ -1,5 +1,6 @@
-"""Redis client: named connections read the configured URLs; readiness reflects
-ping results. Redis itself is mocked so tests need no running server."""
+"""Redis client: named connections read the configured URLs; readiness
+reflects the cost connection's ping result (the queue connection has no
+consumer yet). Redis itself is mocked so tests need no running server."""
 
 from __future__ import annotations
 
@@ -27,12 +28,12 @@ def _clear_caches():
     redis_module.get_cost_client.cache_clear()
 
 
-def test_ready_true_when_both_ping(monkeypatch):
+def test_ready_true_when_cost_redis_pings(monkeypatch):
     _clear_caches()
     fake = MagicMock()
     fake.ping.return_value = True
     with patch.object(redis_module.redis, "from_url", return_value=fake):
-        assert redis_module.check_redis_ready() is True
+        assert redis_module.check_cost_redis_ready() is True
     _clear_caches()
 
 
@@ -41,7 +42,7 @@ def test_ready_false_when_ping_raises(monkeypatch):
     fake = MagicMock()
     fake.ping.side_effect = redis_module.redis.RedisError("down")
     with patch.object(redis_module.redis, "from_url", return_value=fake):
-        assert redis_module.check_redis_ready() is False
+        assert redis_module.check_cost_redis_ready() is False
     _clear_caches()
 
 
@@ -50,5 +51,5 @@ def test_ready_false_when_ping_returns_false(monkeypatch):
     fake = MagicMock()
     fake.ping.return_value = False
     with patch.object(redis_module.redis, "from_url", return_value=fake):
-        assert redis_module.check_redis_ready() is False
+        assert redis_module.check_cost_redis_ready() is False
     _clear_caches()

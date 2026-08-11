@@ -46,10 +46,16 @@ def get_cost_client() -> redis.Redis:
     )
 
 
-def check_redis_ready() -> bool:
-    """Return True only if both named connections respond to ping. Used by the
-    readiness endpoint. Any connection error means not ready (fail closed)."""
+def check_cost_redis_ready() -> bool:
+    """Return True if the cost/quota connection responds to ping. Used by the
+    readiness endpoint. Only the cost connection is checked -- the queue
+    connection has no consumer yet (no worker exists), so pinging it would
+    make readiness depend on infrastructure nothing actually uses.
+
+    A connection error returns False; it is the CALLER's decision what that
+    means for readiness (see main.py -- Redis down does not fail /ready,
+    matching the cost gate's own fail-open policy)."""
     try:
-        return bool(get_queue_client().ping()) and bool(get_cost_client().ping())
+        return bool(get_cost_client().ping())
     except redis.RedisError:
         return False

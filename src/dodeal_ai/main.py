@@ -7,7 +7,7 @@ from dodeal_ai.api.routes import _probe
 from dodeal_ai.core.config import ConfigError, get_settings
 from dodeal_ai.core.errors import register_error_handlers
 from dodeal_ai.core.logging_config import configure_logging
-from dodeal_ai.core.redis import check_redis_ready
+from dodeal_ai.core.redis import check_cost_redis_ready
 from dodeal_ai.middleware.request_id import RequestIDMiddleware
 
 
@@ -44,8 +44,11 @@ def ready():
         get_settings()
     except ConfigError:
         return JSONResponse(status_code=503, content={"status": "not ready"})
-    if not check_redis_ready():
-        return JSONResponse(
-            status_code=503, content={"status": "not ready", "reason": "redis"}
-        )
-    return {"status": "ready"}
+    # Redis down does NOT take the pod out of rotation: the cost gate fails
+    # OPEN on a Redis outage (core/cost/limiter.py), so the service still
+    # serves requests correctly without it. Report the degraded state in the
+    # body so it's observable, but keep 200 so an orchestrator doesn't pull a
+    # functioning pod over a non-critical dependency.
+    if check_cost_redis_ready():
+        return {"status": "ready", "redis": "ok"}
+    return {"status": "ready", "redis": "degraded"}
