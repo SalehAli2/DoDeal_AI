@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 """Manual, one-shot real-backend check for LeadsClient.
 
 Makes ONE real HTTP call to the live backend to verify the lead integration
