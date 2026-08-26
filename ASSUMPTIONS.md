@@ -61,6 +61,10 @@ the seam it lives behind, and how to correct it when the real answer lands.
 - **Seam:** `core/config.py` `jwt_algorithm`.
 - **How to correct:** set `DODEAL_JWT_ALGORITHM=RS256`, point the key config at
   the public key. No code change.
+- Code side is RS256-ready: `pyjwt[crypto]` installed, RS256 round-trip and
+  alg-confusion tests in `test_verify.py`. The switch is
+  `DODEAL_JWT_ALGORITHM=RS256` + `DODEAL_JWT_SIGNING_KEY=<public PEM>`. Still
+  waiting on the backend's public key (asked twice).
 
 ### 1.3 Claim names — sub / subdomain / database `[T]`
 - The token carries `sub` (user id, INTEGER), `subdomain` (tenant), `database`,
@@ -71,6 +75,10 @@ the seam it lives behind, and how to correct it when the real answer lands.
 
 ### 1.4 No iss, no aud `[T]`
 - Neither claim is present. Those checks are removed. `exp` is verified.
+- Clock skew: `exp`/`nbf`/`iat` verified with `DODEAL_JWT_LEEWAY_SECONDS`
+  (default 30). Reason codes `token_expired` / `token_not_yet_valid` /
+  `invalid_iat` are distinct from `invalid_token` so drift is diagnosable in the
+  audit log.
 
 ### 1.5 Integer sub handling `[T]`
 - PyJWT rejects a non-string `sub`. Tymon's is an integer, so PyJWT's check is

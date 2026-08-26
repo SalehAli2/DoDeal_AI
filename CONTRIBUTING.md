@@ -64,6 +64,8 @@ current list and status of every provisional decision.
   token carries no roles yet.
 - **PyJWT's `verify_sub` is disabled.** The token's `sub` claim is an integer;
   PyJWT requires a string. Don't re-enable it.
+- **JWT leeway is 30s by default.** Never set it to `0` in production — clock
+  drift between the CRM and this service then 401s valid users.
 - **The cost gate fails open on Redis outage.** Intentional — see above.
 - **The broad `except Exception` in `core/errors.py`'s catch-all is
   intentional.** It's the outermost fail-closed boundary; don't narrow it.

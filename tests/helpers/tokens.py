@@ -13,12 +13,17 @@ stay test-only either way.
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
 import json
 import secrets
 import time
 from dataclasses import dataclass
+from functools import cache
 
 import jwt  # PyJWT
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 # Stable per-process test key. Test-only; never used anywhere near prod.
 TEST_SECRET = secrets.token_hex(32)
@@ -95,3 +100,59 @@ def mint_alg_none_token(claims: TokenClaims | None = None, **overrides) -> str:
             "",  # empty signature
         ]
     )
+
+
+# --- RS256 -----------------------------------------------------------------
+# The agreed migration (ASSUMPTIONS.md §1.2) is HS256 -> RS256 by config alone.
+# These helpers prove that end to end without any real key: the pair is
+# generated inside the test process and never leaves it.
+
+
+@cache
+def rsa_test_keypair(_slot: int = 0) -> tuple[str, str]:
+    """(private_pem, public_pem) for an ephemeral 2048-bit RSA test key.
+
+    Cached per `_slot` purely to keep the suite fast — key generation is the
+    slow part. Pass a different `_slot` when a test needs a SECOND, unrelated
+    keypair (the wrong-key case). Test-only; never a real key.
+    """
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    private_pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode()
+    public_pem = (
+        private_key.public_key()
+        .public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        .decode()
+    )
+    return private_pem, public_pem
+
+
+def mint_rs256(claims: dict, private_pem: str) -> str:
+    """Sign an already-built claim dict with an RSA private key (RS256)."""
+    return jwt.encode(claims, private_pem, algorithm="RS256")
+
+
+def mint_hs256_unchecked(claims: dict, secret: str) -> str:
+    """HS256-sign `claims` with ANY secret, bypassing PyJWT's encode-side guards.
+
+    Needed for the algorithm-confusion case: the attacker HMACs the token with
+    the RSA *public* key (which is public) and hopes the verifier trusts the
+    header's alg. PyJWT refuses to *encode* that — it rejects a PEM as an HMAC
+    secret — but an attacker is not using PyJWT. Built by hand for the same
+    reason mint_alg_none_token is: we still need to prove Gate 1 *rejects* it.
+    """
+    header = {"alg": "HS256", "typ": "JWT"}
+    signing_input = ".".join(
+        [
+            _b64url(json.dumps(header, separators=(",", ":")).encode()),
+            _b64url(json.dumps(claims, separators=(",", ":")).encode()),
+        ]
+    ).encode()
+    signature = hmac.new(secret.encode(), signing_input, hashlib.sha256).digest()
+    return f"{signing_input.decode()}.{_b64url(signature)}"

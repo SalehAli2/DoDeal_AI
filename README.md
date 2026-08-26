@@ -339,7 +339,7 @@ Tests for the gate chain and everything that enforces it, run over HTTP with `Te
 | `test_audit.py` | The audit logger's level rules, field set, and that a cross-tenant deny actually emits a warning-level line. |
 | `test_tenancy.py` | Gate 2's host-matching logic in isolation, without HTTP: a parametrised table covering case-insensitivity, trailing dot, port, a cross-domain host, extra subdomain levels, a bare domain, `localhost`, an IPv6 literal, an absent host, and a different tenant — asserting the reason code on every denial. |
 | `test_permissions.py` | Gate 3's role-to-permission resolution and default-deny enforcement, in isolation, kept green even though the gate is not wired into the live chain. |
-| `test_verify.py` | Gate 1's token verification: signature, expiry, `alg: none` rejection, and that the confirmed token shape (no `iss` or `aud`) is accepted. |
+| `test_verify.py` | Gate 1's token verification: signature, expiry, `alg: none` rejection, and that the confirmed token shape (no `iss` or `aud`) is accepted. Also covers RS256 against an ephemeral test keypair — round-trip, wrong key, and the algorithm-confusion attack — and the clock-skew leeway, including the distinct reason codes for skewed versus forged tokens. |
 | `test_errors.py` | The fail-closed catch-all: an unexpected exception returns a generic 500 with no internal detail, while a deliberate `HTTPException` passes through untouched. |
 
 ### `tests/unit/`
@@ -378,8 +378,9 @@ All configuration is read through `Settings` in `core/config.py`. Every variable
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `DODEAL_JWT_SIGNING_KEY` | none, required | The HS256 signing key used to verify inbound tokens. The service refuses to start without it. |
-| `DODEAL_JWT_ALGORITHM` | `HS256` | The JWT algorithm. Explicitly allow-listed so an `alg: none` token is always rejected. |
+| `DODEAL_JWT_SIGNING_KEY` | none, required | The key inbound tokens are verified against. Under `HS256` this is the shared secret; under `RS256` it holds the CRM's **public** key (PEM). The name is kept for env stability. The service refuses to start without it. |
+| `DODEAL_JWT_ALGORITHM` | `HS256` | The JWT algorithm. Explicitly allow-listed so an `alg: none` token — or an `HS256` token under an `RS256` config — is always rejected. |
+| `DODEAL_JWT_LEEWAY_SECONDS` | `30` | Clock-skew tolerance applied to `exp`, `nbf`, and `iat`. The CRM mints tokens on its own clock; without leeway a few seconds of drift rejects valid tokens. Do not set to `0` in production. |
 | `DODEAL_CLAIM_SUBJECT` | `sub` | The wire claim name mapped to the internal subject (user id). |
 | `DODEAL_CLAIM_SUBDOMAIN` | `subdomain` | The wire claim name mapped to the internal tenant identifier. |
 | `DODEAL_CLAIM_DATABASE` | `database` | The wire claim name mapped to the tenant's database name, carried for the tool layer. |

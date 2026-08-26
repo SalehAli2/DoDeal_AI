@@ -54,9 +54,16 @@ class Settings(BaseSettings):
     # removed. exp IS present and still verified.
     jwt_algorithm: str = "HS256"
 
+    # Clock-skew tolerance for exp/nbf/iat, in seconds. The CRM mints tokens on its own clock;
+    # without leeway a few seconds of drift rejects valid tokens with a reason code that looks like
+    # forgery. 30s is the conventional value. Do not set to 0.
+    jwt_leeway_seconds: int = 30
+
     # Required, NO default -> fail-closed if absent. In dev/test this is the
     # self-generated TEST key; in prod it is injected from a secret manager.
     # NEVER a real backend secret committed here.
+    # HS256: the shared secret. RS256: the CRM's PUBLIC key (PEM). Field name kept for env
+    # stability; it is the verification key.
     jwt_signing_key: str
 
     # --- Claim-name mapping: the ONE place (read by core/auth/claims.py) ---
