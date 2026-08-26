@@ -20,5 +20,10 @@ htmlcov/
 
 .vscode/
 .idea/
+
+# Claude Code: settings.json is SHARED (committed, see CONTRIBUTING).
+# Anything machine- or person-specific stays local and unversioned.
+.claude/settings.local.json
+.claude/*.local.*
 *.swp
 .DS_Store

@@ -14,6 +14,14 @@
 5. Run the app: `uv run uvicorn dodeal_ai.main:app --reload`
 6. Run tests: `uv run pytest`
 
+**Using Claude Code on this repo?** The permission rules travel with the tree:
+`.claude/settings.json` is committed, so every session starts with the same
+allow / ask / deny list — `git push` always asks, and `--amend`, `--force`,
+`reset --hard`, `rm -rf` and reading `.env` are denied outright. Do not put
+personal or machine-specific rules there. They belong in
+`.claude/settings.local.json`, which `.gitignore` excludes (along with anything
+matching `.claude/*.local.*`) and which Claude Code merges over the shared file.
+
 ## Architectural rules (not enforced by tooling)
 
 - **Single config source.** Every setting is read through
@@ -42,11 +50,21 @@
   in it); our own exceptions keep fixed-vocabulary messages, so keep it that way
   when you add one. A sentinel test in `tests/security/test_log_safety.py` fails
   if raw content reaches a log line.
+- **Sentinel tests raise through a helper that binds the value on a non-raising
+  line, or the assertion matches its own source text.** A sentinel test asserts
+  some secret string never reaches the log. If the `raise` statement itself
+  contains that string, the traceback frame quotes the source line, the string
+  appears in the captured output, and the test fails on its own text rather than
+  on a real leak — or worse, is "fixed" by weakening the assertion. Bind the
+  sentinel on an earlier line and raise the name.
 - Run all four checks before every push, and read every result:
   `uv run pytest`, `uv run ruff check .`, `uv run ruff format --check .`,
   `uv run mypy`. On Windows PowerShell 5 `&&` does not work; use
   `uv run pytest; if ($?) { uv run ruff check . }; if ($?) { uv run ruff format --check . }; if ($?) { uv run mypy }`
-  so the chain stops at the first failure.
+  so the chain stops at the first failure. CI runs two more on top of these
+  four — `scripts/check_coverage_floors.py` and the wheel build plus
+  `scripts/verify_wheel.py`. Run them locally too before a push that touches
+  packaging or a module with a coverage floor.
 - **Tests must stay hermetic.** No live Redis, network, or LLM calls in the
   suite — mock/fake them (see `tests/unit/test_cost.py`'s `FakeRedis` for the
   pattern). If a test needs real infrastructure, it doesn't belong here.
@@ -84,6 +102,34 @@ current list and status of every provisional decision.
   A pinned model id is set per deployment, never drifted by a default.
 - **Backend keys are per tenant and have no default.** An unknown tenant fails
   closed before any network call; never fall back to another tenant's key.
+- **Per-file coverage floors are the real gate for security modules; the 92%
+  total is a floor, not a target.** The repo-wide number is an average, so a
+  gate module can rot to 60% while well-covered code elsewhere keeps the total
+  green. `scripts/check_coverage_floors.py` sets a minimum per *file* for
+  `core/auth/**`, `core/tenancy.py`, `core/cost/**`, `core/errors.py`,
+  `core/validation.py` and `core/log_safety.py`. Never lower a floor to make a
+  build pass — write the test.
+
+## Branch protection (repository settings, not code)
+
+**This is configured by the repository owner in GitHub settings. Nothing in this
+tree enforces it, and nothing in this tree can.** A clean checkout with a green
+local run tells you nothing about whether these rules are actually on — check
+the repository settings.
+
+`main` and `scaffold/*` require, before any merge:
+
+- **A green status for every required CI check**, which is all six in
+  `.github/workflows/ci.yml`: `ruff check`, `ruff format --check`, `mypy`,
+  `pytest` (total coverage floor 92%), `scripts/check_coverage_floors.py` (the
+  per-file floors), and the wheel build plus `scripts/verify_wheel.py`. All six
+  are *required*, not merely reported — a check that is advisory is a check that
+  gets ignored on a Friday.
+- **No force-push.** History on these branches is append-only. This is the same
+  rule the working process already follows (never amend, never force-push); the
+  branch setting is what makes it true for everyone rather than a habit.
+- **No merge on red.** No admin override, no "it's only the coverage floor", no
+  merging a PR whose checks are still running.
 
 ## Security checkpoint per feature
 

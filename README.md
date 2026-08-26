@@ -190,35 +190,47 @@ dodeal-ai/
 | --- | --- |
 | `pyproject.toml` | Project metadata, runtime dependencies, dev dependency groups, and tool configuration for pytest, coverage, and mypy. |
 | `uv.lock` | Locked, reproducible dependency versions resolved by uv. Committed so every environment installs identical packages. |
-| `.gitignore` | Excludes the virtual environment, caches, coverage artifacts, editor files, and any `.env*` file except `.env.example`. |
+| `.gitignore` | Excludes the virtual environment, caches, coverage artifacts, editor files, any `.env*` file except `.env.example`, and the per-developer Claude Code settings (`.claude/settings.local.json`, `.claude/*.local.*`) while keeping the shared `.claude/settings.json` tracked. |
 | `.env` | Local environment variables. Not committed. Must be UTF-8 with no byte order mark. |
-| `.env.example` | Documents every `DODEAL_*` setting with its default or a placeholder. Copy to `.env` and fill in real local values; never holds real secrets. |
+| `.env.example` | Documents every `DODEAL_*` setting in `core/config.py::Settings` with its default, or `change-me-local-only` for a secret. Audited field-by-field against `Settings`, in the same order. Copy to `.env` and fill in real local values; never holds real secrets. UTF-8, no BOM, LF. |
 | `.dockerignore` | Keeps the build context small and secrets out of it: the virtual environment, `.git`, `.env*`, tests, docs, build artifacts, caches, and `study.py`. |
 | `Dockerfile` | Multi-stage build. Installs the locked dependencies and the project **non-editable** into a venv, then copies only that venv into a slim runtime image — no source tree in the final image, so this is the same installed-wheel shape `scripts/verify_wheel.py` checks in CI. |
 | `.pre-commit-config.yaml` | Local git hooks: ruff lint, ruff format check, and mypy, all run through `uv run` so they use the exact versions locked in `uv.lock`. |
 | `docker-compose.yml` | `api` (built from the `Dockerfile`) plus a local Redis 7 container for the cost and queue gates. |
 | `ASSUMPTIONS.md` | The single seam ledger for the service. Every provisional decision, organized by status (confirmed, built, parked, pending, deferred), the seam it lives behind, and how to correct it when the real answer lands. |
-| `CONTRIBUTING.md` | The contributor guide: local setup, architectural rules that tooling cannot enforce, deliberate decisions not to reverse, the OWASP LLM Top 10 checkpoint habit, and commit style. |
-| `study.py` | Personal reference notes on Pydantic behavior (type coercion, `Field` constraints, `BaseSettings`). Not part of the application and not imported anywhere. |
+| `CONTRIBUTING.md` | The contributor guide: local setup, shared vs personal Claude Code permissions, architectural rules that tooling cannot enforce, deliberate decisions not to reverse, branch-protection requirements, the OWASP LLM Top 10 checkpoint habit, and commit style. |
+| `.gitattributes` | `* text=auto eol=lf` plus explicit `binary` for `*.png` and `*.pdf`. Line endings are decided here rather than by each developer's `core.autocrlf`. |
+| `.python-version` | `3.12`. Pins the interpreter for `uv` locally and, with `uv python install 3.12` in CI, makes both the same. |
+
+### `.claude/`
+
+| File | Purpose |
+| --- | --- |
+| `settings.json` | **Committed.** The shared Claude Code permission rules, so every contributor's session starts with the same allow / ask / deny list: `uv` and read-only git are allowed, `git push` always asks, and `--amend`, `--force`, `reset --hard`, `rm -rf` and reading `.env` are denied. Personal or machine-specific rules go in `.claude/settings.local.json`, which is gitignored and merged over this file. |
 
 ### `.github/workflows/`
 
 | File | Purpose |
 | --- | --- |
-| `ci.yml` | GitHub Actions pipeline. On every push and pull request: installs uv and Python, runs `uv sync --locked`, then ruff check, ruff format check, mypy, pytest with the coverage gate, and finally builds the wheel and runs `scripts/verify_wheel.py` against it to prove an installed copy actually imports. |
+| `ci.yml` | GitHub Actions pipeline. On every push and pull request: installs uv and a pinned Python 3.12, runs `uv sync --locked`, then the six required checks — ruff check, ruff format check, mypy, pytest with the 92% coverage gate, `scripts/check_coverage_floors.py` for the per-file security floors, and finally a wheel build plus `scripts/verify_wheel.py` to prove an installed copy actually imports. |
+| `dependabot.yml` | Weekly dependency updates for two ecosystems: `uv` (all packages grouped into one PR labelled `deps`, because a pinned lockfile means one PR per package would re-run the whole check chain per bump) and `github-actions` (ungrouped — few, and a pinned action bump is worth reading alone). |
 
 ### `docs/`
 
 | File | Purpose |
 | --- | --- |
 | `architecture.md` | The recorded, authoritative directory tree and the build order for Phase 0. Read this before scaffolding anything new, so structure is not reinvented from memory. |
-| `FUTURE_PATTERNS.md` | Patterns worth adopting later, each tagged with the phase in which it becomes relevant: idempotency keys for writes, prompt-injection containment for agentic units, the model gateway, prompt caching, async pipeline reliability, evaluation from real examples, observability identifiers, and the OWASP LLM Top 10 checkpoint. Trigger comments in the code point back to specific items here. |
+| `FUTURE_PATTERNS.md` | Patterns worth adopting later, each tagged with the phase in which it becomes relevant: idempotency keys, prompt-injection containment for agentic units, the model gateway, prompt caching, async pipeline reliability, evaluation from real examples, observability identifiers, and the OWASP LLM Top 10 checkpoint. Trigger comments in the code point back to specific items here. |
+| `STATUS.md` | The build register: where the service is, what is committed and what is next, the audit-finding register with the commit each fix landed in, open questions and who owes what, and the build sequence ahead. Sits beside `ASSUMPTIONS.md` — this file is about the *build*, `ASSUMPTIONS.md` is about the *contract*. Every commit that changes a row updates it in the same commit. |
+| `decisions/` | Design notes for decisions taken before the code that depends on them is written. `0001-principal-model-and-execution-model.md` covers the two open before route skeletons: who calls this service and as whom (the principal model), and settling on one execution model instead of three. Both are `PROPOSED`, tracked in `STATUS.md` §2. |
+| `runbooks/` | Operational procedures. `secret-rotation.md` covers the JWT verification key, the per-tenant `DD-API-KEY`s and the future provider key: what exists, how each is loaded, why rotation means a deploy (`get_settings()` is `lru_cache`d and `Settings` is frozen — there is no hot reload), the coordinated HS256 window, and the audit-log search terms for establishing blast radius. |
 
 ### `scripts/`
 
 | File | Purpose |
 | --- | --- |
 | `real_fetch_check.py` | A manual, one-shot script for the real, credentialed verification call against the live backend, run by hand for the joint session with the backend team. Not a pytest test and never runs in CI. Dry-runs by default against a guaranteed-unreachable fake host (no real network call); the real call requires an explicit `--live` flag, with a defense-in-depth guard that refuses to target a `dodealcrm.com` host without it. |
+| `check_coverage_floors.py` | Enforces per-**file** coverage minimums for the modules on a deny path (`core/auth/**`, `core/tenancy.py`, `core/cost/**`, `core/errors.py`, `core/validation.py`, `core/log_safety.py`). Reads `coverage.json` written by the pytest run. The repo-wide 92% gate is an average and can be paid for by well-covered code elsewhere; these cannot. Fails closed when a pattern matches no file, so a rename cannot silently drop a floor. stdlib only. |
 | `verify_wheel.py` | Installs a built wheel into a throwaway venv and, from a temp directory outside the repo, imports every module under `dodeal_ai` and confirms the packaged prompts directory exists and holds `unit_a_v1.txt`. Runs in CI after the wheel is built; proves an installed copy actually works, not just the editable dev install. |
 
 ### `src/dodeal_ai/` (top level)
@@ -427,7 +439,20 @@ All configuration is read through `Settings` in `core/config.py`. Every variable
 
 ## Continuous integration
 
-`.github/workflows/ci.yml` runs on every push and pull request. It installs uv and Python, runs `uv sync --locked` to catch a lockfile that has drifted from `pyproject.toml`, and then runs the same four checks used locally: ruff check, ruff format check, mypy, and pytest with the coverage gate.
+`.github/workflows/ci.yml` runs on every push and pull request. It installs uv and a pinned Python 3.12, then runs `uv sync --locked` to catch a lockfile that has drifted from `pyproject.toml`.
+
+**The required checks**, in order. Every one must be green before a branch merges; branch protection is configured in the repository settings, not in the tree (see `CONTRIBUTING.md`, "Branch protection"):
+
+| # | Check | Command |
+| --- | --- | --- |
+| 1 | Lint | `uv run ruff check .` |
+| 2 | Format | `uv run ruff format --check .` |
+| 3 | Types | `uv run mypy` |
+| 4 | Tests + total coverage gate (92%) | `uv run pytest` |
+| 5 | Per-file coverage floors | `uv run python scripts/check_coverage_floors.py` |
+| 6 | Wheel build + install/import check | `uv build --wheel` then `uv run python scripts/verify_wheel.py dist/*.whl` |
+
+Checks 1-4 are the same ones run locally by the stopping chain and by the pre-commit hooks. Check 5 exists because the 92% gate is an average and can hide one security module rotting; check 6 is the only one that tests the artifact a deploy receives rather than the source tree.
 
 ## Security model
 
@@ -445,6 +470,9 @@ All configuration is read through `Settings` in `core/config.py`. Every variable
 | `ASSUMPTIONS.md` | The single seam ledger: every provisional decision, organized by status (confirmed, built, parked, pending, deferred), the seam it lives behind, and how to correct it. |
 | `docs/architecture.md` | The recorded directory tree and Phase 0 build order. |
 | `docs/FUTURE_PATTERNS.md` | Patterns to adopt at specific later phases, referenced by trigger comments in the code. |
+| `docs/STATUS.md` | The build register: build position, decisions, the audit-finding register, open questions and their owners, and the steps ahead. |
+| `docs/decisions/` | Design notes for decisions taken before the dependent code is written. `0001` covers the principal model (who calls us, and as whom) and the execution model (one, not three). |
+| `docs/runbooks/secret-rotation.md` | How to rotate the JWT verification key and the per-tenant `DD-API-KEY`s, why rotation means a deploy, and how to establish blast radius from the audit log after a compromise. |
 | `CONTRIBUTING.md` | Local setup, architectural rules, deliberate decisions, the security checkpoint habit, and commit style. |
 
 ## Contributing

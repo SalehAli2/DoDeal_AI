@@ -58,14 +58,11 @@ plugins = ["pydantic.mypy"]
 [dependency-groups]
 # The ONE dev list. `uv sync` installs from here; a second copy under
 # [project.optional-dependencies] was never installed from and drifted.
-#
-# NOT here on purpose: httpx2. starlette.testclient prefers it over httpx and
-# warns when it falls back, but the production transport (tools/httpx_transport)
-# and the integration test both use httpx, and running the test client on a
-# DIFFERENT http library than the code under test is worth less than a clean
-# dependency set. The StarletteDeprecationWarning on each run is deliberate and
-# left visible: it is the notice for the day starlette drops the fallback.
 dev = [
+    # Starlette's TestClient prefers httpx2 over httpx. Remove only when
+    # tools/httpx_transport.py migrates to httpx2 as well (planned: step 4,
+    # with the transport rewrite).
+    "httpx2>=2.9.1",
     "hypothesis>=6.100.0",
     "mypy>=2.3.0",
     "pre-commit>=4.6.1",

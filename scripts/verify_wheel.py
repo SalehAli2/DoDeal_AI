@@ -15,6 +15,19 @@ Usage:
     python scripts/verify_wheel.py <path-to-wheel>
 
 stdlib only — this must run before dev dependencies are known to be sound.
+
+The required CI checks, in order (.github/workflows/ci.yml). All six must be
+green before a branch merges -- see CONTRIBUTING, "Branch protection":
+
+    1. uv run ruff check .
+    2. uv run ruff format --check .
+    3. uv run mypy
+    4. uv run pytest                              (total coverage floor: 92%)
+    5. uv run python scripts/check_coverage_floors.py   (per-FILE floors)
+    6. uv build --wheel  +  this script            (installs and imports)
+
+This script is step 6: it is the last gate, and the only one that tests the
+artifact a deploy actually receives rather than the source tree.
 """
 
 from __future__ import annotations

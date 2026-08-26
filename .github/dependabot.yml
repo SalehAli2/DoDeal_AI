@@ -1,0 +1,26 @@
+# Dependency updates. Two ecosystems, both weekly.
+#
+# The uv updates are GROUPED into a single PR: this repo pins a lockfile, and
+# one PR per package would mean re-running the whole CI chain (ruff, mypy,
+# pytest with the coverage floors, the wheel-install check) once per bump for
+# changes that are almost always reviewed together.
+version: 2
+
+updates:
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "deps"
+    groups:
+      all-dependencies:
+        patterns:
+          - "*"
+
+  # The workflow's own actions (actions/checkout, astral-sh/setup-uv). Left
+  # ungrouped: there are few, and a pinned action bump is worth reading alone.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
