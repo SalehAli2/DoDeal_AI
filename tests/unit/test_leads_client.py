@@ -14,21 +14,11 @@ from dodeal_ai.tools.keys import BackendKeyError, SettingsKeyResolver
 from dodeal_ai.tools.leads import LeadsClient
 
 
-@pytest.fixture(autouse=True)
-def _config(monkeypatch):
-    monkeypatch.setenv("DODEAL_JWT_SIGNING_KEY", "test-key")
-    from dodeal_ai.core.config import get_settings
-
-    get_settings.cache_clear()
-    yield
-    get_settings.cache_clear()
-
-
 def _settings() -> Settings:
     return Settings(
         _env_file=None,
         jwt_signing_key="test-key",
-        dd_api_keys={"nasir3": "key-nasir3", "acme": "key-acme"},
+        dd_api_keys={"tenant-a": "key-tenant-a", "acme": "key-acme"},
         backend_base_domain="dodealcrm.com",
     )
 
@@ -38,11 +28,11 @@ def _client(transport: MockTransport, settings: Settings | None = None) -> Leads
     return LeadsClient(transport, SettingsKeyResolver(settings), settings)
 
 
-def _context(tenant: str = "nasir3") -> RequestContext:
+def _context(tenant: str = "tenant-a") -> RequestContext:
     return RequestContext(
         tenant=tenant,
         subject="42",
-        database="crm_nasir3",
+        database="crm_tenant_a",
         roles=(),
         permissions=frozenset(),
         request_id="req-1",
@@ -87,15 +77,15 @@ def _notes_body(notes: list[dict]) -> dict:
 async def test_builds_tenant_url_from_context_subdomain():
     transport = MockTransport(_list_body([{"id": 1}]))
     client = _client(transport)
-    await client.get_leads(_context("nasir3"))
-    assert transport.last_url == "https://nasir3.dodealcrm.com/api/service/leads"
+    await client.get_leads(_context("tenant-a"))
+    assert transport.last_url == "https://tenant-a.dodealcrm.com/api/service/leads"
 
 
 async def test_sends_dd_api_key_header():
     transport = MockTransport(_list_body([{"id": 1}]))
     client = _client(transport)
     await client.get_leads(_context())
-    assert transport.last_headers == {"DD-API-KEY": "key-nasir3"}
+    assert transport.last_headers == {"DD-API-KEY": "key-tenant-a"}
 
 
 async def test_returns_leads_from_data():
@@ -123,8 +113,8 @@ async def test_different_tenant_hits_different_url():
 async def test_get_lead_builds_id_url_and_returns_lead():
     transport = MockTransport(_lead_body({"id": 7, "name": "Acme"}))
     client = _client(transport)
-    lead = await client.get_lead(_context("nasir3"), 7)
-    assert transport.last_url == "https://nasir3.dodealcrm.com/api/service/leads/7"
+    lead = await client.get_lead(_context("tenant-a"), 7)
+    assert transport.last_url == "https://tenant-a.dodealcrm.com/api/service/leads/7"
     assert lead.id == 7
     assert lead.name == "Acme"
 
@@ -148,9 +138,9 @@ async def test_get_lead_notes_builds_url_and_returns_notes():
     ]
     transport = MockTransport(_notes_body(notes))
     client = _client(transport)
-    result = await client.get_lead_notes(_context("nasir3"), 7)
+    result = await client.get_lead_notes(_context("tenant-a"), 7)
     assert (
-        transport.last_url == "https://nasir3.dodealcrm.com/api/service/leads/7/notes"
+        transport.last_url == "https://tenant-a.dodealcrm.com/api/service/leads/7/notes"
     )
     assert len(result) == 1
     assert result[0].author == "Jane"
@@ -184,8 +174,8 @@ async def test_header_carries_the_requesting_tenants_key():
     transport = MockTransport(_list_body([{"id": 1}]))
     client = _client(transport)
 
-    await client.get_leads(_context("nasir3"))
-    assert transport.last_headers == {"DD-API-KEY": "key-nasir3"}
+    await client.get_leads(_context("tenant-a"))
+    assert transport.last_headers == {"DD-API-KEY": "key-tenant-a"}
 
     await client.get_leads(_context("acme"))
     assert transport.last_headers == {"DD-API-KEY": "key-acme"}

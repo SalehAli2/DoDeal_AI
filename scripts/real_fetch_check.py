@@ -14,7 +14,7 @@ real call:
 Usage:
     uv run python scripts/real_fetch_check.py <tenant-subdomain>
     # or, with the tenant set via env var instead of a CLI argument:
-    DODEAL_CHECK_TENANT=nasir3 uv run python scripts/real_fetch_check.py
+    DODEAL_CHECK_TENANT=<tenant-subdomain> uv run python scripts/real_fetch_check.py
 
     # the real, credentialed call:
     uv run python scripts/real_fetch_check.py <tenant-subdomain> --live
@@ -22,8 +22,10 @@ Usage:
 Requires:
     - DODEAL_DD_API_KEYS set to a JSON map that includes this tenant's real,
       per-tenant key (via .env or the environment), e.g.
-      DODEAL_DD_API_KEYS={"nasir3":"<key>"}. Never hardcode a key here. Only
-      read when --live is passed.
+      DODEAL_DD_API_KEYS={"<tenant-subdomain>":"<key>"}. Never hardcode a key
+      here, and never a tenant name either: the tenant comes ONLY from the
+      CLI argument or DODEAL_CHECK_TENANT, so there is no default this can
+      be pointed at by accident. Only read when --live is passed.
     - DODEAL_JWT_SIGNING_KEY set to anything. Settings requires it to fail
       closed, even though this script bypasses the gate chain entirely and
       never touches a JWT. Your local .env already has this if you can run

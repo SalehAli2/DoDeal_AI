@@ -53,22 +53,22 @@ def fake(monkeypatch):
 
 
 def test_under_limit_passes(fake):
-    enforce_cost("nasir3", "42")
+    enforce_cost("tenant-a", "42")
 
 
 def test_user_limit_denies(fake):
-    enforce_cost("nasir3", "42")
-    enforce_cost("nasir3", "42")
+    enforce_cost("tenant-a", "42")
+    enforce_cost("tenant-a", "42")
     with pytest.raises(CostLimitError) as exc:
-        enforce_cost("nasir3", "42")
+        enforce_cost("tenant-a", "42")
     assert exc.value.reason_code == "user_quota_exceeded"
 
 
 def test_tenant_limit_denies(fake):
     for i in range(5):
-        enforce_cost("nasir3", f"user{i}")
+        enforce_cost("tenant-a", f"user{i}")
     with pytest.raises(CostLimitError) as exc:
-        enforce_cost("nasir3", "user5")
+        enforce_cost("tenant-a", "user5")
     assert exc.value.reason_code == "tenant_quota_exceeded"
 
 
@@ -81,7 +81,7 @@ def test_tenants_counted_separately(fake):
 def test_redis_down_fails_open_with_warning(fake, caplog):
     fake.raise_on_eval = True
     with caplog.at_level("WARNING", logger="dodeal_ai.cost"):
-        enforce_cost("nasir3", "42")  # must NOT raise
+        enforce_cost("tenant-a", "42")  # must NOT raise
     assert any("cost_cap_bypassed" in r.getMessage() for r in caplog.records)
 
 
@@ -91,32 +91,32 @@ def test_atomic_failure_leaves_neither_counter_touched(fake, caplog):
     # update where one moved and the other didn't.
     fake.raise_on_eval = True
     with caplog.at_level("WARNING", logger="dodeal_ai.cost"):
-        enforce_cost("nasir3", "42")
-    assert get_usage("nasir3", "42") == (0, 0)
+        enforce_cost("tenant-a", "42")
+    assert get_usage("tenant-a", "42") == (0, 0)
 
 
 def test_both_counters_move_together_on_success(fake):
-    enforce_cost("nasir3", "42")
-    assert get_usage("nasir3", "42") == (1, 1)
+    enforce_cost("tenant-a", "42")
+    assert get_usage("tenant-a", "42") == (1, 1)
 
 
 def test_amount_increments_both_counters_by_amount(fake):
-    enforce_cost("nasir3", "42", amount=2)
-    assert get_usage("nasir3", "42") == (2, 2)
+    enforce_cost("tenant-a", "42", amount=2)
+    assert get_usage("tenant-a", "42") == (2, 2)
 
 
 def test_amount_can_exceed_cap_in_a_single_call(fake):
     with pytest.raises(CostLimitError) as exc:
-        enforce_cost("nasir3", "42", amount=3)  # user cap is 2
+        enforce_cost("tenant-a", "42", amount=3)  # user cap is 2
     assert exc.value.reason_code == "user_quota_exceeded"
 
 
 def test_get_usage_does_not_increment(fake):
-    enforce_cost("nasir3", "42")
-    before = get_usage("nasir3", "42")
-    after = get_usage("nasir3", "42")
+    enforce_cost("tenant-a", "42")
+    before = get_usage("tenant-a", "42")
+    after = get_usage("tenant-a", "42")
     assert before == after == (1, 1)
 
 
 def test_get_usage_zero_when_untouched(fake):
-    assert get_usage("nasir3", "42") == (0, 0)
+    assert get_usage("tenant-a", "42") == (0, 0)

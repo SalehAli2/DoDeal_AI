@@ -8,13 +8,6 @@ from pydantic import SecretStr, ValidationError
 from dodeal_ai.core.config import ConfigError, get_settings
 
 
-@pytest.fixture(autouse=True)
-def _clear_settings_cache():
-    get_settings.cache_clear()
-    yield
-    get_settings.cache_clear()
-
-
 def test_required_key_present_yields_defaults(monkeypatch):
     monkeypatch.setenv("DODEAL_JWT_SIGNING_KEY", "test-key-abc")
     s = get_settings()

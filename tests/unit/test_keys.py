@@ -13,15 +13,15 @@ def _settings() -> Settings:
     return Settings(
         _env_file=None,
         jwt_signing_key="test-key",
-        dd_api_keys={"nasir3": "key-nasir3", "acme": "key-acme"},
+        dd_api_keys={"tenant-a": "key-tenant-a", "acme": "key-acme"},
     )
 
 
 def test_known_tenant_resolves_to_its_configured_secret():
     resolver = SettingsKeyResolver(_settings())
-    resolved = resolver.resolve("nasir3")
+    resolved = resolver.resolve("tenant-a")
     assert isinstance(resolved, SecretStr)
-    assert resolved.get_secret_value() == "key-nasir3"
+    assert resolved.get_secret_value() == "key-tenant-a"
 
 
 def test_unknown_tenant_fails_closed_with_no_key_material(caplog):
@@ -37,11 +37,11 @@ def test_unknown_tenant_fails_closed_with_no_key_material(caplog):
     assert raised is not None
     assert raised.reason_code == "backend_key_missing"
     assert str(raised) == "backend_key_missing"
-    assert "key-nasir3" not in str(raised)
+    assert "key-tenant-a" not in str(raised)
     assert "key-acme" not in str(raised)
 
     assert "ghost" in caplog.text
-    assert "key-nasir3" not in caplog.text
+    assert "key-tenant-a" not in caplog.text
     assert "key-acme" not in caplog.text
 
 

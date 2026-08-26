@@ -35,8 +35,8 @@ class TokenClaims:
     """The CONFIRMED Tymon claim set. sub is an INTEGER. No iss, no aud."""
 
     sub: int = 42
-    subdomain: str = "nasir3"
-    database: str = "crm_nasir3"
+    subdomain: str = "tenant-a"
+    database: str = "crm_tenant_a"
     ttl_seconds: int = 43200  # 12h, the confirmed lifetime; negative => expired
 
     def to_payload(self) -> dict:

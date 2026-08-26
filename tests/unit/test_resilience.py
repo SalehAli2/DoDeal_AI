@@ -6,16 +6,7 @@ import asyncio
 
 import pytest
 
-from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.resilience import ExternalCallError, call_with_watchdog
-
-
-@pytest.fixture(autouse=True)
-def _config(monkeypatch):
-    monkeypatch.setenv("DODEAL_JWT_SIGNING_KEY", "test-key")
-    get_settings.cache_clear()
-    yield
-    get_settings.cache_clear()
 
 
 @pytest.mark.asyncio

@@ -49,7 +49,7 @@ def _route_httpx_to_fake_backend(monkeypatch, fake_backend: FakeBackend):
     monkeypatch.setattr(httpx_transport_module.httpx, "AsyncClient", _ASGIAsyncClient)
 
 
-def _settings(dd_api_key: str = EXPECTED_API_KEY, tenant: str = "nasir3") -> Settings:
+def _settings(dd_api_key: str = EXPECTED_API_KEY, tenant: str = "tenant-a") -> Settings:
     return Settings(
         _env_file=None,
         jwt_signing_key="test-key",
@@ -62,11 +62,11 @@ def _client(settings: Settings) -> LeadsClient:
     return LeadsClient(HttpxTransport(), SettingsKeyResolver(settings), settings)
 
 
-def _context(tenant: str = "nasir3") -> RequestContext:
+def _context(tenant: str = "tenant-a") -> RequestContext:
     return RequestContext(
         tenant=tenant,
         subject="42",
-        database="crm_nasir3",
+        database="crm_tenant_a",
         roles=(),
         permissions=frozenset(),
         request_id="req-1",
@@ -122,7 +122,7 @@ async def test_fake_backend_returns_401_with_no_key_header_at_all(fake_backend):
     # directly against the fake app rather than through the client.
     transport = httpx.ASGITransport(app=fake_backend.app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="https://nasir3.dodealcrm.com"
+        transport=transport, base_url="https://tenant-a.dodealcrm.com"
     ) as raw_client:
         response = await raw_client.get("/api/service/leads")
     assert response.status_code == 401

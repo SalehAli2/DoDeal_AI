@@ -19,39 +19,79 @@ tools, never a database (separate DB per tenant, switched backend-side).
 
 ## Tree
 
+Regenerated from the real tree; gitignored paths (.venv, caches, .env, coverage
+output) are omitted.
+
     dodeal-ai/
-    ├── pyproject.toml
+    ├── pyproject.toml            # deps, pytest/coverage gates, ruff + mypy config
     ├── uv.lock
+    ├── .python-version           # 3.12 — one interpreter for CI and local
     ├── .env.example              # documents required config, never real secrets
+    ├── .gitattributes            # * text=auto eol=lf — line endings decided here
     ├── .gitignore
+    ├── .dockerignore
+    ├── .pre-commit-config.yaml   # ruff check + ruff format --check + mypy
     ├── Dockerfile
-    ├── docker-compose.yml        # api + redis for local dev (worker: not yet)
+    ├── docker-compose.yml        # api + redis (worker: not yet)
     ├── README.md
+    ├── ASSUMPTIONS.md            # what is decided, assumed, and still open
+    ├── CONTRIBUTING.md
     │
-    ├── .github/workflows/ci.yml  # lint + test + wheel-install check on push
-    ├── docs/                     # this file + design decisions
+    ├── .github/workflows/ci.yml  # lint + type + test + coverage floors + wheel check
+    │
+    ├── docs/
+    │   ├── architecture.md       # this file
+    │   ├── FUTURE_PATTERNS.md    # patterns to adopt, each tagged with WHEN
+    │   └── unit_a/               # Unit A reference PDFs
+    │
+    ├── scripts/                  # not shipped in the wheel, not run by pytest
+    │   ├── check_coverage_floors.py  # per-FILE coverage floors (CI step)
+    │   ├── real_fetch_check.py       # manual one-shot real-backend check
+    │   └── verify_wheel.py           # wheel installs and imports outside the repo
     │
     ├── src/dodeal_ai/
-    │   ├── main.py               # FastAPI app + /health
+    │   ├── main.py               # FastAPI app, lifespan, /health + /ready
+    │   ├── py.typed              # ships type information to consumers
     │   │
     │   ├── core/                 # ── THE FOUNDATION ── everything imports this
     │   │   ├── auth/             # Gate 1: verify JWT / service creds
-    │   │   ├── authz/            # Gate 3: permission + scope + role table
+    │   │   │   ├── claims.py         # claims -> Identity
+    │   │   │   ├── dependencies.py   # the gate chain as FastAPI Depends()
+    │   │   │   └── verify.py         # JwtVerifier / TokenVerifier
+    │   │   ├── authz/            # Gate 3: permission + role table (PARKED)
+    │   │   │   └── permissions.py
     │   │   ├── audit/            # structured JSON deny/allow logger
-    │   │   ├── llm/              # provider abstraction, deterministic mode
-    │   │   ├── cost/             # enforced per-tenant/user quota (§7)
+    │   │   │   └── logger.py
+    │   │   ├── llm/              # provider abstraction (adapter: Step 14)
+    │   │   │   ├── __init__.py       # get_llm_client() factory
+    │   │   │   └── client.py         # the seam: Protocol, LLMResponse, errors
+    │   │   ├── cost/             # Gate 4: per-tenant/user quota (§7)
+    │   │   │   └── limiter.py
+    │   │   ├── config.py         # Settings + get_settings() (fail-closed)
     │   │   ├── context.py        # RequestContext (frozen)
     │   │   ├── tenancy.py        # Gate 2: tenant-isolation guards
     │   │   ├── resilience.py     # watchdog timeout + retry-once (§6)
     │   │   ├── validation.py     # output-vs-schema enforcement (§6)
     │   │   ├── prompting.py      # server-side prompt assembly (§6)
     │   │   ├── redis.py          # two named connections: queue + cost
+    │   │   ├── logging_config.py # JSON to stdout, configured once at startup
+    │   │   ├── log_safety.py     # what may reach a log line (§3.3)
     │   │   └── errors.py         # deny paths -> response codes
     │   │
-    │   ├── middleware/           # always-on: request-id, logging, timing
-    │   ├── prompts/              # versioned LLM prompts (unit_a, unit_b, assistant, sales_automation)
-    │   ├── schemas/              # output contracts per feature — ships inside the package (F1)
+    │   ├── middleware/           # always-on, every route
+    │   │   └── request_id.py     # X-Request-ID: validated inbound, else uuid4
+    │   │
+    │   ├── prompts/              # versioned LLM prompts, packaged with the wheel
+    │   │   ├── unit_a_v1.txt
+    │   │   └── {structured_intelligence,call_intelligence,assistant,sales_automation}/
+    │   │
+    │   ├── schemas/              # output contracts — ship inside the package (F1)
+    │   │   └── lead.py
+    │   │
     │   ├── tools/                # CRM API wrappers — AI's ONLY path to CRM (read-only)
+    │   │   ├── httpx_transport.py    # the real transport
+    │   │   ├── keys.py               # per-tenant DD-API-KEY resolution
+    │   │   └── leads.py              # LeadsClient
     │   │
     │   ├── units/                # feature logic — EMPTY until exit demo passes
     │   │   ├── structured_intelligence/   # Unit A (fast/sync)
@@ -60,14 +100,17 @@ tools, never a database (separate DB per tenant, switched backend-side).
     │   │   └── sales_automation/          # Unit C2 (deferred, post-pilot)
     │   │
     │   ├── workers/              # Celery: transcription (B), lead engagement (C2)
-    │   │   ├── celery_app.py
+    │   │   ├── celery_app.py     # empty — no worker yet
     │   │   └── tasks/
     │   │
     │   └── api/routes/           # one router per unit
+    │       └── _probe.py         # gate-chain probe route (tests only)
     │
     └── tests/
+        ├── conftest.py           # autouse: signing key + empty settings cache
+        ├── helpers/              # tokens.py, fake_llm.py (+ their own tests)
         ├── unit/
-        ├── integration/
+        ├── integration/          # `-m integration`, excluded from the default run
         └── security/             # tenant-isolation tests — Phase 0 exit demo
 
 ---

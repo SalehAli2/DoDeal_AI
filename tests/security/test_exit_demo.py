@@ -57,7 +57,7 @@ def _host(subdomain: str) -> dict:
 
 
 def test_criterion_1_cross_tenant_blocked_and_logged(client, json_log):
-    token = tokens.mint_token(subdomain="nasir3")
+    token = tokens.mint_token(subdomain="tenant-a")
     r = client.get("/_probe/protected", headers={**_auth(token), **_host("other")})
     assert r.status_code == 403
     denies = [
@@ -76,21 +76,21 @@ def test_criterion_1_cross_tenant_blocked_and_logged(client, json_log):
 def test_criterion_2_expired_token_rejected(client):
     r = client.get(
         "/_probe/protected",
-        headers={**_auth(tokens.mint_expired_token()), **_host("nasir3")},
+        headers={**_auth(tokens.mint_expired_token()), **_host("tenant-a")},
     )
     assert r.status_code == 401
 
 
 def test_criterion_2_malformed_token_rejected(client):
     r = client.get(
-        "/_probe/protected", headers={**_auth("garbage.not.jwt"), **_host("nasir3")}
+        "/_probe/protected", headers={**_auth("garbage.not.jwt"), **_host("tenant-a")}
     )
     assert r.status_code == 401
 
 
 def test_criterion_3_valid_token_passes_auth_and_tenancy(client, json_log):
-    token = tokens.mint_token(subdomain="nasir3", sub=42)
-    r = client.get("/_probe/protected", headers={**_auth(token), **_host("nasir3")})
+    token = tokens.mint_token(subdomain="tenant-a", sub=42)
+    r = client.get("/_probe/protected", headers={**_auth(token), **_host("tenant-a")})
     assert r.status_code == 200
     allow_gates = {
         line["gate"]
@@ -103,6 +103,6 @@ def test_criterion_3_valid_token_passes_auth_and_tenancy(client, json_log):
 def test_criterion_4_alg_none_rejected(client):
     r = client.get(
         "/_probe/protected",
-        headers={**_auth(tokens.mint_alg_none_token()), **_host("nasir3")},
+        headers={**_auth(tokens.mint_alg_none_token()), **_host("tenant-a")},
     )
     assert r.status_code == 401

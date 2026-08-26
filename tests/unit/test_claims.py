@@ -25,16 +25,16 @@ def _settings(**overrides) -> Settings:
 
 
 def test_extracts_confirmed_identity():
-    payload = {"sub": 42, "subdomain": "nasir3", "database": "crm_nasir3"}
+    payload = {"sub": 42, "subdomain": "tenant-a", "database": "crm_tenant_a"}
     ident = extract_identity(payload, _settings())
     assert ident == Identity(
-        tenant="nasir3", subject="42", database="crm_nasir3", roles=()
+        tenant="tenant-a", subject="42", database="crm_tenant_a", roles=()
     )
 
 
 def test_integer_sub_normalised_to_string():
     ident = extract_identity(
-        {"sub": 42, "subdomain": "nasir3", "database": "crm_nasir3"}, _settings()
+        {"sub": 42, "subdomain": "tenant-a", "database": "crm_tenant_a"}, _settings()
     )
     assert ident.subject == "42"
     assert isinstance(ident.subject, str)
@@ -42,7 +42,7 @@ def test_integer_sub_normalised_to_string():
 
 def test_string_sub_also_accepted():
     ident = extract_identity(
-        {"sub": "42", "subdomain": "nasir3", "database": "crm_nasir3"}, _settings()
+        {"sub": "42", "subdomain": "tenant-a", "database": "crm_tenant_a"}, _settings()
     )
     assert ident.subject == "42"
 
@@ -51,7 +51,8 @@ def test_bool_sub_rejected():
     # bool is an int subclass; must not slip through as "True".
     with pytest.raises(ClaimMappingError) as exc:
         extract_identity(
-            {"sub": True, "subdomain": "nasir3", "database": "crm_nasir3"}, _settings()
+            {"sub": True, "subdomain": "tenant-a", "database": "crm_tenant_a"},
+            _settings(),
         )
     assert exc.value.reason_code == "missing_subject"
 
@@ -59,8 +60,8 @@ def test_bool_sub_rejected():
 def test_roles_never_sourced_from_token():
     payload = {
         "sub": 42,
-        "subdomain": "nasir3",
-        "database": "crm_nasir3",
+        "subdomain": "tenant-a",
+        "database": "crm_tenant_a",
         "roles": ["agent"],
     }
     ident = extract_identity(payload, _settings())
@@ -69,18 +70,20 @@ def test_roles_never_sourced_from_token():
 
 def test_missing_subdomain_raises():
     with pytest.raises(ClaimMappingError) as exc:
-        extract_identity({"sub": 42, "database": "crm_nasir3"}, _settings())
+        extract_identity({"sub": 42, "database": "crm_tenant_a"}, _settings())
     assert exc.value.reason_code == "missing_subdomain"
 
 
 def test_missing_subject_raises():
     with pytest.raises(ClaimMappingError) as exc:
-        extract_identity({"subdomain": "nasir3", "database": "crm_nasir3"}, _settings())
+        extract_identity(
+            {"subdomain": "tenant-a", "database": "crm_tenant_a"}, _settings()
+        )
     assert exc.value.reason_code == "missing_subject"
 
 
 def test_absent_database_defaults_empty_not_error():
-    ident = extract_identity({"sub": 42, "subdomain": "nasir3"}, _settings())
+    ident = extract_identity({"sub": 42, "subdomain": "tenant-a"}, _settings())
     assert ident.database == ""
 
 

@@ -98,7 +98,12 @@ class LLMProviderError(Exception):
 
 
 class LLMConfigurationError(ConfigError):
-    """The seam was asked for a client without a provider and a pinned model."""
+    """The seam was asked for a client without a provider and a pinned model.
+
+    THE one definition. A ConfigError subclass so startup/readiness treat it
+    fail-closed like any other missing-config failure; the import direction is
+    llm -> config, never the reverse, so it lives here and not in config.py.
+    """
 
     def __init__(self) -> None:
         super().__init__("llm_not_configured")

@@ -12,11 +12,6 @@ dependencies = [
     "httpx>=0.27.0",
 ]
 
-[project.optional-dependencies]
-dev = [
-    "pytest>=8.3.0",
-]
-
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -27,7 +22,7 @@ packages = ["src/dodeal_ai"]
 [tool.pytest.ini_options]
   pythonpath = ["."]
   asyncio_mode = "auto"
-  addopts = "--cov=src/dodeal_ai --cov-report=term-missing -m \"not integration\""
+  addopts = "--cov=src/dodeal_ai --cov-report=term-missing --cov-report=json -m \"not integration\""
   markers = [
     "integration: starts a local ASGI-backed fake HTTP server; excluded from the default run (pytest -m integration to run it).",
   ]
@@ -37,6 +32,19 @@ fail_under = 92
 exclude_also = [
     'class .*\bProtocol\):',
 ]
+[tool.ruff]
+# Pins the two values ruff was otherwise INFERRING: target-version from
+# requires-python, and its default line-length. Both now survive a change to
+# either default.
+#
+# Deliberately NO [tool.ruff.lint] select: the rule set in effect is ruff's
+# built-in default, which is a curated ~413-rule set, not a set of prefix
+# selectors (e.g. 2 of 19 pycodestyle-E rules, 1 of 46 pydocstyle, 3 of 60
+# flake8-bandit). Writing select = ["E", "D", "S", ...] would turn on hundreds
+# of rules that are off today, which is a separate decision from this pin.
+target-version = "py312"
+line-length = 88
+
 [tool.mypy]
 python_version = "3.12"
 files = ["src", "tests/helpers"]
@@ -48,11 +56,20 @@ warn_unused_ignores = true
 no_implicit_optional = true
 plugins = ["pydantic.mypy"]
 [dependency-groups]
+# The ONE dev list. `uv sync` installs from here; a second copy under
+# [project.optional-dependencies] was never installed from and drifted.
+#
+# NOT here on purpose: httpx2. starlette.testclient prefers it over httpx and
+# warns when it falls back, but the production transport (tools/httpx_transport)
+# and the integration test both use httpx, and running the test client on a
+# DIFFERENT http library than the code under test is worth less than a clean
+# dependency set. The StarletteDeprecationWarning on each run is deliberate and
+# left visible: it is the notice for the day starlette drops the fallback.
 dev = [
-    "httpx2>=2.9.1",
     "hypothesis>=6.100.0",
     "mypy>=2.3.0",
     "pre-commit>=4.6.1",
+    "pytest>=8.3.0",
     "pytest-asyncio>=1.4.0",
     "pytest-cov>=7.1.0",
     "ruff>=0.16.1",

@@ -34,8 +34,8 @@ def _decode(token: str):
 def test_mint_token_roundtrips_default_claims():
     payload = _decode(mint_token())
     assert payload["sub"] == 42
-    assert payload["subdomain"] == "nasir3"
-    assert payload["database"] == "crm_nasir3"
+    assert payload["subdomain"] == "tenant-a"
+    assert payload["database"] == "crm_tenant_a"
     assert payload["exp"] > payload["iat"]
     assert "iss" not in payload
     assert "aud" not in payload

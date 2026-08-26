@@ -31,8 +31,14 @@ class PermissionDeniedError(Exception):
 # agent  : the people who write lead notes (the Phase 1 users).
 # viewer : read-only.
 # Real role names/grants replace this ONE dict when Product signs off.
+#
+# Read permissions only. The service has NO write path to the CRM
+# (ASSUMPTIONS §3.1: judgements are returned to the caller, which persists what
+# it chooses), so a note:write grant here would name a capability that does not
+# exist -- and default-deny is a weaker claim when the table grants things
+# nothing can do. It goes in the day a write endpoint does.
 _ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
-    "agent": frozenset({"lead:read", "note:read", "note:write"}),
+    "agent": frozenset({"lead:read", "note:read"}),
     "viewer": frozenset({"lead:read", "note:read"}),
 }
 

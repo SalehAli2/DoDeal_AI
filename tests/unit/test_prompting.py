@@ -9,16 +9,6 @@ from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.prompting import PromptError, build_prompt
 
 
-@pytest.fixture(autouse=True)
-def _clear_settings_cache(monkeypatch: pytest.MonkeyPatch):
-    # _prompts_dir() reads Settings, so give it a signing key to build one —
-    # same pattern every other module that touches get_settings() uses.
-    monkeypatch.setenv("DODEAL_JWT_SIGNING_KEY", "test-key")
-    get_settings.cache_clear()
-    yield
-    get_settings.cache_clear()
-
-
 def test_builds_prompt_with_system_and_data():
     prompt = build_prompt("unit_a_v1.txt", "Customer wants a quote by Friday.").text
     # System instructions are present (from the file).

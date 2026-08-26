@@ -15,19 +15,19 @@ from tests.helpers import tokens
 
 
 def test_valid_token_yields_identity(verifier, settings):
-    token = tokens.mint_token(subdomain="nasir3", sub=42)
+    token = tokens.mint_token(subdomain="tenant-a", sub=42)
     ident = verify_token(token, verifier, settings)
     assert isinstance(ident, Identity)
-    assert ident.tenant == "nasir3"
+    assert ident.tenant == "tenant-a"
     assert ident.subject == "42"
-    assert ident.database == "crm_nasir3"
+    assert ident.database == "crm_tenant_a"
 
 
 def test_token_without_iss_aud_still_passes(verifier, settings):
     # The confirmed token has no iss/aud; it must NOT be rejected for that.
     token = tokens.mint_token()
     ident = verify_token(token, verifier, settings)
-    assert ident.tenant == "nasir3"
+    assert ident.tenant == "tenant-a"
 
 
 def test_expired_token_rejected(verifier, settings):

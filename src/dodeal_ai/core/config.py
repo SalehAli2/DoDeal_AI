@@ -79,7 +79,7 @@ class Settings(BaseSettings):
 
     # Backend service credentials, ONE PER TENANT (integration guide §1: a key is valid only against
     # its own tenant host). Keyed by tenant subdomain. Parsed from JSON in the env var, e.g.
-    #   DODEAL_DD_API_KEYS={"nasir3":"<key>","acme":"<key>"}
+    #   DODEAL_DD_API_KEYS={"tenant-a":"<key>","tenant-b":"<key>"}
     # No default value exists for any tenant: an unknown tenant fails closed in tools/keys.py.
     # Empty map = nothing can reach the backend; startup logs this at ERROR (main.py).
     dd_api_keys: dict[str, SecretStr] = {}
@@ -131,13 +131,6 @@ class Settings(BaseSettings):
     # resilience, validation, ...). Third-party libraries are unaffected --
     # they stay at the root logger's WARNING default.
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
-
-
-class LLMConfigurationError(ConfigError):
-    """The seam was asked for a client without a provider and a pinned model."""
-
-    def __init__(self) -> None:
-        super().__init__("llm_not_configured")
 
 
 def _build_settings(**overrides) -> Settings:

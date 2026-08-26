@@ -12,9 +12,9 @@ from dodeal_ai.core.context import RequestContext
 
 def _ctx(**overrides) -> RequestContext:
     base = {
-        "tenant": "nasir3",
+        "tenant": "tenant-a",
         "subject": "42",
-        "database": "crm_nasir3",
+        "database": "crm_tenant_a",
         "roles": ("agent",),
         "permissions": frozenset({"lead:read"}),
         "request_id": "req-123",
@@ -25,14 +25,14 @@ def _ctx(**overrides) -> RequestContext:
 
 def test_from_identity_carries_all_fields():
     ident = Identity(
-        tenant="nasir3", subject="42", database="crm_nasir3", roles=("agent",)
+        tenant="tenant-a", subject="42", database="crm_tenant_a", roles=("agent",)
     )
     ctx = RequestContext.from_identity(
         ident, permissions=frozenset({"lead:read"}), request_id="req-123"
     )
-    assert ctx.tenant == "nasir3"
+    assert ctx.tenant == "tenant-a"
     assert ctx.subject == "42"
-    assert ctx.database == "crm_nasir3"
+    assert ctx.database == "crm_tenant_a"
     assert ctx.roles == ("agent",)
     assert ctx.permissions == frozenset({"lead:read"})
     assert ctx.request_id == "req-123"

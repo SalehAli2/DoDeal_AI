@@ -16,7 +16,7 @@ jobs:
           enable-cache: true
 
       - name: Install Python
-        run: uv python install
+        run: uv python install 3.12
 
       - name: Install dependencies
         run: uv sync --locked
@@ -32,6 +32,11 @@ jobs:
 
       - name: Tests (with coverage gate)
         run: uv run pytest
+
+      # Per-FILE floors for the deny-path modules. The gate above is an
+      # average and can hide one security module rotting; this cannot.
+      - name: Per-file coverage floors
+        run: uv run python scripts/check_coverage_floors.py
 
       - name: Build wheel
         run: uv build --wheel

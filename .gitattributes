@@ -1,0 +1,10 @@
+# Line endings are decided HERE, not by each developer's core.autocrlf.
+# Without this file, whether a checkout gets CRLF depends on a local git
+# setting, so the same commit produces different working trees on different
+# machines -- and a Windows contributor with autocrlf=false commits CRLF into
+# blobs that the Linux CI container then reads.
+* text=auto eol=lf
+
+# Binary: never inspected for text, never line-ending converted.
+*.png binary
+*.pdf binary

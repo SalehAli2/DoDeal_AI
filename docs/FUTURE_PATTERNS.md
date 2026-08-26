@@ -10,10 +10,11 @@ phase named in "When."
 
 ---
 
-## 1. Idempotency keys for writes
+## 1. Idempotency keys
 
-**When:** the moment you build the note write-back (Unit A) — the first time the
-service writes anything back to the CRM.
+**When:** any request that must not be processed twice — today the note-scoring
+request (tenant + operation + item id + content fingerprint, ASSUMPTIONS §3.2);
+a CRM write-back does not exist and is not planned.
 
 **Why:** our watchdog retries once on failure. A read is safe to retry. A WRITE
 is not — a retry could create the same note or score twice. ASSUMPTIONS.md

@@ -1,6 +1,6 @@
 """Watchdog — one shared wrapper for every EXTERNAL call (LLM + backend tools).
 
-Every call out of this service (to the model, or later to the Hikal API) runs
+Every call out of this service (to the model, or to the CRM backend) runs
 under an explicit timeout and retries at most ONCE on failure/timeout, then
 fails closed with a clear error. This policy is defined HERE, once, so no call
 site invents its own timeout/retry behaviour.
@@ -8,9 +8,11 @@ site invents its own timeout/retry behaviour.
 Nothing calls the LLM or tools yet — this is the reusable wrapper, ready to wrap
 those calls when they exist. Built and tested in isolation.
 
-IDEMPOTENCY NOTE: retry-once is safe for READS. For a non-idempotent WRITE (the
-future note-writeback) a blind retry could double-execute. Callers wrapping a
-write must pass retry=False, or apply an idempotency key per FUTURE_PATTERNS.md
+IDEMPOTENCY NOTE: retry-once is safe for READS. For a non-idempotent call a
+blind retry could double-execute; there is no write path today
+(ASSUMPTIONS §3.1), the rule stands for the day one appears, and for paid calls
+that may already have completed (LLM: retry=False). Callers wrapping such a
+call must pass retry=False, or apply an idempotency key per FUTURE_PATTERNS.md
 item 1 before enabling retry. See ASSUMPTIONS.md.
 """
 

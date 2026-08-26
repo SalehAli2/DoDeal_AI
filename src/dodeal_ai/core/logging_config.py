@@ -29,6 +29,12 @@ _STANDARD_RECORD_ATTRS = frozenset(
 ) | {"message", "asctime"}
 
 
+# uvicorn's own loggers. "uvicorn" is the parent, but uvicorn configures all
+# three explicitly, so all three need handing back -- clearing only the parent
+# leaves uvicorn.error and uvicorn.access still holding their own handlers.
+_UVICORN_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access")
+
+
 class JsonFormatter(logging.Formatter):
     """One JSON object per line.
 
@@ -74,6 +80,10 @@ def configure_logging() -> None:
     - The root logger stays at WARNING, which is what third-party libraries
       (with no "dodeal_ai" ancestor) inherit -- so this does not flood logs
       with dependency chatter.
+    - uvicorn's three loggers are stripped of the handlers uvicorn installs
+      for itself and made to propagate, so its access/error lines reach the
+      SAME JSON handler as ours instead of being written as plain text. See
+      _UVICORN_LOGGERS.
     """
     settings = get_settings()
 
@@ -85,3 +95,14 @@ def configure_logging() -> None:
     root.handlers = [handler]
 
     logging.getLogger("dodeal_ai").setLevel(settings.log_level)
+
+    # uvicorn installs its own handlers on these three and sets
+    # propagate=False, so its lines bypass the JSON handler above and land on
+    # stdout as plain text -- a log collector then sees two formats in one
+    # stream and cannot index the request lines. Handing them back to the root
+    # handler makes every line in the process one JSON object. Levels are left
+    # exactly as uvicorn set them: this changes the FORMAT, not what is logged.
+    for name in _UVICORN_LOGGERS:
+        uvicorn_logger = logging.getLogger(name)
+        uvicorn_logger.handlers = []
+        uvicorn_logger.propagate = True

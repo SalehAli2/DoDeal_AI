@@ -26,7 +26,7 @@ def test_backend_keys_missing_logs_error_when_map_is_empty(monkeypatch, caplog):
 
 def test_backend_keys_missing_not_logged_when_map_is_non_empty(monkeypatch, caplog):
     monkeypatch.setenv("DODEAL_JWT_SIGNING_KEY", "test-key")
-    monkeypatch.setenv("DODEAL_DD_API_KEYS", '{"nasir3":"a-real-key"}')
+    monkeypatch.setenv("DODEAL_DD_API_KEYS", '{"tenant-a":"a-real-key"}')
     get_settings.cache_clear()
 
     with caplog.at_level(logging.ERROR, logger="dodeal_ai.startup"), TestClient(app):

@@ -76,7 +76,7 @@ def client():
 
 
 def test_cross_tenant_deny_emits_warning_line(client, json_log):
-    token = tokens.mint_token(subdomain="nasir3")
+    token = tokens.mint_token(subdomain="tenant-a")
     r = client.get(
         "/_probe/protected",
         headers={"Authorization": f"Bearer {token}", "Host": "other.dodealcrm.com"},
