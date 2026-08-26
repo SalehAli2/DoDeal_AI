@@ -71,6 +71,8 @@ current list and status of every provisional decision.
   the global to fit a model call.
 - `llm_model` has no real default and the factory refuses an empty value.
   A pinned model id is set per deployment, never drifted by a default.
+- **Backend keys are per tenant and have no default.** An unknown tenant fails
+  closed before any network call; never fall back to another tenant's key.
 
 ## Security checkpoint per feature
 

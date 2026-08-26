@@ -20,8 +20,10 @@ Usage:
     uv run python scripts/real_fetch_check.py <tenant-subdomain> --live
 
 Requires:
-    - DODEAL_DD_API_KEY set to a real, per-tenant key (via .env or the
-      environment). Never hardcode it here. Only read when --live is passed.
+    - DODEAL_DD_API_KEYS set to a JSON map that includes this tenant's real,
+      per-tenant key (via .env or the environment), e.g.
+      DODEAL_DD_API_KEYS={"nasir3":"<key>"}. Never hardcode a key here. Only
+      read when --live is passed.
     - DODEAL_JWT_SIGNING_KEY set to anything. Settings requires it to fail
       closed, even though this script bypasses the gate chain entirely and
       never touches a JWT. Your local .env already has this if you can run
@@ -36,12 +38,14 @@ import os
 import sys
 
 import httpx
+from pydantic import SecretStr
 
 from dodeal_ai.core.config import Settings, get_settings
 from dodeal_ai.core.context import RequestContext
 from dodeal_ai.core.resilience import ExternalCallError
 from dodeal_ai.core.validation import OutputValidationError
 from dodeal_ai.tools.httpx_transport import HttpxTransport
+from dodeal_ai.tools.keys import SettingsKeyResolver, TenantKeyResolver
 from dodeal_ai.tools.leads import LeadsClient
 
 # RFC 2606 reserves .invalid and guarantees it is never resolvable in DNS.
@@ -99,12 +103,21 @@ def _build_context(tenant: str) -> RequestContext:
 
 def _dry_run_settings(real_settings: Settings) -> Settings:
     """A settings object identical to the real one, except pointed at the
-    fake unreachable dry-run host and with the key blanked out. The .invalid
-    TLD never resolves, so no bytes -- credentials included -- ever leave
-    the machine; blanking the key here is defense in depth on top of that."""
-    return real_settings.model_copy(
-        update={"backend_base_domain": _DRY_RUN_HOST, "dd_api_key": "dry-run-no-key"}
-    )
+    fake unreachable dry-run host. The .invalid TLD never resolves, so no
+    bytes -- credentials included -- ever leave the machine. The dry run
+    never touches settings.dd_api_keys at all: _DryRunKeyResolver supplies a
+    fixed dummy key so the tenant does not need a real one configured just to
+    exercise the request/error-handling logic."""
+    return real_settings.model_copy(update={"backend_base_domain": _DRY_RUN_HOST})
+
+
+class _DryRunKeyResolver:
+    """Always resolves to a fixed dummy key, for any tenant. Used only in
+    dry-run mode, where no real key is needed and no real network call
+    happens."""
+
+    def resolve(self, tenant: str) -> SecretStr:
+        return SecretStr("dry-run-no-key")
 
 
 def _guard_against_accidental_live_call(settings: Settings, live: bool) -> None:
@@ -136,8 +149,8 @@ def _report_external_call_error(exc: ExternalCallError) -> None:
         if status in (401, 403):
             print(
                 f"AUTH PROBLEM: backend returned {status}. Check that "
-                "DODEAL_DD_API_KEY is the correct, currently-valid key for "
-                "this tenant, and that the tenant subdomain is right.",
+                "this tenant's entry in DODEAL_DD_API_KEYS is the correct, "
+                "currently-valid key, and that the tenant subdomain is right.",
                 file=sys.stderr,
             )
         elif status == 422:
@@ -182,23 +195,26 @@ def _report_validation_error(exc: OutputValidationError) -> None:
 
 async def _run(tenant: str, live: bool) -> int:
     real_settings = get_settings()
+    key_resolver: TenantKeyResolver
 
     if live:
         settings = real_settings
-        if not settings.dd_api_key or settings.dd_api_key == "test-dd-api-key":
+        if tenant not in settings.dd_api_keys:
             print(
-                "DODEAL_DD_API_KEY is not set (still the placeholder default).\n"
+                f"No key configured for tenant {tenant!r} in DODEAL_DD_API_KEYS.\n"
                 "Set it to the real per-tenant key before running with --live.",
                 file=sys.stderr,
             )
             return 1
+        key_resolver = SettingsKeyResolver(settings)
     else:
         settings = _dry_run_settings(real_settings)
+        key_resolver = _DryRunKeyResolver()
 
     _guard_against_accidental_live_call(settings, live)
 
     context = _build_context(tenant)
-    client = LeadsClient(HttpxTransport(), settings)
+    client = LeadsClient(HttpxTransport(), key_resolver, settings)
     url = f"https://{tenant}.{settings.backend_base_domain}/api/service/leads"
     mode = (
         "LIVE (real call to production)" if live else "DRY RUN (no real network call)"
@@ -208,7 +224,9 @@ async def _run(tenant: str, live: bool) -> int:
     print(f"Tenant:     {tenant}")
     print(f"Fetching:   GET {url}")
     if live:
-        print(f"DD-API-KEY: {_mask_key(settings.dd_api_key)}")
+        print(
+            f"DD-API-KEY: {_mask_key(key_resolver.resolve(tenant).get_secret_value())}"
+        )
     print()
 
     try:

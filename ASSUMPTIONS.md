@@ -324,7 +324,9 @@ Ordered by what they release. Items 4.1–4.3 are the critical path.
 - **Per-tenant configuration read** — releases business-changeable thresholds.
   **Premature for a pilot**: runtime config in our own settings is sufficient
   until a tenant needs different weights.
-- **Per-tenant DD-API-KEY provisioning.**
+- **Per-tenant DD-API-KEY provisioning.** The seam is built (§8.7,
+  `tools/keys.py`, `DODEAL_DD_API_KEYS`) — this is now purely "the backend
+  hands us the real keys," not a code change.
 - **RS256 public key** — unrelated to the lead/note integration.
 
 ---
@@ -541,6 +543,21 @@ discovered at build time.
   running container proves the same thing.
 - `DODEAL_PROMPTS_DIR` overrides the prompt location for local iteration only.
 
+### 8.7 Backend key resolver — per-tenant, fail closed
+- Audit finding F2: `dd_api_key` was ONE key for every tenant, with a
+  placeholder default — unworkable once a second tenant is provisioned (the
+  backend's contract is a key valid only against its own tenant host), and a
+  misconfigured deployment could send the literal placeholder to the real
+  backend with nothing failing closed.
+- `TenantKeyResolver` Protocol, `SettingsKeyResolver` from `DODEAL_DD_API_KEYS`
+  (a JSON map, no default for any tenant). An unknown tenant fails closed
+  (`BackendKeyError`) before any call is made — never retried, never wrapped
+  by the watchdog. Startup logs `backend_keys_missing` at `ERROR` when the map
+  is empty, without refusing to start (the gate chain and `/ready` must work
+  before a key is provisioned).
+- The key is read out of its `SecretStr` in exactly one place:
+  `LeadsClient._headers()`.
+
 ---
 
 # 9. PARKED
@@ -630,10 +647,9 @@ discovered at build time.
 - Redis client timeouts: `socket_connect_timeout=2.0`, `socket_timeout=2.0` on
   both clients — **hardcoded, not config-driven**. Promote to `Settings` if they
   need tuning without a code change.
-- Backend client: `dd_api_key = "test-dd-api-key"`, `backend_base_domain = "dodealcrm.com"`.
-- **`dd_api_key` fail-closed treatment is now urgent, not tidy** — DD-API-KEY *is*
-  the credential for every data call, and it still carries a placeholder default
-  unlike the signing key.
+- Backend client: `backend_base_domain = "dodealcrm.com"` (still a placeholder;
+  real hosts come from DevOps).
+- `dd_api_keys`: per-tenant map, no default, fail closed (`tools/keys.py`).
 
 ---
 

@@ -301,8 +301,9 @@ Root contracts owned by the backend, kept inside the package for the same reason
 
 | File | Purpose |
 | --- | --- |
-| `leads.py` | `LeadsClient`, the only path this service has to lead data. Builds request URLs under `/api/service/...` from the caller's authoritative tenant subdomain, sends the per-tenant service key, validates each response against the confirmed schema, and runs every call through the resilience watchdog. Exposes `get_leads` (list), `get_lead` (single lead by id), and `get_lead_notes` (a lead's notes). |
+| `leads.py` | `LeadsClient`, the only path this service has to lead data. Builds request URLs under `/api/service/...` from the caller's authoritative tenant subdomain, resolves that tenant's key via `TenantKeyResolver` and sends it as the service header, validates each response against the confirmed schema, and runs every call through the resilience watchdog. Exposes `get_leads` (list), `get_lead` (single lead by id), and `get_lead_notes` (a lead's notes). |
 | `httpx_transport.py` | The production `httpx`-based transport used by `LeadsClient`. Not exercised by the test suite, which supplies a mock transport instead. |
+| `keys.py` | `TenantKeyResolver` Protocol and `SettingsKeyResolver`, the per-tenant DD-API-KEY lookup behind `get_key_resolver()` (same shape as Gate 1's `get_verifier()`). An unknown tenant raises `BackendKeyError` before any network call — never retried, never wrapped by the watchdog. The key is read out of its `SecretStr` in exactly one place: `LeadsClient._headers()`. |
 
 ### `src/dodeal_ai/units/`
 
@@ -352,12 +353,14 @@ Tests for the gate chain and everything that enforces it, run over HTTP with `Te
 | `test_redis.py` | The named Redis client accessors and the cost-only readiness check, with Redis mocked. |
 | `test_resilience.py` | The watchdog: success on the first attempt, success on retry, failing closed after retry, honoring `retry=False`, and respecting the timeout. |
 | `test_lead_schema.py` | The lead and note response schemas: parsing the `data`-wrapped shape, the single-lead and notes envelopes, and failing closed on a malformed one. |
-| `test_leads_client.py` | `LeadsClient`: URL construction under `/api/service/...` from the tenant subdomain, the service key header, `get_leads`/`get_lead`/`get_lead_notes` reading `data`, and failing closed on a malformed response. |
+| `test_keys.py` | `SettingsKeyResolver`: a known tenant resolves to its configured secret, an unknown tenant raises `BackendKeyError` with no key material (from that tenant or any other) in the exception or the log line, and `SettingsKeyResolver` satisfies the `TenantKeyResolver` Protocol. |
+| `test_leads_client.py` | `LeadsClient`: URL construction under `/api/service/...` from the tenant subdomain, that each tenant's request carries *that tenant's own* key (the F2 isolation test), failing closed with zero transport calls and an unwrapped `BackendKeyError` for an unknown tenant, `get_leads`/`get_lead`/`get_lead_notes` reading `data`, and failing closed on a malformed response. |
 | `test_prompting.py` | The prompt builder: server-side assembly and that caller-supplied data can never become an instruction. |
 | `test_assembled_prompt.py` | `AssembledPrompt`: `.text` byte-identical to the pre-structure output, untrusted text never in `.stable`, tail rendered after the data, `.variable` excluded from repr. |
 | `test_llm_seam.py` | The LLM seam: frozen `LLMResponse` with repr-safe text, enumerated `LLMProviderError` messages, `DODEAL_LLM_*` settings and fail-closed provider validation, the factory's configuration errors, the runtime-checkable Protocol, and the prompt-type pass-through contract. |
 | `test_logging_config.py` | The structured logging setup: an allow line actually reaching standard output under the real configuration, a deny line at warning level, the cost-bypass warning reaching the same stream, third-party loggers staying quiet, and the configuration being called from the application lifespan. |
 | `test_health.py` | `/health` and `/ready`: config missing returns 503, Redis down returns 200 with a degraded body, and Redis up returns 200 with an ok body. |
+| `test_startup.py` | The application lifespan logs `backend_keys_missing` at `ERROR` when `DODEAL_DD_API_KEYS` is empty, and does not when it holds at least one tenant. Never refuses to start either way — the gate chain and `/ready` must work before a key is provisioned. |
 
 ### `tests/integration/`
 
@@ -379,7 +382,7 @@ All configuration is read through `Settings` in `core/config.py`. Every variable
 | `DODEAL_CLAIM_SUBJECT` | `sub` | The wire claim name mapped to the internal subject (user id). |
 | `DODEAL_CLAIM_SUBDOMAIN` | `subdomain` | The wire claim name mapped to the internal tenant identifier. |
 | `DODEAL_CLAIM_DATABASE` | `database` | The wire claim name mapped to the tenant's database name, carried for the tool layer. |
-| `DODEAL_DD_API_KEY` | `test-dd-api-key` | The per-tenant service key sent to the backend by tool clients. |
+| `DODEAL_DD_API_KEYS` | `{}` (empty map) | JSON map of tenant subdomain to that tenant's DD-API-KEY, e.g. `{"nasir3":"<key>","acme":"<key>"}`. No default value exists for any tenant; an unknown tenant fails closed in `tools/keys.py` before any network call. An empty map means nothing can reach the backend, and is logged at `ERROR` on startup. |
 | `DODEAL_BACKEND_BASE_DOMAIN` | `dodealcrm.com` | The base domain used to build a tenant's backend URL. |
 | `DODEAL_PROMPTS_DIR` | none | Overrides where prompt templates are read from. Unset uses the copies shipped inside the package (`src/dodeal_ai/prompts/`); set only for local prompt iteration without a rebuild. |
 | `DODEAL_EXTERNAL_CALL_TIMEOUT_SECONDS` | `10.0` | The timeout applied to every external call by the resilience watchdog. |

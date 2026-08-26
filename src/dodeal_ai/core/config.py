@@ -20,7 +20,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -70,10 +70,12 @@ class Settings(BaseSettings):
     # abuse before any tool/LLM work happens.
     # max_request_body_bytes: int = 1_000_000
 
-    # Backend tool client (service-to-service data fetch).
-    # DD-API-KEY is a per-tenant key; real per-tenant provisioning is pending,
-    # so this is a placeholder default for local/mock use only.
-    dd_api_key: str = "test-dd-api-key"
+    # Backend service credentials, ONE PER TENANT (integration guide §1: a key is valid only against
+    # its own tenant host). Keyed by tenant subdomain. Parsed from JSON in the env var, e.g.
+    #   DODEAL_DD_API_KEYS={"nasir3":"<key>","acme":"<key>"}
+    # No default value exists for any tenant: an unknown tenant fails closed in tools/keys.py.
+    # Empty map = nothing can reach the backend; startup logs this at ERROR (main.py).
+    dd_api_keys: dict[str, SecretStr] = {}
     backend_base_domain: str = "dodealcrm.com"
     # Where versioned prompt files are read from. None = the copies shipped inside the package
     # (src/dodeal_ai/prompts). Set only for local prompt iteration; production uses the package.
@@ -98,7 +100,7 @@ class Settings(BaseSettings):
     # the tokens of equivalent English. Tasks override per call.
     llm_max_output_tokens: int = 1024
     # The provider API key lands in Step 14 with the adapter: a SecretStr with
-    # no default and no placeholder. dd_api_key above is the cautionary example
+    # no default and no placeholder, the same fail-closed shape dd_api_keys uses.
 
     # Redis connections. Two named connections so code never guesses which
     # instance it is using: a queue connection and a cost/quota connection.

@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -14,7 +15,12 @@ from dodeal_ai.middleware.request_id import RequestIDMiddleware
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Fail closed: if required config (signing key) is absent, refuse to start.
-    get_settings()
+    settings = get_settings()
+    if not settings.dd_api_keys:
+        # Not fail-closed: the gate chain and /ready must work before a key is
+        # provisioned (Step 0). Loud so a deployment with no backend keys at
+        # all is never silently discovered later as every data call 401ing.
+        logging.getLogger("dodeal_ai.startup").error("backend_keys_missing count=0")
     configure_logging()
     yield
 

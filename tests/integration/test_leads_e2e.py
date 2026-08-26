@@ -23,6 +23,7 @@ from dodeal_ai.core.context import RequestContext
 from dodeal_ai.core.resilience import ExternalCallError
 from dodeal_ai.core.validation import OutputValidationError
 from dodeal_ai.tools.httpx_transport import HttpxTransport
+from dodeal_ai.tools.keys import SettingsKeyResolver
 from dodeal_ai.tools.leads import LeadsClient
 from tests.integration.fake_backend import EXPECTED_API_KEY, FakeBackend
 
@@ -48,13 +49,17 @@ def _route_httpx_to_fake_backend(monkeypatch, fake_backend: FakeBackend):
     monkeypatch.setattr(httpx_transport_module.httpx, "AsyncClient", _ASGIAsyncClient)
 
 
-def _settings(dd_api_key: str = EXPECTED_API_KEY) -> Settings:
+def _settings(dd_api_key: str = EXPECTED_API_KEY, tenant: str = "nasir3") -> Settings:
     return Settings(
         _env_file=None,
         jwt_signing_key="test-key",
-        dd_api_key=dd_api_key,
+        dd_api_keys={tenant: dd_api_key},
         backend_base_domain="dodealcrm.com",
     )
+
+
+def _client(settings: Settings) -> LeadsClient:
+    return LeadsClient(HttpxTransport(), SettingsKeyResolver(settings), settings)
 
 
 def _context(tenant: str = "nasir3") -> RequestContext:
@@ -69,7 +74,7 @@ def _context(tenant: str = "nasir3") -> RequestContext:
 
 
 async def test_get_leads_through_real_httpx_transport(fake_backend):
-    client = LeadsClient(HttpxTransport(), _settings())
+    client = _client(_settings())
     leads = await client.get_leads(_context())
     assert [lead.id for lead in leads] == [1, 2]
     assert leads[0].name == "Acme Corp"
@@ -77,14 +82,14 @@ async def test_get_leads_through_real_httpx_transport(fake_backend):
 
 
 async def test_get_lead_returns_single_lead():
-    client = LeadsClient(HttpxTransport(), _settings())
+    client = _client(_settings())
     lead = await client.get_lead(_context(), 1)
     assert lead.id == 1
     assert lead.name == "Acme Corp"
 
 
 async def test_get_lead_notes_returns_notes_newest_first_order_preserved():
-    client = LeadsClient(HttpxTransport(), _settings())
+    client = _client(_settings())
     notes = await client.get_lead_notes(_context(), 1)
     assert len(notes) == 2
     assert notes[0].author == "Jane Doe"
@@ -92,19 +97,19 @@ async def test_get_lead_notes_returns_notes_newest_first_order_preserved():
 
 
 async def test_empty_notes_list_is_not_an_error():
-    client = LeadsClient(HttpxTransport(), _settings())
+    client = _client(_settings())
     notes = await client.get_lead_notes(_context(), 2)
     assert notes == []
 
 
 async def test_malformed_response_fails_closed_through_real_http():
-    client = LeadsClient(HttpxTransport(), _settings())
+    client = _client(_settings())
     with pytest.raises(OutputValidationError):
         await client.get_lead(_context(), 999)
 
 
 async def test_wrong_dd_api_key_is_rejected_and_fails_closed(fake_backend):
-    client = LeadsClient(HttpxTransport(), _settings(dd_api_key="wrong-key"))
+    client = _client(_settings(dd_api_key="wrong-key"))
     with pytest.raises(ExternalCallError):
         await client.get_leads(_context())
     assert fake_backend.last_dd_api_key == "wrong-key"

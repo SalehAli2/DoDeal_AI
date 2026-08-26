@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
 from dodeal_ai.core.config import ConfigError, get_settings
 
@@ -59,3 +59,17 @@ def test_missing_key_fails_closed(monkeypatch):
     monkeypatch.delenv("DODEAL_JWT_SIGNING_KEY", raising=False)
     with pytest.raises(ConfigError):
         _build_settings(_env_file=None)
+
+
+def test_dd_api_keys_parses_json_map_of_secrets(monkeypatch):
+    monkeypatch.setenv("DODEAL_JWT_SIGNING_KEY", "test-key-abc")
+    monkeypatch.setenv("DODEAL_DD_API_KEYS", '{"t1":"k1","t2":"k2"}')
+    s = get_settings()
+    assert set(s.dd_api_keys) == {"t1", "t2"}
+    assert isinstance(s.dd_api_keys["t1"], SecretStr)
+    assert s.dd_api_keys["t1"].get_secret_value() == "k1"
+    assert s.dd_api_keys["t2"].get_secret_value() == "k2"
+    assert "k1" not in repr(s)
+    assert "k1" not in str(s)
+    assert "k2" not in repr(s)
+    assert "k2" not in str(s)

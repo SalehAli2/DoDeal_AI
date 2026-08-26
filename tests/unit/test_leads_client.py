@@ -8,7 +8,9 @@ import pytest
 
 from dodeal_ai.core.config import Settings
 from dodeal_ai.core.context import RequestContext
+from dodeal_ai.core.resilience import ExternalCallError
 from dodeal_ai.core.validation import OutputValidationError
+from dodeal_ai.tools.keys import BackendKeyError, SettingsKeyResolver
 from dodeal_ai.tools.leads import LeadsClient
 
 
@@ -26,9 +28,14 @@ def _settings() -> Settings:
     return Settings(
         _env_file=None,
         jwt_signing_key="test-key",
-        dd_api_key="test-dd-api-key",
+        dd_api_keys={"nasir3": "key-nasir3", "acme": "key-acme"},
         backend_base_domain="dodealcrm.com",
     )
+
+
+def _client(transport: MockTransport, settings: Settings | None = None) -> LeadsClient:
+    settings = settings or _settings()
+    return LeadsClient(transport, SettingsKeyResolver(settings), settings)
 
 
 def _context(tenant: str = "nasir3") -> RequestContext:
@@ -43,14 +50,18 @@ def _context(tenant: str = "nasir3") -> RequestContext:
 
 
 class MockTransport:
-    """Records the URL and headers it was called with, returns a canned body."""
+    """Records the URL and headers it was called with, returns a canned body,
+    and counts how many times it was actually called -- so a test can prove a
+    fail-closed path never reaches the network."""
 
     def __init__(self, body: object):
         self._body = body
         self.last_url: str | None = None
         self.last_headers: dict[str, str] | None = None
+        self.calls = 0
 
     async def get_json(self, url: str, headers: dict[str, str]) -> object:
+        self.calls += 1
         self.last_url = url
         self.last_headers = headers
         return self._body
@@ -75,21 +86,21 @@ def _notes_body(notes: list[dict]) -> dict:
 @pytest.mark.asyncio
 async def test_builds_tenant_url_from_context_subdomain():
     transport = MockTransport(_list_body([{"id": 1}]))
-    client = LeadsClient(transport, _settings())
+    client = _client(transport)
     await client.get_leads(_context("nasir3"))
     assert transport.last_url == "https://nasir3.dodealcrm.com/api/service/leads"
 
 
 async def test_sends_dd_api_key_header():
     transport = MockTransport(_list_body([{"id": 1}]))
-    client = LeadsClient(transport, _settings())
+    client = _client(transport)
     await client.get_leads(_context())
-    assert transport.last_headers == {"DD-API-KEY": "test-dd-api-key"}
+    assert transport.last_headers == {"DD-API-KEY": "key-nasir3"}
 
 
 async def test_returns_leads_from_data():
     transport = MockTransport(_list_body([{"id": 1}, {"id": 2}]))
-    client = LeadsClient(transport, _settings())
+    client = _client(transport)
     leads = await client.get_leads(_context())
     assert [lead.id for lead in leads] == [1, 2]
 
@@ -97,21 +108,21 @@ async def test_returns_leads_from_data():
 async def test_malformed_response_fails_closed():
     # Old shape / wrong wrapper must be rejected, not surfaced.
     transport = MockTransport({"success": True, "data": []})
-    client = LeadsClient(transport, _settings())
+    client = _client(transport)
     with pytest.raises(OutputValidationError):
         await client.get_leads(_context())
 
 
 async def test_different_tenant_hits_different_url():
     transport = MockTransport(_list_body([{"id": 1}]))
-    client = LeadsClient(transport, _settings())
-    await client.get_leads(_context("beta"))
-    assert transport.last_url == "https://beta.dodealcrm.com/api/service/leads"
+    client = _client(transport)
+    await client.get_leads(_context("acme"))
+    assert transport.last_url == "https://acme.dodealcrm.com/api/service/leads"
 
 
 async def test_get_lead_builds_id_url_and_returns_lead():
     transport = MockTransport(_lead_body({"id": 7, "name": "Acme"}))
-    client = LeadsClient(transport, _settings())
+    client = _client(transport)
     lead = await client.get_lead(_context("nasir3"), 7)
     assert transport.last_url == "https://nasir3.dodealcrm.com/api/service/leads/7"
     assert lead.id == 7
@@ -120,7 +131,7 @@ async def test_get_lead_builds_id_url_and_returns_lead():
 
 async def test_get_lead_malformed_response_fails_closed():
     transport = MockTransport({"status": True})  # missing data
-    client = LeadsClient(transport, _settings())
+    client = _client(transport)
     with pytest.raises(OutputValidationError):
         await client.get_lead(_context(), 7)
 
@@ -136,7 +147,7 @@ async def test_get_lead_notes_builds_url_and_returns_notes():
         },
     ]
     transport = MockTransport(_notes_body(notes))
-    client = LeadsClient(transport, _settings())
+    client = _client(transport)
     result = await client.get_lead_notes(_context("nasir3"), 7)
     assert (
         transport.last_url == "https://nasir3.dodealcrm.com/api/service/leads/7/notes"
@@ -147,7 +158,7 @@ async def test_get_lead_notes_builds_url_and_returns_notes():
 
 async def test_get_lead_notes_empty_list_is_not_an_error():
     transport = MockTransport(_notes_body([]))
-    client = LeadsClient(transport, _settings())
+    client = _client(transport)
     result = await client.get_lead_notes(_context(), 7)
     assert result == []
 
@@ -163,6 +174,39 @@ async def test_get_lead_notes_tolerates_null_author():
         },
     ]
     transport = MockTransport(_notes_body(notes))
-    client = LeadsClient(transport, _settings())
+    client = _client(transport)
     result = await client.get_lead_notes(_context(), 7)
     assert result[0].author is None
+
+
+async def test_header_carries_the_requesting_tenants_key():
+    # THE isolation test for F2: two tenants, two different keys, never mixed.
+    transport = MockTransport(_list_body([{"id": 1}]))
+    client = _client(transport)
+
+    await client.get_leads(_context("nasir3"))
+    assert transport.last_headers == {"DD-API-KEY": "key-nasir3"}
+
+    await client.get_leads(_context("acme"))
+    assert transport.last_headers == {"DD-API-KEY": "key-acme"}
+
+
+async def test_unknown_tenant_fails_closed_before_any_network_call():
+    transport = MockTransport(_list_body([{"id": 1}]))
+    client = _client(transport)
+    with pytest.raises(BackendKeyError):
+        await client.get_leads(_context("ghost"))
+    assert transport.calls == 0
+
+
+async def test_missing_key_is_not_wrapped_by_the_watchdog():
+    transport = MockTransport(_list_body([{"id": 1}]))
+    client = _client(transport)
+    try:
+        await client.get_leads(_context("ghost"))
+    except BackendKeyError:
+        pass
+    except ExternalCallError:
+        pytest.fail("BackendKeyError must not be wrapped as ExternalCallError")
+    else:
+        pytest.fail("expected BackendKeyError")
