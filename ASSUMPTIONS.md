@@ -104,7 +104,7 @@ Base `https://<tenant>.dodealcrm.com/api/service`, DD-API-KEY header only.
   wrong and are withdrawn.
 - **Note:** the envelope key is `status`, which is also a lead field name. The
   parser is explicit about which is which and a fixture covers both.
-- **Seam:** `schemas/lead.py`, `tools/leads.py`.
+- **Seam:** `dodeal_ai/schemas/lead.py`, `tools/leads.py`.
 
 ### 1.8 The lead contract `[T]`
 - **Fields:** id, name, phone, email, leadType, enquiryType, project, status,
@@ -189,7 +189,7 @@ version against three endpoints."
 | **Read-only** | The unit writes nothing to the CRM. Judgements are returned to the caller, which persists what it chooses. |
 | **Design A** | Settled **by requirement**: a scoring outage must never block a note save. That rules out sitting in the CRM write path. The note saves first; we read, judge, and return. |
 | **The seam** | Unit A owns `core/llm/`. Unit B consumes it — which is why the client method is async and must not assume a short prompt. |
-| **Schemas** | Unit-owned schemas live in the unit, not root `schemas/`. The service response envelope is a root contract; our result types are not. |
+| **Schemas** | Root contracts live in `dodeal_ai/schemas/` (inside the package); unit-owned result types live in the unit. |
 
 ### 3.2 Cost and reliability
 
@@ -529,6 +529,17 @@ discovered at build time.
   the test client bypasses an installed 500 handler.
 - **Middleware ordering has caused two regressions.** Add new middleware alone and
   run the full suite immediately.
+
+### 8.6 Packaging — schemas and prompts ship inside the wheel
+- Audit finding F1: the wheel used to contain only `src/dodeal_ai`; `schemas/`
+  and `prompts/` lived at the repo root, so an installed copy raised
+  `ModuleNotFoundError` on `tools/leads.py` and `core/prompting.py` could not
+  find its templates. It only worked in the repo because pytest sets
+  `pythonpath = ["."]` and the dev install is editable.
+- CI installs the built wheel into a clean venv and imports every module
+  (`scripts/verify_wheel.py`); the Dockerfile installs non-editable so the
+  running container proves the same thing.
+- `DODEAL_PROMPTS_DIR` overrides the prompt location for local iteration only.
 
 ---
 

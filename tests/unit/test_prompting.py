@@ -4,7 +4,19 @@ from __future__ import annotations
 
 import pytest
 
+from dodeal_ai.core import prompting
+from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.prompting import PromptError, build_prompt
+
+
+@pytest.fixture(autouse=True)
+def _clear_settings_cache(monkeypatch: pytest.MonkeyPatch):
+    # _prompts_dir() reads Settings, so give it a signing key to build one —
+    # same pattern every other module that touches get_settings() uses.
+    monkeypatch.setenv("DODEAL_JWT_SIGNING_KEY", "test-key")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 def test_builds_prompt_with_system_and_data():
@@ -45,3 +57,14 @@ def test_caller_cannot_forge_end_delimiter():
     # END delimiter (the one we control), and their fake one is filtered.
     assert prompt.count("----- END CALLER DATA -----") == 1
     assert "[filtered-delimiter]" in prompt
+
+
+def test_default_prompts_dir_is_inside_the_package():
+    assert prompting._DEFAULT_PROMPTS_DIR.parent.name == "dodeal_ai"
+    assert (prompting._DEFAULT_PROMPTS_DIR / "unit_a_v1.txt").is_file()
+
+
+def test_prompts_dir_override_from_settings(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("DODEAL_PROMPTS_DIR", str(tmp_path))
+    get_settings.cache_clear()
+    assert prompting._prompts_dir() == tmp_path

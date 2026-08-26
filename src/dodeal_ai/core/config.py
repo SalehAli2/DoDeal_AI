@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from enum import Enum
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic import ValidationError
@@ -74,6 +75,9 @@ class Settings(BaseSettings):
     # so this is a placeholder default for local/mock use only.
     dd_api_key: str = "test-dd-api-key"
     backend_base_domain: str = "dodealcrm.com"
+    # Where versioned prompt files are read from. None = the copies shipped inside the package
+    # (src/dodeal_ai/prompts). Set only for local prompt iteration; production uses the package.
+    prompts_dir: Path | None = None
     # --- Watchdog: timeout + retry policy for external calls (§6) -----------
     # Placeholder values; tune per real LLM/tool latency later.
     external_call_timeout_seconds: float = 10.0

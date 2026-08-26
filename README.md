@@ -81,7 +81,11 @@ See `docs/architecture.md` for the recorded directory tree and the reasoning beh
    uv sync
    ```
 
-2. Create a `.env` file in the project root with at least the signing key:
+2. Copy `.env.example` to `.env` and fill in at least the signing key:
+
+   ```bash
+   cp .env.example .env
+   ```
 
    ```bash
    DODEAL_JWT_SIGNING_KEY=any-local-value
@@ -92,7 +96,7 @@ See `docs/architecture.md` for the recorded directory tree and the reasoning beh
 3. Start Redis:
 
    ```bash
-   docker compose up -d
+   docker compose up -d redis
    ```
 
 4. Run the application:
@@ -107,31 +111,37 @@ See `docs/architecture.md` for the recorded directory tree and the reasoning beh
    uv run pytest
    ```
 
+### Running with Docker
+
+The `Dockerfile` builds a non-editable install of the wheel — no source tree in the final image, so this is the same artifact CI verifies with `scripts/verify_wheel.py`. To run the full stack (API + Redis) instead of the local dev flow above:
+
+```bash
+docker compose up --build
+```
+
+The API reads `.env` (copy `.env.example` first) and talks to the `redis` service's queue and cost databases automatically.
+
 See `CONTRIBUTING.md` for the architectural rules and deliberate decisions that apply to any change in this repository.
 
 ## Project structure
 
 ```
 dodeal-ai/
+├── .dockerignore
+├── .env.example
 ├── .github/workflows/ci.yml
 ├── .pre-commit-config.yaml
 ├── ASSUMPTIONS.md
 ├── CONTRIBUTING.md
+├── Dockerfile
 ├── docker-compose.yml
 ├── docs/
 │   ├── architecture.md
 │   └── FUTURE_PATTERNS.md
-├── prompts/
-│   ├── unit_a_v1.txt
-│   ├── assistant/
-│   ├── call_intelligence/
-│   ├── sales_automation/
-│   └── structured_intelligence/
 ├── pyproject.toml
 ├── scripts/
-│   └── real_fetch_check.py
-├── schemas/
-│   └── lead.py
+│   ├── real_fetch_check.py
+│   └── verify_wheel.py
 ├── src/dodeal_ai/
 │   ├── main.py
 │   ├── api/routes/_probe.py
@@ -151,6 +161,14 @@ dodeal-ai/
 │   │   ├── cost/limiter.py
 │   │   └── llm/__init__.py
 │   ├── middleware/request_id.py
+│   ├── prompts/
+│   │   ├── unit_a_v1.txt
+│   │   ├── assistant/
+│   │   ├── call_intelligence/
+│   │   ├── sales_automation/
+│   │   └── structured_intelligence/
+│   ├── schemas/
+│   │   └── lead.py
 │   ├── tools/{leads.py,httpx_transport.py}
 │   ├── units/{structured_intelligence,call_intelligence,assistant,sales_automation}/
 │   └── workers/celery_app.py
@@ -173,8 +191,11 @@ dodeal-ai/
 | `uv.lock` | Locked, reproducible dependency versions resolved by uv. Committed so every environment installs identical packages. |
 | `.gitignore` | Excludes the virtual environment, caches, coverage artifacts, editor files, and any `.env*` file except `.env.example`. |
 | `.env` | Local environment variables. Not committed. Must be UTF-8 with no byte order mark. |
+| `.env.example` | Documents every `DODEAL_*` setting with its default or a placeholder. Copy to `.env` and fill in real local values; never holds real secrets. |
+| `.dockerignore` | Keeps the build context small and secrets out of it: the virtual environment, `.git`, `.env*`, tests, docs, build artifacts, caches, and `study.py`. |
+| `Dockerfile` | Multi-stage build. Installs the locked dependencies and the project **non-editable** into a venv, then copies only that venv into a slim runtime image — no source tree in the final image, so this is the same installed-wheel shape `scripts/verify_wheel.py` checks in CI. |
 | `.pre-commit-config.yaml` | Local git hooks: ruff lint, ruff format check, and mypy, all run through `uv run` so they use the exact versions locked in `uv.lock`. |
-| `docker-compose.yml` | Starts a local Redis 7 container on port 6379 for the cost gate. |
+| `docker-compose.yml` | `api` (built from the `Dockerfile`) plus a local Redis 7 container for the cost and queue gates. |
 | `ASSUMPTIONS.md` | The single seam ledger for the service. Every provisional decision, organized by status (confirmed, built, parked, pending, deferred), the seam it lives behind, and how to correct it when the real answer lands. |
 | `CONTRIBUTING.md` | The contributor guide: local setup, architectural rules that tooling cannot enforce, deliberate decisions not to reverse, the OWASP LLM Top 10 checkpoint habit, and commit style. |
 | `study.py` | Personal reference notes on Pydantic behavior (type coercion, `Field` constraints, `BaseSettings`). Not part of the application and not imported anywhere. |
@@ -183,7 +204,7 @@ dodeal-ai/
 
 | File | Purpose |
 | --- | --- |
-| `ci.yml` | GitHub Actions pipeline. On every push and pull request: installs uv and Python, runs `uv sync --locked`, then ruff check, ruff format check, mypy, and pytest with the coverage gate. |
+| `ci.yml` | GitHub Actions pipeline. On every push and pull request: installs uv and Python, runs `uv sync --locked`, then ruff check, ruff format check, mypy, pytest with the coverage gate, and finally builds the wheel and runs `scripts/verify_wheel.py` against it to prove an installed copy actually imports. |
 
 ### `docs/`
 
@@ -192,24 +213,12 @@ dodeal-ai/
 | `architecture.md` | The recorded, authoritative directory tree and the build order for Phase 0. Read this before scaffolding anything new, so structure is not reinvented from memory. |
 | `FUTURE_PATTERNS.md` | Patterns worth adopting later, each tagged with the phase in which it becomes relevant: idempotency keys for writes, prompt-injection containment for agentic units, the model gateway, prompt caching, async pipeline reliability, evaluation from real examples, observability identifiers, and the OWASP LLM Top 10 checkpoint. Trigger comments in the code point back to specific items here. |
 
-### `prompts/`
-
-| File | Purpose |
-| --- | --- |
-| `unit_a_v1.txt` | A sample, versioned system prompt used to build and test the prompt builder. It is a placeholder; the real Unit A prompt replaces it when that unit is built. |
-| `assistant/`, `call_intelligence/`, `sales_automation/`, `structured_intelligence/` | Empty directories reserved for each unit's future versioned prompts. |
-
-### `schemas/`
-
-| File | Purpose |
-| --- | --- |
-| `lead.py` | The confirmed Pydantic response contracts for the lead and note endpoints: `Lead`, `PageMeta`, `LeadListResponse`, `LeadNote`, `LeadNotesResponse`, and `LeadResponse` (single lead; envelope shape unconfirmed, modelled by analogy). Leads and notes are read from `data`, with pagination in `meta`. Unlisted fields from the backend are tolerated rather than rejected, since this is an external response the service does not control. |
-
 ### `scripts/`
 
 | File | Purpose |
 | --- | --- |
 | `real_fetch_check.py` | A manual, one-shot script for the real, credentialed verification call against the live backend, run by hand for the joint session with the backend team. Not a pytest test and never runs in CI. Dry-runs by default against a guaranteed-unreachable fake host (no real network call); the real call requires an explicit `--live` flag, with a defense-in-depth guard that refuses to target a `dodealcrm.com` host without it. |
+| `verify_wheel.py` | Installs a built wheel into a throwaway venv and, from a temp directory outside the repo, imports every module under `dodeal_ai` and confirms the packaged prompts directory exists and holds `unit_a_v1.txt`. Runs in CI after the wheel is built; proves an installed copy actually works, not just the editable dev install. |
 
 ### `src/dodeal_ai/` (top level)
 
@@ -227,7 +236,7 @@ dodeal-ai/
 | `tenancy.py` | Gate 2. Confirms the host subdomain matches the token's authoritative subdomain and raises `TenantMismatchError` on any mismatch or absence. |
 | `resilience.py` | The shared watchdog for every external call. Wraps an operation with a timeout and, by default, a single retry on failure. Carries an explicit note that writes must not be retried blindly; a caller wrapping a write should pass `retry=False` or apply an idempotency key. |
 | `validation.py` | Validates any tool or LLM output against a Pydantic schema before it is used or returned. Rejects and fails closed on any mismatch, and never logs the raw invalid content. |
-| `prompting.py` | Assembles prompts server-side from versioned files in `prompts/`. Caller-supplied data is always placed in a clearly delimited section and neutralized against delimiter injection, so untrusted input can never be mistaken for an instruction. The stable system template is placed first and variable caller data last, which is also the shape prompt caching needs once real LLM calls exist. `build_prompt` returns an `AssembledPrompt` (stable template / delimited variable data / reserved tail) whose `.text` is the flat prompt; the split lets a provider adapter place a cache breakpoint without parsing the prompt. |
+| `prompting.py` | Assembles prompts server-side from versioned files in `src/dodeal_ai/prompts/`, resolved lazily (package default, or `DODEAL_PROMPTS_DIR` override) so importing this module never requires settings to be loaded. Caller-supplied data is always placed in a clearly delimited section and neutralized against delimiter injection, so untrusted input can never be mistaken for an instruction. The stable system template is placed first and variable caller data last, which is also the shape prompt caching needs once real LLM calls exist. `build_prompt` returns an `AssembledPrompt` (stable template / delimited variable data / reserved tail) whose `.text` is the flat prompt; the split lets a provider adapter place a cache breakpoint without parsing the prompt. |
 | `redis.py` | Exposes two named, lazily created Redis clients, one for the work queue and one for cost and quota counters, each with explicit connection and socket timeouts. Also exposes `check_cost_redis_ready`, used by `/ready`. |
 | `errors.py` | The fail-closed catch-all for unexpected errors. Deliberate `HTTPException` responses (401, 403, 429) pass through untouched; anything else is logged internally at `ERROR` with the request id and returned to the client as a generic 500 with no internal detail. |
 | `logging_config.py` | Configures Python logging once at application startup. Emits one structured JSON line per log record to standard output. Sets the `dodeal_ai` logger tree to the configured level so audit `allow` lines are not silently dropped, while leaving third-party libraries at the root logger's default level. |
@@ -270,6 +279,23 @@ dodeal-ai/
 | File | Purpose |
 | --- | --- |
 | `request_id.py` | Reads an inbound `X-Request-ID` header if present, or generates a new one, and sets it on `request.state.request_id` for every existing consumer to read. Also stores a `RequestObservability` object for the fuller identifier set (trace id today, prompt version, model version, and workflow version reserved for later) and echoes the id back on the response. Runs inside Starlette's own outermost error-handling middleware but before the gate chain. |
+
+### `src/dodeal_ai/prompts/`
+
+| File | Purpose |
+| --- | --- |
+| `unit_a_v1.txt` | A sample, versioned system prompt used to build and test the prompt builder. It is a placeholder; the real Unit A prompt replaces it when that unit is built. |
+| `assistant/`, `call_intelligence/`, `sales_automation/`, `structured_intelligence/` | Empty directories reserved for each unit's future versioned prompts. |
+
+Ships inside the package (not a repo-root directory) so an installed wheel has it. `DODEAL_PROMPTS_DIR` overrides the location for local prompt iteration only — see the configuration reference below.
+
+### `src/dodeal_ai/schemas/`
+
+| File | Purpose |
+| --- | --- |
+| `lead.py` | The confirmed Pydantic response contracts for the lead and note endpoints: `Lead`, `PageMeta`, `LeadListResponse`, `LeadNote`, `LeadNotesResponse`, and `LeadResponse` (single lead; envelope shape unconfirmed, modelled by analogy). Leads and notes are read from `data`, with pagination in `meta`. Unlisted fields from the backend are tolerated rather than rejected, since this is an external response the service does not control. |
+
+Root contracts owned by the backend, kept inside the package for the same reason as `prompts/`. Unit-owned result types live in their unit, not here (`ASSUMPTIONS.md` §3.1).
 
 ### `src/dodeal_ai/tools/`
 
@@ -355,6 +381,7 @@ All configuration is read through `Settings` in `core/config.py`. Every variable
 | `DODEAL_CLAIM_DATABASE` | `database` | The wire claim name mapped to the tenant's database name, carried for the tool layer. |
 | `DODEAL_DD_API_KEY` | `test-dd-api-key` | The per-tenant service key sent to the backend by tool clients. |
 | `DODEAL_BACKEND_BASE_DOMAIN` | `dodealcrm.com` | The base domain used to build a tenant's backend URL. |
+| `DODEAL_PROMPTS_DIR` | none | Overrides where prompt templates are read from. Unset uses the copies shipped inside the package (`src/dodeal_ai/prompts/`); set only for local prompt iteration without a rebuild. |
 | `DODEAL_EXTERNAL_CALL_TIMEOUT_SECONDS` | `10.0` | The timeout applied to every external call by the resilience watchdog. |
 | `DODEAL_EXTERNAL_CALL_RETRY_ONCE` | `true` | Whether the watchdog retries once by default. Individual callers can override this per call. |
 | `DODEAL_LLM_PROVIDER` | none | Which model adapter `get_llm_client()` builds. Unset means not configured; the factory refuses. |

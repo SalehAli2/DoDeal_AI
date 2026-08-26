@@ -34,13 +34,6 @@ import argparse
 import asyncio
 import os
 import sys
-from pathlib import Path
-
-# schemas/ is a plain top-level directory, not part of the installed
-# dodeal_ai package. pytest gets it on sys.path via pythonpath = ["."] in
-# pyproject.toml; a bare script invocation does not, so add the repo root
-# here, before importing anything that transitively imports schemas.lead.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import httpx
 
@@ -171,7 +164,7 @@ def _report_external_call_error(exc: ExternalCallError) -> None:
 def _report_validation_error(exc: OutputValidationError) -> None:
     print(
         f"SHAPE MISMATCH: the response for '{exc.label}' did not match the "
-        "expected schema (schemas.lead.LeadListResponse). The real backend "
+        "expected schema (dodeal_ai.schemas.lead.LeadListResponse). The real backend "
         "response differs from the confirmed spec in ASSUMPTIONS.md -- bring "
         "this back to the joint session.",
         file=sys.stderr,

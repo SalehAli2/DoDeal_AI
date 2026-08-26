@@ -25,13 +25,11 @@ tools, never a database (separate DB per tenant, switched backend-side).
     ├── .env.example              # documents required config, never real secrets
     ├── .gitignore
     ├── Dockerfile
-    ├── docker-compose.yml        # api + worker + redis for local dev
+    ├── docker-compose.yml        # api + redis for local dev (worker: not yet)
     ├── README.md
     │
-    ├── .github/workflows/ci.yml  # lint + test on push
+    ├── .github/workflows/ci.yml  # lint + test + wheel-install check on push
     ├── docs/                     # this file + design decisions
-    ├── prompts/                  # versioned LLM prompts (unit_a, unit_b, assistant, sales_automation)
-    ├── schemas/                  # output contracts per feature
     │
     ├── src/dodeal_ai/
     │   ├── main.py               # FastAPI app + /health
@@ -51,6 +49,8 @@ tools, never a database (separate DB per tenant, switched backend-side).
     │   │   └── errors.py         # deny paths -> response codes
     │   │
     │   ├── middleware/           # always-on: request-id, logging, timing
+    │   ├── prompts/              # versioned LLM prompts (unit_a, unit_b, assistant, sales_automation)
+    │   ├── schemas/              # output contracts per feature — ships inside the package (F1)
     │   ├── tools/                # CRM API wrappers — AI's ONLY path to CRM (read-only)
     │   │
     │   ├── units/                # feature logic — EMPTY until exit demo passes
@@ -96,10 +96,11 @@ gate independently (cross-tenant blocked, bad token rejected).
 
 - **resilience.py** — every external call (LLM + tools) wrapped with timeout +
   retry-once-then-fail-closed. Imported by core/llm and tools/.
-- **validation.py** — every tool/LLM output validated against /schemas before
-  use. Called by tools/ and units/.
-- **prompting.py** — prompts assembled server-side from /prompts; caller input
-  is data, never instructions.
+- **validation.py** — every tool/LLM output validated against dodeal_ai/schemas
+  before use. Called by tools/ and units/.
+- **prompting.py** — prompts assembled server-side from dodeal_ai/prompts
+  (packaged; DODEAL_PROMPTS_DIR overrides for local iteration only); caller
+  input is data, never instructions.
 
 ---
 

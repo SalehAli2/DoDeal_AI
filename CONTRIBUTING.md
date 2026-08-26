@@ -30,6 +30,9 @@
   Auth and Tenancy fail closed (an outage risks a data breach). The cost gate
   fails open (an outage risks a bounded, recoverable, logged spend). Don't
   unify these.
+- **Everything the service needs at runtime lives inside `src/dodeal_ai/` and
+  ships in the wheel.** `scripts/verify_wheel.py` runs in CI and fails if an
+  installed copy cannot import every module or find its prompts.
 - Run all four checks before every push, and read every result:
   `uv run pytest`, `uv run ruff check .`, `uv run ruff format --check .`,
   `uv run mypy`. On Windows PowerShell 5 `&&` does not work; use

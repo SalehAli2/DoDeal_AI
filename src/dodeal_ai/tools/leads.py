@@ -14,7 +14,8 @@ Request flow, all three methods:
     https://<subdomain>.<base_domain>/api/service/...
   - Authentication uses the DD-API-KEY header (per-tenant); these endpoints
     take no JWT.
-  - The response is validated against the confirmed schemas in schemas.lead.
+  - The response is validated against the confirmed schemas in
+    dodeal_ai.schemas.lead.
   - The call is wrapped by the watchdog (timeout, retry-once, fail closed).
 """
 
@@ -26,7 +27,7 @@ from dodeal_ai.core.config import Settings, get_settings
 from dodeal_ai.core.context import RequestContext
 from dodeal_ai.core.resilience import call_with_watchdog
 from dodeal_ai.core.validation import validate_output
-from schemas.lead import (
+from dodeal_ai.schemas.lead import (
     Lead,
     LeadListResponse,
     LeadNote,

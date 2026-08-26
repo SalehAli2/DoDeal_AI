@@ -1,5 +1,9 @@
 """Prompt builder — assemble prompts SERVER-SIDE from versioned files.
 
+Prompts ship inside the package (src/dodeal_ai/prompts/), so an installed copy
+always has them. DODEAL_PROMPTS_DIR overrides the location for local prompt
+iteration only — it is never required in production.
+
 A prompt has two kinds of content that must never blur:
   - TRUSTED: the system instructions, loaded from versioned files in prompts/.
   - UNTRUSTED: caller-supplied data (a lead note, etc.).
@@ -25,7 +29,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-_PROMPTS_DIR = Path(__file__).resolve().parents[3] / "prompts"
+# The prompts shipped inside the package, next to core/. Always present in an
+# installed copy, unlike a repo-root directory that a wheel does not include.
+_DEFAULT_PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
 # Delimiters marking the untrusted region. The model is instructed (in the
 # system text) to treat everything between these as data only.
@@ -72,10 +78,21 @@ class AssembledPrompt:
         return rendered
 
 
+def _prompts_dir() -> Path:
+    """Where to read prompt templates from: the package default, unless
+    DODEAL_PROMPTS_DIR is set for local iteration. Settings is imported here,
+    not at module level, so this module never triggers a settings build (and
+    the fail-closed ConfigError it can raise) merely by being imported."""
+    from dodeal_ai.core.config import get_settings
+
+    override = get_settings().prompts_dir
+    return override if override is not None else _DEFAULT_PROMPTS_DIR
+
+
 def _load_template(name: str) -> str:
     """Load a versioned prompt template from prompts/ by filename. Missing file
     is a hard error — a prompt must exist as a tracked file, never inline."""
-    path = _PROMPTS_DIR / name
+    path = _prompts_dir() / name
     try:
         return path.read_text(encoding="utf-8").strip()
     except OSError as exc:

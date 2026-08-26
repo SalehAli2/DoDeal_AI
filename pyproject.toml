@@ -27,7 +27,7 @@ packages = ["src/dodeal_ai"]
 [tool.pytest.ini_options]
   pythonpath = ["."]
   asyncio_mode = "auto"
-  addopts = "--cov=src/dodeal_ai --cov=schemas --cov-report=term-missing -m \"not integration\""
+  addopts = "--cov=src/dodeal_ai --cov-report=term-missing -m \"not integration\""
   markers = [
     "integration: starts a local ASGI-backed fake HTTP server; excluded from the default run (pytest -m integration to run it).",
   ]

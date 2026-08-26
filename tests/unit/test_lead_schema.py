@@ -6,7 +6,7 @@ from __future__ import annotations
 import pytest
 
 from dodeal_ai.core.validation import OutputValidationError, validate_output
-from schemas.lead import LeadListResponse, LeadNotesResponse, LeadResponse
+from dodeal_ai.schemas.lead import LeadListResponse, LeadNotesResponse, LeadResponse
 
 
 def _lead_payload(**overrides) -> dict:

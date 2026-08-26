@@ -32,3 +32,9 @@ jobs:
 
       - name: Tests (with coverage gate)
         run: uv run pytest
+
+      - name: Build wheel
+        run: uv build --wheel
+
+      - name: Wheel installs and imports outside the repo
+        run: uv run python scripts/verify_wheel.py dist/*.whl
