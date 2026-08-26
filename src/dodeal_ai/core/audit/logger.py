@@ -10,11 +10,16 @@ Rules (from the spec, non-negotiable):
 What is safe to log and why: tenant and request_id are identifiers, not
 secrets; reason_code is a fixed vocabulary we defined (never a claim value or a
 token fragment). Everything else stays out.
+
+The fields travel as `extra=`, which is logging's own structured-field
+mechanism; core/logging_config.py's JsonFormatter merges them at the top level
+of the JSON line. They are NOT pre-serialised into the message string: a
+formatter that unpacks JSON-looking messages would let any other log line whose
+text happens to start with "{" forge these same fields.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Literal
 
@@ -37,7 +42,7 @@ def audit(
     trustworthy tenant — we must not invent one. When it's unknown we log null,
     never a guessed or header-supplied value.
     """
-    record = {
+    fields = {
         "event": "auth_decision",
         "decision": decision,
         "gate": gate,
@@ -45,8 +50,7 @@ def audit(
         "request_id": request_id,
         "reason_code": reason_code,
     }
-    line = json.dumps(record, separators=(",", ":"), sort_keys=True)
     if decision == "deny":
-        _logger.warning(line)  # denies never dropped
+        _logger.warning("auth_decision", extra=fields)  # denies never dropped
     else:
-        _logger.info(line)
+        _logger.info("auth_decision", extra=fields)

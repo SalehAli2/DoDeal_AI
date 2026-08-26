@@ -21,6 +21,7 @@ import logging
 from collections.abc import Awaitable, Callable
 
 from dodeal_ai.core.config import get_settings
+from dodeal_ai.core.log_safety import safe_error_fields
 
 _logger = logging.getLogger("dodeal_ai.resilience")
 
@@ -29,7 +30,12 @@ class ExternalCallError(Exception):
     """An external call failed after its timeout and (optional) single retry.
     Fail closed: raise this rather than returning partial/absent data that
     downstream code might mistake for a real result. Carries a short label
-    naming which call failed (for logs, not for clients)."""
+    naming which call failed (for logs, not for clients).
+
+    `.cause` keeps the original exception for CALLERS to branch on (transient
+    vs not). It is deliberately never logged with %r or str(): a foreign
+    exception's message can quote the payload. Log it with
+    core/log_safety.safe_error_fields instead."""
 
     def __init__(self, label: str, cause: Exception):
         self.label = label
@@ -66,12 +72,17 @@ async def call_with_watchdog[T](
             return await asyncio.wait_for(operation(), timeout=timeout)
         except Exception as exc:  # noqa: BLE001 - resilience boundary: ANY failure must fail closed uniformly
             last_exc = exc
+            # Type, not message: `exc` here is whatever the external call
+            # raised, and a foreign exception's message can quote the payload
+            # that failed. See core/log_safety.py.
             _logger.warning(
-                "external_call_failed label=%s attempt=%d of=%d error=%r",
-                label,
-                attempt,
-                attempts,
-                exc,
+                "external_call_failed",
+                extra={
+                    "label": label,
+                    "attempt": attempt,
+                    "of": attempts,
+                    **safe_error_fields(exc),
+                },
             )
             # loop continues to the retry if attempts remain
 

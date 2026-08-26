@@ -9,7 +9,9 @@ detail — and log the truth internally at ERROR with the request_id.
 
 Why generic outward: an exception message can carry a file path, a query, a
 secret fragment. The client gets none of it. The audit/error log gets enough to
-debug (request_id + the real error, server-side only).
+debug: request_id, the exception TYPE, and the traceback frames — never the
+exception message of a foreign error, which is where note text and model output
+would surface. See core/log_safety.py.
 """
 
 from __future__ import annotations
@@ -19,6 +21,8 @@ import logging
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
+
+from dodeal_ai.core.log_safety import frames_only, safe_error_fields
 
 _logger = logging.getLogger("dodeal_ai.error")
 
@@ -32,12 +36,17 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
     client sees a generic 500 with only the request_id (so they can quote it in
     a support request); the real error is logged server-side at ERROR."""
     request_id = _request_id(request)
-    # exc_info=exc records the full traceback in the SERVER log only.
+    # Structured fields only, and no exc_info: %r/exc_info would print the
+    # exception's message and every chained message with it, which for a
+    # foreign exception is the data that failed (see core/log_safety.py).
+    # The traceback frames stay — they are what makes this debuggable.
     _logger.error(
-        "unhandled_exception request_id=%s error=%r",
-        request_id,
-        exc,
-        exc_info=exc,
+        "unhandled_exception",
+        extra={
+            "request_id": request_id,
+            **safe_error_fields(exc),
+            "traceback": frames_only(exc),
+        },
     )
     return JSONResponse(
         status_code=500,

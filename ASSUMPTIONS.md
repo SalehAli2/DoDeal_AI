@@ -236,7 +236,7 @@ version against three endpoints."
 | --- | --- |
 | **Versioning** | Every output records prompt, model, rubric/formula and config version. Past outputs are never recomputed when rules change. |
 | **Configuration** | Weights, thresholds and catalogues live in our configuration, per tenant, read at runtime. **Not yet business-changeable** — no reachable config store. State that plainly rather than letting it read as "administrator-changeable". |
-| **Logging** | Client responses are generic, from a fixed enumerated set with no interpolation. Raw note text and model output are never logged. |
+| **Logging** | Client responses are generic, from a fixed enumerated set with no interpolation. Raw note text and model output are never logged. Exceptions from outside this codebase are logged by type only; our own carry fixed-vocabulary messages. Tracebacks are frames-only, unchained. `OutputValidationError` never holds the pydantic error or the input. Enforced by `tests/security/test_log_safety.py`. |
 | **Never invent** | If budget was not discussed, the field stays empty. A wrong figure is more damaging than a blank one. |
 | **Salary firewall** | Nothing this unit produces is written into a performance, rating, target or salary record. Currently guaranteed by having no write access at all — it must survive the day that changes. |
 
@@ -545,6 +545,11 @@ discovered at build time.
   version reserved).
 - Structured JSON to stdout, `dodeal_ai` tree at `DODEAL_LOG_LEVEL` (default
   INFO) so audit allow lines are not dropped.
+- Audit fields travel as `extra=` and are merged at the top level by the
+  formatter. The formatter no longer parses messages: it used to unpack a
+  message that was itself a JSON object, which let any line whose text began
+  with `{` forge `decision` / `reason_code` (audit finding M9). The field set,
+  levels, and JSON shape on stdout are unchanged.
 
 ### 8.3 Global error handler is ASGI-level
 - The fail-closed catch-all runs inside Starlette's outermost

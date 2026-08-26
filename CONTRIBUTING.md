@@ -36,6 +36,12 @@
 - **Untrusted strings that become identifiers (tenant, host, request id) are
   validated against a fixed pattern at the boundary, once, and lowercased.**
   Downstream code never re-validates and never sees the raw value.
+- **Never log `%r` or `str()` of a foreign exception or any payload.** Use
+  `core/log_safety.safe_error_fields` and `frames_only`. A foreign exception's
+  message is frequently the data that failed (pydantic puts the rejected value
+  in it); our own exceptions keep fixed-vocabulary messages, so keep it that way
+  when you add one. A sentinel test in `tests/security/test_log_safety.py` fails
+  if raw content reaches a log line.
 - Run all four checks before every push, and read every result:
   `uv run pytest`, `uv run ruff check .`, `uv run ruff format --check .`,
   `uv run mypy`. On Windows PowerShell 5 `&&` does not work; use

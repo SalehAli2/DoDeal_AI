@@ -149,6 +149,7 @@ dodeal-ai/
 │   │   ├── config.py
 │   │   ├── context.py
 │   │   ├── errors.py
+│   │   ├── log_safety.py
 │   │   ├── logging_config.py
 │   │   ├── prompting.py
 │   │   ├── redis.py
@@ -235,11 +236,12 @@ dodeal-ai/
 | `context.py` | `RequestContext`, a frozen dataclass built once the gates have run. It is the single, immutable source of tenant, subject, roles, permissions, and request identity for everything downstream. |
 | `tenancy.py` | Gate 2. Requires the whole `Host` header to equal `<tenant>.<inbound_base_domain>` — compared case-insensitively, with a `:port` and one trailing dot tolerated and IPv6 literals rejected — and raises `TenantMismatchError` with `invalid_host` (wrong shape or domain) or `tenant_mismatch` (valid shape, different tenant). Checking the whole host, not just its first label, is what stops `<tenant>.evil.com`. `X-Forwarded-Host` is deliberately not read; the seam is marked in the module docstring. |
 | `resilience.py` | The shared watchdog for every external call. Wraps an operation with a timeout and, by default, a single retry on failure. Carries an explicit note that writes must not be retried blindly; a caller wrapping a write should pass `retry=False` or apply an idempotency key. |
-| `validation.py` | Validates any tool or LLM output against a Pydantic schema before it is used or returned. Rejects and fails closed on any mismatch, and never logs the raw invalid content. |
+| `validation.py` | Validates any tool or LLM output against a Pydantic schema before it is used or returned. Rejects and fails closed on any mismatch, and never logs the raw invalid content. The pydantic `ValidationError` is deliberately dropped rather than chained: it carries the rejected value, so anything that formatted the resulting traceback would print the note text or model output that failed. `OutputValidationError` keeps only the label and one (dotted location, pydantic error type) pair per problem. |
 | `prompting.py` | Assembles prompts server-side from versioned files in `src/dodeal_ai/prompts/`, resolved lazily (package default, or `DODEAL_PROMPTS_DIR` override) so importing this module never requires settings to be loaded. Caller-supplied data is always placed in a clearly delimited section and neutralized against delimiter injection, so untrusted input can never be mistaken for an instruction. The stable system template is placed first and variable caller data last, which is also the shape prompt caching needs once real LLM calls exist. `build_prompt` returns an `AssembledPrompt` (stable template / delimited variable data / reserved tail) whose `.text` is the flat prompt; the split lets a provider adapter place a cache breakpoint without parsing the prompt. |
 | `redis.py` | Exposes two named, lazily created Redis clients, one for the work queue and one for cost and quota counters, each with explicit connection and socket timeouts. Also exposes `check_cost_redis_ready`, used by `/ready`. |
 | `errors.py` | The fail-closed catch-all for unexpected errors. Deliberate `HTTPException` responses (401, 403, 429) pass through untouched; anything else is logged internally at `ERROR` with the request id and returned to the client as a generic 500 with no internal detail. |
 | `logging_config.py` | Configures Python logging once at application startup. Emits one structured JSON line per log record to standard output. Sets the `dodeal_ai` logger tree to the configured level so audit `allow` lines are not silently dropped, while leaving third-party libraries at the root logger's default level. |
+| `log_safety.py` | The two helpers every exception-logging site uses. `safe_error_fields` returns the exception's type and module always, its message only when the class is defined under `dodeal_ai` (where messages are fixed vocabulary), and a chained exception's class name but never its message. `frames_only` returns the traceback frames without the exception line and without walking the chain. A foreign exception's message is frequently the data that failed, so it is never logged. |
 
 ### `src/dodeal_ai/core/auth/`
 
@@ -341,6 +343,7 @@ Tests for the gate chain and everything that enforces it, run over HTTP with `Te
 | `test_permissions.py` | Gate 3's role-to-permission resolution and default-deny enforcement, in isolation, kept green even though the gate is not wired into the live chain. |
 | `test_verify.py` | Gate 1's token verification: signature, expiry, `alg: none` rejection, and that the confirmed token shape (no `iss` or `aud`) is accepted. Also covers RS256 against an ephemeral test keypair — round-trip, wrong key, and the algorithm-confusion attack — and the clock-skew leeway, including the distinct reason codes for skewed versus forged tokens. |
 | `test_errors.py` | The fail-closed catch-all: an unexpected exception returns a generic 500 with no internal detail, while a deliberate `HTTPException` passes through untouched. |
+| `test_log_safety.py` | The sentinel tests for audit findings H1, L5, and M9. Each drives a real failure whose data contains a sentinel string, formats the record with the real `JsonFormatter`, and asserts the sentinel is absent from the captured text while the safe structured fields are present: a validation failure through the catch-all, a foreign exception whose message is the sentinel, a chained cause, a watchdog failure, a JSON-looking message that must not forge audit fields, and the audit line's six fields still at the top level at `WARNING`. |
 
 ### `tests/unit/`
 
@@ -354,6 +357,7 @@ Tests for the gate chain and everything that enforces it, run over HTTP with `Te
 | `test_redis.py` | The named Redis client accessors and the cost-only readiness check, with Redis mocked. |
 | `test_resilience.py` | The watchdog: success on the first attempt, success on retry, failing closed after retry, honoring `retry=False`, and respecting the timeout. |
 | `test_lead_schema.py` | The lead and note response schemas: parsing the `data`-wrapped shape, the single-lead and notes envelopes, and failing closed on a malformed one. |
+| `test_validation.py` | `validate_output`'s failure path: `OutputValidationError` carries only (dotted location, pydantic error type) pairs, the pydantic error is not chained, and no attribute holds the rejected input. |
 | `test_keys.py` | `SettingsKeyResolver`: a known tenant resolves to its configured secret, an unknown tenant raises `BackendKeyError` with no key material (from that tenant or any other) in the exception or the log line, and `SettingsKeyResolver` satisfies the `TenantKeyResolver` Protocol. |
 | `test_leads_client.py` | `LeadsClient`: URL construction under `/api/service/...` from the tenant subdomain, that each tenant's request carries *that tenant's own* key (the F2 isolation test), failing closed with zero transport calls and an unwrapped `BackendKeyError` for an unknown tenant, `get_leads`/`get_lead`/`get_lead_notes` reading `data`, and failing closed on a malformed response. |
 | `test_prompting.py` | The prompt builder: server-side assembly and that caller-supplied data can never become an instruction. |

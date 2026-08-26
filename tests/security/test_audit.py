@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-
 import pytest
 from fastapi.testclient import TestClient
 
@@ -15,43 +13,47 @@ from dodeal_ai.main import app
 from tests.helpers import tokens
 
 
-def test_allow_is_info_deny_is_warning(caplog):
-    with caplog.at_level("INFO", logger="dodeal_ai.audit"):
-        audit(
-            decision="allow",
-            gate="auth",
-            request_id="r1",
-            reason_code="ok",
-            tenant="tenant-a",
-        )
-        audit(
-            decision="deny",
-            gate="authz",
-            request_id="r2",
-            reason_code="permission_denied",
-            tenant="tenant-a",
-        )
-    levels = {r.levelname for r in caplog.records}
+def test_allow_is_info_deny_is_warning(json_log):
+    audit(
+        decision="allow",
+        gate="auth",
+        request_id="r1",
+        reason_code="ok",
+        tenant="tenant-a",
+    )
+    audit(
+        decision="deny",
+        gate="authz",
+        request_id="r2",
+        reason_code="permission_denied",
+        tenant="tenant-a",
+    )
+    levels = {line["level"] for line in json_log()}
     assert "INFO" in levels
     assert "WARNING" in levels
 
 
-def test_audit_line_is_valid_json_with_no_secrets(caplog):
-    with caplog.at_level("INFO", logger="dodeal_ai.audit"):
-        audit(
-            decision="allow",
-            gate="auth",
-            request_id="r1",
-            reason_code="ok",
-            tenant="tenant-a",
-        )
-    payload = json.loads(caplog.records[-1].message)
+def test_audit_line_is_valid_json_with_no_secrets(json_log):
+    audit(
+        decision="allow",
+        gate="auth",
+        request_id="r1",
+        reason_code="ok",
+        tenant="tenant-a",
+    )
+    payload = json_log()[-1]
+    assert payload["event"] == "auth_decision"
     assert payload["decision"] == "allow"
+    assert payload["gate"] == "auth"
     assert payload["tenant"] == "tenant-a"
     assert payload["request_id"] == "r1"
     assert payload["reason_code"] == "ok"
-    # No token, claims, or secret fields ever present.
-    assert set(payload.keys()) == {
+    # The message is a fixed string, not a serialised copy of the fields --
+    # nothing here is a JSON object nested inside the line.
+    assert payload["message"] == "auth_decision"
+    # No token, claims, or secret fields ever present. Only the formatter's own
+    # envelope may accompany the audit field set.
+    assert set(payload) - {"timestamp", "level", "logger", "message"} == {
         "event",
         "decision",
         "gate",
@@ -73,16 +75,17 @@ def client():
     app.dependency_overrides.clear()
 
 
-def test_cross_tenant_deny_emits_warning_line(client, caplog):
+def test_cross_tenant_deny_emits_warning_line(client, json_log):
     token = tokens.mint_token(subdomain="nasir3")
-    with caplog.at_level("WARNING", logger="dodeal_ai.audit"):
-        r = client.get(
-            "/_probe/protected",
-            headers={"Authorization": f"Bearer {token}", "Host": "other.dodealcrm.com"},
-        )
+    r = client.get(
+        "/_probe/protected",
+        headers={"Authorization": f"Bearer {token}", "Host": "other.dodealcrm.com"},
+    )
     assert r.status_code == 403
     denies = [
-        json.loads(rec.message) for rec in caplog.records if rec.levelname == "WARNING"
+        line
+        for line in json_log()
+        if line["logger"] == "dodeal_ai.audit" and line["level"] == "WARNING"
     ]
     assert any(
         d["gate"] == "tenancy"

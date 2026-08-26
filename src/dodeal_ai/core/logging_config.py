@@ -29,38 +29,22 @@ _STANDARD_RECORD_ATTRS = frozenset(
 ) | {"message", "asctime"}
 
 
-def _try_parse_json_object(text: str) -> dict[str, object] | None:
-    if not text.startswith("{"):
-        return None
-    try:
-        candidate = json.loads(text)
-    except ValueError:
-        return None
-    return candidate if isinstance(candidate, dict) else None
-
-
 class JsonFormatter(logging.Formatter):
     """One JSON object per line.
 
-    Two ways structured fields reach the output, both merged at the TOP
-    level so nothing is ever a JSON string nested inside another JSON
-    string:
-      - extra=/Filter-set attributes on the record (the general mechanism).
-      - a message that IS ALREADY a JSON object (the audit logger's
-        existing pattern: it builds its own dict and passes json.dumps() of
-        it as the message). Rather than refactor that call site, this
-        unpacks the shape -- audit()'s field set and levels stay unchanged.
+    Structured fields reach the output ONE way: extra=/Filter-set attributes
+    on the record, merged at the TOP level so nothing is ever a JSON string
+    nested inside another JSON string. The audit logger uses exactly that.
+
+    The message is NEVER parsed. An earlier version unpacked a message that
+    was itself a JSON object, which meant any log line whose text began with
+    "{" -- a note body, a model completion, an echoed payload -- could set or
+    overwrite top-level fields such as decision or reason_code and forge an
+    audit record. The message is always a plain string under "message".
     """
 
     def format(self, record: logging.LogRecord) -> str:
-        raw_message = record.getMessage()
-
-        payload: dict[str, object] = {}
-        parsed = _try_parse_json_object(raw_message)
-        if parsed is not None:
-            payload.update(parsed)
-        else:
-            payload["message"] = raw_message
+        payload: dict[str, object] = {"message": record.getMessage()}
 
         for key, value in record.__dict__.items():
             if key not in _STANDARD_RECORD_ATTRS:
