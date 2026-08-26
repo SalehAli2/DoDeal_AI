@@ -8,7 +8,8 @@ file's implementation only; callers depend on the protocol.
 
 Security rules enforced here:
   - algorithm read from config; alg:none rejected (never trust the header's alg)
-  - signature, exp, iss, aud all verified
+  - signature and exp verified. iss and aud are NOT present on this token and
+    are NOT verified -- see JwtVerifier.verify()'s options.
   - required claims present (delegated to the claim-mapping layer)
 On ANY failure -> AuthError, which the dependency layer (Step 7) turns into a
 GENERIC 401. The specific reason is for the audit line only, never the client.

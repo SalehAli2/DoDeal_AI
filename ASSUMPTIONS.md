@@ -77,15 +77,31 @@ the seam it lives behind, and how to correct it when the real answer lands.
   disabled (`verify_sub: False`) and the claim layer normalises it instead.
 - **DO NOT re-enable PyJWT's sub verification.** It would reject valid tokens.
 
-### 1.6 Tenant — subdomain, authoritative, Host must match `[T]`
-- The tenant is the `subdomain` claim and it is authoritative. The request also
-  arrives at `<subdomain>.dodealcrm.com`; the Host subdomain must match the token
-  subdomain or the request is denied (403).
+### 1.6 Tenant — a validated DNS label at both boundaries `[T]`
+- The tenant is the `subdomain` claim and it is authoritative. It is validated
+  and lowercased as a single DNS label (`claims.TENANT_LABEL_RE`: 1-63 chars,
+  `[a-z0-9-]`, no leading/trailing hyphen) at BOTH boundaries — the token claim
+  and the Host header — using the one rule, defined once.
+- Gate 2 compares the WHOLE host, case-insensitively, as
+  `<tenant>.<inbound_base_domain>` after stripping a `:port` and one trailing
+  dot. Comparing only the first label (the old behaviour) let
+  `<tenant>.evil.com` through; that is audit finding H4.
+- Reason codes: `invalid_tenant_claim` (the claim is present but not a valid
+  label — audit finding H6), `invalid_host` (the Host is not
+  `<label>.<inbound_base_domain>` at all: wrong domain, no subdomain, extra
+  subdomain level, IPv6 literal, or absent), `tenant_mismatch` (valid shape,
+  different tenant). All are a generic 403 to the client.
 - Isolation is enforced backend-side by tenant database, keyed on subdomain. Lead
-  records carry no tenant field, so the re-check is a subdomain match.
+  records carry no tenant field, so the re-check is a host match.
 - An absent or subdomain-less Host is a hard 403 (deliberate). `localhost` fails
   Gate 2; local testing needs a tenant Host header.
-- **Seam:** `core/tenancy.py`, `gate2_tenant` in `core/auth/dependencies.py`.
+- `DODEAL_INBOUND_BASE_DOMAIN` is separate from `backend_base_domain`: the host
+  of arrival is an open question with the backend and may become e.g.
+  `ai.dodealcrm.com` without changing the outbound URL.
+- **X-Forwarded-Host is deliberately NOT read** — deferred until the backend
+  confirms the host of arrival. The seam is marked in `core/tenancy.py`.
+- **Seam:** `core/tenancy.py`, `core/auth/claims.py`, `gate2_tenant` in
+  `core/auth/dependencies.py`.
 
 ### 1.7 The service surface — three read endpoints only `[T]`
 Base `https://<tenant>.dodealcrm.com/api/service`, DD-API-KEY header only.
@@ -624,6 +640,8 @@ discovered at build time.
 - `LeadNote` is modelled stricter than `Lead`: only `author` is nullable. The
   "all optional except id" instruction was scoped to leads and not repeated for
   notes. Do not loosen without a confirmed reason.
+- Tenant labels are validated and lowercased at the boundary; do not loosen the
+  regex to admit a value — fix the token instead.
 
 ---
 

@@ -39,6 +39,7 @@ from dodeal_ai.core.authz.permissions import (
     require_permission,
     resolve_permissions,
 )
+from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.context import RequestContext
 from dodeal_ai.core.cost.limiter import (
     CostLimitError,
@@ -97,7 +98,7 @@ def gate2_tenant(
 ) -> Identity:
     request_id = getattr(request.state, "request_id", "unknown")
     try:
-        check_tenant(identity, host)
+        check_tenant(identity, host, get_settings().inbound_base_domain)
     except TenantMismatchError as exc:
         audit(
             decision="deny",

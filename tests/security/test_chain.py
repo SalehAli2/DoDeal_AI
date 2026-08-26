@@ -7,10 +7,12 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
+import dodeal_ai.core.auth.dependencies as auth_dependencies
 import dodeal_ai.core.cost.limiter as cost_limiter
 from dodeal_ai.core.auth.dependencies import get_verifier
 from dodeal_ai.core.auth.verify import JwtVerifier
 from dodeal_ai.core.config import Settings, get_settings
+from dodeal_ai.core.cost.limiter import CostLimitError
 from dodeal_ai.main import app
 from tests.helpers import tokens
 
@@ -124,3 +126,53 @@ def test_response_carries_generated_request_id_header(client):
     r = client.get("/_probe/protected", headers={**_auth(token), **_host("nasir3")})
     assert r.status_code == 200
     assert r.headers["X-Request-ID"] == r.json()["request_id"]
+
+
+def test_mixed_case_host_is_now_allowed(client):
+    # H4: Gate 2 compares case-insensitively -- this used to be a 403.
+    token = tokens.mint_token(subdomain="tenant-a", sub=42)
+    r = client.get(
+        "/_probe/protected",
+        headers={**_auth(token), "Host": "Tenant-A.dodealcrm.com"},
+    )
+    assert r.status_code == 200
+    assert r.json()["tenant"] == "tenant-a"
+
+
+def test_cross_domain_host_denied_with_invalid_host(client, caplog):
+    # H4: only the first label used to be checked, so "tenant-a.evil.com"
+    # passed Gate 2 for a token belonging to tenant-a. Now denied outright.
+    token = tokens.mint_token(subdomain="tenant-a", sub=42)
+    with caplog.at_level("WARNING", logger="dodeal_ai.audit"):
+        r = client.get(
+            "/_probe/protected",
+            headers={**_auth(token), "Host": "tenant-a.evil.com"},
+        )
+    assert r.status_code == 403
+
+    deny_lines = [json.loads(rec.message) for rec in caplog.records]
+    assert any(
+        line["gate"] == "tenancy" and line["reason_code"] == "invalid_host"
+        for line in deny_lines
+    )
+
+
+def test_cost_cap_exceeded_is_generic_429_and_audited(client, monkeypatch, caplog):
+    def _raise(*args, **kwargs):
+        raise CostLimitError("tenant_quota_exceeded")
+
+    monkeypatch.setattr(auth_dependencies, "enforce_cost", _raise)
+
+    token = tokens.mint_token(subdomain="nasir3", sub=42)
+    with caplog.at_level("WARNING", logger="dodeal_ai.audit"):
+        r = client.get("/_probe/protected", headers={**_auth(token), **_host("nasir3")})
+
+    assert r.status_code == 429
+    assert r.json() == {"detail": "Too Many Requests"}
+    assert "tenant_quota_exceeded" not in r.text
+
+    deny_lines = [json.loads(rec.message) for rec in caplog.records]
+    assert any(
+        line["gate"] == "cost" and line["reason_code"] == "tenant_quota_exceeded"
+        for line in deny_lines
+    )

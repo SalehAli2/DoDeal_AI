@@ -77,6 +77,11 @@ class Settings(BaseSettings):
     # Empty map = nothing can reach the backend; startup logs this at ERROR (main.py).
     dd_api_keys: dict[str, SecretStr] = {}
     backend_base_domain: str = "dodealcrm.com"
+    # The base domain requests to THIS service arrive under: Gate 2 requires
+    # Host == "<tenant>.<inbound_base_domain>". Same as the backend's domain today; kept separate
+    # because the host of arrival is an open question with the backend (design note, Decision 1,
+    # question 2) and may become e.g. "ai.dodealcrm.com" without touching the backend URL.
+    inbound_base_domain: str = "dodealcrm.com"
     # Where versioned prompt files are read from. None = the copies shipped inside the package
     # (src/dodeal_ai/prompts). Set only for local prompt iteration; production uses the package.
     prompts_dir: Path | None = None

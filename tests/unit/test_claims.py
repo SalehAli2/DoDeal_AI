@@ -91,3 +91,38 @@ def test_swapping_claim_names_is_config_only():
     )
     ident = extract_identity(payload, settings)
     assert ident == Identity(tenant="beta", subject="9", database="beta_db", roles=())
+
+
+def test_tenant_claim_is_lowercased():
+    ident = extract_identity(
+        {"sub": 1, "subdomain": "Tenant-A", "database": "d"}, _settings()
+    )
+    assert ident.tenant == "tenant-a"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "abc@evil",
+        "x y",
+        "a..b",
+        "-",
+        "-abc",
+        "abc-",
+        "a" * 64,
+        "tenant-a.dodealcrm.com",
+    ],
+)
+def test_invalid_tenant_claim_rejected(value):
+    with pytest.raises(ClaimMappingError) as exc:
+        extract_identity({"sub": 1, "subdomain": value, "database": "d"}, _settings())
+    assert exc.value.reason_code == "invalid_tenant_claim"
+    assert str(exc.value) == "invalid_tenant_claim"
+    assert value not in str(exc.value)
+
+
+def test_empty_tenant_claim_is_missing_not_invalid():
+    with pytest.raises(ClaimMappingError) as exc:
+        extract_identity({"sub": 1, "subdomain": "", "database": "d"}, _settings())
+    assert exc.value.reason_code == "missing_subdomain"
+    assert str(exc.value) == "missing_subdomain"

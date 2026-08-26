@@ -48,7 +48,7 @@ No feature logic ships yet. The feature units (structured intelligence, call int
 Every inbound request runs through a small set of independent dependencies, each of which can be tested in isolation:
 
 1. **Gate 1, authentication** (`core/auth/`). Verifies the bearer token and maps it to an internal `Identity`. Fails with a generic 401 on any error.
-2. **Gate 2, tenancy** (`core/tenancy.py`). Confirms that the subdomain in the `Host` header matches the tenant carried in the token. Fails with a generic 403 on mismatch.
+2. **Gate 2, tenancy** (`core/tenancy.py`). Confirms that the whole `Host` header equals `<tenant>.<inbound_base_domain>` for the tenant carried in the token. Fails with a generic 403 on any mismatch.
 3. **Gate 3, authorization** (`core/authz/permissions.py`). Resolves role to permission and enforces default-deny. Currently parked: the token carries no roles yet, so this gate is built and unit-tested but not wired into the live chain.
 4. **Gate 4, cost** (`core/cost/limiter.py`). Enforces a per-tenant and per-user request quota backed by Redis. Fails with a generic 429 when a cap is exceeded.
 
@@ -233,7 +233,7 @@ dodeal-ai/
 | --- | --- |
 | `config.py` | `Settings`, the single source of runtime configuration, built on `pydantic-settings`. Every module that needs a claim name, a JWT parameter, or a Redis URL reads it from here. The signing key has no default, so a missing key raises a fail-closed `ConfigError` rather than letting the service start unable to verify tokens. |
 | `context.py` | `RequestContext`, a frozen dataclass built once the gates have run. It is the single, immutable source of tenant, subject, roles, permissions, and request identity for everything downstream. |
-| `tenancy.py` | Gate 2. Confirms the host subdomain matches the token's authoritative subdomain and raises `TenantMismatchError` on any mismatch or absence. |
+| `tenancy.py` | Gate 2. Requires the whole `Host` header to equal `<tenant>.<inbound_base_domain>` — compared case-insensitively, with a `:port` and one trailing dot tolerated and IPv6 literals rejected — and raises `TenantMismatchError` with `invalid_host` (wrong shape or domain) or `tenant_mismatch` (valid shape, different tenant). Checking the whole host, not just its first label, is what stops `<tenant>.evil.com`. `X-Forwarded-Host` is deliberately not read; the seam is marked in the module docstring. |
 | `resilience.py` | The shared watchdog for every external call. Wraps an operation with a timeout and, by default, a single retry on failure. Carries an explicit note that writes must not be retried blindly; a caller wrapping a write should pass `retry=False` or apply an idempotency key. |
 | `validation.py` | Validates any tool or LLM output against a Pydantic schema before it is used or returned. Rejects and fails closed on any mismatch, and never logs the raw invalid content. |
 | `prompting.py` | Assembles prompts server-side from versioned files in `src/dodeal_ai/prompts/`, resolved lazily (package default, or `DODEAL_PROMPTS_DIR` override) so importing this module never requires settings to be loaded. Caller-supplied data is always placed in a clearly delimited section and neutralized against delimiter injection, so untrusted input can never be mistaken for an instruction. The stable system template is placed first and variable caller data last, which is also the shape prompt caching needs once real LLM calls exist. `build_prompt` returns an `AssembledPrompt` (stable template / delimited variable data / reserved tail) whose `.text` is the flat prompt; the split lets a provider adapter place a cache breakpoint without parsing the prompt. |
@@ -334,10 +334,10 @@ Tests for the gate chain and everything that enforces it, run over HTTP with `Te
 | File | Purpose |
 | --- | --- |
 | `conftest.py` | Shared fixtures that align the runtime signing key and algorithm with the test-token helper's constants. |
-| `test_chain.py` | The gate chain end to end: happy path, missing or bad token, cross-tenant host, missing host subdomain, and the request-id middleware's behavior (real id in the audit line, inbound header honored, id echoed on the response). |
+| `test_chain.py` | The gate chain end to end: happy path, missing or bad token, cross-tenant host, missing host subdomain, a mixed-case host that is now allowed, a cross-domain host denied with `invalid_host`, the cost cap returning a generic 429 with an audited reason code, and the request-id middleware's behavior (real id in the audit line, inbound header honored, id echoed on the response). |
 | `test_exit_demo.py` | The Phase 0 exit demo criteria: cross-tenant access blocked and logged, expired and malformed tokens rejected, a valid token passing both live gates, and `alg: none` rejected. |
 | `test_audit.py` | The audit logger's level rules, field set, and that a cross-tenant deny actually emits a warning-level line. |
-| `test_tenancy.py` | Gate 2's subdomain-matching logic in isolation, without HTTP. |
+| `test_tenancy.py` | Gate 2's host-matching logic in isolation, without HTTP: a parametrised table covering case-insensitivity, trailing dot, port, a cross-domain host, extra subdomain levels, a bare domain, `localhost`, an IPv6 literal, an absent host, and a different tenant — asserting the reason code on every denial. |
 | `test_permissions.py` | Gate 3's role-to-permission resolution and default-deny enforcement, in isolation, kept green even though the gate is not wired into the live chain. |
 | `test_verify.py` | Gate 1's token verification: signature, expiry, `alg: none` rejection, and that the confirmed token shape (no `iss` or `aud`) is accepted. |
 | `test_errors.py` | The fail-closed catch-all: an unexpected exception returns a generic 500 with no internal detail, while a deliberate `HTTPException` passes through untouched. |
@@ -348,7 +348,8 @@ Tests for the gate chain and everything that enforces it, run over HTTP with `Te
 | --- | --- |
 | `test_config.py` | `Settings` defaults, environment variable overrides, immutability, and the fail-closed behavior when the signing key is missing. |
 | `test_context.py` | `RequestContext` construction and its frozen, immutable behavior. |
-| `test_claims.py` | Claim-to-`Identity` mapping, including the integer `sub` claim normalization. |
+| `test_claims.py` | Claim-to-`Identity` mapping, including the integer `sub` claim normalization, tenant lowercasing, and rejection of malformed tenant claims (`@`, whitespace, dots, leading/trailing hyphen, over-length) with `invalid_tenant_claim`. |
+| `test_tenant_label_properties.py` | Hypothesis property tests for the one tenant-label rule at both boundaries: any valid label survives any host decoration (case, trailing dot, port) and comes back lowercased; `tenant_from_host` and `normalise_tenant_label` return either `None` or something matching `TENANT_LABEL_RE` for arbitrary text; and `extract_identity` lowercases any valid label. |
 | `test_cost.py` | The cost gate: under and over both caps, tenants counted separately, atomic failure leaving neither counter touched, the `amount` parameter, and the read-only usage function. Uses an in-memory fake Redis. |
 | `test_redis.py` | The named Redis client accessors and the cost-only readiness check, with Redis mocked. |
 | `test_resilience.py` | The watchdog: success on the first attempt, success on retry, failing closed after retry, honoring `retry=False`, and respecting the timeout. |
@@ -383,7 +384,8 @@ All configuration is read through `Settings` in `core/config.py`. Every variable
 | `DODEAL_CLAIM_SUBDOMAIN` | `subdomain` | The wire claim name mapped to the internal tenant identifier. |
 | `DODEAL_CLAIM_DATABASE` | `database` | The wire claim name mapped to the tenant's database name, carried for the tool layer. |
 | `DODEAL_DD_API_KEYS` | `{}` (empty map) | JSON map of tenant subdomain to that tenant's DD-API-KEY, e.g. `{"nasir3":"<key>","acme":"<key>"}`. No default value exists for any tenant; an unknown tenant fails closed in `tools/keys.py` before any network call. An empty map means nothing can reach the backend, and is logged at `ERROR` on startup. |
-| `DODEAL_BACKEND_BASE_DOMAIN` | `dodealcrm.com` | The base domain used to build a tenant's backend URL. |
+| `DODEAL_BACKEND_BASE_DOMAIN` | `dodealcrm.com` | The base domain used to build a tenant's **outbound** backend URL. |
+| `DODEAL_INBOUND_BASE_DOMAIN` | `dodealcrm.com` | The base domain requests to this service arrive under. Gate 2 requires `Host == <tenant>.<inbound_base_domain>`. Kept separate from the outbound domain because the host of arrival is an open question with the backend and may become e.g. `ai.dodealcrm.com` independently. |
 | `DODEAL_PROMPTS_DIR` | none | Overrides where prompt templates are read from. Unset uses the copies shipped inside the package (`src/dodeal_ai/prompts/`); set only for local prompt iteration without a rebuild. |
 | `DODEAL_EXTERNAL_CALL_TIMEOUT_SECONDS` | `10.0` | The timeout applied to every external call by the resilience watchdog. |
 | `DODEAL_EXTERNAL_CALL_RETRY_ONCE` | `true` | Whether the watchdog retries once by default. Individual callers can override this per call. |
