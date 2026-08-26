@@ -15,6 +15,7 @@ names, iss/aud placeholders).
 
 from __future__ import annotations
 
+from enum import Enum
 from functools import lru_cache
 from typing import Literal
 
@@ -28,6 +29,13 @@ class ConfigError(RuntimeError):
     Callers (startup / readiness) treat this as fail-closed: refuse to start or
     return 503. Never swallow it into a running-but-unverifying state.
     """
+
+
+class LLMProvider(str, Enum):
+    """Providers get_llm_client() can build. A typo in DODEAL_LLM_PROVIDER
+    fails at settings load (ConfigError), not at the first model call."""
+
+    ANTHROPIC = "anthropic"
 
 
 class Settings(BaseSettings):
@@ -70,6 +78,24 @@ class Settings(BaseSettings):
     # Placeholder values; tune per real LLM/tool latency later.
     external_call_timeout_seconds: float = 10.0
     external_call_retry_once: bool = True
+
+    # --- LLM seam (core/llm/; Unit A owns it, Unit B consumes it) ------------
+    # None = not configured; the factory refuses to build a client.
+    llm_provider: LLMProvider | None = None
+    # Exact pinned model id, set per deployment. NO drifting default: the
+    # factory refuses an empty value. Stored on every output as model_version.
+    llm_model: str = ""
+    # Per-call timeout for a model call, passed as timeout= into
+    # call_with_watchdog with retry=False. DELIBERATELY separate from
+    # external_call_timeout_seconds (10s, sized for a CRM fetch). Never raise
+    # the global to fit a model call.
+    llm_timeout_seconds: float = 60.0
+    # Default output ceiling. Headroom for Arabic, which costs roughly 1.5-3x
+    # the tokens of equivalent English. Tasks override per call.
+    llm_max_output_tokens: int = 1024
+    # The provider API key lands in Step 14 with the adapter: a SecretStr with
+    # no default and no placeholder. dd_api_key above is the cautionary example
+
     # Redis connections. Two named connections so code never guesses which
     # instance it is using: a queue connection and a cost/quota connection.
     # Local Redis by default; real hosts come from DevOps later. Different
@@ -87,6 +113,13 @@ class Settings(BaseSettings):
     # resilience, validation, ...). Third-party libraries are unaffected --
     # they stay at the root logger's WARNING default.
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+
+
+class LLMConfigurationError(ConfigError):
+    """The seam was asked for a client without a provider and a pinned model."""
+
+    def __init__(self) -> None:
+        super().__init__("llm_not_configured")
 
 
 def _build_settings(**overrides) -> Settings:

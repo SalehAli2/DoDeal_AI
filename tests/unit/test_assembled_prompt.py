@@ -38,7 +38,9 @@ def test_text_is_byte_identical_to_legacy_output(template_dir: Path) -> None:
     assert assembled.text == _legacy_render(TEMPLATE, data)
 
 
-def test_build_prompt_returns_assembled_prompt_with_empty_tail(template_dir: Path) -> None:
+def test_build_prompt_returns_assembled_prompt_with_empty_tail(
+    template_dir: Path,
+) -> None:
     assembled = build_prompt("t.txt", "hello")
     assert isinstance(assembled, AssembledPrompt)
     assert assembled.tail == ""

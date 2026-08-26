@@ -227,7 +227,7 @@ dodeal-ai/
 | `tenancy.py` | Gate 2. Confirms the host subdomain matches the token's authoritative subdomain and raises `TenantMismatchError` on any mismatch or absence. |
 | `resilience.py` | The shared watchdog for every external call. Wraps an operation with a timeout and, by default, a single retry on failure. Carries an explicit note that writes must not be retried blindly; a caller wrapping a write should pass `retry=False` or apply an idempotency key. |
 | `validation.py` | Validates any tool or LLM output against a Pydantic schema before it is used or returned. Rejects and fails closed on any mismatch, and never logs the raw invalid content. |
-| `prompting.py` | Assembles prompts server-side from versioned files in `prompts/`. Caller-supplied data is always placed in a clearly delimited section and neutralized against delimiter injection, so untrusted input can never be mistaken for an instruction. The stable system template is placed first and variable caller data last, which is also the shape prompt caching needs once real LLM calls exist. |
+| `prompting.py` | Assembles prompts server-side from versioned files in `prompts/`. Caller-supplied data is always placed in a clearly delimited section and neutralized against delimiter injection, so untrusted input can never be mistaken for an instruction. The stable system template is placed first and variable caller data last, which is also the shape prompt caching needs once real LLM calls exist. `build_prompt` returns an `AssembledPrompt` (stable template / delimited variable data / reserved tail) whose `.text` is the flat prompt; the split lets a provider adapter place a cache breakpoint without parsing the prompt. |
 | `redis.py` | Exposes two named, lazily created Redis clients, one for the work queue and one for cost and quota counters, each with explicit connection and socket timeouts. Also exposes `check_cost_redis_ready`, used by `/ready`. |
 | `errors.py` | The fail-closed catch-all for unexpected errors. Deliberate `HTTPException` responses (401, 403, 429) pass through untouched; anything else is logged internally at `ERROR` with the request id and returned to the client as a generic 500 with no internal detail. |
 | `logging_config.py` | Configures Python logging once at application startup. Emits one structured JSON line per log record to standard output. Sets the `dodeal_ai` logger tree to the configured level so audit `allow` lines are not silently dropped, while leaving third-party libraries at the root logger's default level. |
@@ -262,7 +262,8 @@ dodeal-ai/
 
 | File | Purpose |
 | --- | --- |
-| `__init__.py` | Empty until the first real LLM call exists. Reserved to grow into the model gateway: provider routing and fallback, pinned model versions, prompt caching, timeouts, circuit breakers, and per-tenant quotas. |
+| `__init__.py` | Re-exports and `get_llm_client()`, the FastAPI dependency that builds the model client. Reads settings lazily; raises the fail-closed `LLMConfigurationError` if `DODEAL_LLM_PROVIDER` or `DODEAL_LLM_MODEL` is unset, and `NotImplementedError` until the adapter lands in Step 14. Gateway concerns (routing, fallback, breakers) grow here, behind the factory. |
+| `client.py` | The seam every unit calls a model through: `LLMClient` Protocol (one async `complete()`, prompt passed through unchanged), frozen `LLMResponse` (OTel-aligned token/finish fields, `text` excluded from repr), `FinishReason`, `LLMProviderError` with enumerated non-interpolated reasons. No provider implementation yet. |
 
 ### `src/dodeal_ai/middleware/`
 
@@ -281,7 +282,7 @@ dodeal-ai/
 
 | Directory | Purpose |
 | --- | --- |
-| `structured_intelligence/` | Unit A, fast synchronous note scoring. Empty until the exit demo passes. Reserved as the seam for the first write this service ever makes back to the CRM. |
+| `structured_intelligence/` | Unit A, fast synchronous note scoring. Empty until the exit demo passes. Read-only; judgements are returned to the caller, which persists them. |
 | `call_intelligence/` | Unit B, slow asynchronous call analysis. Empty. |
 | `assistant/` | Unit C1, the conversational assistant. Empty. |
 | `sales_automation/` | Unit C2, deferred until after the pilot. Empty. |
@@ -327,6 +328,8 @@ Tests for the gate chain and everything that enforces it, run over HTTP with `Te
 | `test_lead_schema.py` | The lead and note response schemas: parsing the `data`-wrapped shape, the single-lead and notes envelopes, and failing closed on a malformed one. |
 | `test_leads_client.py` | `LeadsClient`: URL construction under `/api/service/...` from the tenant subdomain, the service key header, `get_leads`/`get_lead`/`get_lead_notes` reading `data`, and failing closed on a malformed response. |
 | `test_prompting.py` | The prompt builder: server-side assembly and that caller-supplied data can never become an instruction. |
+| `test_assembled_prompt.py` | `AssembledPrompt`: `.text` byte-identical to the pre-structure output, untrusted text never in `.stable`, tail rendered after the data, `.variable` excluded from repr. |
+| `test_llm_seam.py` | The LLM seam: frozen `LLMResponse` with repr-safe text, enumerated `LLMProviderError` messages, `DODEAL_LLM_*` settings and fail-closed provider validation, the factory's configuration errors, the runtime-checkable Protocol, and the prompt-type pass-through contract. |
 | `test_logging_config.py` | The structured logging setup: an allow line actually reaching standard output under the real configuration, a deny line at warning level, the cost-bypass warning reaching the same stream, third-party loggers staying quiet, and the configuration being called from the application lifespan. |
 | `test_health.py` | `/health` and `/ready`: config missing returns 503, Redis down returns 200 with a degraded body, and Redis up returns 200 with an ok body. |
 
@@ -354,6 +357,10 @@ All configuration is read through `Settings` in `core/config.py`. Every variable
 | `DODEAL_BACKEND_BASE_DOMAIN` | `dodealcrm.com` | The base domain used to build a tenant's backend URL. |
 | `DODEAL_EXTERNAL_CALL_TIMEOUT_SECONDS` | `10.0` | The timeout applied to every external call by the resilience watchdog. |
 | `DODEAL_EXTERNAL_CALL_RETRY_ONCE` | `true` | Whether the watchdog retries once by default. Individual callers can override this per call. |
+| `DODEAL_LLM_PROVIDER` | none | Which model adapter `get_llm_client()` builds. Unset means not configured; the factory refuses. |
+| `DODEAL_LLM_MODEL` | empty, refused | The exact pinned model id, set per deployment. No drifting default. |
+| `DODEAL_LLM_TIMEOUT_SECONDS` | `60.0` | Per-call timeout for a model call, passed into the watchdog with `retry=False`. Deliberately separate from the 10s external-call timeout. |
+| `DODEAL_LLM_MAX_OUTPUT_TOKENS` | `1024` | Default output ceiling, sized with headroom for Arabic. |
 | `DODEAL_REDIS_QUEUE_URL` | `redis://localhost:6379/0` | The work-queue Redis connection. Reserved for future workers. |
 | `DODEAL_REDIS_COST_URL` | `redis://localhost:6379/1` | The cost and quota Redis connection used by Gate 4. |
 | `DODEAL_COST_PER_TENANT_LIMIT` | `10000` | The per-tenant request cap per window. |

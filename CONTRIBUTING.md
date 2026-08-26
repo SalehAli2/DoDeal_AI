@@ -3,13 +3,16 @@
 ## Run locally
 
 1. `uv sync`
-2. Create `.env` with at least `DODEAL_JWT_SIGNING_KEY=<any-local-value>` — the
+2. `uv run pre-commit install` — the hooks run ruff check, ruff format and
+   mypy on every commit. Without them, CI is the first place a formatting
+   failure shows up.
+3. Create `.env` with at least `DODEAL_JWT_SIGNING_KEY=<any-local-value>` — the
    app fails closed (refuses to start; `/ready` returns 503) if this isn't set.
    **The file must be saved as UTF-8 with no BOM** — a BOM breaks env-var
    parsing silently.
-3. Start Redis: `docker compose up -d`
-4. Run the app: `uv run uvicorn dodeal_ai.main:app --reload`
-5. Run tests: `uv run pytest`
+4. Start Redis: `docker compose up -d`
+5. Run the app: `uv run uvicorn dodeal_ai.main:app --reload`
+6. Run tests: `uv run pytest`
 
 ## Architectural rules (not enforced by tooling)
 
@@ -27,10 +30,24 @@
   Auth and Tenancy fail closed (an outage risks a data breach). The cost gate
   fails open (an outage risks a bounded, recoverable, logged spend). Don't
   unify these.
-- **Test after every change**, not just before a PR.
+- Run all four checks before every push, and read every result:
+  `uv run pytest`, `uv run ruff check .`, `uv run ruff format --check .`,
+  `uv run mypy`. On Windows PowerShell 5 `&&` does not work; use
+  `uv run pytest; if ($?) { uv run ruff check . }; if ($?) { uv run ruff format --check . }; if ($?) { uv run mypy }`
+  so the chain stops at the first failure.
 - **Tests must stay hermetic.** No live Redis, network, or LLM calls in the
   suite — mock/fake them (see `tests/unit/test_cost.py`'s `FakeRedis` for the
   pattern). If a test needs real infrastructure, it doesn't belong here.
+- Model calls go through `core/llm/` only. No provider SDK is imported
+  anywhere else, and the `LLMClient` Protocol stays one method — routing,
+  fallback, breakers and quota grow behind `get_llm_client()`, never onto
+  the interface (`docs/FUTURE_PATTERNS.md` item 3). Adapters receive an
+  `AssembledPrompt` and pass it through unchanged: they read `.stable` and
+  `.variable` and never re-split `.text`, or the injection boundary moves
+  out of `core/prompting.py`.
+- Raw note text and model output are never logged. `AssembledPrompt.variable`
+  and `LLMResponse.text` are excluded from repr for this reason; don't
+  reintroduce them into a log line by another route.
 
 ## Decisions not to reverse
 
@@ -44,6 +61,13 @@ current list and status of every provisional decision.
 - **The cost gate fails open on Redis outage.** Intentional — see above.
 - **The broad `except Exception` in `core/errors.py`'s catch-all is
   intentional.** It's the outermost fail-closed boundary; don't narrow it.
+- LLM calls use `retry=False` and pass `timeout=llm_timeout_seconds` per
+  call. A timed-out model call may have completed and billed.
+  `llm_timeout_seconds` (60s) is deliberately separate from
+  `external_call_timeout_seconds` (10s, sized for a CRM fetch) — never raise
+  the global to fit a model call.
+- `llm_model` has no real default and the factory refuses an empty value.
+  A pinned model id is set per deployment, never drifted by a default.
 
 ## Security checkpoint per feature
 

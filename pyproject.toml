@@ -34,16 +34,19 @@ packages = ["src/dodeal_ai"]
 
 [tool.coverage.report]
 fail_under = 92
-
+exclude_also = [
+    'class .*\bProtocol\):',
+]
 [tool.mypy]
 python_version = "3.12"
-files = ["src"]
+files = ["src", "tests/helpers"]
+mypy_path = "src"
+explicit_package_bases = true
 check_untyped_defs = true
 warn_redundant_casts = true
 warn_unused_ignores = true
 no_implicit_optional = true
 plugins = ["pydantic.mypy"]
-
 [dependency-groups]
 dev = [
     "httpx2>=2.9.1",
