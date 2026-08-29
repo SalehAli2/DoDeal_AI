@@ -55,7 +55,9 @@ def get_verifier() -> TokenVerifier:
     return JwtVerifier()
 
 
-def _bearer_token(authorization: Annotated[str | None, Header()] = None) -> str:
+async def _bearer_token(
+    authorization: Annotated[str | None, Header()] = None,
+) -> str:
     """Extract the bearer token from the Authorization header. A missing or
     malformed header is a generic 401 — same shape as any other auth failure."""
     if not authorization or not authorization.lower().startswith("bearer "):
@@ -63,7 +65,7 @@ def _bearer_token(authorization: Annotated[str | None, Header()] = None) -> str:
     return authorization[len("bearer ") :].strip()
 
 
-def gate1_identity(
+async def gate1_identity(
     request: Request,
     token: Annotated[str, Depends(_bearer_token)],
     verifier: Annotated[TokenVerifier, Depends(get_verifier)],
@@ -91,7 +93,7 @@ def gate1_identity(
     return identity
 
 
-def gate2_tenant(
+async def gate2_tenant(
     request: Request,
     identity: Annotated[Identity, Depends(gate1_identity)],
     host: Annotated[str | None, Header()] = None,
@@ -118,7 +120,7 @@ def gate2_tenant(
     return identity
 
 
-def build_context(
+async def build_context(
     request: Request,
     identity: Annotated[Identity, Depends(gate2_tenant)],
 ) -> RequestContext:
@@ -134,7 +136,7 @@ def build_context(
 
 
 def require_context(permission: str):
-    def _dependency(
+    async def _dependency(
         request: Request,
         context: Annotated[RequestContext, Depends(build_context)],
     ) -> RequestContext:

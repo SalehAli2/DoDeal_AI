@@ -7,7 +7,7 @@ not duplicate it. This file is about the *build*; ASSUMPTIONS is about the *cont
 Update rule: every commit that changes a row here updates this file in the same commit. If a row's status
 and the tree disagree, the tree is right and this file is wrong — fix the file.
 
-**Last updated:** 29 Aug 2026, after D2 part 1 — the cost path on redis.asyncio (head of `scaffold/core-governance-homes`, CI green).
+**Last updated:** 29 Aug 2026, after D2 part 2 — gates, probe and health on `async def` (head of `scaffold/core-governance-homes`, CI green).
 
 Status vocabulary: `DONE` (committed, CI green) · `PLANNED` (prompt written, not run) · `NEXT` (the next step
 in the sequence) · `BLOCKED <on>` · `PROPOSED` (decision written, not accepted) · `OPEN` (question asked, no
@@ -37,7 +37,7 @@ answer) · `UNASKED` (question identified, not yet sent).
 | Step 0 — test tenant + key + joint call | BLOCKED on backend (Waqas) | — |
 | Step 14+ | BLOCKED on step 0 | — |
 
-Suite at head: 218 tests, 98.3% coverage (total floor 92, plus per-file floors on the deny-path modules),
+Suite at head: 218 tests, 98.4% coverage (total floor 92, plus per-file floors on the deny-path modules),
 ruff/format/mypy clean, wheel installs and imports in a clean venv.
 
 ---
@@ -225,7 +225,7 @@ writes.
 
 | Step | Contents | Carries from the audit / practices | Gate |
 | --- | --- | --- | --- |
-| 3 | `enforce_token_cost` beside `enforce_cost` (own namespace, own limits, window `None` → `cost_window_seconds`); fail-open pre-flight read; the key test (token charge leaves request counters untouched and vice versa) | H3 breaker + timeouts to `Settings`; M4 TTL fix; M5 `fakeredis[lua]`; M7 client type; policy-per-caller for fail-closed workers | D2 accepted (`9dca80d`) |
+| 3 | `enforce_token_cost` beside `enforce_cost` (own namespace, own limits, window `None` → `cost_window_seconds`); fail-open pre-flight read; the key test (token charge leaves request counters untouched and vice versa) | H3 breaker + timeouts to `Settings`; M4 TTL fix; M5 `fakeredis[lua]`; M7 client type (DONE — D2 part 1); policy-per-caller for fail-closed workers | D2 accepted (`9dca80d`) |
 | 4 | `tools/leads.py`: `page`/`per_page`/`since`/filters as kwargs; paging on `current_page == last_page`; `since` always with explicit offset | H2 typed backend errors + `retry_on`; M1 lifespan-owned `AsyncClient`; M2 per-item validation + `bookedAmount: Any`; M3 `get_leads_page`; backoff with jitter; `User-Agent` | — |
 | 5 | `units/structured_intelligence/` schemas (`NoteType`, `NoteAnalysis`, `NoteScore`), version stamps, suppressed-state | `TenantConfig` seam decision | — |
 | 6 | Route skeletons behind the gates, dependency override proven | D1 answer (Q1/Q2); metrics/tracing; error taxonomy | Q1 answered |

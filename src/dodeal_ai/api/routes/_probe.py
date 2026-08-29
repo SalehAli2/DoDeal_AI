@@ -18,7 +18,7 @@ router = APIRouter(prefix="/_probe", tags=["scaffolding"])
 
 
 @router.get("/protected")
-def protected(
+async def protected(
     context: Annotated[RequestContext, Depends(gate4_cost)],
 ) -> dict:
     return {

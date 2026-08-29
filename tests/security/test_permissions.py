@@ -130,11 +130,11 @@ def _bare_context(permissions=frozenset()) -> RequestContext:
     )
 
 
-def test_require_context_denies_with_403_and_audits_the_reason(json_log):
+async def test_require_context_denies_with_403_and_audits_the_reason(json_log):
     dependency = require_context("lead:read")
 
     with pytest.raises(HTTPException) as raised:
-        dependency(_stub_request(), _bare_context())
+        await dependency(_stub_request(), _bare_context())
 
     assert raised.value.status_code == 403
     assert raised.value.detail == "Forbidden"
@@ -155,11 +155,11 @@ def test_require_context_denies_with_403_and_audits_the_reason(json_log):
     )
 
 
-def test_require_context_allows_and_audits_when_the_permission_is_held(json_log):
+async def test_require_context_allows_and_audits_when_the_permission_is_held(json_log):
     dependency = require_context("lead:read")
     context = _bare_context(permissions=frozenset({"lead:read"}))
 
-    assert dependency(_stub_request(), context) is context
+    assert await dependency(_stub_request(), context) is context
 
     allow_lines = [
         line
