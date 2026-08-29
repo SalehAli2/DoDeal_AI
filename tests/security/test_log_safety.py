@@ -115,7 +115,6 @@ def _notes_payload_with_bad_note() -> dict:
     }
 
 
-@pytest.mark.asyncio
 async def test_h1_validation_failure_through_catch_all_logs_no_note_text(log_capture):
     # H1 made permanent: the note's content used to arrive in the ERROR line
     # via the chained ValidationError's input_value.
@@ -142,7 +141,6 @@ async def test_h1_validation_failure_through_catch_all_logs_no_note_text(log_cap
     assert "test_log_safety.py" in line["traceback"]
 
 
-@pytest.mark.asyncio
 async def test_foreign_exception_through_catch_all_logs_type_not_message(log_capture):
     try:
         _raise_foreign(KeyError)
@@ -159,7 +157,6 @@ async def test_foreign_exception_through_catch_all_logs_type_not_message(log_cap
     assert "test_log_safety.py" in line["traceback"]
 
 
-@pytest.mark.asyncio
 async def test_chained_cause_is_logged_by_type_only(log_capture):
     try:
         try:
@@ -178,7 +175,6 @@ async def test_chained_cause_is_logged_by_type_only(log_capture):
     assert "error" not in line
 
 
-@pytest.mark.asyncio
 async def test_l5_watchdog_logs_failure_type_not_message(log_capture, settings_env):
     async def op():
         raise RuntimeError(SENTINEL)

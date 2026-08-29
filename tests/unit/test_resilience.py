@@ -9,7 +9,6 @@ import pytest
 from dodeal_ai.core.resilience import ExternalCallError, call_with_watchdog
 
 
-@pytest.mark.asyncio
 async def test_succeeds_first_try():
     calls = 0
 
@@ -23,7 +22,6 @@ async def test_succeeds_first_try():
     assert calls == 1  # no retry needed
 
 
-@pytest.mark.asyncio
 async def test_succeeds_on_retry():
     calls = 0
 
@@ -39,7 +37,6 @@ async def test_succeeds_on_retry():
     assert calls == 2  # failed once, succeeded on the single retry
 
 
-@pytest.mark.asyncio
 async def test_fails_closed_after_retry():
     calls = 0
 
@@ -55,7 +52,6 @@ async def test_fails_closed_after_retry():
     assert calls == 2  # tried exactly twice, then failed closed
 
 
-@pytest.mark.asyncio
 async def test_no_retry_tries_once():
     calls = 0
 
@@ -69,7 +65,6 @@ async def test_no_retry_tries_once():
     assert calls == 1  # retry disabled -> single attempt
 
 
-@pytest.mark.asyncio
 async def test_respects_timeout():
     async def too_slow():
         await asyncio.sleep(1.0)

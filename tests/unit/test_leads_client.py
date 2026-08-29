@@ -73,7 +73,6 @@ def _notes_body(notes: list[dict]) -> dict:
     return {"status": True, "data": notes, "meta": _meta(len(notes))}
 
 
-@pytest.mark.asyncio
 async def test_builds_tenant_url_from_context_subdomain():
     transport = MockTransport(_list_body([{"id": 1}]))
     client = _client(transport)
