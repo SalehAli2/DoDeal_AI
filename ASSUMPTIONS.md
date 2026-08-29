@@ -925,16 +925,22 @@ discovered at build time.
 
 Ask these directly when he presents his design. Clear answers mean he understands the failure modes; hesitation shows where to focus review.
 
-- Where exactly is the sync/async boundary, and how is the event loop managed per task? Celery workers are sync processes; this codebase is async. Watch for blocking calls inside async code, and for one network client shared across forked processes.
-- **Which async runtime, and why not Celery?** — ask this **only once Decision 2
-  is accepted** (`docs/decisions/0001-principal-model-and-execution-model.md`;
-  `PROPOSED` in `docs/STATUS.md` §2, not yet decided). If it is accepted, workers
-  run the *same* async code under an async-native runner (`arq`, or a Redis
-  Streams consumer we own) and `celery_app.py` is deleted rather than filled in,
-  so this question replaces the one above rather than joining it. A good answer
-  names what the two-stage / three-lane design maps onto (arq queues or Streams
-  consumer groups) and shows nothing in the Unit B plan depends on a Celery-only
-  feature. **Do not ask it while D2 is still open** — it presumes the answer.
+- **Which async runtime, and why not Celery?** — ask this; D2 is accepted
+  (`docs/decisions/0001-principal-model-and-execution-model.md`; `ACCEPTED` in
+  `docs/STATUS.md` §2). It **replaces** the older "where is the sync/async
+  boundary" question rather than joining it, because under D2 there is no
+  boundary left to place. The recorded answer: workers run the *same* async code
+  under an async-native runner — `arq` (a Redis Streams consumer we own is the
+  fallback) — and `celery_app.py` is deleted rather than filled in. One execution
+  model, not three. Celery's cost was never its feature set: a fork-based sync
+  worker against an async codebase buys one Redis client shared across forked
+  processes, a sync-to-async bridge at every seam, and retry multiplication on
+  top of `call_with_watchdog` — six paid provider calls for one recording
+  (§7.6), a money bug and not merely a reliability one. A good answer names what
+  the two-stage / three-lane design maps onto (arq queues or Streams consumer
+  groups), shows nothing in the Unit B plan depends on a Celery-only feature,
+  and still says where the event loop lives per task and what keeps a blocking
+  call from landing inside async code.
 - How many provider calls does one failing job actually make? See §7.6.
 - What does a job record look like when the model returns malformed output? Watch for `json.loads` on the raw reply, and for a broad `except: pass` making a failed job look successful. The broad except in `core/errors.py` is deliberate at the ASGI boundary only.
 

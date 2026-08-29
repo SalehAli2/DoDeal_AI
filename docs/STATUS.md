@@ -7,7 +7,7 @@ not duplicate it. This file is about the *build*; ASSUMPTIONS is about the *cont
 Update rule: every commit that changes a row here updates this file in the same commit. If a row's status
 and the tree disagree, the tree is right and this file is wrong — fix the file.
 
-**Last updated:** 27 Aug 2026, after fix 6b (head of `scaffold/core-governance-homes`, CI green).
+**Last updated:** 29 Aug 2026, after the D1/D2 acceptance flip (head of `scaffold/core-governance-homes`, CI green).
 
 Status vocabulary: `DONE` (committed, CI green) · `PLANNED` (prompt written, not run) · `NEXT` (the next step
 in the sequence) · `BLOCKED <on>` · `PROPOSED` (decision written, not accepted) · `OPEN` (question asked, no
@@ -31,7 +31,7 @@ answer) · `UNASKED` (question identified, not yet sent).
 | Hotfix — root `tests/conftest.py` (signing key + settings cache per test; no `.env` dependence) | DONE | `60125dc` |
 | Audit fix 6a — code housekeeping (see §4 for contents) | DONE | `e138149` |
 | Audit fix 6b — repo/process housekeeping + ledger corrections (see §4, §7) | DONE | this commit |
-| Step 3 — token counters (`enforce_token_cost`, pre-flight read, breaker, TTL fix, Lua under fakeredis) | NEXT · BLOCKED on Decision 2 | — |
+| Step 3 — token counters (`enforce_token_cost`, pre-flight read, breaker, TTL fix, Lua under fakeredis) | NEXT | — |
 | Step 4 — tool layer: query params, paging, error taxonomy, retry policy, pooled transport, per-item validation | after step 3 | — |
 | Steps 5–13 | per ed3 §15 | — |
 | Step 0 — test tenant + key + joint call | BLOCKED on backend (Waqas) | — |
@@ -63,11 +63,11 @@ ruff/format/mypy clean, wheel installs and imports in a clean venv.
   (`uv run pytest; if ($?) { uv run ruff check . }; if ($?) { uv run ruff format --check . }; if ($?) { uv run mypy }`);
   one Claude Code session per fix/step; never amend or force-push; no Co-Authored-By.
 
-### Proposed — design note `docs/decisions/0001-principal-model-and-execution-model.md`
-| Decision | Recommendation | Status | Blocks |
+### Accepted — design note `docs/decisions/0001-principal-model-and-execution-model.md`
+| Decision | Position | Status | Carried into |
 | --- | --- | --- | --- |
-| D1 — who calls us, and as whom | Principal model with three sources (user JWT today; signed service token mirroring `X-Node-System-Token`; signed job payload for workers); tool layer takes a `TenantScope`, not a `RequestContext` | PROPOSED · waiting on backend Q1/Q2 (§6) | Step 6 route skeletons; Unit B step 4 |
-| D2 — one execution model | All-async: `redis.asyncio` on the request path, `async def` routes, workers on an async-native runner (arq or Redis Streams) instead of Celery; `celery_app.py` deleted, not filled | PROPOSED · engineering-only | Step 3 (cost client type), step 6, Unit B step 4 |
+| D1 — who calls us, and as whom | Principal model with three sources (user JWT today; signed service token mirroring `X-Node-System-Token`; signed job payload for workers); tool layer takes a `TenantScope`, not a `RequestContext` | ACCEPTED as design · which source the CRM caller uses still awaits Q1/Q2 (§6) | Step 6 route skeletons; Unit B step 4 |
+| D2 — one execution model | All-async: `redis.asyncio` on the request path, `async def` routes, workers on `arq` (an async-native, Redis-backed runner; a Streams consumer we own is the fallback) instead of Celery; `celery_app.py` deleted, not filled | ACCEPTED · engineering-only | Step 3 (cost client type), step 6, Unit B step 4 |
 
 ### Smaller design debts (fold into the step that first needs them)
 - Error taxonomy: one `DodealError(reason_code, http_status, gate)` base + one handler — step 4 or step 6.
@@ -92,7 +92,7 @@ Severity from the 26 Aug audit. "Landed in" is the commit or the step that carri
 | F2 | One global DD-API-KEY with placeholder default | DONE | fix 2 |
 | H1 | Validation failures leaked field values into the ERROR log via the chained pydantic error | DONE | fix 5 |
 | H2 | Watchdog retried 401/403/404/422 and collapsed them into one error | PLANNED | step 4, first sub-commit |
-| H3 | Redis outage costs 2.0s per request in the threadpool; `/ready` ping exceeds k8s default probe timeout | PLANNED · BLOCKED on D2 | step 3, first sub-commit |
+| H3 | Redis outage costs 2.0s per request in the threadpool; `/ready` ping exceeds k8s default probe timeout | PLANNED | step 3, first sub-commit |
 | H4 | Gate 2 case-sensitive on Host; base domain unchecked | DONE | fix 3 |
 | H5 | No JWT clock-skew leeway; skew indistinguishable from forgery | DONE | fix 4 |
 | H6 | Tenant claim unvalidated and interpolated into the outbound URL | DONE | fix 3 |
@@ -103,7 +103,7 @@ Severity from the 26 Aug audit. "Landed in" is the commit or the step that carri
 | M4 | Lua sets EXPIRE only on create; pre-existing key without TTL never expires | PLANNED | step 3 |
 | M5 | Lua never executed by the suite | PLANNED (`fakeredis[lua]`) | step 3 |
 | M6 | Inbound `X-Request-ID` trusted verbatim | DONE | fix 6a |
-| M7 | Sync Redis client will block the event loop from async unit code | PLANNED · BLOCKED on D2 | step 3 |
+| M7 | Sync Redis client will block the event loop from async unit code | PLANNED | step 3 |
 | M8 | No Dockerfile / `.env.example`; compose without api | DONE | fix 1 |
 | M9 | Log formatter merged JSON-shaped messages into top-level fields (forgery path) | DONE | fix 5 |
 | M10 | ~~Unused~~ `httpx2` dev dependency — **the finding was wrong**: `httpx2` is Starlette TestClient's preferred client (it falls back to `httpx` with a deprecation warning). Dropped in 6a, restored in 6b; kept. Runtime migration of `tools/httpx_transport.py` at step 4 | DONE (corrected) | fix 6b |
@@ -119,7 +119,6 @@ Severity from the 26 Aug audit. "Landed in" is the commit or the step that carri
 | — | `require_context` (parked Gate 3) untested, hiding in the aggregate coverage | DONE — deny and allow paths tested; `dependencies.py` 83% → 98% | fix 6a |
 | — | Per-module settings fixtures redundant after root conftest | DONE — five removed | fix 6a |
 | — | Real tenant name in fixtures | DONE — 102 occurrences across 15 test modules, plus the docs and `real_fetch_check.py` | fix 6a |
-
 | — | `httpx` → `httpx2` migration of `tools/httpx_transport.py`, so the test client and the production transport run on one library | PLANNED | step 4 |
 
 Unit B / cross-unit (plan-only, no code yet): worker identity needs a principal type (D1); `lru_cache` Redis
