@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": [
+      "Bash(ls \"C:/Users/DODEAL 1/.claude/projects/d--AIServicesCrm/memory/\" 2>/dev/null)",
+      "Read(//c/Users/DODEAL 1/.claude/projects/d--AIServicesCrm/memory/**)",
+      "PowerShell(uv *)",
+      "PowerShell(git status *)",
+      "PowerShell(git diff *)",
+      "PowerShell(git log *)",
+      "PowerShell(git ls-files *)",
+      "PowerShell(git add *)",
+      "PowerShell(git mv *)",
+      "PowerShell(git rm *)",
+      "PowerShell(git commit *)",
+      "PowerShell(New-Item *)",
+      "PowerShell(Get-Item *)",
+      "PowerShell(Get-ChildItem *)",
+      "PowerShell(Select-String *)"
+    ],
+    "ask": [
+      "PowerShell(git push *)"
+    ],
+    "deny": [
+      "PowerShell(git push --force *)",
+      "PowerShell(git push -f *)",
+      "PowerShell(git reset --hard *)",
+      "PowerShell(git commit --amend *)",
+      "PowerShell(Remove-Item -Recurse *)",
+      "Read(./.env)",
+      "Read(./.env.*)"
+    ]
+  }
+}
