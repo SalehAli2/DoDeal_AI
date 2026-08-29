@@ -1,6 +1,6 @@
-"""Redis client: named connections read the configured URLs; readiness
-reflects the cost connection's ping result (the queue connection has no
-consumer yet). Redis itself is mocked so tests need no running server."""
+"""Redis client: the cost connection reads its configured URL, and readiness
+reflects its ping result. Redis itself is mocked so tests need no running
+server."""
 
 from __future__ import annotations
 
@@ -24,7 +24,6 @@ def _config(monkeypatch):
 
 
 def _clear_caches():
-    redis_module.get_queue_client.cache_clear()
     redis_module.get_cost_client.cache_clear()
 
 

@@ -7,7 +7,7 @@ not duplicate it. This file is about the *build*; ASSUMPTIONS is about the *cont
 Update rule: every commit that changes a row here updates this file in the same commit. If a row's status
 and the tree disagree, the tree is right and this file is wrong — fix the file.
 
-**Last updated:** 29 Aug 2026, after D2 part 2 — gates, probe and health on `async def` (head of `scaffold/core-governance-homes`, CI green).
+**Last updated:** 29 Aug 2026, after D2 part 3 — Celery deleted, arq skeleton in; the async migration is complete (head of `scaffold/core-governance-homes`, CI green).
 
 Status vocabulary: `DONE` (committed, CI green) · `PLANNED` (prompt written, not run) · `NEXT` (the next step
 in the sequence) · `BLOCKED <on>` · `PROPOSED` (decision written, not accepted) · `OPEN` (question asked, no
@@ -31,13 +31,14 @@ answer) · `UNASKED` (question identified, not yet sent).
 | Hotfix — root `tests/conftest.py` (signing key + settings cache per test; no `.env` dependence) | DONE | `60125dc` |
 | Audit fix 6a — code housekeeping (see §4 for contents) | DONE | `e138149` |
 | Audit fix 6b — repo/process housekeeping + ledger corrections (see §4, §7) | DONE | `4805dc1` + `1d795d0` |
+| Async migration (D2, commits a–c) — cost path on `redis.asyncio`; gates, probe and `/health` `async def`; Celery deleted, arq skeleton in | DONE | `d37945b` + `87cab6f` + D2 part 3 |
 | Step 3 — token counters (`enforce_token_cost`, pre-flight read, breaker, TTL fix, Lua under fakeredis) | NEXT | — |
 | Step 4 — tool layer: query params, paging, error taxonomy, retry policy, pooled transport, per-item validation | after step 3 | — |
 | Steps 5–13 | per ed3 §15 | — |
 | Step 0 — test tenant + key + joint call | BLOCKED on backend (Waqas) | — |
 | Step 14+ | BLOCKED on step 0 | — |
 
-Suite at head: 218 tests, 98.4% coverage (total floor 92, plus per-file floors on the deny-path modules),
+Suite at head: 221 tests, 98.4% coverage (total floor 92, plus per-file floors on the deny-path modules),
 ruff/format/mypy clean, wheel installs and imports in a clean venv.
 
 ---

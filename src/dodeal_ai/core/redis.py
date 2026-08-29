@@ -1,22 +1,23 @@
-"""Redis connections for the service.
+"""Redis connection for the service.
 
-Two named connections are exposed so no caller has to guess which Redis it is
+One named connection is exposed, so no caller has to guess which Redis it is
 talking to:
 
-  - queue_client: for the Celery-style work queue (used later).
-  - cost_client:  for per-tenant and per-user cost/quota counters.
+  - cost_client: for per-tenant and per-user cost/quota counters.
 
-Both point at the local Redis today, on different logical DBs, so their keys
-never collide. Connection URLs come from config; real hosts and credentials are
+The work queue has its own connection, owned by arq and configured from
+`redis_queue_url` in workers/runner.py -- a bare factory here had no caller, so
+it is not duplicated. The two use different logical DBs, so their keys never
+collide. The connection URL comes from config; real hosts and credentials are
 provided by DevOps later with no code change.
 
-Both are `redis.asyncio` clients (Decision 2 -- one execution model). The async
-client raises the same `redis.RedisError` family as the sync one, so every
-existing catch keeps its meaning; only the call sites gained an `await`.
+The client is a `redis.asyncio` client (Decision 2 -- one execution model). The
+async client raises the same `redis.RedisError` family as the sync one, so
+every existing catch keeps its meaning; only the call sites gained an `await`.
 
-Clients are created lazily and cached. Creating a client does not open a socket
-and does not touch an event loop; the first awaited command does. A liveness
-check (ping) is exposed for the readiness endpoint.
+The client is created lazily and cached. Creating it does not open a socket and
+does not touch an event loop; the first awaited command does. A liveness check
+(ping) is exposed for the readiness endpoint.
 """
 
 from __future__ import annotations
@@ -27,17 +28,6 @@ import redis
 from redis import asyncio as aioredis
 
 from dodeal_ai.core.config import get_settings
-
-
-@lru_cache
-def get_queue_client() -> aioredis.Redis:
-    """The work-queue connection. Cached so one client is reused."""
-    return aioredis.from_url(
-        get_settings().redis_queue_url,
-        decode_responses=True,
-        socket_connect_timeout=2.0,
-        socket_timeout=2.0,
-    )
 
 
 @lru_cache

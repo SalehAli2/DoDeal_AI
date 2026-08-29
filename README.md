@@ -172,7 +172,7 @@ dodeal-ai/
 │   │   └── lead.py
 │   ├── tools/{leads.py,httpx_transport.py}
 │   ├── units/{structured_intelligence,call_intelligence,assistant,sales_automation}/
-│   └── workers/celery_app.py
+│   └── workers/runner.py
 ├── study.py
 ├── tests/
 │   ├── helpers/{tokens.py,test_tokens.py}
@@ -332,7 +332,7 @@ Root contracts owned by the backend, kept inside the package for the same reason
 
 | File | Purpose |
 | --- | --- |
-| `celery_app.py` | Placeholder Celery entrypoint for future background workers (transcription, lead engagement). Not wired up yet. |
+| `runner.py` | The arq worker entrypoint (Decision 2): `WorkerSettings` with Redis derived from `redis_queue_url` and an empty `functions` list. Importing it opens no connection. Step 14 adds the lanes and the real tasks. |
 
 ### `tests/helpers/`
 
@@ -410,7 +410,7 @@ All configuration is read through `Settings` in `core/config.py`. Every variable
 | `DODEAL_LLM_MODEL` | empty, refused | The exact pinned model id, set per deployment. No drifting default. |
 | `DODEAL_LLM_TIMEOUT_SECONDS` | `60.0` | Per-call timeout for a model call, passed into the watchdog with `retry=False`. Deliberately separate from the 10s external-call timeout. |
 | `DODEAL_LLM_MAX_OUTPUT_TOKENS` | `1024` | Default output ceiling, sized with headroom for Arabic. |
-| `DODEAL_REDIS_QUEUE_URL` | `redis://localhost:6379/0` | The work-queue Redis connection. Reserved for future workers. |
+| `DODEAL_REDIS_QUEUE_URL` | `redis://localhost:6379/0` | The work-queue Redis connection, read by the arq worker (`workers/runner.py`). |
 | `DODEAL_REDIS_COST_URL` | `redis://localhost:6379/1` | The cost and quota Redis connection used by Gate 4. |
 | `DODEAL_COST_PER_TENANT_LIMIT` | `10000` | The per-tenant request cap per window. |
 | `DODEAL_COST_PER_USER_LIMIT` | `1000` | The per-user request cap per window. |

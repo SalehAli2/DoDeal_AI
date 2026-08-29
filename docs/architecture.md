@@ -99,9 +99,8 @@ output) are omitted.
     │   │   ├── assistant/                 # Unit C1
     │   │   └── sales_automation/          # Unit C2 (deferred, post-pilot)
     │   │
-    │   ├── workers/              # Celery: transcription (B), lead engagement (C2)
-    │   │   ├── celery_app.py     # empty — no worker yet
-    │   │   └── tasks/
+    │   ├── workers/              # arq: transcription (B), lead engagement (C2)
+    │   │   └── runner.py         # WorkerSettings only — no task until step 14
     │   │
     │   └── api/routes/           # one router per unit
     │       └── _probe.py         # gate-chain probe route (tests only)
