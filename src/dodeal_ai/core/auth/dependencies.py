@@ -161,13 +161,13 @@ def require_context(permission: str):
     return _dependency
 
 
-def gate4_cost(
+async def gate4_cost(
     request: Request,
     context: Annotated[RequestContext, Depends(build_context)],
 ) -> RequestContext:
     request_id = getattr(request.state, "request_id", "unknown")
     try:
-        enforce_cost(context.tenant, context.subject)
+        await enforce_cost(context.tenant, context.subject)
     except CostLimitError as exc:
         audit(
             decision="deny",

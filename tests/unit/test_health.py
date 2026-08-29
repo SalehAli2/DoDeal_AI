@@ -25,7 +25,11 @@ def test_ready_returns_503_when_config_missing(monkeypatch):
 def test_ready_returns_200_degraded_when_redis_down(monkeypatch):
     monkeypatch.setenv("DODEAL_JWT_SIGNING_KEY", "test-key")
     get_settings.cache_clear()
-    monkeypatch.setattr("dodeal_ai.main.check_cost_redis_ready", lambda: False)
+
+    async def _redis_down() -> bool:
+        return False
+
+    monkeypatch.setattr("dodeal_ai.main.check_cost_redis_ready", _redis_down)
     response = client.get("/ready")
     assert response.status_code == 200
     assert response.json() == {"status": "ready", "redis": "degraded"}
@@ -35,7 +39,11 @@ def test_ready_returns_200_degraded_when_redis_down(monkeypatch):
 def test_ready_returns_200_ok_when_redis_up(monkeypatch):
     monkeypatch.setenv("DODEAL_JWT_SIGNING_KEY", "test-key")
     get_settings.cache_clear()
-    monkeypatch.setattr("dodeal_ai.main.check_cost_redis_ready", lambda: True)
+
+    async def _redis_up() -> bool:
+        return True
+
+    monkeypatch.setattr("dodeal_ai.main.check_cost_redis_ready", _redis_up)
     response = client.get("/ready")
     assert response.status_code == 200
     assert response.json() == {"status": "ready", "redis": "ok"}

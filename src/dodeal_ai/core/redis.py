@@ -10,9 +10,13 @@ Both point at the local Redis today, on different logical DBs, so their keys
 never collide. Connection URLs come from config; real hosts and credentials are
 provided by DevOps later with no code change.
 
-Clients are created lazily and cached. Creating a client does not open a socket;
-the first command does. A liveness check (ping) is exposed for the readiness
-endpoint.
+Both are `redis.asyncio` clients (Decision 2 -- one execution model). The async
+client raises the same `redis.RedisError` family as the sync one, so every
+existing catch keeps its meaning; only the call sites gained an `await`.
+
+Clients are created lazily and cached. Creating a client does not open a socket
+and does not touch an event loop; the first awaited command does. A liveness
+check (ping) is exposed for the readiness endpoint.
 """
 
 from __future__ import annotations
@@ -20,14 +24,15 @@ from __future__ import annotations
 from functools import lru_cache
 
 import redis
+from redis import asyncio as aioredis
 
 from dodeal_ai.core.config import get_settings
 
 
 @lru_cache
-def get_queue_client() -> redis.Redis:
+def get_queue_client() -> aioredis.Redis:
     """The work-queue connection. Cached so one client is reused."""
-    return redis.from_url(
+    return aioredis.from_url(
         get_settings().redis_queue_url,
         decode_responses=True,
         socket_connect_timeout=2.0,
@@ -36,9 +41,9 @@ def get_queue_client() -> redis.Redis:
 
 
 @lru_cache
-def get_cost_client() -> redis.Redis:
+def get_cost_client() -> aioredis.Redis:
     """The cost/quota connection. Cached so one client is reused."""
-    return redis.from_url(
+    return aioredis.from_url(
         get_settings().redis_cost_url,
         decode_responses=True,
         socket_connect_timeout=2.0,
@@ -46,7 +51,7 @@ def get_cost_client() -> redis.Redis:
     )
 
 
-def check_cost_redis_ready() -> bool:
+async def check_cost_redis_ready() -> bool:
     """Return True if the cost/quota connection responds to ping. Used by the
     readiness endpoint. Only the cost connection is checked -- the queue
     connection has no consumer yet (no worker exists), so pinging it would
@@ -56,6 +61,6 @@ def check_cost_redis_ready() -> bool:
     means for readiness (see main.py -- Redis down does not fail /ready,
     matching the cost gate's own fail-open policy)."""
     try:
-        return bool(get_cost_client().ping())
+        return bool(await get_cost_client().ping())
     except redis.RedisError:
         return False

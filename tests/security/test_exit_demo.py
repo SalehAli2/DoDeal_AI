@@ -18,7 +18,7 @@ class _FakeCostRedis:
     def __init__(self):
         self.store = {}
 
-    def eval(self, script, numkeys, *keys_and_args):
+    async def eval(self, script, numkeys, *keys_and_args):
         keys = keys_and_args[:numkeys]
         amount = int(keys_and_args[numkeys])
         counts = []

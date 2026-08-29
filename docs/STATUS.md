@@ -7,7 +7,7 @@ not duplicate it. This file is about the *build*; ASSUMPTIONS is about the *cont
 Update rule: every commit that changes a row here updates this file in the same commit. If a row's status
 and the tree disagree, the tree is right and this file is wrong — fix the file.
 
-**Last updated:** 29 Aug 2026, after the D1/D2 acceptance flip (head of `scaffold/core-governance-homes`, CI green).
+**Last updated:** 29 Aug 2026, after D2 part 1 — the cost path on redis.asyncio (head of `scaffold/core-governance-homes`, CI green).
 
 Status vocabulary: `DONE` (committed, CI green) · `PLANNED` (prompt written, not run) · `NEXT` (the next step
 in the sequence) · `BLOCKED <on>` · `PROPOSED` (decision written, not accepted) · `OPEN` (question asked, no
@@ -30,7 +30,7 @@ answer) · `UNASKED` (question identified, not yet sent).
 | Audit fix 5 — log safety (`OutputValidationError` unchained, `log_safety.py`, audit via `extra=`, sentinel tests) | DONE | `dc8371f` |
 | Hotfix — root `tests/conftest.py` (signing key + settings cache per test; no `.env` dependence) | DONE | `60125dc` |
 | Audit fix 6a — code housekeeping (see §4 for contents) | DONE | `e138149` |
-| Audit fix 6b — repo/process housekeeping + ledger corrections (see §4, §7) | DONE | this commit |
+| Audit fix 6b — repo/process housekeeping + ledger corrections (see §4, §7) | DONE | `4805dc1` + `1d795d0` |
 | Step 3 — token counters (`enforce_token_cost`, pre-flight read, breaker, TTL fix, Lua under fakeredis) | NEXT | — |
 | Step 4 — tool layer: query params, paging, error taxonomy, retry policy, pooled transport, per-item validation | after step 3 | — |
 | Steps 5–13 | per ed3 §15 | — |
@@ -103,7 +103,7 @@ Severity from the 26 Aug audit. "Landed in" is the commit or the step that carri
 | M4 | Lua sets EXPIRE only on create; pre-existing key without TTL never expires | PLANNED | step 3 |
 | M5 | Lua never executed by the suite | PLANNED (`fakeredis[lua]`) | step 3 |
 | M6 | Inbound `X-Request-ID` trusted verbatim | DONE | fix 6a |
-| M7 | Sync Redis client will block the event loop from async unit code | PLANNED | step 3 |
+| M7 | Sync Redis client will block the event loop from async unit code | DONE | D2 part 1 |
 | M8 | No Dockerfile / `.env.example`; compose without api | DONE | fix 1 |
 | M9 | Log formatter merged JSON-shaped messages into top-level fields (forgery path) | DONE | fix 5 |
 | M10 | ~~Unused~~ `httpx2` dev dependency — **the finding was wrong**: `httpx2` is Starlette TestClient's preferred client (it falls back to `httpx` with a deprecation warning). Dropped in 6a, restored in 6b; kept. Runtime migration of `tools/httpx_transport.py` at step 4 | DONE (corrected) | fix 6b |
@@ -138,7 +138,7 @@ loggers through the JSON handler (L6); `require_context` deny-path test; per-fil
 pin ruff selectors + line-length + target; commit `.python-version` and pin CI Python; `.gitattributes`;
 docstring drift (L4).
 
-**6b (repo/process) — DONE, this commit:** commit `.claude/settings.json` (wildcard permission rules) and gitignore
+**6b (repo/process) — DONE, `4805dc1` + `1d795d0`:** commit `.claude/settings.json` (wildcard permission rules) and gitignore
 `.claude/settings.local.json`; Dependabot for `uv` and GitHub Actions; branch-protection instructions in
 CONTRIBUTING (no merge on red, required checks = the four + wheel + floors); `docs/runbooks/secret-rotation.md`
 (JWT secret / RS256 public key, per-tenant DD-API-KEYS — today rotation = deploy, `Settings` is cached; JWKS is
@@ -217,6 +217,7 @@ writes.
   until step 3.
 - §14: `study.py` deletion (fix 6a); README no longer refers to `.env.example` as missing.
 - §15 (Unit B review questions): add "which async runtime, and why not Celery" once D2 is accepted.
+  DONE — applied in `9dca80d`, with the recorded answer.
 
 ---
 
@@ -224,7 +225,7 @@ writes.
 
 | Step | Contents | Carries from the audit / practices | Gate |
 | --- | --- | --- | --- |
-| 3 | `enforce_token_cost` beside `enforce_cost` (own namespace, own limits, window `None` → `cost_window_seconds`); fail-open pre-flight read; the key test (token charge leaves request counters untouched and vice versa) | H3 breaker + timeouts to `Settings`; M4 TTL fix; M5 `fakeredis[lua]`; M7 client type; policy-per-caller for fail-closed workers | D2 accepted first |
+| 3 | `enforce_token_cost` beside `enforce_cost` (own namespace, own limits, window `None` → `cost_window_seconds`); fail-open pre-flight read; the key test (token charge leaves request counters untouched and vice versa) | H3 breaker + timeouts to `Settings`; M4 TTL fix; M5 `fakeredis[lua]`; M7 client type; policy-per-caller for fail-closed workers | D2 accepted (`9dca80d`) |
 | 4 | `tools/leads.py`: `page`/`per_page`/`since`/filters as kwargs; paging on `current_page == last_page`; `since` always with explicit offset | H2 typed backend errors + `retry_on`; M1 lifespan-owned `AsyncClient`; M2 per-item validation + `bookedAmount: Any`; M3 `get_leads_page`; backoff with jitter; `User-Agent` | — |
 | 5 | `units/structured_intelligence/` schemas (`NoteType`, `NoteAnalysis`, `NoteScore`), version stamps, suppressed-state | `TenantConfig` seam decision | — |
 | 6 | Route skeletons behind the gates, dependency override proven | D1 answer (Q1/Q2); metrics/tracing; error taxonomy | Q1 answered |

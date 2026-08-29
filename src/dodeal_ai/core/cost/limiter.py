@@ -43,6 +43,7 @@ from __future__ import annotations
 import logging
 
 import redis
+from redis import asyncio as aioredis
 
 from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.redis import get_cost_client
@@ -80,8 +81,8 @@ return {tenant_count, user_count}
 """
 
 
-def _incr_both_with_window(
-    client: redis.Redis,
+async def _incr_both_with_window(
+    client: aioredis.Redis,
     tenant_key: str,
     user_key: str,
     amount: int,
@@ -89,13 +90,13 @@ def _incr_both_with_window(
 ) -> tuple[int, int]:
     """Atomically increment both counters by `amount` in one Lua script
     execution (see _INCR_BOTH_SCRIPT). Returns (tenant_count, user_count)."""
-    tenant_count, user_count = client.eval(
+    tenant_count, user_count = await client.eval(
         _INCR_BOTH_SCRIPT, 2, tenant_key, user_key, amount, window
     )
     return int(tenant_count), int(user_count)
 
 
-def enforce_cost(tenant: str, subject: str, amount: int = 1) -> None:
+async def enforce_cost(tenant: str, subject: str, amount: int = 1) -> None:
     """Atomically increment the tenant and user counters by `amount` and
     enforce both caps.
 
@@ -112,7 +113,7 @@ def enforce_cost(tenant: str, subject: str, amount: int = 1) -> None:
     user_key = f"cost:user:{tenant}:{subject}"
 
     try:
-        tenant_count, user_count = _incr_both_with_window(
+        tenant_count, user_count = await _incr_both_with_window(
             client, tenant_key, user_key, amount, settings.cost_window_seconds
         )
     except redis.RedisError:
@@ -129,7 +130,7 @@ def enforce_cost(tenant: str, subject: str, amount: int = 1) -> None:
         raise CostLimitError("user_quota_exceeded")
 
 
-def get_usage(tenant: str, subject: str) -> tuple[int, int]:
+async def get_usage(tenant: str, subject: str) -> tuple[int, int]:
     """Read-only: current (tenant_count, user_count) for this window, without
     incrementing either counter. 0 for a counter that hasn't been touched yet
     (or has expired). Unlike enforce_cost, this does not fail open -- a Redis
@@ -139,5 +140,5 @@ def get_usage(tenant: str, subject: str) -> tuple[int, int]:
     client = get_cost_client()
     tenant_key = f"cost:tenant:{tenant}"
     user_key = f"cost:user:{tenant}:{subject}"
-    tenant_raw, user_raw = client.mget(tenant_key, user_key)
+    tenant_raw, user_raw = await client.mget(tenant_key, user_key)
     return int(tenant_raw or 0), int(user_raw or 0)

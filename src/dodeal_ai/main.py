@@ -8,7 +8,11 @@ from dodeal_ai.api.routes import _probe
 from dodeal_ai.core.config import ConfigError, get_settings
 from dodeal_ai.core.errors import register_error_handlers
 from dodeal_ai.core.logging_config import configure_logging
-from dodeal_ai.core.redis import check_cost_redis_ready
+from dodeal_ai.core.redis import (
+    check_cost_redis_ready,
+    get_cost_client,
+    get_queue_client,
+)
 from dodeal_ai.middleware.request_id import RequestIDMiddleware
 
 
@@ -23,6 +27,11 @@ async def lifespan(app: FastAPI):
         logging.getLogger("dodeal_ai.startup").error("backend_keys_missing count=0")
     configure_logging()
     yield
+    # Release both connection pools on shutdown. from_url opens no socket, so
+    # constructing a client here only to close it costs nothing, and closing
+    # unconditionally keeps shutdown symmetrical whether or not it was used.
+    await get_queue_client().aclose()
+    await get_cost_client().aclose()
 
 
 app = FastAPI(title="DODEAL AI Intelligence Layer", lifespan=lifespan)
@@ -45,7 +54,7 @@ register_error_handlers(app)
 
 
 @app.get("/ready")
-def ready():
+async def ready():
     try:
         get_settings()
     except ConfigError:
@@ -55,6 +64,6 @@ def ready():
     # serves requests correctly without it. Report the degraded state in the
     # body so it's observable, but keep 200 so an orchestrator doesn't pull a
     # functioning pod over a non-critical dependency.
-    if check_cost_redis_ready():
+    if await check_cost_redis_ready():
         return {"status": "ready", "redis": "ok"}
     return {"status": "ready", "redis": "degraded"}
