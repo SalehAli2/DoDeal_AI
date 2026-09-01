@@ -120,6 +120,13 @@ class Settings(BaseSettings):
     # logical DBs (0 and 1) keep the two namespaces separate.
     redis_queue_url: str = "redis://localhost:6379/0"
     redis_cost_url: str = "redis://localhost:6379/1"
+    # Per-request operational state for the feature units: idempotency
+    # reservations, clarification rate limits, per-note attempt counters. A
+    # THIRD logical DB, not a third namespace inside the cost DB: these keys
+    # have different lifetimes and a different failure policy from the cost
+    # counters (idempotency fails CLOSED, the cost cap fails open), and sharing
+    # a DB would make a flush aimed at one of them hit the other.
+    redis_operational_url: str = "redis://localhost:6379/2"
     # Cost/quota caps (placeholder values; tune to real budgets later).
     # Counters reset each window. A request over either cap is denied (429).
     cost_per_tenant_limit: int = 10000

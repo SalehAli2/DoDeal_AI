@@ -25,6 +25,41 @@ def _config(monkeypatch):
 
 def _clear_caches():
     redis_module.get_cost_client.cache_clear()
+    redis_module.get_operational_client.cache_clear()
+
+
+def test_each_client_reads_its_own_url(monkeypatch):
+    # A copy-paste between these two factories would put idempotency
+    # reservations in the cost DB, where they would be counted as spend and
+    # flushed on a different schedule. Assert each reads its OWN setting.
+    _clear_caches()
+    monkeypatch.setenv("DODEAL_REDIS_COST_URL", "redis://localhost:6379/1")
+    monkeypatch.setenv("DODEAL_REDIS_OPERATIONAL_URL", "redis://localhost:6379/2")
+    from dodeal_ai.core.config import get_settings
+
+    get_settings.cache_clear()
+
+    urls = []
+    with patch.object(
+        redis_module.aioredis,
+        "from_url",
+        side_effect=lambda url, **kwargs: urls.append(url) or MagicMock(),
+    ):
+        redis_module.get_cost_client()
+        redis_module.get_operational_client()
+
+    assert urls == ["redis://localhost:6379/1", "redis://localhost:6379/2"]
+    _clear_caches()
+
+
+def test_the_two_clients_are_separate_logical_dbs():
+    # Different failure policies (cost fails open, idempotency fails closed),
+    # so an outage or a flush aimed at one must not reach the other.
+    from dodeal_ai.core.config import Settings
+
+    settings = Settings(_env_file=None, jwt_signing_key="test-key")
+    assert settings.redis_cost_url != settings.redis_operational_url
+    assert settings.redis_operational_url.endswith("/2")
 
 
 async def test_ready_true_when_cost_redis_pings(monkeypatch):

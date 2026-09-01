@@ -17,6 +17,9 @@ decides what a salesperson is told about their own work:
     units/structured_intelligence/**  Unit A's judgement pipeline.
       ... /config.py   the ONLY source of a weight, threshold, cap or TTL.
                        Wrong -> a silently wrong score, not a crash.
+      ... /state.py    three state concerns with three DIFFERENT failure
+                       policies. Wrong -> duplicate paid work, or a user
+                       pestered past their cap.
 
 A file matched by both a `**` pattern and its own exact pattern is checked
 against both and printed twice; the stricter floor governs. That is deliberate
@@ -52,6 +55,7 @@ _FLOORS: dict[str, float] = {
     # there is a silently wrong score, not a crash.
     "src/dodeal_ai/units/structured_intelligence/**": 95,
     "src/dodeal_ai/units/structured_intelligence/config.py": 100,
+    "src/dodeal_ai/units/structured_intelligence/state.py": 95,
 }
 
 

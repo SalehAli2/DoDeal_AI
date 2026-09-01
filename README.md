@@ -412,6 +412,7 @@ All configuration is read through `Settings` in `core/config.py`. Every variable
 | `DODEAL_LLM_MAX_OUTPUT_TOKENS` | `1024` | Default output ceiling, sized with headroom for Arabic. |
 | `DODEAL_REDIS_QUEUE_URL` | `redis://localhost:6379/0` | The work-queue Redis connection, read by the arq worker (`workers/runner.py`). |
 | `DODEAL_REDIS_COST_URL` | `redis://localhost:6379/1` | The cost and quota Redis connection used by Gate 4. |
+| `DODEAL_REDIS_OPERATIONAL_URL` | `redis://localhost:6379/2` | The operational Redis connection used by the feature units for idempotency reservations, clarification rate limits and per-note attempt counters. A separate logical DB from the cost connection because the failure policies differ: losing the cost store fails open, losing the idempotency store fails closed. |
 | `DODEAL_COST_PER_TENANT_LIMIT` | `10000` | The per-tenant request cap per window. |
 | `DODEAL_COST_PER_USER_LIMIT` | `1000` | The per-user request cap per window. |
 | `DODEAL_COST_WINDOW_SECONDS` | `86400` | The cost counter window, in seconds. |

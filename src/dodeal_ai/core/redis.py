@@ -1,9 +1,18 @@
 """Redis connection for the service.
 
-One named connection is exposed, so no caller has to guess which Redis it is
+Named connections are exposed, so no caller has to guess which Redis it is
 talking to:
 
-  - cost_client: for per-tenant and per-user cost/quota counters.
+  - cost_client (db1):        per-tenant and per-user cost/quota counters.
+  - operational_client (db2): per-request operational state for the feature
+                              units -- idempotency reservations, clarification
+                              rate limits, per-note attempt counters.
+
+They are separate logical DBs, not namespaces in one, because their failure
+policies differ: losing the cost store fails OPEN (a money guard), losing the
+idempotency store fails CLOSED (a duplicate-work guard). Keeping them apart
+means an outage, a flush or a migration aimed at one cannot silently change
+the other's policy.
 
 The work queue has its own connection, owned by arq and configured from
 `redis_queue_url` in workers/runner.py -- a bare factory here had no caller, so
@@ -35,6 +44,25 @@ def get_cost_client() -> aioredis.Redis:
     """The cost/quota connection. Cached so one client is reused."""
     return aioredis.from_url(
         get_settings().redis_cost_url,
+        decode_responses=True,
+        socket_connect_timeout=2.0,
+        socket_timeout=2.0,
+    )
+
+
+@lru_cache
+def get_operational_client() -> aioredis.Redis:
+    """The operational connection (db2): idempotency reservations, rate limits,
+    attempt counters. Cached so one client is reused.
+
+    Same shape as get_cost_client, and the 2.0s timeouts are hardcoded here for
+    the same reason they are hardcoded there -- they are not yet a tuning
+    surface, and audit finding H3 (a Redis outage costing 2.0s per request) is
+    addressed at step 3 for both clients at once. Do not add a settings field
+    for one of them in isolation; that would make the two drift.
+    """
+    return aioredis.from_url(
+        get_settings().redis_operational_url,
         decode_responses=True,
         socket_connect_timeout=2.0,
         socket_timeout=2.0,

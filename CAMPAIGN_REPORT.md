@@ -7,6 +7,11 @@
 Resume mechanism: a session may stop at any phase boundary. The next session runs Phase 0,
 reads this file, resumes at the first phase not `DONE`, and never redoes a `DONE` phase.
 
+**Sha convention:** a phase's own commit sha cannot be written into the report block that the
+commit contains, and amending is forbidden. Each phase therefore backfills the PREVIOUS phase's
+sha as its first edit. A block reading `DONE <sha>` means the phase is committed and the next
+phase has not started.
+
 **Report format, every phase:**
 
 ```
@@ -86,7 +91,7 @@ on a fetch → 503 `backend_unavailable`.
 
 ---
 
-## Phase A — unit schemas and the TenantConfig seam   STATUS: DONE <sha>
+## Phase A — unit schemas and the TenantConfig seam   STATUS: DONE df4689b
 
 **What changed:**
 
@@ -154,9 +159,82 @@ both at 100 %. Package layout changed, so the wheel was rebuilt and verified:
   step 4 is "never rescore history" and explains why `config_version` exists.
 - No `Settings` field was added in this phase, so `.env.example` needs no line yet — Phase B adds one.
 
-## Phase B — db2 operational client and the three state concerns
+## Phase B — db2 operational client and the three state concerns   STATUS: DONE <sha>
 
-**STATUS: NOT STARTED**
+**What changed:**
+
+- `src/dodeal_ai/core/config.py` — `redis_operational_url` added in source position beside
+  `redis_cost_url`, with the reason the two are separate logical DBs rather than one.
+- `src/dodeal_ai/core/redis.py` — `get_operational_client()` (db2), same shape as
+  `get_cost_client`; module docstring now describes both connections and why they are split.
+- `src/dodeal_ai/main.py` — lifespan closes the operational pool beside the cost pool.
+- `README.md` — `DODEAL_REDIS_OPERATIONAL_URL` row, in `Settings` source position.
+- `src/dodeal_ai/units/structured_intelligence/state.py` — new. `note_fingerprint()`, the three
+  key builders, `reserve_idempotency` / `release_idempotency` / `read_rate_limit` /
+  `increment_rate_limit` / `read_attempts` / `increment_attempts`, `IdempotencyUnavailableError`.
+- `tests/helpers/fake_operational_redis.py` — new, mypy-checked. Six commands, `raise_on`,
+  inspectable `store` / `ttls` / `commands`, no clock.
+- `tests/unit/test_unit_a_state.py` — new, 31 tests.
+- `tests/unit/test_redis.py` — clears the second `lru_cache`; two tests that each factory reads
+  its own URL and that the two DBs differ.
+- `scripts/check_coverage_floors.py` — `state.py` floor at 95, with its reason.
+
+**Decisions taken here:**
+
+- **`note_fingerprint()` lives in `state.py`, not in the pipeline.** The phase spec lists six
+  state functions and no fingerprint helper. Alternative: compute the SHA-256 in `pipeline.py`
+  (Phase C). Cost: the idempotency key's format would be split across two modules — the prefix
+  and note_id here, the variable part there — so a change to either half could silently stop
+  matching. Keeping it here means one module owns the whole key.
+- **`request_id` added as a keyword-only parameter to all six functions.** The spec's signatures
+  omit it (`read_rate_limit(tenant, subject) -> int`) but also require bypass paths to log
+  "with tenant/request_id via `extra=`". Alternative: a contextvar. Cost: an implicit ambient
+  request id is exactly the kind of thing that is empty in a worker and silently logs `None`.
+  Recorded as a reconciliation, not a disagreement — see below.
+- **No Lua, and the INCR/EXPIRE pair is deliberately non-atomic.** Alternative: a script like the
+  cost limiter's. Cost: audit M5 records that no Lua in this repo is executed by the suite until
+  `fakeredis[lua]` at step 3, so a script here would be untested logic guarding paid work. The
+  race this admits re-sets the same TTL on the same key — harmless. The cost limiter's script is
+  different in kind: two counters that must move together.
+- **`release_idempotency` swallows every `RedisError`.** Alternative: propagate. Cost: it runs
+  only on an error path, so raising would replace the real failure (model down, backend down)
+  with a less useful one, and the reservation expires on its TTL anyway.
+- **`reserve_idempotency` raises `from None`.** Chaining the `RedisError` would carry its message
+  — which can quote the command, and so the key, and so the fingerprint — into any traceback
+  formatted downstream. Same rule and same reason as `core/validation.py`. A test asserts
+  `__cause__ is None`.
+- **The M4 edge is handled on db2 (`TTL == -1` → `EXPIRE`).** Alternative: set the TTL only on
+  create, as the cost Lua does. Cost: that is the open finding M4; here a counter surviving
+  without a TTL would pin a user's rate limit or a note's attempt count forever, silently
+  withholding every future clarification prompt. The `or` short-circuits, so a new key still
+  costs only INCR + EXPIRE — a test asserts the command sequence.
+- **Two extra `test_redis.py` tests not in the phase spec.** A copy-paste between the two nearly
+  identical factories would put idempotency reservations in the cost DB, counted as spend and
+  flushed on a different schedule. Cheap to guard, invisible if it happened.
+
+**Tree disagreements:**
+
+- **The phase spec's state signatures omit `request_id`, which its own logging requirement needs.**
+  Followed the requirement and added `*, request_id: str` to all six functions. Nothing in §2 or
+  the documents contradicted; this is an internal gap in the phase text, resolved toward the
+  stated logging behaviour.
+- Nothing else. `get_cost_client`'s shape, the cost-test injection pattern
+  (`monkeypatch.setattr(module, "get_client", lambda: fake)`), the README's source-order rule and
+  the `_FLOORS` mechanics all held exactly as §2 described.
+
+**Tests:** 33 added (31 state + 2 redis); suite **313 total, 98.81 %**; floors met — 9 patterns,
+new: `src/dodeal_ai/units/structured_intelligence/state.py = 95` (actual 100 %). Wheel rebuilt and
+verified: `wheel import check: OK`.
+
+**For the lead:**
+
+- **Add to `.env.example`:** `DODEAL_REDIS_OPERATIONAL_URL=redis://localhost:6379/2`, placed after
+  `DODEAL_REDIS_COST_URL` to keep the file in `Settings` source order. This session cannot read or
+  write `.env*` — the path is denied to every tool — so the README row is done and that one line
+  is not.
+- `/ready` still pings only the cost connection; db2 is not in the readiness probe. Deliberate for
+  now (the campaign records the debt in Phase J), but worth knowing: an operational-Redis outage
+  is invisible to an orchestrator and shows up as 503 `idempotency_unavailable` on judgements.
 
 ## Phase C — judgement routes, TenantScope, DodealError, SEAM[STEP3]
 
