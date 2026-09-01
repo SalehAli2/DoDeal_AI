@@ -7,11 +7,11 @@ from __future__ import annotations
 import pytest
 
 from dodeal_ai.core.config import Settings
-from dodeal_ai.core.context import RequestContext
+from dodeal_ai.core.context import RequestContext, TenantScope
 from dodeal_ai.core.resilience import ExternalCallError
 from dodeal_ai.core.validation import OutputValidationError
 from dodeal_ai.tools.keys import BackendKeyError, SettingsKeyResolver
-from dodeal_ai.tools.leads import LeadsClient
+from dodeal_ai.tools.leads import LeadsClient, get_leads_client
 
 
 def _settings() -> Settings:
@@ -28,7 +28,9 @@ def _client(transport: MockTransport, settings: Settings | None = None) -> Leads
     return LeadsClient(transport, SettingsKeyResolver(settings), settings)
 
 
-def _context(tenant: str = "tenant-a") -> RequestContext:
+def _scope(tenant: str = "tenant-a") -> TenantScope:
+    # Built through RequestContext.scope(), the ONE construction site, so this
+    # exercises the same narrowing the routes do rather than a parallel shape.
     return RequestContext(
         tenant=tenant,
         subject="42",
@@ -36,7 +38,7 @@ def _context(tenant: str = "tenant-a") -> RequestContext:
         roles=(),
         permissions=frozenset(),
         request_id="req-1",
-    )
+    ).scope()
 
 
 class MockTransport:
@@ -73,24 +75,24 @@ def _notes_body(notes: list[dict]) -> dict:
     return {"status": True, "data": notes, "meta": _meta(len(notes))}
 
 
-async def test_builds_tenant_url_from_context_subdomain():
+async def test_builds_tenant_url_from_scope_subdomain():
     transport = MockTransport(_list_body([{"id": 1}]))
     client = _client(transport)
-    await client.get_leads(_context("tenant-a"))
+    await client.get_leads(_scope("tenant-a"))
     assert transport.last_url == "https://tenant-a.dodealcrm.com/api/service/leads"
 
 
 async def test_sends_dd_api_key_header():
     transport = MockTransport(_list_body([{"id": 1}]))
     client = _client(transport)
-    await client.get_leads(_context())
+    await client.get_leads(_scope())
     assert transport.last_headers == {"DD-API-KEY": "key-tenant-a"}
 
 
 async def test_returns_leads_from_data():
     transport = MockTransport(_list_body([{"id": 1}, {"id": 2}]))
     client = _client(transport)
-    leads = await client.get_leads(_context())
+    leads = await client.get_leads(_scope())
     assert [lead.id for lead in leads] == [1, 2]
 
 
@@ -99,20 +101,20 @@ async def test_malformed_response_fails_closed():
     transport = MockTransport({"success": True, "data": []})
     client = _client(transport)
     with pytest.raises(OutputValidationError):
-        await client.get_leads(_context())
+        await client.get_leads(_scope())
 
 
 async def test_different_tenant_hits_different_url():
     transport = MockTransport(_list_body([{"id": 1}]))
     client = _client(transport)
-    await client.get_leads(_context("acme"))
+    await client.get_leads(_scope("acme"))
     assert transport.last_url == "https://acme.dodealcrm.com/api/service/leads"
 
 
 async def test_get_lead_builds_id_url_and_returns_lead():
     transport = MockTransport(_lead_body({"id": 7, "name": "Acme"}))
     client = _client(transport)
-    lead = await client.get_lead(_context("tenant-a"), 7)
+    lead = await client.get_lead(_scope("tenant-a"), 7)
     assert transport.last_url == "https://tenant-a.dodealcrm.com/api/service/leads/7"
     assert lead.id == 7
     assert lead.name == "Acme"
@@ -122,7 +124,7 @@ async def test_get_lead_malformed_response_fails_closed():
     transport = MockTransport({"status": True})  # missing data
     client = _client(transport)
     with pytest.raises(OutputValidationError):
-        await client.get_lead(_context(), 7)
+        await client.get_lead(_scope(), 7)
 
 
 async def test_get_lead_notes_builds_url_and_returns_notes():
@@ -137,7 +139,7 @@ async def test_get_lead_notes_builds_url_and_returns_notes():
     ]
     transport = MockTransport(_notes_body(notes))
     client = _client(transport)
-    result = await client.get_lead_notes(_context("tenant-a"), 7)
+    result = await client.get_lead_notes(_scope("tenant-a"), 7)
     assert (
         transport.last_url == "https://tenant-a.dodealcrm.com/api/service/leads/7/notes"
     )
@@ -148,7 +150,7 @@ async def test_get_lead_notes_builds_url_and_returns_notes():
 async def test_get_lead_notes_empty_list_is_not_an_error():
     transport = MockTransport(_notes_body([]))
     client = _client(transport)
-    result = await client.get_lead_notes(_context(), 7)
+    result = await client.get_lead_notes(_scope(), 7)
     assert result == []
 
 
@@ -164,7 +166,7 @@ async def test_get_lead_notes_tolerates_null_author():
     ]
     transport = MockTransport(_notes_body(notes))
     client = _client(transport)
-    result = await client.get_lead_notes(_context(), 7)
+    result = await client.get_lead_notes(_scope(), 7)
     assert result[0].author is None
 
 
@@ -173,10 +175,10 @@ async def test_header_carries_the_requesting_tenants_key():
     transport = MockTransport(_list_body([{"id": 1}]))
     client = _client(transport)
 
-    await client.get_leads(_context("tenant-a"))
+    await client.get_leads(_scope("tenant-a"))
     assert transport.last_headers == {"DD-API-KEY": "key-tenant-a"}
 
-    await client.get_leads(_context("acme"))
+    await client.get_leads(_scope("acme"))
     assert transport.last_headers == {"DD-API-KEY": "key-acme"}
 
 
@@ -184,7 +186,7 @@ async def test_unknown_tenant_fails_closed_before_any_network_call():
     transport = MockTransport(_list_body([{"id": 1}]))
     client = _client(transport)
     with pytest.raises(BackendKeyError):
-        await client.get_leads(_context("ghost"))
+        await client.get_leads(_scope("ghost"))
     assert transport.calls == 0
 
 
@@ -192,10 +194,23 @@ async def test_missing_key_is_not_wrapped_by_the_watchdog():
     transport = MockTransport(_list_body([{"id": 1}]))
     client = _client(transport)
     try:
-        await client.get_leads(_context("ghost"))
+        await client.get_leads(_scope("ghost"))
     except BackendKeyError:
         pass
     except ExternalCallError:
         pytest.fail("BackendKeyError must not be wrapped as ExternalCallError")
     else:
         pytest.fail("expected BackendKeyError")
+
+
+def test_the_factory_builds_a_client_from_settings():
+    # The FastAPI dependency. Tests override it at the route rather than
+    # calling it, so without this the production wiring is never executed.
+    client = get_leads_client()
+    assert isinstance(client, LeadsClient)
+
+
+def test_the_factory_is_not_a_singleton():
+    # Audit M1: a fresh AsyncClient per call, until step 4 gives the transport
+    # a lifespan-owned pool. Asserted so the change is deliberate when it lands.
+    assert get_leads_client() is not get_leads_client()

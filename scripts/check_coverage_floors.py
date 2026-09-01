@@ -56,6 +56,9 @@ _FLOORS: dict[str, float] = {
     "src/dodeal_ai/units/structured_intelligence/**": 95,
     "src/dodeal_ai/units/structured_intelligence/config.py": 100,
     "src/dodeal_ai/units/structured_intelligence/state.py": 95,
+    # 90 while the pipeline is still a stub ending at SEAM[STEP3]; raised in
+    # Phase H once classify/vague/score/compute/decide exist.
+    "src/dodeal_ai/units/structured_intelligence/pipeline.py": 90,
 }
 
 

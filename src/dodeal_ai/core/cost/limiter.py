@@ -46,6 +46,7 @@ import redis
 from redis import asyncio as aioredis
 
 from dodeal_ai.core.config import get_settings
+from dodeal_ai.core.context import TenantScope
 from dodeal_ai.core.redis import get_cost_client
 
 _logger = logging.getLogger("dodeal_ai.cost")
@@ -128,6 +129,53 @@ async def enforce_cost(tenant: str, subject: str, amount: int = 1) -> None:
         raise CostLimitError("tenant_quota_exceeded")
     if user_count > settings.cost_per_user_limit:
         raise CostLimitError("user_quota_exceeded")
+
+
+# Module-level, not an lru_cache: tests reset it with
+# monkeypatch.setattr(limiter, "_TOKEN_PREFLIGHT_LOGGED", False), and a cache
+# would also key on the arguments, which would make "once per process" mean
+# "once per tenant".
+_TOKEN_PREFLIGHT_LOGGED = False
+
+
+async def token_preflight(scope: TenantScope) -> None:
+    """SEAM[STEP3] -- the pre-flight token-budget read, not implemented yet.
+
+    A NO-OP today. It exists so the pipeline calls it in the right place now,
+    and step 3 fills in the body without moving a call site or changing a
+    signature.
+
+    WHAT STEP 3 PUTS HERE: a fail-OPEN read of the tenant's remaining token
+    budget before a model call is made, so a tenant that is already over budget
+    is refused before we spend, not after. Fail open for the same reason
+    enforce_cost does -- a cost cap is a money guard, not a security guard.
+
+    WHY NOT get_usage(): that reads the per-REQUEST counters Gate 4 increments.
+    A token budget is a different quantity on a different key with a different
+    window, and reusing get_usage would silently make "requests made" stand in
+    for "tokens spent" -- a number that looks right and is not. Step 3 adds
+    enforce_token_cost and its own counters; this seam calls those.
+
+    Async now, though nothing awaits inside: the real body is a redis.asyncio
+    read (Decision 2 -- one execution model), and making it sync today would
+    force every call site to change when step 3 lands.
+
+    Logs once per process, at WARNING, so that a deployment running with no
+    token pre-flight at all is visible in the logs rather than being a fact you
+    have to know. Once, not per request: this is a static property of the build,
+    and one line per judgement would be noise that trains people to ignore it.
+    """
+    global _TOKEN_PREFLIGHT_LOGGED
+    if not _TOKEN_PREFLIGHT_LOGGED:
+        _TOKEN_PREFLIGHT_LOGGED = True
+        _logger.warning(
+            "token_preflight_bypassed",
+            extra={
+                "reason_code": "token_preflight_bypassed",
+                "tenant": scope.tenant,
+                "request_id": scope.request_id,
+            },
+        )
 
 
 async def get_usage(tenant: str, subject: str) -> tuple[int, int]:

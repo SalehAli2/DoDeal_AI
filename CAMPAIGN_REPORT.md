@@ -159,7 +159,7 @@ both at 100 %. Package layout changed, so the wheel was rebuilt and verified:
   step 4 is "never rescore history" and explains why `config_version` exists.
 - No `Settings` field was added in this phase, so `.env.example` needs no line yet — Phase B adds one.
 
-## Phase B — db2 operational client and the three state concerns   STATUS: DONE <sha>
+## Phase B — db2 operational client and the three state concerns   STATUS: DONE 42cd11c
 
 **What changed:**
 
@@ -236,9 +236,97 @@ verified: `wheel import check: OK`.
   now (the campaign records the debt in Phase J), but worth knowing: an operational-Redis outage
   is invisible to an orchestrator and shows up as 503 `idempotency_unavailable` on judgements.
 
-## Phase C — judgement routes, TenantScope, DodealError, SEAM[STEP3]
+## Phase C — judgement routes, TenantScope, DodealError, SEAM[STEP3]   STATUS: DONE <sha>
 
-**STATUS: NOT STARTED**
+**What changed:**
+
+- `src/dodeal_ai/core/context.py` — `TenantScope` (frozen, four fields) and `RequestContext.scope()`.
+- `src/dodeal_ai/tools/leads.py` — all three methods now take `scope: TenantScope`; added
+  `get_leads_client()`; docstring records the H2 caveat.
+- `tests/unit/test_leads_client.py`, `tests/integration/test_leads_e2e.py` — `_context()` →
+  `_scope()`, built through `RequestContext.scope()`; two factory tests.
+- `scripts/real_fetch_check.py` — builds a `TenantScope` directly (it has no gate chain to narrow
+  from — the non-user-principal case D1 describes).
+- `src/dodeal_ai/core/errors.py` — `DodealError(reason_code, http_status)` + eight subclasses,
+  `dodeal_error_handler`, `request_validation_handler`, `_unit_error_body`.
+- `src/dodeal_ai/api/routes/judgements.py` — new. `APIRouter(prefix="/api/v1")`, three routes.
+- `src/dodeal_ai/main.py` — includes the router beside `_probe`.
+- `src/dodeal_ai/api/routes/_probe.py` — docstring line: removal deferred past the campaign.
+- `src/dodeal_ai/units/structured_intelligence/pipeline.py` — new. `judge_note`, `JudgementDeps`,
+  the version constants, `_fetch_note`, `_is_thin`, `_suppressed`, `_log_outcome`.
+- `src/dodeal_ai/core/cost/limiter.py` — `token_preflight()`, the SEAM[STEP3] no-op.
+- `tests/helpers/fake_leads.py` — new, mypy-checked.
+- `tests/unit/test_judgement_routes.py` (35), `test_judgement_pipeline.py` (12),
+  `test_tenant_scope.py` (7), `test_dodeal_errors.py` (28) — new.
+- `scripts/check_coverage_floors.py` — `pipeline.py` floor at 90.
+
+**Decisions taken here:**
+
+- **`lead_not_found` is defined but never raised.** §3.6 wants `get_lead` → 404 `lead_not_found`,
+  but the watchdog collapses every backend failure into `ExternalCallError`, so a genuine 404 is
+  indistinguishable from a 500 or a timeout — that is open finding **H2, explicitly step 4 and
+  explicitly not this campaign**. Alternative: infer "not found" from `ExternalCallError`. Cost:
+  the CRM would be told a lead is missing whenever the backend is merely down, which is worse than
+  a 503 — it invites the caller to delete or re-create a record that exists. So a missing lead is
+  503 `backend_unavailable` today; the class, its status mapping and its test exist so that when
+  H2 lands the branch goes into `_fetch_note` and nothing else moves. **`note_not_found` IS
+  reachable** and is fully wired: notes come back as a list, so a missing id is determinable
+  without typed errors.
+- **`request_validation_handler` drops every field name, location and message.** Alternative:
+  keep pydantic's `loc`/`msg` and strip only `input`. Cost: a field name in an `extra_forbidden`
+  error is attacker-chosen text echoed back, and the whole reason the 422 exists here is that
+  `extra="forbid"` catches a caller posting note text. A test asserts even the string `"note"`
+  is absent from the response.
+- **`token_preflight` is `async` although nothing awaits inside.** Alternative: sync now, async at
+  step 3. Cost: the real body is a `redis.asyncio` read (D2), so every call site would change
+  later — for a seam whose whole purpose is that the call site does not.
+- **`token_preflight` does not reuse `get_usage()`.** `get_usage` reads the per-REQUEST counters
+  Gate 4 increments; a token budget is a different quantity, key and window. Reusing it would make
+  "requests made" silently stand in for "tokens spent".
+- **`model_version` means two different things, deliberately.** On a judgement it is what the
+  provider reported ran (`""` when no model ran — never `settings.llm_model`, because stamping the
+  configured pin on an unspent judgement makes it look spent). On `/meta/versions` there is no call
+  to report, so it is the configured pin. Alternative: omit it from `/meta/versions`. Cost: the
+  endpoint is specified as "the four version strings" and a three-field response would not match
+  the `Versions` schema. Both are documented at their definition sites.
+- **`JudgementDeps` carries the leads client, the LLM client and the config — but not the state
+  functions.** Those are called through the `state` module, which tests redirect with
+  `monkeypatch.setattr`. Alternative: put them on the dataclass too. Cost: two injection points
+  for one thing, and the Phase B tests already established the module-level pattern.
+- **`/meta/versions` sits behind `gate4_cost` like the other two.** Alternative: leave it open.
+  Cost: version strings are a fingerprint of the deployment; there is no reason for them to be
+  public, and putting it behind the same dependency means there is no ungated route to forget about.
+- **A direct-call pipeline test module exists alongside the HTTP tests.** The release-on-failure
+  path is unreachable through HTTP today (everything after the reservation fails open), but it is
+  the difference between "retry" and "409 for 24 hours" the moment model calls land. Tested now at
+  the seam rather than after something depends on it.
+
+**Tree disagreements:**
+
+- **§3.6's `get_lead (404 lead_not_found)` cannot be honoured on this tree.** H2 is open; followed
+  the tree, as the campaign's own rule requires, and recorded it above and in a code comment in
+  `_fetch_note`. This is the one place the phase's specified behaviour and the tree genuinely
+  conflict.
+- **§2 said "no route accepts a body today", and that FastAPI's stock 422 echoes the caller's
+  input.** Both were true and both are now changed on purpose by this phase.
+- Everything else in §2 held: the `test_chain.py:38-52` fixture shape transplanted unmodified, the
+  cost-gate fake, `gate4_cost` as the single chain dependency, the router-prefix pattern, and
+  `HTTPStatus(422).phrase == "Unprocessable Entity"` on Python 3.12.
+- One test bug of mine, not a tree issue: `TestClient.get()` takes no `json=` kwarg.
+
+**Tests:** 84 added (35 routes + 12 pipeline + 28 errors + 7 scope + 2 leads factory); suite
+**397 total, 98.99 %**; floors met — 10 patterns, new:
+`src/dodeal_ai/units/structured_intelligence/pipeline.py = 90` (actual 97.18 %). The integration
+suite was re-run separately (`-m integration`): **7 passed**. Wheel rebuilt and verified:
+`wheel import check: OK`.
+
+**For the lead:**
+
+- The error-taxonomy debt in STATUS §2 is settled **for unit errors only**. The gates keep their
+  hand-mapped `HTTPException`s and their existing bodies — `{"detail": "Too Many Requests"}` is
+  still exactly that, pinned by both `test_chain.py:224` and a new route test.
+- `pipeline.py`'s only uncovered lines are the `judgement_completed` log branch, unreachable until
+  scoring exists. Floor set at 90 as specified; Phase H should raise it.
 
 ## Phase D
 

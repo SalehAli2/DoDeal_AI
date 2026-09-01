@@ -43,7 +43,7 @@ import httpx
 from pydantic import SecretStr
 
 from dodeal_ai.core.config import Settings, get_settings
-from dodeal_ai.core.context import RequestContext
+from dodeal_ai.core.context import TenantScope
 from dodeal_ai.core.resilience import ExternalCallError
 from dodeal_ai.core.validation import OutputValidationError
 from dodeal_ai.tools.httpx_transport import HttpxTransport
@@ -89,16 +89,20 @@ def _parse_args() -> tuple[str, bool]:
     raise SystemExit(2)
 
 
-def _build_context(tenant: str) -> RequestContext:
-    # Minimal context: get_leads only reads .tenant. Everything else is a
-    # placeholder -- this is a direct tool-layer call, not a gated request,
-    # so there is no real subject/roles/permissions/request_id to carry.
-    return RequestContext(
+def _build_scope(tenant: str) -> TenantScope:
+    # Minimal scope: get_leads only reads .tenant. Everything else is a
+    # placeholder -- this is a direct tool-layer call, not a gated request, so
+    # there is no real subject or request_id to carry.
+    #
+    # A TenantScope, not a RequestContext, since the tool layer took the
+    # narrower type (design note 0001, D1). Constructed directly here because
+    # this script has no gate chain to narrow a context FROM -- which is
+    # exactly the non-user-principal case D1 describes. That is also why the
+    # "one construction site" test greps src/ only.
+    return TenantScope(
         tenant=tenant,
         subject="manual-script",
         database="",
-        roles=(),
-        permissions=frozenset(),
         request_id="manual-real-fetch-check",
     )
 
@@ -215,7 +219,7 @@ async def _run(tenant: str, live: bool) -> int:
 
     _guard_against_accidental_live_call(settings, live)
 
-    context = _build_context(tenant)
+    scope = _build_scope(tenant)
     client = LeadsClient(HttpxTransport(), key_resolver, settings)
     url = f"https://{tenant}.{settings.backend_base_domain}/api/service/leads"
     mode = (
@@ -232,7 +236,7 @@ async def _run(tenant: str, live: bool) -> int:
     print()
 
     try:
-        leads = await client.get_leads(context)
+        leads = await client.get_leads(scope)
     except ExternalCallError as exc:
         _report_external_call_error(exc)
         if not live:

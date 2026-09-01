@@ -20,6 +20,16 @@ Request flow, all three methods:
   - The response is validated against the confirmed schemas in
     dodeal_ai.schemas.lead.
   - The call is wrapped by the watchdog (timeout, retry-once, fail closed).
+
+All three methods take a TenantScope (core/context.py), NOT a RequestContext:
+design note 0001, Decision 1. A tool needs to know whose data it is fetching,
+never what the caller is allowed to do -- and the scope is the shape a
+service-token or job-payload principal can also produce.
+
+TODAY the watchdog collapses every backend failure into ExternalCallError, so
+a 404 for a missing lead is indistinguishable here from a 500 or a timeout.
+That is audit finding H2, planned for step 4 (typed backend errors +
+retry_on). Callers must not infer "not found" from an ExternalCallError.
 """
 
 from __future__ import annotations
@@ -27,7 +37,7 @@ from __future__ import annotations
 from typing import Protocol
 
 from dodeal_ai.core.config import Settings, get_settings
-from dodeal_ai.core.context import RequestContext
+from dodeal_ai.core.context import TenantScope
 from dodeal_ai.core.resilience import call_with_watchdog
 from dodeal_ai.core.validation import validate_output
 from dodeal_ai.schemas.lead import (
@@ -37,7 +47,8 @@ from dodeal_ai.schemas.lead import (
     LeadNotesResponse,
     LeadResponse,
 )
-from dodeal_ai.tools.keys import TenantKeyResolver
+from dodeal_ai.tools.httpx_transport import HttpxTransport
+from dodeal_ai.tools.keys import TenantKeyResolver, get_key_resolver
 
 
 class Transport(Protocol):
@@ -81,28 +92,40 @@ class LeadsClient:
 
         return await call_with_watchdog(_fetch, label=label)
 
-    async def get_leads(self, context: RequestContext) -> list[Lead]:
-        """Fetch the tenant's leads. The subdomain is taken from the request's
-        authoritative context, so a caller cannot fetch another tenant's data.
+    async def get_leads(self, scope: TenantScope) -> list[Lead]:
+        """Fetch the tenant's leads. The subdomain is taken from the scope the
+        gates produced, so a caller cannot fetch another tenant's data.
         """
-        url = f"{self._base_url(context.tenant)}/leads"
-        raw = await self._get(url, label="tool.get_leads", tenant=context.tenant)
+        url = f"{self._base_url(scope.tenant)}/leads"
+        raw = await self._get(url, label="tool.get_leads", tenant=scope.tenant)
         response = validate_output(LeadListResponse, raw, label="tool.get_leads")
         return response.data
 
-    async def get_lead(self, context: RequestContext, lead_id: int) -> Lead:
+    async def get_lead(self, scope: TenantScope, lead_id: int) -> Lead:
         """Fetch a single lead by id, scoped to the request's tenant."""
-        url = f"{self._base_url(context.tenant)}/leads/{lead_id}"
-        raw = await self._get(url, label="tool.get_lead", tenant=context.tenant)
+        url = f"{self._base_url(scope.tenant)}/leads/{lead_id}"
+        raw = await self._get(url, label="tool.get_lead", tenant=scope.tenant)
         response = validate_output(LeadResponse, raw, label="tool.get_lead")
         return response.data
 
-    async def get_lead_notes(
-        self, context: RequestContext, lead_id: int
-    ) -> list[LeadNote]:
+    async def get_lead_notes(self, scope: TenantScope, lead_id: int) -> list[LeadNote]:
         """Fetch a lead's notes, newest first. An empty list is a valid
         result (a lead with no notes), not an error."""
-        url = f"{self._base_url(context.tenant)}/leads/{lead_id}/notes"
-        raw = await self._get(url, label="tool.get_lead_notes", tenant=context.tenant)
+        url = f"{self._base_url(scope.tenant)}/leads/{lead_id}/notes"
+        raw = await self._get(url, label="tool.get_lead_notes", tenant=scope.tenant)
         response = validate_output(LeadNotesResponse, raw, label="tool.get_lead_notes")
         return response.data
+
+
+def get_leads_client() -> LeadsClient:
+    """FastAPI dependency. Same shape as get_verifier() and get_key_resolver():
+    tests override it at the route via app.dependency_overrides, never by
+    patching a module global.
+
+    Builds a fresh client (and so a fresh AsyncClient per call, inside
+    HttpxTransport) each time. That is audit finding M1, planned for step 4
+    along with a lifespan-owned pooled AsyncClient; pooling it here would mean
+    inventing connection lifecycle ownership in a phase that is only wiring the
+    seam.
+    """
+    return LeadsClient(HttpxTransport(), get_key_resolver(), get_settings())

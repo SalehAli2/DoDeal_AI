@@ -1,6 +1,11 @@
 """Temporary probe route exercising the gate chain over HTTP. Scaffolding;
 remove before the first real feature route.
 
+Removal deferred past the campaign: the judgement routes now exercise the same
+chain, but 19 gate assertions across test_chain / test_exit_demo / test_audit
+are written against this route, and moving them is a change to the security
+suite that deserves its own commit rather than riding along with a feature.
+
 Runs Gate 1 (auth) and Gate 2 (tenancy). Gate 3 (permissions) is parked pending
 a confirmed permission model, so no permission is required here yet.
 """

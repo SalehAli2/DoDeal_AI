@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
-from dodeal_ai.api.routes import _probe
+from dodeal_ai.api.routes import _probe, judgements
 from dodeal_ai.core.config import ConfigError, get_settings
 from dodeal_ai.core.errors import register_error_handlers
 from dodeal_ai.core.logging_config import configure_logging
@@ -43,6 +43,7 @@ app = FastAPI(title="DODEAL AI Intelligence Layer", lifespan=lifespan)
 app.add_middleware(RequestIDMiddleware)
 
 app.include_router(_probe.router)
+app.include_router(judgements.router)
 
 
 @app.get("/health")
