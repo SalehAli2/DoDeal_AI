@@ -5,7 +5,8 @@ module can rot to 60% while the total stays above 92% because well-covered
 code elsewhere carries it. These floors are per FILE, so no file below can be
 paid for by another.
 
-The list is deliberately short -- only the code on a deny path:
+The list is deliberately short -- the code on a deny path, plus the code that
+decides what a salesperson is told about their own work:
 
     core/auth/**      Gate 1: who the caller is. Wrong -> everyone is anyone.
     core/tenancy.py   Gate 2: whose data. Wrong -> a cross-tenant read.
@@ -13,6 +14,13 @@ The list is deliberately short -- only the code on a deny path:
     core/errors.py    what a denied caller is told (and is NOT told).
     core/validation.py  the untrusted-output boundary.
     core/log_safety.py  what may reach a log line.
+    units/structured_intelligence/**  Unit A's judgement pipeline.
+      ... /config.py   the ONLY source of a weight, threshold, cap or TTL.
+                       Wrong -> a silently wrong score, not a crash.
+
+A file matched by both a `**` pattern and its own exact pattern is checked
+against both and printed twice; the stricter floor governs. That is deliberate
+for config.py.
 
 100 where the file is small enough that every line is reachable in a unit
 test; 95 where a defensive branch is not worth contorting a test to reach.
@@ -39,6 +47,11 @@ _FLOORS: dict[str, float] = {
     "src/dodeal_ai/core/errors.py": 95,
     "src/dodeal_ai/core/validation.py": 100,
     "src/dodeal_ai/core/log_safety.py": 100,
+    # Unit A. The unit decides what a salesperson is told about their own work,
+    # and its config is the only source of a weight or a threshold -- a gap
+    # there is a silently wrong score, not a crash.
+    "src/dodeal_ai/units/structured_intelligence/**": 95,
+    "src/dodeal_ai/units/structured_intelligence/config.py": 100,
 }
 
 

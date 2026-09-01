@@ -1,0 +1,363 @@
+"""Unit A note-judgement contracts — the vocabularies, the model-output
+schemas, and the response shape.
+
+Three groups live here, and the boundary between them is the point:
+
+  VOCABULARIES  StrEnums. Every code a caller or a log line can carry is a
+                member of one of these. Nothing in this unit ever emits a bare
+                string where an enum exists -- that is what makes reason codes
+                a fixed vocabulary (ASSUMPTIONS §3.3) rather than a convention.
+
+  MODEL OUTPUT  ClassificationOutput / VagueOutput / ScoreOutput. These are
+                UNTRUSTED: they describe what we are willing to accept back
+                from a model, and they are the schemas handed to
+                core/validation.py::validate_output. All three are
+                extra="forbid" -- a model that invents a field is a malformed
+                response, not a tolerated one. (Contrast schemas/lead.py, which
+                is extra="ignore" because the BACKEND is allowed to grow
+                fields and we do not control it.)
+
+  RESPONSE      NoteAnalysis / ScoreComponent / NoteScore / Suppressed /
+                Decision / Versions / Judgement. What the CRM receives.
+
+THE RULE THIS FILE ENFORCES STRUCTURALLY: no model-output schema has a `band`
+or a `total` field. The model supplies marks and a classification; the total,
+the denominator, the band and the decision are computed in code from
+TenantConfig. A model cannot hand us a score. A test asserts this by
+introspecting model_fields, so adding such a field to an output schema fails
+the suite rather than silently moving the arithmetic into the prompt.
+"""
+
+from __future__ import annotations
+
+from enum import StrEnum
+from typing import Annotated, Literal
+
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    model_validator,
+)
+
+# ---------------------------------------------------------------------------
+# Vocabularies
+# ---------------------------------------------------------------------------
+
+
+class NoteType(StrEnum):
+    """What kind of interaction the note records.
+
+    Six human types plus system_event. system_event is ASSUMPTION[Q6]: the
+    notes feed is assumed to carry backend-generated timeline entries as well
+    as things a human typed. Those are not a salesperson's work and are never
+    scored -- they suppress as not_scorable. If the backend confirms the feed
+    is notes-only, this member stays in the vocabulary and is simply never
+    emitted; nothing needs rescoring, because a suppressed judgement carries
+    no score.
+    """
+
+    NO_CONTACT = "no_contact"
+    CALLBACK = "callback"
+    DISCOVERY = "discovery"
+    VIEWING = "viewing"
+    NEGOTIATION = "negotiation"
+    WON_LOST = "won_lost"
+    SYSTEM_EVENT = "system_event"
+
+
+# The classifier may also decline. Kept as a Literal rather than an eighth
+# NoteType member: "unclassifiable" is the ABSENCE of a type, and making it a
+# member would let it flow into places that legitimately expect a real type
+# (suppressed_components_by_type, allowed_missing_by_type).
+UNCLASSIFIABLE = "unclassifiable"
+
+# A plain assignment alias, not a PEP 695 `type` statement: pydantic resolves
+# this form on every supported version, and the models below annotate with it
+# directly so the vocabulary has exactly one spelling.
+ClassifierOutput = NoteType | Literal["unclassifiable"]
+
+
+class MissingComponent(StrEnum):
+    """What the vagueness pass may report as absent from the note.
+
+    Deliberately NOT the same vocabulary as ComponentName: this is the
+    narrower set a clarification prompt can sensibly ask about, and its
+    date member is spelled next_step_with_date where the scored component is
+    next_step_date. Do not merge the two enums.
+    """
+
+    WHAT_HAPPENED = "what_happened"
+    CLIENT_SAID = "client_said"
+    NEXT_STEP_WITH_DATE = "next_step_with_date"
+
+
+class ComponentName(StrEnum):
+    """The five scored components, in the fixed order the response lists them.
+
+    Declaration order IS the response order (StrEnum preserves it, and
+    __members__ is ordered), so a caller can rely on components[2] being
+    next_step_date without matching on name.
+    """
+
+    WHAT_HAPPENED = "what_happened"
+    CLIENT_SAID = "client_said"
+    NEXT_STEP_DATE = "next_step_date"
+    DEAL_SPECIFICS = "deal_specifics"
+    CLARITY = "clarity"
+
+
+class Band(StrEnum):
+    """The qualitative label derived from the total. Derived in code from
+    TenantConfig.band_boundaries, never accepted from a model or a caller."""
+
+    POOR = "poor"
+    FAIR = "fair"
+    GOOD = "good"
+    EXCELLENT = "excellent"
+
+
+class DecisionAction(StrEnum):
+    """What the CRM is told to do. Enforcement is the CRM's; we advise."""
+
+    ACCEPT_SILENT = "accept_silent"
+    ACCEPT_FLAG_PROMPT = "accept_flag_prompt"
+    PROMPT_CLARIFICATION = "prompt_clarification"
+
+
+class PromptWithheld(StrEnum):
+    """Why a clarification prompt was computed but not sent.
+
+    The field this fills is `PromptWithheld | None`; None means nothing was
+    withheld. A withheld prompt is a STATE with a reason, never a silently
+    absent prompt -- the CRM can tell "we had nothing to ask" from "the user
+    is rate limited" without inferring it.
+    """
+
+    RESUBMISSION = "resubmission"
+    ATTEMPT_CAP = "attempt_cap"
+    RATE_LIMITED = "rate_limited"
+    NOTHING_TO_ASK = "nothing_to_ask"
+
+
+class SuppressedReason(StrEnum):
+    """Why no score was produced. Suppression is a STATE, never a zero, never
+    a null-treated-as-zero, and never a `poor` band -- a suppressed judgement
+    carries `score: null`, so it cannot be averaged into anything."""
+
+    INSUFFICIENT_EVIDENCE = "insufficient_evidence"
+    NOT_SCORABLE = "not_scorable"
+
+
+class SuppressedDetail(StrEnum):
+    """The specific cause under a SuppressedReason.
+
+    NOTE_TOO_SHORT pairs with INSUFFICIENT_EVIDENCE. The other three pair with
+    NOT_SCORABLE: SYSTEM_EVENT and UNCLASSIFIABLE come from the classifier,
+    NOT_IMPLEMENTED is the SEAM[STEP3] stub's answer until the pipeline is
+    filled in.
+    """
+
+    NOTE_TOO_SHORT = "note_too_short"
+    SYSTEM_EVENT = "system_event"
+    UNCLASSIFIABLE = "unclassifiable"
+    NOT_IMPLEMENTED = "not_implemented"
+
+
+# ---------------------------------------------------------------------------
+# Request
+# ---------------------------------------------------------------------------
+
+
+class JudgementRequest(BaseModel):
+    """The only body this unit accepts: two integers.
+
+    extra="forbid" is load-bearing. The note is ALREADY SAVED in the CRM and is
+    fetched by id (Design A); note text is never accepted in a body. Forbidding
+    extras means a caller that tries to post `note` or `text` gets a 422 naming
+    the field rather than having it silently ignored -- which would leave the
+    caller believing we judged the text they sent.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    lead_id: int
+    note_id: int
+
+
+# ---------------------------------------------------------------------------
+# Model output -- untrusted, validated through core/validation.py
+# ---------------------------------------------------------------------------
+
+# 300 chars is a clarification question, not a paragraph. The cap is a
+# structural bound on what we will relay to a salesperson, enforced here so
+# an over-long prompt is a validation failure (and gets one reprompt) rather
+# than something the CRM has to truncate.
+ClarificationPrompt = Annotated[str, StringConstraints(min_length=1, max_length=300)]
+
+
+class ClassificationOutput(BaseModel):
+    """Pass 1: what kind of note is this. One field, by design -- a classifier
+    that also volunteers a score is answering a question we did not ask."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    note_type: ClassifierOutput
+
+
+class VagueOutput(BaseModel):
+    """Pass 2: is the note vague, and what would we ask about it.
+
+    The cross-field rule below is a BICONDITIONAL, checked in both directions:
+
+        is_vague     <-> missing_components non-empty AND a prompt is present
+        not is_vague <-> missing_components empty     AND prompt is None
+
+    Both halves matter. A model that says "vague" but names nothing gives the
+    decision step nothing to act on; one that says "not vague" while filling in
+    a prompt would have that prompt sent to a salesperson about a note we just
+    judged fine. Either shape is malformed output -- it earns the single
+    reprompt, not a repair in code.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    is_vague: bool
+    missing_components: list[MissingComponent]
+    clarification_prompt: ClarificationPrompt | None = None
+    reasoning: str
+
+    @model_validator(mode="after")
+    def _check_vagueness_is_self_consistent(self) -> VagueOutput:
+        # Fixed-vocabulary messages: this runs on model output, and pydantic's
+        # message reaches the OutputValidationError's error TYPE only, but the
+        # rule in log_safety.py is that our own messages never interpolate
+        # content. These name fields, never values.
+        has_components = bool(self.missing_components)
+        has_prompt = self.clarification_prompt is not None
+        if self.is_vague and not (has_components and has_prompt):
+            raise ValueError(
+                "vague output requires missing_components and clarification_prompt"
+            )
+        if not self.is_vague and (has_components or has_prompt):
+            raise ValueError(
+                "non-vague output must have empty missing_components and no "
+                "clarification_prompt"
+            )
+        return self
+
+
+class ScoreOutput(BaseModel):
+    """Pass 3: a mark per component.
+
+    DELIBERATELY UNBOUNDED HERE. Each mark must satisfy 0 <= mark <= weight[c],
+    and the weights are per-tenant (TenantConfig), which validate_output cannot
+    see -- it takes a schema and a raw value and has no context channel. So the
+    bound is checked in the scoring code against the tenant's own weights, not
+    declared here against a constant that would be wrong for any tenant whose
+    weights differ. A `ge=0` here would look like the check and hide its
+    absence.
+
+    No `total` and no `band`: the model supplies marks only.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    marks: dict[ComponentName, int]
+
+
+# ---------------------------------------------------------------------------
+# Response
+# ---------------------------------------------------------------------------
+
+
+class NoteAnalysis(BaseModel):
+    """The analysis half of a judgement. On a suppressed judgement every field
+    is null/empty except note_type, which carries the classifier's answer when
+    there was one (including "unclassifiable") and null when we stopped before
+    classifying."""
+
+    note_type: ClassifierOutput | None = None
+    is_vague: bool | None = None
+    missing_components: list[MissingComponent] = Field(default_factory=list)
+    clarification_prompt: str | None = None
+    reasoning: str | None = None
+
+
+class ScoreComponent(BaseModel):
+    """One row of the score breakdown.
+
+    A suppressed component has `mark: null` and `suppressed: true`, and its
+    weight has ALREADY been removed from the denominator. It is not a zero:
+    scoring a component 0 and dropping it from the denominator are different
+    outcomes, and collapsing them is how a rubric silently penalises note types
+    that legitimately cannot answer a component.
+    """
+
+    name: ComponentName
+    mark: int | None
+    weight: int
+    suppressed: bool
+
+
+class NoteScore(BaseModel):
+    """The computed score. Every field here is derived in code from marks plus
+    TenantConfig; none is accepted from a model."""
+
+    total: int
+    band: Band
+    denominator: int
+    components: list[ScoreComponent]
+
+
+class Suppressed(BaseModel):
+    """Why this judgement carries no score."""
+
+    reason: SuppressedReason
+    detail_code: SuppressedDetail
+
+
+class Decision(BaseModel):
+    """What we advise, and what actually happened to the clarification prompt."""
+
+    action: DecisionAction
+    prompt_sent: bool
+    prompt_withheld: PromptWithheld | None = None
+    attempt: int
+    attempts_remaining: int
+
+
+class Versions(BaseModel):
+    """Stamped on EVERY judgement, scored or suppressed.
+
+    Four independently movable things: the rubric, the prompt set, the model
+    the provider reports it ran (LLMResponse.model, not what config asked for),
+    and the tenant config. A judgement is only comparable with another that
+    carries the same four -- which is what makes it safe to change a weight or
+    a prompt without rescoring history.
+    """
+
+    rubric_version: str
+    prompt_version: str
+    model_version: str
+    config_version: str
+
+
+class Judgement(BaseModel):
+    """The 200 body, scored or suppressed.
+
+    Exactly one of `score`/`decision` and `suppressed` is populated: a scored
+    judgement has score + decision with suppressed null; a suppressed one has
+    suppressed set with score and decision null.
+    """
+
+    note_id: int
+    lead_id: int
+    author_id: int
+    analysis: NoteAnalysis
+    score: NoteScore | None = None
+    decision: Decision | None = None
+    suppressed: Suppressed | None = None
+    versions: Versions
+    request_id: str
