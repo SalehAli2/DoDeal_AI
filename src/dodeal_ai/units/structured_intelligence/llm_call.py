@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
 
 from pydantic import BaseModel
 
@@ -48,6 +49,32 @@ from dodeal_ai.core.resilience import ExternalCallError, call_with_watchdog
 from dodeal_ai.core.validation import OutputValidationError, validate_output
 
 _logger = logging.getLogger("dodeal_ai.unit_a")
+
+
+def output_rejected(
+    label: str, errors: tuple[tuple[str, str], ...]
+) -> OutputValidationError:
+    """Log `output_validation_failed` and BUILD the error to raise.
+
+    `validate_output` already emits this event for a schema failure. The two
+    rejections that cannot go through a schema -- output that is not JSON at
+    all, and the per-type / per-tenant rules the schema has no context for --
+    emit it here, in the same shape, so one alert covers every way a model
+    answer can be refused.
+
+    Every `errors` entry is a (dotted location, error type) pair from a FIXED
+    vocabulary: our own codes, or pydantic's. No model output, ever.
+
+    It returns the exception rather than raising it, so the call site reads
+    `raise output_rejected(...)` and the traceback starts where the rule is.
+    """
+    _logger.warning(
+        "output_validation_failed label=%s error_count=%d error_types=%s",
+        label,
+        len(errors),
+        ",".join(dict.fromkeys(error_type for _, error_type in errors)),
+    )
+    return OutputValidationError(label, errors)
 
 
 async def complete_once(
@@ -87,13 +114,25 @@ async def complete_once(
         raise ModelUnavailableError() from None
 
 
-def parse_output[M: BaseModel](response: LLMResponse, schema: type[M], label: str) -> M:
-    """Decode the response as JSON and validate it against `schema`.
+def parse_output[M: BaseModel](
+    response: LLMResponse,
+    schema: type[M],
+    label: str,
+    *,
+    check: Callable[[M], None] | None = None,
+) -> M:
+    """Decode the response as JSON, validate it against `schema`, then apply
+    `check` -- the rules the schema cannot express.
 
-    Raises `OutputValidationError` for both halves of "malformed": text that is
-    not JSON at all, and JSON that is not the shape we asked for. One exception
-    type, because Phase G's reprompt treats them identically -- the model is
-    told to answer with the object only, and either failure means it did not.
+    Raises `OutputValidationError` for all three: text that is not JSON at all,
+    JSON that is not the shape we asked for, and a well-shaped answer that
+    breaks a rule depending on the note type or the tenant. One exception type,
+    because Phase G's reprompt treats them identically -- the model was told
+    what to answer, and every one of these means it did not.
+
+    `check` raises; it never returns a repaired value. A hook that could rewrite
+    the answer would put part of the judgement in code that no prompt test
+    covers.
 
     The decoder's message is dropped and the exception is unchained. A
     `JSONDecodeError` carries the offending document on `.doc`, and formatting
@@ -103,18 +142,12 @@ def parse_output[M: BaseModel](response: LLMResponse, schema: type[M], label: st
     try:
         raw = json.loads(response.text)
     except ValueError:
-        # The same event `validate_output` emits, with the same fields, so an
-        # alert on output_validation_failed catches both halves. "json_invalid"
-        # is our own fixed vocabulary, not the decoder's text.
-        _logger.warning(
-            "output_validation_failed label=%s error_count=%d error_types=%s",
-            label,
-            1,
-            "json_invalid",
-        )
-        raise OutputValidationError(label, (("", "json_invalid"),)) from None
+        raise output_rejected(label, (("", "json_invalid"),)) from None
 
-    return validate_output(schema, raw, label=label)
+    parsed = validate_output(schema, raw, label=label)
+    if check is not None:
+        check(parsed)
+    return parsed
 
 
 async def call_model[M: BaseModel](
@@ -124,6 +157,7 @@ async def call_model[M: BaseModel](
     label: str,
     *,
     settings: Settings,
+    check: Callable[[M], None] | None = None,
 ) -> tuple[M, LLMResponse]:
     """Send one prompt and return the validated output beside the raw response.
 
@@ -141,7 +175,7 @@ async def call_model[M: BaseModel](
     """
     response = await complete_once(client, prompt, label, settings=settings)
     try:
-        return parse_output(response, schema, label), response
+        return parse_output(response, schema, label, check=check), response
     except OutputValidationError:
         # from None: the OutputValidationError is ours and safe, but chaining it
         # would print a second exception line wherever a traceback is formatted,

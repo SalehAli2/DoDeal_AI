@@ -610,7 +610,7 @@ suite was re-run separately (`-m integration`): **7 passed**. Wheel rebuilt and 
 - `pipeline.py`'s only uncovered lines are the `judgement_completed` log branch, unreachable until
   scoring exists. Floor set at 90 as specified; Phase H should raise it.
 
-## Phase D — classification against FakeLLM, system_event short-circuit   STATUS: DONE <sha>
+## Phase D — classification against FakeLLM, system_event short-circuit   STATUS: DONE 8874958
 
 **What changed:**
 
@@ -724,9 +724,86 @@ mypy: 56 source files, clean. Integration suite re-run separately (`-m integrati
   AR/EN/mixed examples, the explicit untrusted-data instruction) with no version bump, because no
   judgement has ever been produced by it.
 
-## Phase E
+## Phase E — vague detection: per-type prompts, fixed missing-components vocabulary   STATUS: DONE <sha>
 
-**STATUS: NOT STARTED**
+**What changed:**
+
+- `src/dodeal_ai/prompts/structured_intelligence/vague_{no_contact,callback,discovery,viewing,negotiation,won_lost}_v1.txt`
+  — six new templates. Each names its type's bar, applies the floor test ("could another agent pick
+  up this lead tomorrow, read this note and nothing else, and carry on?"), lists the components it
+  may report missing, forbids the generic question by name, and asks for JSON exactly `VagueOutput`
+  with the biconditional spelled out. The `no_contact` one lists two components and says in so many
+  words that `client_said` must never appear.
+- `src/dodeal_ai/units/structured_intelligence/vague.py` — new. `_TEMPLATES` (six entries,
+  `system_event` deliberately absent), `template_for`, `_caller_data`, `build_vague_prompt`,
+  `allowed_components_check`, `detect_vagueness`.
+- `src/dodeal_ai/units/structured_intelligence/llm_call.py` — `output_rejected(label, errors)`
+  (logs `output_validation_failed` and builds the error), and a `check` hook on `parse_output` /
+  `call_model` for the rules a schema cannot hold.
+- `tests/unit/test_vague.py` — new, 72 tests.
+- `CAMPAIGN_REPORT.md` — Phase D's sha backfilled, this block.
+
+**Decisions taken here:**
+
+- **Phase E does not touch the pipeline.** `vague.py` is built and tested; nothing calls it yet.
+  §5 gives Phase F the concurrency requirement — "from this phase the pipeline runs them
+  concurrently with `asyncio.gather`" — so wiring vague in sequentially here would create a
+  pipeline shape that exists for exactly one commit, and a concurrency test written twice. The
+  alternative's cost is real but small (one commit where the module is exercised only by its own
+  tests); the cost of doing it the other way is a rewrite of the same call site in the next commit.
+  §5's Phase E bullets do not mention the pipeline, unlike Phase D's, which is read as deliberate.
+- **The per-type rule runs INSIDE the validated call, through a new `check` hook.** §5 requires
+  `client_said` on a `no_contact` note to be "a validation failure", and §5's Phase F requires the
+  same of an out-of-range mark, both so Phase G's reprompt covers them. A rule enforced *after*
+  `call_model` returned would be a malformed answer that never earned its reprompt. So
+  `parse_output` takes a `check` that raises `OutputValidationError`, and the hook is a closure
+  over the note type and the tenant config — the context `validate_output` structurally cannot
+  have. Alternative: enforce it in the pipeline after the call. Cost: the reprompt would silently
+  not apply to two of the three ways an answer can be wrong.
+- **`check` raises; it never repairs.** Dropping the disallowed component and carrying on would
+  hand the decision step an answer no model gave. A test pins the rejection specifically so a
+  future "just filter it out" fails the suite.
+- **The allowed set stays in `TenantConfig`, not in `vague.py`.** It is a rubric decision like a
+  weight or a threshold, and a tenant that wants a different set should not need a code change.
+- **Six templates, not one parameterised template.** A single file would have to describe all six
+  bars and then trust the model to pick the right one *after* classification already decided —
+  paying twice for the same decision and giving it a second chance to get it wrong. Cost of six:
+  the shared paragraphs are duplicated six times, so a wording fix is six edits. They were
+  generated from one skeleton so the shared halves are byte-identical today, and Phase I revises
+  them in place.
+- **The vague prompt carries the note and NO lead context**, unlike classification. The floor test
+  is "could another agent read THIS NOTE and carry on"; handing the model the lead's project and
+  status would let it fill in from the record what the note does not say, and pass a note that
+  leaves the next reader guessing. Alternative: same context as the classifier. Cost: the floor
+  test stops meaning what it says.
+- **`template_for` raises rather than falling back.** A type with no template is a programming
+  error — the only one is `system_event`, which the classifier stops before. A generic fallback
+  would judge a `no_contact` note against a discovery bar and nobody would see it happen. A test
+  asserts the six keys plus `system_event` are exactly `NoteType`, so an eighth type is a failing
+  test rather than a `KeyError` in production.
+- **The rejected component's NAME goes into the error location** (`missing_components.client_said`,
+  type `component_not_allowed_for_type`). It is a `MissingComponent` member — fixed vocabulary,
+  never free text — so it is safe on a log line and makes the failure diagnosable. A test asserts
+  the note text is absent from the same log output.
+
+**Tree disagreements:**
+
+- **§5 asks Phase E to "add a per-type allowed set in `config.py`". It is already there.**
+  `allowed_missing_by_type` was built in Phase A with exactly the right contents
+  (`no_contact` → `{what_happened, next_step_with_date}`, every other type → all three). Phase E
+  therefore added no config; it consumed what existed. Recorded because a reader comparing the
+  phase to the spec will look for a config diff and find none.
+
+**Tests:** 72 added; suite **526 total, 99.07 %** (floor 92); all 10 floors met, none added —
+`vague.py` is at **100 %** under the unit's existing `units/structured_intelligence/** = 95`.
+mypy: 57 source files, clean. Integration suite re-run separately (`-m integration`): **7 passed**.
+Wheel rebuilt: all seven prompt files ship under `dodeal_ai/prompts/structured_intelligence/`.
+
+**For the lead:**
+
+- The six templates are the wording most worth a human read before Phase I hardens them. In
+  particular: `won_lost` currently expects a next step *or* an explicit "nothing follows", which is
+  a judgement call about closed leads that Product may want to make differently.
 
 ## Phase F
 
