@@ -347,6 +347,112 @@ produces a `Band`.
 - **`validate_output`'s `label` is keyword-only** (`validate_output(schema, raw, *, label=...)`),
   where §4 writes it positionally. Cosmetic; call sites use the keyword.
 
+### 3 Sep 2026 — session 4 (hotfix: lazy `WorkerSettings.redis_settings`)
+
+**Scope of this session:** one hotfix commit. No phase advances. **Phase G is not started.**
+`workers/runner.py` is exempt from the do-not-touch list for this commit only, by the lead's
+instruction; every other rule in §0 and §7 still applies.
+
+**Sha convention.** **Phase F's sha `2f2dbfb` backfilled into its heading** as this session's
+first edit.
+
+**Tree state.** Branch `scaffold/core-governance-homes`, head `2f2dbfb` (Phase F).
+`git status --porcelain`:
+
+```
+ M .env.example        <- the lead's edit, still unstaged; untouched
+?? AIService.zip       <- untracked, left alone
+?? docs/campaign/      <- the spec itself, untracked; the lead's to commit
+```
+
+**What is broken.** CI is red on `tests/unit/test_worker_settings.py` — not at assertion time,
+at **collection**. `src/dodeal_ai/workers/runner.py` called `redis_settings()` in the class body
+of `WorkerSettings`, so merely importing the module built `Settings`. `jwt_signing_key` has no
+default (fail-closed, `core/config.py`), CI has neither the env var nor a `.env`, and the root
+`conftest.py` autouse fixture that supplies the key runs **after** collection. The import
+therefore raised `ConfigError` before any fixture could exist, taking the whole file with it.
+
+**Why it never showed locally, and why the wheel check passes.** Two separate masks:
+
+- A developer machine has a `.env` at the repo root, and pydantic-settings reads it
+  (`env_file=".env"`), so the eager read succeeded.
+- `scripts/verify_wheel.py:115` passes `DODEAL_JWT_SIGNING_KEY: "verify-wheel-dummy-key"` in the
+  subprocess env, so the wheel import check supplied the key itself and never exercised the bug.
+
+**Pre-existing, not a campaign regression.** The line dates from `36a0210` (the arq skeleton,
+the campaign's base head). No phase A–F touched `workers/`.
+
+**Reproduction, recorded.** `.env` is permission-blocked in this session, so it was moved with
+`mv .env .env.off`, not renamed in PowerShell; the env var was cleared in the same shell. Moved
+back immediately after.
+
+```
+$ Remove-Item Env:DODEAL_JWT_SIGNING_KEY -ErrorAction SilentlyContinue
+$ uv run pytest tests/unit/test_worker_settings.py --no-cov
+collected 0 items / 1 error
+ERROR collecting tests/unit/test_worker_settings.py
+  tests/unit/test_worker_settings.py:11: in <module>
+      from dodeal_ai.workers import runner
+  src/dodeal_ai/workers/runner.py:44: in WorkerSettings
+      redis_settings = redis_settings()
+  src/dodeal_ai/core/config.py:151: in _build_settings
+      raise ConfigError(
+  E   dodeal_ai.core.config.ConfigError: Missing or invalid required configuration; refusing to start.
+!!!!!!! Interrupted: 1 error during collection !!!!!!!
+```
+
+**The fix.** A `_LazyRedisSettings` descriptor whose `__get__` returns `redis_settings()`, so the
+read happens when arq reads the attribute to start the worker, not when the class is created.
+`redis_settings()` stays the module function; `WorkerSettings.functions` is unchanged; the
+step-14 TRIGGER comment is unchanged. **Register item 7, pulled forward from step 14 — CI.**
+
+**Decision taken here: descriptor, not `classmethod`+`property` or `__getattr__`.** A property
+does not fire on class attribute access, and arq reads `WorkerSettings.redis_settings` off the
+class, not an instance — so a property would have handed arq the property object itself.
+Chaining `classmethod` with `property` was removed in 3.13 and is deprecated in 3.12, so it
+would have been a known-dated construct. A module-level `__getattr__` cannot intercept a class
+attribute at all. The descriptor is eight lines, types cleanly under the strict mypy config, and
+re-reads current settings on every access — the cost is one `lru_cache` hit per access, which is
+what `get_settings()` is for.
+
+**Tests:** 1 added (`test_import_reads_no_settings`), 1 strengthened.
+
+- `test_import_reads_no_settings` runs `[sys.executable, "-c", ...]` with every `DODEAL_` var
+  stripped, `cwd` the repo root. It imports the module **and asserts
+  `get_settings.cache_info().currsize == 0`**. The cache assertion is load-bearing: `cwd` must be
+  the repo root for the package to resolve, a repo root has a `.env`, and a `.env` satisfies the
+  eager read — so a returncode-only check would have passed on this machine against the old code
+  while still failing in CI. Verified negatively: restored the eager `runner.py`, ran the new
+  test, got `AssertionError: import built Settings` (not `ConfigError` — the `.env` mask,
+  demonstrated).
+- `test_worker_settings_carry_redis_settings` now takes the `queue_url` fixture and asserts
+  `runner.WorkerSettings.redis_settings.host == "queue.example"`. The old `is not None` passed
+  against a value captured at import; this proves the descriptor reads the settings **current at
+  access time**, since the fixture set that URL long after the module was imported.
+
+**Suite:** 601 passed, 7 deselected, total coverage **99.12 %** (floor 92). All 11 per-file
+coverage floors met; no floor added or changed. `src/dodeal_ai/workers/runner.py` 13 statements,
+**100 %**. Chain green in order: `pytest`, `ruff check .`, `ruff format --check .`, `mypy`
+(58 source files, clean under the strict config).
+
+**Tree disagreements:** none. The change is confined to the one file the lead exempted, plus its
+test.
+
+**For the lead:**
+
+- **"Appendix B #11" does not exist in the tree.** Nothing in `docs/`, `CAMPAIGN_REPORT.md` or
+  `docs/campaign/UNIT_A_PROJECT1_CAMPAIGN_PROMPT.md` contains the string "Appendix B" — the
+  campaign prompt has no appendices at all. It is cited in the commit body as instructed, but it
+  is a pointer into a document this repository does not hold, so no session can check the commit
+  against it. Same for the register itself: "register item 7" is referenced by number in the
+  prompt and by number in several places in the spec, but the register is not in the tree.
+- **The `.env` mask is general, not specific to `workers/`.** Any module that reads settings at
+  import time will pass locally and fail CI at collection in exactly this way, and the wheel
+  check will not catch it because it injects a dummy key. The new test only guards
+  `workers/runner.py`. A one-line grep test over `src/` for module-scope `get_settings()` calls
+  would guard the class of bug rather than this instance — not done here, since this commit is
+  scoped to the hotfix.
+
 ## Fail-open / fail-closed matrix (§1 — do not reopen)
 
 | # | Concern | Store / failure | Policy | Observable |
@@ -805,7 +911,7 @@ Wheel rebuilt: all seven prompt files ship under `dodeal_ai/prompts/structured_i
   particular: `won_lost` currently expects a next step *or* an explicit "nothing follows", which is
   a judgement call about closed leads that Product may want to make differently.
 
-## Phase F — scoring: marks from the model, arithmetic in code, Q13 suppression   STATUS: DONE <sha>
+## Phase F — scoring: marks from the model, arithmetic in code, Q13 suppression   STATUS: DONE 2f2dbfb
 
 **What changed:**
 
