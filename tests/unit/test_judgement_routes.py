@@ -48,6 +48,54 @@ def _classified(note_type: str):
     return json_response({"note_type": note_type})
 
 
+def _vague_answer(
+    *,
+    is_vague: bool = True,
+    missing: list[str] | None = None,
+    prompt: str | None = None,
+):
+    """The vague pass's answer. Vague by default, with the one missing thing the
+    GOOD_NOTE above actually lacks a firm version of."""
+    return json_response(
+        {
+            "is_vague": is_vague,
+            "missing_components": ["next_step_with_date"]
+            if missing is None
+            else missing,
+            "clarification_prompt": (
+                "Which Tuesday are you calling, and what will you cover?"
+                if prompt is None and is_vague
+                else prompt
+            ),
+            "reasoning": "The follow-up has no date.",
+        }
+    )
+
+
+def _score_answer(**marks: int):
+    """The scoring pass's answer. The default marks sum to 55 of a denominator of
+    80 -- 69, `fair` -- which is one mark below the accept threshold and so the
+    most interesting default to carry into Phase H."""
+    return json_response(
+        {
+            "marks": {
+                "what_happened": 20,
+                "client_said": 15,
+                "next_step_date": 15,
+                "clarity": 5,
+                **marks,
+            }
+        }
+    )
+
+
+def _happy_path(note_type: str = "discovery"):
+    """One judgement's three answers, in the order the pipeline issues them:
+    classification first (it chooses the other two prompts), then vague detection
+    and scoring, which are issued together."""
+    return [_classified(note_type), _vague_answer(), _score_answer()]
+
+
 class _FakeCostRedis:
     """Gate 4's store. Copied from tests/security/test_chain.py -- the cost gate
     runs on every one of these routes and must not be the thing that fails."""
@@ -75,13 +123,13 @@ def leads() -> FakeLeadsClient:
 
 @pytest.fixture
 def llm() -> FakeLLM:
-    """Four identical classifications -- enough for the tests that judge twice.
+    """Two full judgements' worth -- enough for the tests that judge twice.
 
     Deliberately not an endless supply: an exhausted FakeLLM raises rather than
     returning a default, so a path that calls the model more often than the
     pipeline is specified to is loud instead of silently absorbed.
     """
-    return FakeLLM(*[_classified("discovery") for _ in range(4)])
+    return FakeLLM(*(_happy_path() + _happy_path()))
 
 
 @pytest.fixture
@@ -309,7 +357,7 @@ def test_note_is_matched_by_id_not_by_position(client, leads):
 
 
 def test_a_thin_note_is_suppressed_without_reserving_anything(
-    client, leads, operational
+    client, leads, operational, llm
 ):
     leads.notes[LEAD_ID] = [note(NOTE_ID, "ok")]
     r = client.post(JUDGE, json=_body(), headers=_headers())
@@ -325,6 +373,9 @@ def test_a_thin_note_is_suppressed_without_reserving_anything(
     # Nothing reserved: the salesperson can fix the note and resubmit at once
     # instead of being told 409 for the next 24 hours.
     assert operational.store == {}
+    # And nothing spent: the check is before the reservation and before the
+    # first thing that costs money.
+    assert llm.call_count == 0
 
 
 def test_a_short_but_wordy_note_is_still_thin(client, leads):
@@ -430,17 +481,28 @@ def test_a_thin_note_stamps_no_model_version(client, leads):
     assert versions["model_version"] == ""
 
 
-def test_the_analysis_carries_the_classifiers_answer_and_nothing_else(client):
+def test_the_analysis_carries_all_three_passes(client):
     analysis = client.post(JUDGE, json=_body(), headers=_headers()).json()["analysis"]
     assert analysis == {
         "note_type": "discovery",
-        # Vague detection and scoring have not run, so these stay null/empty --
-        # never zero, and never a default the CRM could read as an answer.
-        "is_vague": None,
-        "missing_components": [],
-        "clarification_prompt": None,
-        "reasoning": None,
+        "is_vague": True,
+        "missing_components": ["next_step_with_date"],
+        "clarification_prompt": "Which Tuesday are you calling, and what will you cover?",
+        "reasoning": "The follow-up has no date.",
     }
+
+
+def test_the_score_is_computed_but_not_yet_published(client, json_log):
+    # §2.5's scored shape is score AND decision. decide() is Phase H, and half a
+    # scored judgement is one the CRM cannot act on -- so the arithmetic runs and
+    # the result is logged, not returned.
+    body = client.post(JUDGE, json=_body(), headers=_headers()).json()
+    assert body["score"] is None
+    assert body["decision"] is None
+
+    line = next(x for x in _lines(json_log) if x["message"] == "judgement_suppressed")
+    assert line["band"] == "fair"  # 55 of 80 -> 69
+    assert line["denominator"] == 80  # ASSUMPTION[Q13]: deal_specifics is out
 
 
 def test_a_thin_note_has_no_note_type_at_all(client, leads):
@@ -460,11 +522,22 @@ def test_the_response_carries_the_request_id(client):
     assert r.json()["request_id"] == r.headers["X-Request-ID"]
 
 
-def test_exactly_one_model_call_reaches_the_seam(client, llm):
-    # Classification and nothing else: vague detection and scoring are the next
-    # two phases, and a third call here would mean one of them arrived early.
+def test_three_model_calls_on_the_happy_path(client, llm):
+    # Classification, vague detection, scoring. A fourth would mean something
+    # was issued twice; a second reprompt is Phase G and is not one of these.
     client.post(JUDGE, json=_body(), headers=_headers())
-    assert llm.call_count == 1
+    assert llm.call_count == 3
+
+
+def test_the_calls_are_issued_in_the_one_order_they_may_be(client, llm):
+    # Classification FIRST, because it chooses the other two prompts. The other
+    # two are issued together, in the order gather was given them -- which is
+    # what makes an ordered script a safe way to write these tests.
+    client.post(JUDGE, json=_body(), headers=_headers())
+    stables = [p.stable[:40] for p in llm.prompts]
+    assert stables[0].startswith("You classify one CRM lead note")
+    assert stables[1].startswith("You decide whether one CRM lead note")
+    assert stables[2].startswith("You mark one CRM lead note")
 
 
 def test_the_tool_layer_sees_the_verified_tenant(client, leads):
@@ -485,7 +558,7 @@ def test_a_judgement_is_logged_without_note_text(client, json_log):
     line = next(x for x in _lines(json_log) if x["message"] == "judgement_suppressed")
     assert line["suppressed_reason"] == "not_scorable"
     assert line["suppressed_detail"] == "not_implemented"
-    assert line["model_calls"] == 1
+    assert line["model_calls"] == 3
     assert line["tenant"] == "tenant-a"
 
 
@@ -606,7 +679,7 @@ def test_malformed_model_output_is_503_malformed_output(client, llm):
 def test_malformed_output_releases_the_idempotency_key(client, llm, operational):
     # Otherwise the caller is told 409 for the next 24 hours for a judgement
     # that never happened.
-    llm.rescript(response("not json"), _classified("discovery"))
+    llm.rescript(response("not json"), *_happy_path())
     assert client.post(JUDGE, json=_body(), headers=_headers()).status_code == 503
     assert operational.store == {}
     assert client.post(JUDGE, json=_body(), headers=_headers()).status_code == 200
@@ -635,7 +708,7 @@ def test_a_provider_failure_is_503_model_unavailable(client, llm):
 def test_a_provider_failure_releases_the_key_so_a_retry_works(client, llm, operational):
     llm.rescript(
         LLMProviderError(LLMErrorReason.UNAVAILABLE, transient=True),
-        _classified("discovery"),
+        *_happy_path(),
     )
     assert client.post(JUDGE, json=_body(), headers=_headers()).status_code == 503
     assert operational.store == {}

@@ -56,6 +56,10 @@ _FLOORS: dict[str, float] = {
     "src/dodeal_ai/units/structured_intelligence/**": 95,
     "src/dodeal_ai/units/structured_intelligence/config.py": 100,
     "src/dodeal_ai/units/structured_intelligence/state.py": 95,
+    # The arithmetic a salesperson is shown and asked to accept. A gap here is a
+    # silently wrong total, not a crash -- and it is pure functions over marks
+    # and config, so there is no excuse for an uncovered line.
+    "src/dodeal_ai/units/structured_intelligence/scoring.py": 100,
     # 90 while the pipeline is still a stub ending at SEAM[STEP3]; raised in
     # Phase H once classify/vague/score/compute/decide exist.
     "src/dodeal_ai/units/structured_intelligence/pipeline.py": 90,

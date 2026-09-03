@@ -10,6 +10,11 @@ tested now, at the seam, rather than after something starts depending on it.
 
 from __future__ import annotations
 
+import asyncio
+import io
+import json
+import logging
+
 import pytest
 
 import dodeal_ai.units.structured_intelligence.pipeline as pipeline_module
@@ -19,15 +24,20 @@ from dodeal_ai.core.errors import (
     BackendUnavailableError,
     DuplicateRequestError,
     IdempotencyUnavailableResponse,
+    ModelUnavailableError,
     NoteNotFoundError,
 )
 from dodeal_ai.core.llm import LLMErrorReason, LLMProviderError
+from dodeal_ai.core.logging_config import JsonFormatter
 from dodeal_ai.core.resilience import ExternalCallError
 from dodeal_ai.tools.keys import BackendKeyError
 from dodeal_ai.units.structured_intelligence import state
 from dodeal_ai.units.structured_intelligence.config import get_tenant_config
 from dodeal_ai.units.structured_intelligence.pipeline import JudgementDeps, judge_note
-from dodeal_ai.units.structured_intelligence.schemas import JudgementRequest
+from dodeal_ai.units.structured_intelligence.schemas import (
+    JudgementRequest,
+    SuppressedDetail,
+)
 from tests.helpers.fake_leads import FakeLeadsClient, lead, note
 from tests.helpers.fake_llm import FakeLLM, json_response
 from tests.helpers.fake_operational_redis import FakeOperationalRedis
@@ -41,6 +51,54 @@ def _classified(note_type: str):
     """One scripted classifier reply: exactly the JSON object the template asks
     for, and nothing around it."""
     return json_response({"note_type": note_type})
+
+
+def _vague_answer(
+    *,
+    is_vague: bool = True,
+    missing: list[str] | None = None,
+    prompt: str | None = None,
+):
+    """The vague pass's answer. Vague by default, with the one missing thing the
+    GOOD_NOTE above actually lacks a firm version of."""
+    return json_response(
+        {
+            "is_vague": is_vague,
+            "missing_components": ["next_step_with_date"]
+            if missing is None
+            else missing,
+            "clarification_prompt": (
+                "Which Tuesday are you calling, and what will you cover?"
+                if prompt is None and is_vague
+                else prompt
+            ),
+            "reasoning": "The follow-up has no date.",
+        }
+    )
+
+
+def _score_answer(**marks: int):
+    """The scoring pass's answer. The default marks sum to 55 of a denominator of
+    80 -- 69, `fair` -- which is one mark below the accept threshold and so the
+    most interesting default to carry into Phase H."""
+    return json_response(
+        {
+            "marks": {
+                "what_happened": 20,
+                "client_said": 15,
+                "next_step_date": 15,
+                "clarity": 5,
+                **marks,
+            }
+        }
+    )
+
+
+def _happy_path(note_type: str = "discovery"):
+    """One judgement's three answers, in the order the pipeline issues them:
+    classification first (it chooses the other two prompts), then vague detection
+    and scoring, which are issued together."""
+    return [_classified(note_type), _vague_answer(), _score_answer()]
 
 
 def _scope(tenant: str = "tenant-a"):
@@ -71,7 +129,25 @@ def operational(monkeypatch) -> FakeOperationalRedis:
 
 @pytest.fixture
 def llm() -> FakeLLM:
-    return FakeLLM(*[_classified("discovery") for _ in range(4)])
+    return FakeLLM(*(_happy_path() + _happy_path()))
+
+
+@pytest.fixture
+def json_capture():
+    """The real JsonFormatter over the dodeal_ai tree, returned as a callable
+    yielding the parsed lines emitted so far."""
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(JsonFormatter())
+    logger = logging.getLogger("dodeal_ai")
+    original_level = logger.level
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    try:
+        yield lambda: [json.loads(x) for x in stream.getvalue().splitlines()]
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(original_level)
 
 
 @pytest.fixture
@@ -199,12 +275,144 @@ async def test_both_fetches_are_made_for_the_requested_lead(deps, leads, operati
     ]
 
 
-async def test_only_the_classifier_is_called(deps, operational):
+async def test_the_three_passes_are_called(deps, operational):
     await judge_note(_scope(), _request(), resubmission=False, deps=deps)
-    assert deps.llm.call_count == 1
+    assert deps.llm.call_count == 3
 
 
 async def test_a_stop_before_the_seam_spends_nothing(deps, operational):
     with pytest.raises(NoteNotFoundError):
         await judge_note(_scope(), _request(note_id=999), resubmission=False, deps=deps)
     assert deps.llm.call_count == 0
+
+
+# --- vague and scoring run concurrently (register item 14) ------------------
+
+
+async def test_the_happy_path_costs_three_calls(deps, operational):
+    await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+    assert deps.llm.call_count == 3
+
+
+async def test_vague_and_scoring_are_issued_before_either_returns(
+    leads, operational, monkeypatch
+):
+    """Counting calls proves how many happened, not how many were in flight.
+
+    The fake holds every call after the first, so when call_count reaches three
+    the classifier has returned and the other two are BOTH still open. Three
+    sequential calls could never reach that state.
+    """
+    llm = FakeLLM(*_happy_path(), hold_after=1)
+    deps = JudgementDeps(
+        leads=leads,
+        llm=llm,
+        config=get_tenant_config("tenant-a"),
+        settings=get_settings(),
+    )
+    task = asyncio.create_task(
+        judge_note(_scope(), _request(), resubmission=False, deps=deps)
+    )
+
+    for _ in range(200):
+        await asyncio.sleep(0)
+        if llm.call_count == 3:
+            break
+
+    assert llm.call_count == 3  # both issued...
+    llm.released.set()  # ...and only now allowed to return
+    judgement = await task
+    assert judgement.suppressed is not None
+
+
+async def test_a_scoring_failure_releases_the_key_exactly_once(
+    leads, operational, monkeypatch
+):
+    releases = {"n": 0}
+    real_release = state.release_idempotency
+
+    async def _counting_release(*args, **kwargs):
+        releases["n"] += 1
+        await real_release(*args, **kwargs)
+
+    monkeypatch.setattr(state, "release_idempotency", _counting_release)
+
+    # Classification fine, vague fine, scoring dies. gather propagates the first
+    # exception through the one release-on-error path.
+    llm = FakeLLM(
+        _classified("discovery"),
+        _vague_answer(),
+        LLMProviderError(LLMErrorReason.UNAVAILABLE, transient=True),
+    )
+    deps = JudgementDeps(
+        leads=leads,
+        llm=llm,
+        config=get_tenant_config("tenant-a"),
+        settings=get_settings(),
+    )
+
+    with pytest.raises(ModelUnavailableError):
+        await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+
+    assert releases["n"] == 1
+    assert operational.store == {}
+
+
+async def test_a_vague_failure_also_releases_the_key(leads, operational):
+    llm = FakeLLM(
+        _classified("discovery"),
+        LLMProviderError(LLMErrorReason.UNAVAILABLE, transient=True),
+        _score_answer(),
+    )
+    deps = JudgementDeps(
+        leads=leads,
+        llm=llm,
+        config=get_tenant_config("tenant-a"),
+        settings=get_settings(),
+    )
+
+    with pytest.raises(ModelUnavailableError):
+        await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+    assert operational.store == {}
+
+
+async def test_a_suppressing_classification_never_issues_the_other_two(
+    leads, operational
+):
+    llm = FakeLLM(_classified("system_event"))
+    deps = JudgementDeps(
+        leads=leads,
+        llm=llm,
+        config=get_tenant_config("tenant-a"),
+        settings=get_settings(),
+    )
+
+    judgement = await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+    assert judgement.suppressed is not None
+    assert judgement.suppressed.detail_code is SuppressedDetail.SYSTEM_EVENT
+    assert llm.call_count == 1
+
+
+async def test_a_no_contact_note_is_scored_against_the_narrower_rubric(
+    leads, operational, json_capture
+):
+    llm = FakeLLM(
+        _classified("no_contact"),
+        _vague_answer(missing=["next_step_with_date"]),
+        json_response(
+            {"marks": {"what_happened": 20, "next_step_date": 20, "clarity": 8}}
+        ),
+    )
+    deps = JudgementDeps(
+        leads=leads,
+        llm=llm,
+        config=get_tenant_config("tenant-a"),
+        settings=get_settings(),
+    )
+
+    await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+
+    line = next(x for x in json_capture() if x["message"] == "judgement_suppressed")
+    # 48 of 60 -> 80, good. client_said and deal_specifics left the denominator.
+    assert line["denominator"] == 60
+    assert line["band"] == "good"

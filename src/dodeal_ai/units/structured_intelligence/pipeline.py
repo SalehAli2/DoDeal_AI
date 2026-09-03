@@ -11,16 +11,26 @@ the step after it costs:
   5. read the rate limit                 (fail open)
   6. read the attempt count              (fail open)
   7. SEAM[STEP3] token pre-flight        (no-op today)
-  8. classify -> vague -> score          three model calls
+  8. classify, THEN vague + score        three model calls, two round-trips
   9. compute, decide                     in code, never from the model
  10. increment counters ONLY if a prompt was actually sent
 
-Step 8 is HALF built: classification is real, and its two terminal answers --
-system_event and unclassifiable -- end the judgement as suppressed states with
-one model call spent. Vague detection and scoring are still ahead, so a note
-that survives classification returns Suppressed(not_scorable, not_implemented).
-That detail code is the marker for what is left: Phase H deletes it from src/
-and a test greps for it, so the stub cannot outlive the work.
+WHY 8 IS "classify, THEN the other two" (register item 14). Classification must
+finish first: the vague template is chosen by type and the applicable components
+are chosen by type, so neither of the other two prompts can even be ASSEMBLED
+until the answer is in. Vague detection and scoring, on the other hand, do not
+depend on each other at all -- so they are issued together with asyncio.gather
+and the happy path costs two round-trips, not three, while the call count stays
+three. `return_exceptions=False`: the first failure propagates through the
+release-on-error path below and the key is released exactly once.
+
+Step 9 is HALF built: the score is computed, and a mark the model returned out
+of range fails here rather than in the phase that would have acted on it. What
+is missing is `decide` -- so a note that survives classification still returns
+Suppressed(not_scorable, not_implemented), because a scored judgement needs a
+Decision beside it (§2.5) and there is not one yet. That detail code is the
+marker for what is left: Phase H deletes it from src/ and a test greps for it,
+so the stub cannot outlive the work.
 
 WHY THIS ORDER, at the two places it matters:
 
@@ -40,6 +50,7 @@ get 409 for a judgement that never happened.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 
@@ -67,11 +78,15 @@ from dodeal_ai.units.structured_intelligence.schemas import (
     Judgement,
     JudgementRequest,
     NoteAnalysis,
+    NoteScore,
+    NoteType,
     Suppressed,
     SuppressedDetail,
     SuppressedReason,
     Versions,
 )
+from dodeal_ai.units.structured_intelligence.scoring import compute_score, score_note
+from dodeal_ai.units.structured_intelligence.vague import detect_vagueness
 
 _logger = logging.getLogger("dodeal_ai.unit_a")
 
@@ -308,11 +323,51 @@ async def judge_note(
         )
         model_calls = 1
         analysis = NoteAnalysis(note_type=classification.note_type)
+        score: NoteScore | None = None
 
         detail = suppression_for(classification.note_type)
         if detail is None:
-            # SEAM: vague -> score -> compute -> decide land next. Until then
-            # this is an honest "we did not judge it", not a zero.
+            # suppression_for returned None, so this is one of the six scored
+            # types -- narrowed here because ClassifierOutput also admits the
+            # "unclassifiable" string, which stopped above.
+            note_type = classification.note_type
+            assert isinstance(note_type, NoteType)
+
+            # --- vague + score: issued together, awaited together ------------
+            vague_result, score_result = await asyncio.gather(
+                detect_vagueness(
+                    deps.llm,
+                    note,
+                    note_type,
+                    config=config,
+                    settings=deps.settings,
+                ),
+                score_note(
+                    deps.llm,
+                    note,
+                    note_type,
+                    config=config,
+                    settings=deps.settings,
+                ),
+            )
+            model_calls = 3
+
+            vague_output, _ = vague_result
+            score_output, _ = score_result
+            analysis = NoteAnalysis(
+                note_type=note_type,
+                is_vague=vague_output.is_vague,
+                missing_components=vague_output.missing_components,
+                clarification_prompt=vague_output.clarification_prompt,
+                reasoning=vague_output.reasoning,
+            )
+            score = compute_score(score_output.marks, note_type, config)
+
+            # SEAM: decide() lands in Phase H, and only then can the judgement
+            # carry the score -- §2.5's scored shape is score AND decision, and
+            # half of it would be a judgement the CRM cannot act on. The
+            # arithmetic runs now regardless, so an out-of-range mark fails in
+            # the phase that produced it.
             detail = SuppressedDetail.NOT_IMPLEMENTED
 
         judgement = _suppressed(
@@ -333,17 +388,29 @@ async def judge_note(
         )
         raise
 
-    _log_outcome(scope, judgement, model_calls=model_calls)
+    _log_outcome(scope, judgement, model_calls=model_calls, score=score)
     return judgement
 
 
-def _log_outcome(scope: TenantScope, judgement: Judgement, *, model_calls: int) -> None:
+def _log_outcome(
+    scope: TenantScope,
+    judgement: Judgement,
+    *,
+    model_calls: int,
+    score: NoteScore | None = None,
+) -> None:
     """One structured line per judgement.
 
     Fields only, via extra=, and every one of them is an identifier or a member
     of a fixed vocabulary. NEVER the note text, never the reasoning, never the
     clarification prompt -- the whole point of the unit is that it reads note
     bodies, so this is the log line most likely to leak one.
+
+    `score` is the computed score when there IS one but the judgement does not
+    yet carry it -- the state between Phase F and Phase H. It puts the band and
+    the denominator on the line so the arithmetic is observable before `decide`
+    exists to publish it. Phase H moves both onto the completed line, where they
+    belong, and this parameter goes away with the stub.
     """
     if judgement.suppressed is not None:
         _logger.info(
@@ -355,6 +422,11 @@ def _log_outcome(scope: TenantScope, judgement: Judgement, *, model_calls: int) 
                 "suppressed_reason": judgement.suppressed.reason.value,
                 "suppressed_detail": judgement.suppressed.detail_code.value,
                 "model_calls": model_calls,
+                **(
+                    {"band": score.band.value, "denominator": score.denominator}
+                    if score is not None
+                    else {}
+                ),
             },
         )
         return

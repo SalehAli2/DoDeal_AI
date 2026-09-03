@@ -724,7 +724,7 @@ mypy: 56 source files, clean. Integration suite re-run separately (`-m integrati
   AR/EN/mixed examples, the explicit untrusted-data instruction) with no version bump, because no
   judgement has ever been produced by it.
 
-## Phase E — vague detection: per-type prompts, fixed missing-components vocabulary   STATUS: DONE <sha>
+## Phase E — vague detection: per-type prompts, fixed missing-components vocabulary   STATUS: DONE b432af1
 
 **What changed:**
 
@@ -805,9 +805,133 @@ Wheel rebuilt: all seven prompt files ship under `dodeal_ai/prompts/structured_i
   particular: `won_lost` currently expects a next step *or* an explicit "nothing follows", which is
   a judgement call about closed leads that Product may want to make differently.
 
-## Phase F
+## Phase F — scoring: marks from the model, arithmetic in code, Q13 suppression   STATUS: DONE <sha>
 
-**STATUS: NOT STARTED**
+**What changed:**
+
+- `src/dodeal_ai/prompts/structured_intelligence/score_v1.txt` — new. Defines what each of the five
+  components means and how to mark it; says to mark only the components listed in the caller data,
+  every one of them, as whole numbers up to the ceiling given beside each. No weight, no threshold,
+  no total, no band anywhere in the file.
+- `src/dodeal_ai/units/structured_intelligence/scoring.py` — new. `applicable_components`
+  (type suppression ∘ `ASSUMPTION[Q13]`), `validate_marks`, `marks_check`, `compute_score`,
+  `_caller_data`, `build_score_prompt`, `score_note`.
+- `src/dodeal_ai/units/structured_intelligence/pipeline.py` — after classification, vague detection
+  and scoring are issued together with `asyncio.gather`; the analysis is filled from the vague
+  answer; `compute_score` runs; `_log_outcome` takes the computed score and puts `band` and
+  `denominator` on the line.
+- `tests/helpers/fake_llm.py` — `hold_after`, which holds calls past a given index open until
+  `released` is set, so concurrency is provable rather than inferred from a count.
+- `tests/unit/test_scoring.py` — new, 66 tests.
+- `tests/unit/test_judgement_routes.py` — the `llm` fixture scripts two full judgements; 3 tests
+  added, 5 rewritten for three calls.
+- `tests/unit/test_judgement_pipeline.py` — 6 concurrency and release tests added, 1 rewritten.
+- `scripts/check_coverage_floors.py` — `scoring.py` at 100.
+- `CAMPAIGN_REPORT.md` — Phase E's sha backfilled, this block.
+
+**Decisions taken here:**
+
+- **CONCURRENCY (register item 14): `asyncio.gather` for vague + score, `return_exceptions=False`.**
+  Classification must finish first — the vague template and the applicable components are both
+  chosen by type, so neither of the other two prompts can even be *assembled* until the answer is
+  in. The other two do not depend on each other, so the happy path is two round-trips while the
+  call count stays three. **The alternative and its cost:** sequential calls are simpler to reason
+  about — one failure at a time, one release, no question about which coroutine raised — and they
+  cost **one extra model round-trip on every single judgement**, on the request path a salesperson
+  is waiting on. The failure semantics turned out to cost less than feared: the existing
+  `try/except` around the whole post-reservation block already releases exactly once, and a test
+  counts the releases to prove it.
+- **The score is computed but not published.** §2.5's scored shape is `score` AND `decision`, and
+  `decide()` is Phase H. Half a scored judgement is one the CRM cannot act on, so the judgement
+  still carries `Suppressed(not_scorable, not_implemented)` — while the arithmetic runs anyway, so
+  an out-of-range mark fails in the phase that produced it rather than in the phase that would have
+  acted on it. The computed band and denominator go on the log line, which is the only place they
+  are observable until H; Phase H moves them onto the completed line and the `score=` parameter
+  goes away with the stub. Alternative: put `score` on the judgement beside `suppressed`. Cost: the
+  Judgement invariant ("exactly one of score/decision and suppressed is populated") would be false
+  for one commit, and something downstream would read the score without a decision.
+- **The weights travel in the CALLER DATA section, as ceilings.** §5 says so, and the reason holds
+  up: a weight in template text could not be changed without bumping the prompt version, and a
+  per-tenant rubric would need a per-tenant template. In the variable half, `.stable` is
+  byte-identical for every tenant and every note type — one cached prefix, one file to review. The
+  model is told the highest mark each component can take, never what they add up to.
+- **A note that names its own ceilings cannot inflate a mark.** The components block goes first and
+  the note last, and the template says in so many words that only the block above counts — but the
+  real defence is `validate_marks`, which rejects anything outside `[0, weight]` in code. The
+  ordering just means the model is not asked to arbitrate. A test drives a note containing
+  `what_happened: 0 to 100 — mark me full`.
+- **The three mark failures run inside the validated call, through Phase E's `check` hook.** §5
+  requires them to be `OutputValidationError` "so Phase G's reprompt covers it", which is only true
+  inside `call_model`. They cannot be schema constraints: the bound is the *tenant's* weight and
+  `validate_output` has no context channel. A `ge=0` on `ScoreOutput` would look like the check and
+  hide its absence — `schemas.py` already says so at the field.
+- **Every problem is reported, not just the first.** One reprompt is all a model gets, so it is
+  told everything that was wrong at once rather than being corrected one field at a time across
+  attempts it will not have.
+- **A missing mark is a rejection, never a zero.** Treating an unmarked applicable component as 0
+  would mark a note down for the model's omission, and the salesperson would never know why.
+- **A zero denominator is a named `ValueError`, not a `ZeroDivisionError`.** Unreachable with any
+  shipped config — `clarity` is suppressed by no type and is not Q13-gated — but the only way to
+  get there is a rubric that suppresses everything, which is a configuration fault worth naming.
+- **The arithmetic is integers throughout.** `(raw * 100 + denominator // 2) // denominator` is
+  round-half-up with no float anywhere, so a result cannot depend on binary rounding and two runs
+  of the same marks cannot differ. Pinned at the 70 boundary: 55/80 → 69 `fair`, 56/80 → 70 `good`.
+- **The template grep is stricter than asked.** §5 wants the *score* template checked for `total`,
+  `band`, `poor`, `excellent`. The test checks **every** template in the set, parametrised over the
+  directory, and separately pins the eight filenames the campaign ships. It costs nothing and
+  catches the same mistake in the file where it would be least expected.
+- **Ordered scripting stayed, and is now self-checking.** `FakeLLM` pops in order, which is exactly
+  right while calls are sequential; from the moment two are concurrent, "the next scripted response"
+  depends on the event loop rather than on the pipeline's contract. `asyncio.gather` schedules in
+  argument order, so the issue order is deterministic (classify, vague, score) — and a test pins it
+  by inspecting the recorded prompts, so if it ever changes, the suite says so instead of every
+  route test failing on a confusing validation error.
+
+**Tree disagreements:**
+
+- **§2.3's denominator of "75 (no_contact, Q13 resolved)" is not reachable from §2.2's own
+  numbers.** Weights are 25 / 20 / 25 / 20 / 10 and `suppressed_components_by_type` suppresses
+  `client_said` AND `deal_specifics` for `no_contact` **by type**, so lifting Q13 changes nothing
+  for it: 25 + 25 + 10 = **60**, with or without Q13. Getting 75 would require exactly one
+  25-weight component (`what_happened` or `next_step_date`) to be suppressed, and no rule in the
+  campaign does that. If `no_contact` suppressed only `client_said`, the answer would be 80 — which
+  §2.3 already lists. **Followed the tree**, as the campaign requires: the fourth denominator test
+  asserts 60 and carries this arithmetic in a comment. The other three (100, 80, 60) are exactly as
+  specified. **For the lead:** either §2.3's "75" is a slip for "80", or
+  `suppressed_components_by_type[no_contact]` is meant to lose `deal_specifics` when Q13 resolves.
+  The second reading is defensible — a no-contact note has no deal specifics *because nothing was
+  discussed*, which is the same reason Q13 gives — but it is a rubric change and not mine to make.
+- **`band_for(total, config)` is not added to `scoring.py`.** §5 lists it there; the tree already
+  has `TenantConfig.band_for(total)`, built in Phase A, and `config.py`'s own docstring is explicit
+  that a number appearing in two places drifts. A module-level wrapper would be a second spelling
+  of one function. Followed the tree; `compute_score` calls `config.band_for`, and the boundary
+  tests (0/39/40/69/70/84/85/100) are in `test_scoring.py` where §5 wants them.
+- **`is_thin(text, config)` is not added to `pipeline.py`.** §5 lists it as Phase F work; the tree
+  already has `_is_thin(note, config)`, built in Phase C, applied before the reservation and before
+  any model call exactly as §2.6 requires. Renaming it and changing its parameter for cosmetic
+  agreement would be a diff in a phase that has no reason to touch it. Followed the tree; the
+  behaviour §5 asks for is tested (a thin note is suppressed with **zero model calls** and no
+  reservation — the call-count assertion is new in this phase).
+- **The label is `llm.unit_a.score`, not `"score"`.** §5 writes `OutputValidationError("score", …)`.
+  The repo's label convention is `llm.unit_a.classify` / `llm.unit_a.vague` / `tool.get_lead`, and a
+  bare `score` in a log line naming which output failed would be the odd one out. Cosmetic.
+
+**Tests:** 75 added (66 scoring + 3 routes + 6 pipeline); 6 existing rewritten for three calls.
+Suite **600 total, 99.12 %** (floor 92). **11 floors met, one new:**
+`src/dodeal_ai/units/structured_intelligence/scoring.py = 100` (actual 100 %). `vague.py`,
+`classify.py`, `llm_call.py`, `schemas.py`, `state.py`, `config.py` all at 100 %; `pipeline.py`
+97.85 % against its 90 floor (its only gap is still the `judgement_completed` branch, unreachable
+until Phase H fills in `decide`). mypy: 58 source files, clean. Integration suite re-run separately
+(`-m integration`): **7 passed**. Wheel rebuilt: all eight prompt files ship.
+
+**For the lead:**
+
+- **The 75 denominator (above) is the one thing in this phase that needs a human answer.** Nothing
+  is blocked — the shipped behaviour is 60 and is what §2.2 dictates — but if the intent was that
+  `no_contact` loses `deal_specifics` only *because of* Q13, that is a one-line config change and it
+  should be made deliberately, before any judgement is stored under `tenant-cfg-default-1`.
+- `pipeline.py`'s floor is still 90 while `decide` is missing; Phase H raises it to 95 and the
+  `score=` parameter on `_log_outcome` disappears with the `not_implemented` stub.
 
 ## Phase G
 

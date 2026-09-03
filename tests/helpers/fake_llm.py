@@ -12,6 +12,7 @@ path that calls the model more times than the test expected fails loudly.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 
@@ -83,9 +84,16 @@ class FakeLLM:
     """Structurally satisfies LLMClient. tests/helpers/test_fake_llm.py asserts
     this both for mypy (typed assignment) and at runtime (isinstance)."""
 
-    def __init__(self, *script: LLMResponse | BaseException) -> None:
+    def __init__(
+        self, *script: LLMResponse | BaseException, hold_after: int | None = None
+    ) -> None:
         self._script: list[LLMResponse | BaseException] = list(script)
         self.calls: list[RecordedCall] = []
+        # Calls past this many are RECORDED and then block on `released`, so a
+        # test can observe how many are in flight at once. None (the default) is
+        # the ordinary fake: every call returns straight away.
+        self.hold_after = hold_after
+        self.released = asyncio.Event()
 
     def script(self, *more: LLMResponse | BaseException) -> None:
         """Append to the script mid-test (e.g. after asserting the first call)."""
@@ -118,6 +126,10 @@ class FakeLLM:
         self.calls.append(
             RecordedCall(prompt=prompt, max_output_tokens=max_output_tokens)
         )
+        if self.hold_after is not None and len(self.calls) > self.hold_after:
+            # Recorded BEFORE the wait, so call_count reflects calls ISSUED, not
+            # calls completed -- which is the whole point of the mechanism.
+            await self.released.wait()
         if not self._script:
             raise FakeLLMExhausted(
                 f"FakeLLM: no scripted response for call {len(self.calls)}"
