@@ -43,8 +43,15 @@ from dodeal_ai.units.structured_intelligence.schemas import (
 router = APIRouter(prefix="/api/v1", tags=["unit-a"])
 
 
-def _deps(context: RequestContext, leads: LeadsClient, llm: LLMClient) -> JudgementDeps:
-    return JudgementDeps(leads=leads, llm=llm, config=get_tenant_config(context.tenant))
+def _deps(
+    context: RequestContext, leads: LeadsClient, llm: LLMClient, settings: Settings
+) -> JudgementDeps:
+    return JudgementDeps(
+        leads=leads,
+        llm=llm,
+        config=get_tenant_config(context.tenant),
+        settings=settings,
+    )
 
 
 @router.post("/notes/judgements")
@@ -53,13 +60,14 @@ async def create_judgement(
     context: Annotated[RequestContext, Depends(gate4_cost)],
     leads: Annotated[LeadsClient, Depends(get_leads_client)],
     llm: Annotated[LLMClient, Depends(get_llm_client)],
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> Judgement:
     """Judge one already-saved note."""
     return await judge_note(
         context.scope(),
         request,
         resubmission=False,
-        deps=_deps(context, leads, llm),
+        deps=_deps(context, leads, llm, settings),
     )
 
 
@@ -69,6 +77,7 @@ async def create_resubmission_judgement(
     context: Annotated[RequestContext, Depends(gate4_cost)],
     leads: Annotated[LeadsClient, Depends(get_leads_client)],
     llm: Annotated[LLMClient, Depends(get_llm_client)],
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> Judgement:
     """Re-judge a note the salesperson has edited after a clarification prompt.
 
@@ -84,7 +93,7 @@ async def create_resubmission_judgement(
         context.scope(),
         request,
         resubmission=True,
-        deps=_deps(context, leads, llm),
+        deps=_deps(context, leads, llm, settings),
     )
 
 

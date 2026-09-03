@@ -13,6 +13,7 @@ from __future__ import annotations
 import pytest
 
 import dodeal_ai.units.structured_intelligence.pipeline as pipeline_module
+from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.context import RequestContext
 from dodeal_ai.core.errors import (
     BackendUnavailableError,
@@ -28,12 +29,18 @@ from dodeal_ai.units.structured_intelligence.config import get_tenant_config
 from dodeal_ai.units.structured_intelligence.pipeline import JudgementDeps, judge_note
 from dodeal_ai.units.structured_intelligence.schemas import JudgementRequest
 from tests.helpers.fake_leads import FakeLeadsClient, lead, note
-from tests.helpers.fake_llm import FakeLLM
+from tests.helpers.fake_llm import FakeLLM, json_response
 from tests.helpers.fake_operational_redis import FakeOperationalRedis
 
 LEAD_ID = 1656
 NOTE_ID = 10
 GOOD_NOTE = "Called the client, discussed the New Cairo 3BR, following up Tuesday."
+
+
+def _classified(note_type: str):
+    """One scripted classifier reply: exactly the JSON object the template asks
+    for, and nothing around it."""
+    return json_response({"note_type": note_type})
 
 
 def _scope(tenant: str = "tenant-a"):
@@ -63,9 +70,17 @@ def operational(monkeypatch) -> FakeOperationalRedis:
 
 
 @pytest.fixture
-def deps(leads: FakeLeadsClient) -> JudgementDeps:
+def llm() -> FakeLLM:
+    return FakeLLM(*[_classified("discovery") for _ in range(4)])
+
+
+@pytest.fixture
+def deps(leads: FakeLeadsClient, llm: FakeLLM) -> JudgementDeps:
     return JudgementDeps(
-        leads=leads, llm=FakeLLM(), config=get_tenant_config("tenant-a")
+        leads=leads,
+        llm=llm,
+        config=get_tenant_config("tenant-a"),
+        settings=get_settings(),
     )
 
 
@@ -184,6 +199,12 @@ async def test_both_fetches_are_made_for_the_requested_lead(deps, leads, operati
     ]
 
 
-async def test_no_model_call_happens_before_the_seam(deps, operational):
+async def test_only_the_classifier_is_called(deps, operational):
     await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+    assert deps.llm.call_count == 1
+
+
+async def test_a_stop_before_the_seam_spends_nothing(deps, operational):
+    with pytest.raises(NoteNotFoundError):
+        await judge_note(_scope(), _request(note_id=999), resubmission=False, deps=deps)
     assert deps.llm.call_count == 0

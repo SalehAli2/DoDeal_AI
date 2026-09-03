@@ -200,6 +200,153 @@ same denial Phase B hit. Step 2b skipped.
 
 ---
 
+### 3 Sep 2026 — session 3 (Phases D, E, F)
+
+**Scope of this session:** Phases D, E and F. It stops at the boundary before G and does not
+reach H.
+
+**Spec provenance.** Read from `docs/campaign/UNIT_A_PROJECT1_CAMPAIGN_PROMPT.md` in the
+repository (38 674 bytes), not a pasted copy. `### Phase J — the ledger commit` is at line 479
+and `## 7. Never, in any phase` at line 521, so the file is complete. First line of every phase
+section D–J, quoted:
+
+| Line | First line of the section |
+| --- | --- |
+| 334 | `### Phase D — classification` |
+| 354 | `### Phase E — vague detection` |
+| 368 | `### Phase F — scoring` |
+| 398 | ``### Phase G — reprompt once via `AssembledPrompt.tail` `` |
+| 414 | `### Phase H — decide, clarification loop, rate limit. **The lead reviews this phase's report hardest.**` |
+| 457 | `### Phase I — prompt hardening, adversarial suite, OWASP checkpoint, eval marker` |
+| 479 | `### Phase J — the ledger commit` |
+
+**Resume point.** Phases A, B, C are `DONE`. **Phase C's sha `317619f` backfilled into its
+heading** as this session's first edit, per the sha convention. The first phase not `DONE` is
+**D**.
+
+**Tree state.** Branch `scaffold/core-governance-homes`, head `28ee8bf` (session 2's
+housekeeping commit), 4 commits ahead of `origin`. `git status --porcelain`:
+
+```
+ M .env.example        <- the lead's edit, unstaged; see "For the lead" below
+?? AIService.zip       <- untracked, left alone (noted by session 2)
+?? docs/campaign/      <- the spec itself, untracked; the lead's to commit, not a session's
+```
+
+**Stopping chain before any change — green:**
+
+```
+399 passed, 7 deselected in 5.57s
+Required test coverage of 92.0% reached. Total coverage: 98.99%
+ruff check .          All checks passed!
+ruff format --check . 104 files already formatted
+mypy                  Success: no issues found in 54 source files
+check_coverage_floors All 10 coverage floors met.
+```
+
+#### The five verifications §4 demands
+
+**(a) Fail-open / fail-closed, five lines.**
+
+1. Auth (Gate 1) and tenancy (Gate 2) — **CLOSED**: 401 / 403, `audit(decision="deny")`.
+2. Request cost (Gate 4), db1 unreachable — **OPEN**: the request proceeds, `cost_cap_bypassed`
+   at WARNING.
+3. Idempotency, db2 unreachable — **CLOSED**: 503 `idempotency_unavailable`; nothing is spent.
+4. Rate limit and attempt counter, db2 unreachable — **OPEN**: proceed, `rate_limit_bypassed` /
+   `attempt_counter_bypassed` at WARNING once per call.
+5. Model call — **enumerated**: `LLMProviderError` → 503 `model_unavailable`, `retry=False`,
+   never retried; the idempotency key is released so the caller can try again.
+
+**(b) The three reachable endpoints, and nothing is `[V]`.** `LeadsClient` exposes exactly
+`get_leads` (`GET /leads`), `get_lead` (`GET /leads/{id}`) and `get_lead_notes`
+(`GET /leads/{id}/notes`) — `tools/leads.py:95,104,111` — each taking a `TenantScope`, keyed by
+`DD-API-KEY`, wrapped by the watchdog. No fourth method and no query parameter exists.
+`ASSUMPTIONS.md:23` still reads **"Nothing is tagged `[V]`"**: no successful live call to the
+real backend has ever been made, so every shape in `schemas/lead.py` is assumed or documented,
+never verified. This campaign adds no `[V]` either — it runs against `FakeLeadsClient` and
+`FakeLLM` only.
+
+**(c) `AssembledPrompt.tail`.** `core/prompting.py:58-62` — "a trusted trailing instruction
+rendered AFTER the data section. Reserved for the Step 10 reprompt … Always sourced from a
+versioned file, never from a caller. Empty today; `build_prompt()` does not populate it yet."
+That is **Phase G's** slot and no earlier phase writes it: `.text` renders
+`stable + "\n\n" + variable`, and appends `+ "\n\n" + tail` only when the tail is non-empty, so
+the byte-identity of the first prompt is what makes "only `.tail` differs" provable.
+
+**(d) The five provisional answers, and what `SEAM[STEP3]` blocks.**
+
+- **Q1** — the CRM forwards the end user's JWT; the judgement routes run Gate 1 → 2 → 4 via one
+  `Depends(gate4_cost)`. Correction: the principal source swaps behind D1's seam; subjects
+  become *asserted*; no route contract moves.
+- **Q6** — the notes feed may carry machine timeline entries; they classify as `system_event`
+  and suppress `not_scorable`, never scored. Correction: if the feed is notes-only the member
+  stays in the vocabulary and is simply never emitted. Nothing to rescore.
+- **Q7** — the rate limit keys on `scope.subject` (who is *asking*), never `note.author_id`
+  (who *wrote* it), and increments only when a prompt is actually sent. Correction: if Product
+  wants per-author limits the key changes; counters are windowed, so no history is invalidated.
+- **Q8** — the target note is on page one of the lead's notes; not found there → 404
+  `note_not_found`. Nothing branches on it. Correction: paging arrives with query parameters in
+  `tools/leads.py` at step 4.
+- **Q13** — no lead field is confirmed to carry the business line, so
+  `deal_specifics_applicable=False` and `deal_specifics` is suppressed for every type; the
+  denominator falls 100 → 80. Correction: name the field, add the per-line checklist, flip the
+  flag, bump `config_version`, **never rescore history**.
+- **`SEAM[STEP3]`** blocks the **token-budget pre-flight**.
+  `core/cost/limiter.py::token_preflight` is a loud no-op logging `token_preflight_bypassed`
+  once per process. Until step 3 lands there is no read of a token budget before a model call,
+  and — the reason it is a seam and not a TODO — **no real provider may be wired before it**:
+  `get_llm_client()` still raises, and `FakeLLM` is the only model in this campaign. Phases D, E
+  and F all call the model *behind* this seam and none of them touch it.
+
+**(e) Why the band is derived and never accepted.** A band is a business judgement about a
+salesperson's work, and the only thing that makes it defensible is that it is reproducible from
+marks + `TenantConfig` + the four version stamps. If a band could arrive from a model, from a
+caller, or from a stored value, an identical note could carry two different bands with no
+recorded reason, and the tenant could not change a weight without silently invalidating history.
+So the model supplies marks only; `total`, `denominator`, `band` and `decision` are computed in
+code. It is enforced structurally, not by convention: no model-output schema has a `band` or a
+`total` field (`schemas.py:23-28`), and `TenantConfig.band_for()` is the one function that
+produces a `Band`.
+
+#### Inspection — the seams Phases D, E and F sit on
+
+| Path | What it is, in one line |
+| --- | --- |
+| `core/prompting.py:102` | `build_prompt(template_name, caller_data) -> AssembledPrompt`; loads `prompts/<name>` (`PromptError` if missing, `.strip()`ed), wraps caller data in the BEGIN/END markers, and rewrites either marker found inside it to `[filtered-delimiter]`. **No `tail` parameter yet — that is Phase G.** |
+| `core/llm/client.py:113` | `LLMClient` Protocol, one method: `async complete(prompt, *, max_output_tokens=None) -> LLMResponse`. |
+| `core/llm/client.py:82` | `LLMProviderError(reason, *, transient)`; `str()` is `llm_provider_error:<reason>` and carries no provider text. |
+| `core/llm/client.py:36` | `FinishReason.STOP / MAX_TOKENS / OTHER` — truncation is signalled as `MAX_TOKENS`; `LLMResponse.text` is `field(repr=False)`. |
+| `core/validation.py:47` | `validate_output[M](schema, raw: object, *, label) -> M` — **`label` is keyword-only**, and `raw` is an *object*, not a string: JSON decoding is the caller's job. Raises `OutputValidationError(label, errors)` carrying only `(dotted_loc, pydantic_type)` pairs, unchained (`from None`), after logging `output_validation_failed`. |
+| `core/resilience.py:48` | `call_with_watchdog(op, *, label, timeout, retry)`; wraps **any** exception into `ExternalCallError(label, cause)` with `.cause` preserved. Validation must therefore run *outside* the wrapped operation, or an `OutputValidationError` would come back as an `ExternalCallError`. |
+| `core/config.py:105-113` | `llm_model: str = ""`, `llm_timeout_seconds: float = 60.0`, `llm_max_output_tokens: int = 1024`, `prompts_dir: Path or None = None`. |
+| `core/errors.py:32-103` | `DodealError(reason_code, http_status)` + eight subclasses; `ModelUnavailableError` (503) and `MalformedOutputError` (503) already exist, so far unraised. |
+| `units/.../pipeline.py:159` | `_fetch_note(scope, request, deps) -> tuple[int, LeadNote]` — returns `note.author_id` and the note, and **discards the `Lead`**. Phase D needs the lead for the classifier's context section, so this signature changes. |
+| `units/.../config.py:99-115` | `allowed_missing_by_type` **already exists** (Phase A built it): `no_contact` → `{what_happened, next_step_with_date}`, every other type → all three. Phase E's "add a per-type allowed set in `config.py`" is therefore already satisfied. |
+| `units/.../schemas.py:200-267` | `ClassificationOutput`, `VagueOutput` (biconditional validator), `ScoreOutput` — all `extra="forbid"`, none carrying a band or a total. |
+| `tests/helpers/fake_llm.py` | **Already scripts an ordered sequence and counts calls**: `FakeLLM(*script)`, `.script(*more)`, `.calls`, `.call_count`, `.prompts`; an exhausted script raises `FakeLLMExhausted`. Phase D therefore needs **no extension** to it. |
+| `tests/helpers/fake_leads.py` | `FakeLeadsClient` — dict-backed, records `RecordedFetch(method, tenant, lead_id)`, `raise_on` maps a method name to the exception it raises. Helpers `lead(id, **overrides)` and `note(id, text, ...)`. |
+| `tests/helpers/fake_operational_redis.py` | `FakeOperationalRedis(raise_on={...})` implementing `set/get/incr/ttl/expire/delete`; injected with `monkeypatch.setattr(state, "get_operational_client", ...)`. |
+| `tests/unit/test_judgement_routes.py:79-107` | The route fixture: gate-chain wiring plus `dependency_overrides` for `get_leads_client`, `get_llm_client` and `get_verifier`, the fake cost redis, the fake db2, and the once-per-process `_TOKEN_PREFLIGHT_LOGGED` reset. |
+| `scripts/check_coverage_floors.py:46-62` | `_FLOORS: dict[glob, percent]`; `units/structured_intelligence/**` is already at 95, so a new file in the unit inherits 95 and only a *higher* floor needs its own entry. |
+| `pyproject.toml:20-21` | `[tool.hatch.build.targets.wheel] packages = ["src/dodeal_ai"]` — hatchling ships every file under the package, so a new `prompts/structured_intelligence/*.txt` is in the wheel without a `pyproject.toml` change. |
+| `pyproject.toml:23-29` | `asyncio_mode = "auto"`; the only marker is `integration`; the default run is `-m "not integration"`. mypy scope is `src` + `tests/helpers`. |
+
+**Tree disagreements found in Phase 0 (both matter to a later phase, neither blocks D–F):**
+
+- **There is no local fake CRM app, no 127-note corpus and no injection fixtures.** §4 asks
+  Phase 0 to record "where it lives (fixture, script or app), how tests point `LeadsClient` at
+  it, how the 127-note corpus and the four injection fixtures are loaded, the 'switchable
+  unknown-flags'". None of it exists: the only fake CRM is `tests/helpers/fake_leads.py`, a
+  dict-backed `FakeLeadsClient` injected through
+  `app.dependency_overrides[get_leads_client]`, and searching `tests/` for `*.json`, `*.jsonl`
+  and `*.csv` returns nothing. **Following the tree**, as the campaign's own rule requires.
+  Phases D–F need only scripted notes and are unaffected. **Phase I is affected**: its
+  adversarial suite is specified against "the four corpus injection fixtures" and its eval
+  skeleton against "the whole fake corpus". Whoever runs I must either build the corpus first or
+  scale the phase to constructed fixtures — flagged now rather than at the start of I.
+- **`validate_output`'s `label` is keyword-only** (`validate_output(schema, raw, *, label=...)`),
+  where §4 writes it positionally. Cosmetic; call sites use the keyword.
+
 ## Fail-open / fail-closed matrix (§1 — do not reopen)
 
 | # | Concern | Store / failure | Policy | Observable |
@@ -371,7 +518,7 @@ verified: `wheel import check: OK`.
   now (the campaign records the debt in Phase J), but worth knowing: an operational-Redis outage
   is invisible to an orchestrator and shows up as 503 `idempotency_unavailable` on judgements.
 
-## Phase C — judgement routes, TenantScope, DodealError, SEAM[STEP3]   STATUS: DONE <sha>
+## Phase C — judgement routes, TenantScope, DodealError, SEAM[STEP3]   STATUS: DONE 317619f
 
 **What changed:**
 
@@ -463,9 +610,119 @@ suite was re-run separately (`-m integration`): **7 passed**. Wheel rebuilt and 
 - `pipeline.py`'s only uncovered lines are the `judgement_completed` log branch, unreachable until
   scoring exists. Floor set at 90 as specified; Phase H should raise it.
 
-## Phase D
+## Phase D — classification against FakeLLM, system_event short-circuit   STATUS: DONE <sha>
 
-**STATUS: NOT STARTED**
+**What changed:**
+
+- `src/dodeal_ai/prompts/structured_intelligence/classify_v1.txt` — new. The seven types with
+  one criterion each, the `unclassifiable` escape, a precedence rule, and JSON-only output. No
+  weight, no threshold, no band, no language branch.
+- `src/dodeal_ai/units/structured_intelligence/llm_call.py` — new. `complete_once` (watchdog,
+  `retry=False`, `timeout=llm_timeout_seconds`, `ExternalCallError` → `ModelUnavailableError`),
+  `parse_output` (JSON decode + `validate_output`, both failures → `OutputValidationError`), and
+  `call_model` returning `(validated, LLMResponse)`.
+- `src/dodeal_ai/units/structured_intelligence/classify.py` — new. `CLASSIFY_TEMPLATE`,
+  `_caller_data`, `build_classification_prompt`, `classify`, `suppression_for`. Carries the
+  `ASSUMPTION[Q6]` marker and its correction path.
+- `src/dodeal_ai/units/structured_intelligence/pipeline.py` — `_fetch_note` returns
+  `(Lead, LeadNote)`; `_suppressed` takes `model_version`; `JudgementDeps` gains `settings`;
+  classification runs after the SEAM[STEP3] call and its two terminal answers end the judgement.
+- `src/dodeal_ai/api/routes/judgements.py` — both POST routes take `Depends(get_settings)` and
+  pass it into `JudgementDeps`.
+- `tests/helpers/fake_llm.py` — `json_response(payload)` and `FakeLLM.rescript(*script)`. The
+  class already scripted ordered responses and counted calls, so nothing else was needed.
+- `tests/unit/test_classification.py` — new, 38 tests.
+- `tests/unit/test_judgement_routes.py` — the `llm` fixture is scripted; 13 tests added, 4
+  rewritten where they pinned "no model ran".
+- `tests/unit/test_judgement_pipeline.py` — `deps` gains `settings` and a scripted `llm`; 1 test
+  rewritten, 1 added.
+- `tests/security/test_log_safety.py` — 3 sentinels for the model-output path.
+- `CAMPAIGN_REPORT.md` — Phase C's sha backfilled, session 3's Phase 0 block, this block.
+
+**Decisions taken here:**
+
+- **`llm_call.py` exists from Phase D, not Phase G.** §5's file list gives it to G, which adds
+  `call_validated` and the reprompt. Built now because D, E and F each need call → decode →
+  validate → translate-the-failures, and the alternative is three copies of the
+  **untrusted-parse boundary** — the one place a string a model wrote becomes a typed object.
+  Cost of the alternative: three places to audit for a JSON-decode leak instead of one, and G
+  would have to delete two of them while adding the reprompt. G's own deliverable is untouched:
+  `call_validated`, the tail rebuild and the two-calls-on-failure contract all still land in G,
+  and the call sites do not move when they do.
+- **Any model failure is one code, `model_unavailable`.** `call_with_watchdog` collapses a
+  translated `LLMProviderError`, a timeout and a transport error into `ExternalCallError`, and
+  `complete_once` turns all of them into 503 `model_unavailable`. Alternative: branch on
+  `exc.cause` and emit different codes. Cost: a vocabulary the caller cannot act on differently
+  — every one of them means "try again later" — and a branch on a foreign exception's type
+  inside the one module that must never look at foreign exception content.
+- **Validation runs OUTSIDE the watchdog.** Only `client.complete()` is wrapped. If validation
+  ran inside, a perfectly healthy provider returning prose would be reported as
+  `backend`/`model_unavailable`, and the reprompt Phase G adds would never see the failure it
+  exists for. This is the one non-obvious line in `llm_call.py` and it is commented as such.
+- **A JSON-decode failure is an `OutputValidationError`, not its own type.** Both halves of
+  "malformed" — not JSON at all, and JSON of the wrong shape — reach Phase G's reprompt through
+  one exception. It logs the same `output_validation_failed` event with
+  `error_types=json_invalid`, so one alert catches both. Alternative: a distinct
+  `MalformedJsonError`. Cost: G's `call_validated` would have to catch two types to do one thing.
+- **Nothing is repaired.** A fenced object, prose around an object, a truncated object: all
+  malformed, none stripped or salvaged. Repairing model output in code makes the judgement partly
+  ours and untestable against the prompt. Tests pin the fence and the prose cases explicitly so a
+  future "helpful" strip fails the suite.
+- **`_fetch_note` returns the `Lead` as well as the note.** The classifier's context section needs
+  four lead fields. Alternatives: fetch the lead twice, or pass the id and let `classify` fetch.
+  Cost of either: the number of backend calls would depend on the note type, and the lead is
+  already in hand from the existence check.
+- **Four context fields, and only four** (`leadType`, `enquiryType`, `project`, `status`). They
+  disambiguate a note ("interested in the same one" reads differently on a leasing enquiry) and
+  none of them can identify a client. `name`, `phone` and `email` are on the `Lead` object and
+  stay there; a test asserts all three are absent from the assembled prompt.
+- **Lead context first, note last, in the caller-data section.** Both halves are untrusted, but
+  the note is the part being analysed, so "everything after `NOTE:`" is unambiguous and a note
+  containing the string `LEAD CONTEXT:` cannot appear to precede context that outranks it.
+  Delimiter neutralisation is left to `build_prompt` and deliberately not repeated — doing it in
+  two places is how one of them drifts.
+- **`model_version` distinguishes the two kinds of suppression.** A thin note is refused before
+  anything is spent and stamps `""`; a `system_event` is refused BY a classifier and stamps what
+  that classifier reported. Alternative: `""` for every suppressed judgement. Cost: an unspent
+  judgement and a paid one would look identical on the only field that records the difference.
+- **`JudgementDeps` gains `settings` rather than `llm_call.py` calling `get_settings()`.**
+  `llm_timeout_seconds` is a per-call argument; a test that wants a different one should set it on
+  the deps it already builds, not reach into a process-wide cache.
+- **`suppression_for()` returns the DETAIL only.** The reason is always `not_scorable` and the
+  judgement shape belongs to the pipeline. One function answers "does this classification stop
+  here", and a new `NoteType` that should stop is one line in the place the question is asked.
+- **`FakeLLM.rescript()` instead of poking `_script`.** A route test receives its FakeLLM through
+  the `client` fixture, already wired into `dependency_overrides`, so it must change the script on
+  the instance it was given. One public method beats the fake's internals appearing in a dozen
+  call sites. `FakeLLM` needed no other extension — it already scripted ordered responses and
+  counted calls, which is what §5 asked Phase D to check.
+
+**Tree disagreements:**
+
+- **None with §5's Phase D text.** The one deviation from its file list (`llm_call.py` arriving
+  early) is a decision recorded above, not a disagreement with the tree.
+- Recorded in this session's Phase 0 block and repeated here because it lands on a later phase:
+  **there is no fake CRM app, no 127-note corpus and no injection fixtures** anywhere in the tree.
+  Phase I is specified against all three.
+- **The clean-venv wheel check could not be run** — the sandbox denied the `uv venv` + install
+  command. What *was* verified: `uv build --wheel` succeeds and the built wheel contains
+  `dodeal_ai/prompts/structured_intelligence/classify_v1.txt`. Neither `pyproject.toml` nor the
+  package layout changed in this phase, so the campaign's trigger for the full check did not fire;
+  the wheel-contents check was run anyway because this is the first real file in that directory.
+
+**Tests:** 55 added (38 classification + 13 routes + 1 pipeline + 3 log-safety); 5 existing tests
+rewritten where they asserted "no model ran". Suite **454 total, 99.05 %** (floor 92); all 10
+floors met, none added — `classify.py` and `llm_call.py` are both **100 %** under the unit's
+existing `units/structured_intelligence/** = 95`. `pipeline.py` 97.53 % against its 90 floor.
+mypy: 56 source files, clean. Integration suite re-run separately (`-m integration`): **7 passed**.
+
+**For the lead:**
+
+- Phase I is specified against a corpus and injection fixtures that do not exist in the tree. It
+  needs either a corpus-building commit before it, or a scoped-down I.
+- `classify_v1.txt` is v1 wording written to be revised: Phase I hardens it in place (few-shot
+  AR/EN/mixed examples, the explicit untrusted-data instruction) with no version bump, because no
+  judgement has ever been produced by it.
 
 ## Phase E
 

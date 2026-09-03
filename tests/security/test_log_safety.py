@@ -35,6 +35,9 @@ from dodeal_ai.core.logging_config import JsonFormatter
 from dodeal_ai.core.resilience import ExternalCallError, call_with_watchdog
 from dodeal_ai.core.validation import OutputValidationError, validate_output
 from dodeal_ai.schemas.lead import LeadNotesResponse
+from dodeal_ai.units.structured_intelligence.llm_call import parse_output
+from dodeal_ai.units.structured_intelligence.schemas import ClassificationOutput
+from tests.helpers.fake_llm import json_response, response
 
 # Shaped like the content this service actually handles: a phone number and a
 # budget inside a note body. If any of these tests can find it in a log line,
@@ -256,3 +259,54 @@ async def test_cost_bypass_keeps_the_tenant_in_a_field_not_in_the_message(
     assert line["tenant"] == "tenant-b"
     # The tenant label is nowhere in the message text.
     assert "tenant-b" not in line["message"]
+
+
+# --- model output: the string a model wrote after reading a note ------------
+
+
+def test_unparseable_model_output_logs_no_model_text(log_capture):
+    # The decode failure. A JSONDecodeError carries the whole offending document
+    # on .doc and quotes a slice of it in its message, so neither the exception
+    # nor the log line may be built from it.
+    with pytest.raises(OutputValidationError) as raised:
+        parse_output(
+            response(f"I would say this note is about {SENTINEL}"),
+            ClassificationOutput,
+            "llm.unit_a.classify",
+        )
+
+    _assert_sentinel_absent(log_capture)
+    assert SENTINEL not in str(raised.value)
+
+    line = next(
+        x for x in _lines(log_capture) if x["message"].startswith("output_validation")
+    )
+    assert "error_types=json_invalid" in line["message"]
+
+
+def test_wrongly_shaped_model_output_logs_no_model_text(log_capture):
+    # The schema failure. Valid JSON, invalid shape -- and the invented field's
+    # VALUE is model output that pydantic would otherwise quote as input_value.
+    with pytest.raises(OutputValidationError):
+        parse_output(
+            json_response({"note_type": "discovery", "reasoning": SENTINEL}),
+            ClassificationOutput,
+            "llm.unit_a.classify",
+        )
+
+    _assert_sentinel_absent(log_capture)
+
+
+def test_a_note_shaped_model_answer_is_not_echoed_by_the_error(log_capture):
+    # The worst case: the model repeats the note back at us instead of
+    # answering. That string is note text wearing model output's clothes.
+    with pytest.raises(OutputValidationError) as raised:
+        parse_output(
+            json_response({"note_type": SENTINEL}),
+            ClassificationOutput,
+            "llm.unit_a.classify",
+        )
+
+    _assert_sentinel_absent(log_capture)
+    assert SENTINEL not in str(raised.value)
+    assert SENTINEL not in repr(raised.value.errors)

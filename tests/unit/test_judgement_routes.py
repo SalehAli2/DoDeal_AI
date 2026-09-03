@@ -18,7 +18,11 @@ from dodeal_ai.core.auth.dependencies import get_verifier
 from dodeal_ai.core.auth.verify import JwtVerifier
 from dodeal_ai.core.config import Settings, get_settings
 from dodeal_ai.core.cost.limiter import CostLimitError
-from dodeal_ai.core.llm import get_llm_client
+from dodeal_ai.core.llm import (
+    LLMErrorReason,
+    LLMProviderError,
+    get_llm_client,
+)
 from dodeal_ai.core.logging_config import JsonFormatter
 from dodeal_ai.core.resilience import ExternalCallError
 from dodeal_ai.main import app
@@ -26,7 +30,7 @@ from dodeal_ai.tools.leads import get_leads_client
 from dodeal_ai.units.structured_intelligence import state
 from tests.helpers import tokens
 from tests.helpers.fake_leads import FakeLeadsClient, lead, note
-from tests.helpers.fake_llm import FakeLLM
+from tests.helpers.fake_llm import FAKE_MODEL, FakeLLM, json_response, response
 from tests.helpers.fake_operational_redis import FakeOperationalRedis
 
 JUDGE = "/api/v1/notes/judgements"
@@ -36,6 +40,12 @@ VERSIONS = "/api/v1/meta/versions"
 LEAD_ID = 1656
 NOTE_ID = 10
 GOOD_NOTE = "Called the client, discussed the New Cairo 3BR, following up Tuesday."
+
+
+def _classified(note_type: str):
+    """One scripted classifier reply: exactly the JSON object the template asks
+    for, and nothing around it."""
+    return json_response({"note_type": note_type})
 
 
 class _FakeCostRedis:
@@ -65,10 +75,13 @@ def leads() -> FakeLeadsClient:
 
 @pytest.fixture
 def llm() -> FakeLLM:
-    # Scripted with NOTHING. The pipeline stops at the SEAM[STEP3] stub, so any
-    # model call at all is a bug -- and an unscripted FakeLLM raises
-    # FakeLLMExhausted rather than returning a default, so it would be loud.
-    return FakeLLM()
+    """Four identical classifications -- enough for the tests that judge twice.
+
+    Deliberately not an endless supply: an exhausted FakeLLM raises rather than
+    returning a default, so a path that calls the model more often than the
+    pipeline is specified to is loud instead of silently absorbed.
+    """
+    return FakeLLM(*[_classified("discovery") for _ in range(4)])
 
 
 @pytest.fixture
@@ -402,12 +415,36 @@ def test_a_suppressed_judgement_still_carries_all_four_versions(client):
     assert versions == {
         "rubric_version": "note_rubric_v1",
         "prompt_version": "unit_a_prompts_v1",
-        "model_version": "",  # no model ran, so nothing to stamp
+        # A classifier RAN, so the stamp is what it reported -- not the
+        # configured pin, and not "".
+        "model_version": FAKE_MODEL,
         "config_version": "tenant-cfg-default-1",
     }
 
 
-def test_the_suppressed_analysis_is_empty_not_zero(client):
+def test_a_thin_note_stamps_no_model_version(client, leads):
+    # The other half of the same field: nothing was spent, so there is nothing
+    # a provider reported. An unspent judgement must not look like a spent one.
+    leads.notes[LEAD_ID] = [note(NOTE_ID, "ok")]
+    versions = client.post(JUDGE, json=_body(), headers=_headers()).json()["versions"]
+    assert versions["model_version"] == ""
+
+
+def test_the_analysis_carries_the_classifiers_answer_and_nothing_else(client):
+    analysis = client.post(JUDGE, json=_body(), headers=_headers()).json()["analysis"]
+    assert analysis == {
+        "note_type": "discovery",
+        # Vague detection and scoring have not run, so these stay null/empty --
+        # never zero, and never a default the CRM could read as an answer.
+        "is_vague": None,
+        "missing_components": [],
+        "clarification_prompt": None,
+        "reasoning": None,
+    }
+
+
+def test_a_thin_note_has_no_note_type_at_all(client, leads):
+    leads.notes[LEAD_ID] = [note(NOTE_ID, "ok")]
     analysis = client.post(JUDGE, json=_body(), headers=_headers()).json()["analysis"]
     assert analysis == {
         "note_type": None,
@@ -423,9 +460,11 @@ def test_the_response_carries_the_request_id(client):
     assert r.json()["request_id"] == r.headers["X-Request-ID"]
 
 
-def test_no_model_is_called_on_any_path(client, llm):
+def test_exactly_one_model_call_reaches_the_seam(client, llm):
+    # Classification and nothing else: vague detection and scoring are the next
+    # two phases, and a third call here would mean one of them arrived early.
     client.post(JUDGE, json=_body(), headers=_headers())
-    assert llm.call_count == 0
+    assert llm.call_count == 1
 
 
 def test_the_tool_layer_sees_the_verified_tenant(client, leads):
@@ -446,7 +485,7 @@ def test_a_judgement_is_logged_without_note_text(client, json_log):
     line = next(x for x in _lines(json_log) if x["message"] == "judgement_suppressed")
     assert line["suppressed_reason"] == "not_scorable"
     assert line["suppressed_detail"] == "not_implemented"
-    assert line["model_calls"] == 0
+    assert line["model_calls"] == 1
     assert line["tenant"] == "tenant-a"
 
 
@@ -493,3 +532,111 @@ def test_meta_versions_returns_the_four_strings(client):
 def test_meta_versions_is_behind_the_gates(client):
     r = client.get(VERSIONS)
     assert r.status_code == 401
+
+
+# --- classification's two stops, through HTTP -------------------------------
+
+
+def test_a_system_event_is_suppressed_after_one_call(client, llm, operational):
+    # ASSUMPTION[Q6]. One call spent to find out, and then nothing: no vague
+    # detection, no scoring, no counters touched.
+    llm.rescript(_classified("system_event"))
+    r = client.post(JUDGE, json=_body(), headers=_headers())
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["suppressed"] == {
+        "reason": "not_scorable",
+        "detail_code": "system_event",
+    }
+    assert body["score"] is None and body["decision"] is None
+    assert body["analysis"]["note_type"] == "system_event"
+    assert llm.call_count == 1
+
+
+def test_an_unclassifiable_note_is_suppressed_after_one_call(client, llm):
+    llm.rescript(_classified("unclassifiable"))
+    r = client.post(JUDGE, json=_body(), headers=_headers())
+
+    assert r.status_code == 200
+    assert r.json()["suppressed"] == {
+        "reason": "not_scorable",
+        "detail_code": "unclassifiable",
+    }
+    assert r.json()["analysis"]["note_type"] == "unclassifiable"
+    assert llm.call_count == 1
+
+
+def test_a_suppressed_classification_still_stamps_the_model_that_ran(client, llm):
+    llm.rescript(_classified("system_event"))
+    versions = client.post(JUDGE, json=_body(), headers=_headers()).json()["versions"]
+    # A model DID run here, unlike the thin-note path. The stamp is the only
+    # place that difference survives onto the judgement.
+    assert versions["model_version"] == FAKE_MODEL
+
+
+def test_a_suppressed_classification_is_logged_by_code_not_by_text(
+    client, llm, json_log
+):
+    llm.rescript(_classified("system_event"))
+    client.post(JUDGE, json=_body(), headers=_headers())
+
+    assert GOOD_NOTE not in json_log.getvalue()
+    line = next(x for x in _lines(json_log) if x["message"] == "judgement_suppressed")
+    assert line["suppressed_detail"] == "system_event"
+    assert line["note_type"] == "system_event"
+    assert line["model_calls"] == 1
+
+
+# --- the model failing, through HTTP ----------------------------------------
+
+
+def test_malformed_model_output_is_503_malformed_output(client, llm):
+    llm.rescript(response("I think this one is a viewing, probably."))
+    r = client.post(JUDGE, json=_body(), headers=_headers())
+
+    assert r.status_code == 503
+    assert r.json() == {
+        "detail": "Service Unavailable",
+        "reason": "malformed_output",
+        "request_id": r.headers["X-Request-ID"],
+    }
+
+
+def test_malformed_output_releases_the_idempotency_key(client, llm, operational):
+    # Otherwise the caller is told 409 for the next 24 hours for a judgement
+    # that never happened.
+    llm.rescript(response("not json"), _classified("discovery"))
+    assert client.post(JUDGE, json=_body(), headers=_headers()).status_code == 503
+    assert operational.store == {}
+    assert client.post(JUDGE, json=_body(), headers=_headers()).status_code == 200
+
+
+def test_the_rejected_output_never_reaches_the_response_or_the_log(
+    client, llm, json_log
+):
+    secret = "SENTINEL-0501234567 villa budget 4.2M"
+    llm.rescript(response(secret))
+    r = client.post(JUDGE, json=_body(), headers=_headers())
+
+    assert secret not in r.text
+    assert secret not in json_log.getvalue()
+    assert "0501234567" not in json_log.getvalue()
+
+
+def test_a_provider_failure_is_503_model_unavailable(client, llm):
+    llm.rescript(LLMProviderError(LLMErrorReason.UNAVAILABLE, transient=True))
+    r = client.post(JUDGE, json=_body(), headers=_headers())
+
+    assert r.status_code == 503
+    assert r.json()["reason"] == "model_unavailable"
+
+
+def test_a_provider_failure_releases_the_key_so_a_retry_works(client, llm, operational):
+    llm.rescript(
+        LLMProviderError(LLMErrorReason.UNAVAILABLE, transient=True),
+        _classified("discovery"),
+    )
+    assert client.post(JUDGE, json=_body(), headers=_headers()).status_code == 503
+    assert operational.store == {}
+    assert client.post(JUDGE, json=_body(), headers=_headers()).status_code == 200

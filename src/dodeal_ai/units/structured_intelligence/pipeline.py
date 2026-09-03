@@ -15,11 +15,12 @@ the step after it costs:
   9. compute, decide                     in code, never from the model
  10. increment counters ONLY if a prompt was actually sent
 
-Steps 8-10 are NOT implemented in this phase: the pipeline runs 1-7 for real
-and then returns Suppressed(not_scorable, not_implemented). Everything before
-the seam -- the fetches, the 404s, the thin-evidence rule, the reservation and
-its release, the two fail-open reads -- is real and tested now, so the phase
-that fills in the model calls changes only what happens after step 7.
+Step 8 is HALF built: classification is real, and its two terminal answers --
+system_event and unclassifiable -- end the judgement as suppressed states with
+one model call spent. Vague detection and scoring are still ahead, so a note
+that survives classification returns Suppressed(not_scorable, not_implemented).
+That detail code is the marker for what is left: Phase H deletes it from src/
+and a test greps for it, so the stub cannot outlive the work.
 
 WHY THIS ORDER, at the two places it matters:
 
@@ -42,6 +43,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+from dodeal_ai.core.config import Settings
 from dodeal_ai.core.context import TenantScope
 from dodeal_ai.core.cost.limiter import token_preflight
 from dodeal_ai.core.errors import (
@@ -52,10 +54,14 @@ from dodeal_ai.core.errors import (
 )
 from dodeal_ai.core.llm import LLMClient
 from dodeal_ai.core.resilience import ExternalCallError
-from dodeal_ai.schemas.lead import LeadNote
+from dodeal_ai.schemas.lead import Lead, LeadNote
 from dodeal_ai.tools.keys import BackendKeyError
 from dodeal_ai.tools.leads import LeadsClient
 from dodeal_ai.units.structured_intelligence import state
+from dodeal_ai.units.structured_intelligence.classify import (
+    classify,
+    suppression_for,
+)
 from dodeal_ai.units.structured_intelligence.config import TenantConfig
 from dodeal_ai.units.structured_intelligence.schemas import (
     Judgement,
@@ -96,11 +102,17 @@ class JudgementDeps:
     `llm` is the client itself, not a factory: get_llm_client() is the FastAPI
     dependency and has already been resolved (and, in tests, overridden) by the
     time the route calls this.
+
+    `settings` is here rather than read through get_settings() inside the model
+    call, because llm_timeout_seconds is a per-call argument and a test that
+    wants a different one should set it on the deps it already builds, not reach
+    into a cache the whole process shares.
     """
 
     leads: LeadsClient
     llm: LLMClient
     config: TenantConfig
+    settings: Settings
 
 
 def _versions(config: TenantConfig, model_version: str = NO_MODEL) -> Versions:
@@ -121,12 +133,19 @@ def _suppressed(
     detail: SuppressedDetail,
     config: TenantConfig,
     analysis: NoteAnalysis | None = None,
+    model_version: str = NO_MODEL,
 ) -> Judgement:
     """Build a suppressed judgement: score and decision are null, never zero.
 
     A suppressed note has no score at all. It is not a 0, not a `poor` band and
     not an absent field that something downstream will read as 0 -- so it
     cannot be averaged into a salesperson's figures.
+
+    `model_version` separates the two kinds of suppression on the judgement
+    itself: a thin note was refused before anything was spent and carries "",
+    while a system_event was refused BY a classifier and carries what that
+    classifier reported. Both are suppressed; only one cost money, and the
+    stamp is the only place that difference survives.
     """
     return Judgement(
         note_id=request.note_id,
@@ -136,7 +155,7 @@ def _suppressed(
         score=None,
         decision=None,
         suppressed=Suppressed(reason=reason, detail_code=detail),
-        versions=_versions(config),
+        versions=_versions(config, model_version),
         request_id=scope.request_id,
     )
 
@@ -158,8 +177,13 @@ def _is_thin(note: LeadNote, config: TenantConfig) -> bool:
 
 async def _fetch_note(
     scope: TenantScope, request: JudgementRequest, deps: JudgementDeps
-) -> tuple[int, LeadNote]:
+) -> tuple[Lead, LeadNote]:
     """Fetch the lead, then find the note on page one of its notes.
+
+    Both come back. The lead is not fetched only to prove it exists: four of its
+    fields are the classifier's context section, and the alternative -- fetching
+    it twice, or passing the id and letting the classifier fetch -- would make
+    the number of backend calls depend on the note type.
 
     ASSUMPTION[Q8]: the target note is on PAGE ONE (notes come back newest
     first, 25 per page), so one un-paged fetch finds it. Nothing branches on
@@ -180,7 +204,7 @@ async def _fetch_note(
     land, the 404 branch goes here and nothing else moves.
     """
     try:
-        await deps.leads.get_lead(scope, request.lead_id)
+        lead = await deps.leads.get_lead(scope, request.lead_id)
         notes = await deps.leads.get_lead_notes(scope, request.lead_id)
     except (ExternalCallError, BackendKeyError) as exc:
         # The real reason is already in the log: the watchdog logged the failure
@@ -199,7 +223,7 @@ async def _fetch_note(
 
     for note in notes:
         if note.id == request.note_id:
-            return note.author_id, note
+            return lead, note
 
     raise NoteNotFoundError()
 
@@ -227,7 +251,8 @@ async def judge_note(
     with the decision step; today both entry points reach the same seam.
     """
     config = deps.config
-    author_id, note = await _fetch_note(scope, request, deps)
+    lead, note = await _fetch_note(scope, request, deps)
+    author_id = note.author_id
 
     # --- thin evidence: before any reservation, before any spend ------------
     if _is_thin(note, config):
@@ -277,15 +302,28 @@ async def judge_note(
         # process; step 3 replaces the body, not this call site.
         await token_preflight(scope)
 
-        # SEAM: classify -> vague -> score -> compute -> decide lands next.
-        # Until then this is an honest "we did not judge it", not a zero.
+        # --- classify: the first thing that costs money ---------------------
+        classification, response = await classify(
+            deps.llm, note, lead, settings=deps.settings
+        )
+        model_calls = 1
+        analysis = NoteAnalysis(note_type=classification.note_type)
+
+        detail = suppression_for(classification.note_type)
+        if detail is None:
+            # SEAM: vague -> score -> compute -> decide land next. Until then
+            # this is an honest "we did not judge it", not a zero.
+            detail = SuppressedDetail.NOT_IMPLEMENTED
+
         judgement = _suppressed(
             scope,
             request,
             author_id=author_id,
             reason=SuppressedReason.NOT_SCORABLE,
-            detail=SuppressedDetail.NOT_IMPLEMENTED,
+            detail=detail,
             config=config,
+            analysis=analysis,
+            model_version=response.model,
         )
     except Exception:
         # Reserved, then failed: release so the caller can retry instead of
@@ -295,7 +333,7 @@ async def judge_note(
         )
         raise
 
-    _log_outcome(scope, judgement, model_calls=0)
+    _log_outcome(scope, judgement, model_calls=model_calls)
     return judgement
 
 

@@ -12,6 +12,7 @@ path that calls the model more times than the test expected fails loudly.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 
 from dodeal_ai.core.llm import FinishReason, LLMResponse
@@ -39,6 +40,18 @@ def response(
         finish_reason=finish_reason,
         provider_request_id=provider_request_id,
     )
+
+
+def json_response(payload: object, **kwargs: object) -> LLMResponse:
+    """A reply whose text is `payload` serialised as JSON and nothing else.
+
+    The well-behaved case: every prompt in this repo asks the model to return
+    one JSON object with no prose and no code fence, so this is what "the model
+    did what it was told" looks like. A test that wants the badly-behaved case
+    passes the raw string to response() instead -- fenced, truncated, or not
+    JSON at all -- because those are the shapes the reprompt exists for.
+    """
+    return response(json.dumps(payload), **kwargs)  # type: ignore[arg-type]
 
 
 def truncated(
@@ -77,6 +90,16 @@ class FakeLLM:
     def script(self, *more: LLMResponse | BaseException) -> None:
         """Append to the script mid-test (e.g. after asserting the first call)."""
         self._script.extend(more)
+
+    def rescript(self, *script: LLMResponse | BaseException) -> None:
+        """Replace the remaining script, leaving the call record alone.
+
+        For the test that was handed a fixture-built client already wired into
+        app.dependency_overrides and needs a different answer from it. The calls
+        already recorded stay recorded -- this changes what happens NEXT, not
+        what happened.
+        """
+        self._script[:] = script
 
     @property
     def call_count(self) -> int:
