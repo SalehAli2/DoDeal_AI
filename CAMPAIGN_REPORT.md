@@ -63,6 +63,141 @@ lands in a directory that already ships).
 
 **No tree disagreements with §2 found in Phase 0.**
 
+### 3 Sep 2026 — session 2 (pre-D housekeeping)
+
+Not a campaign phase. One commit clearing register items 6 and 8 and the line-ending debt; it
+touches nothing Phases D–J own and nothing on the do-not-touch list. Phase D starts from it.
+
+**Tree state.** Branch `scaffold/core-governance-homes`, 3 commits ahead of `origin`; head
+`317619f`, `git status` clean apart from an untracked `AIService.zip` this session leaves alone.
+
+```
+317619f unit-a(C): judgement routes, TenantScope, DodealError, SEAM[STEP3]    <- Phase C
+42cd11c unit-a(B): db2 operational client — idempotency, rate limit, attempts <- Phase B
+df4689b unit-a(A): unit schemas and TenantConfig seam                         <- Phase A
+36a0210 refactor(workers): delete Celery, add the arq skeleton (D2, part 3 of 3)
+87cab6f refactor(api): gates, probe and health to async def (D2, part 2 of 3)
+```
+
+**Phase C's sha is `317619f`** — the head. Phase D backfills it into the Phase C heading, which
+still reads `STATUS: DONE <sha>`. No archaeology needed.
+
+**Stopping chain before any change — green, matching the stated baseline:**
+
+```
+397 passed, 7 deselected in 5.79s
+Required test coverage of 92.0% reached. Total coverage: 98.99%
+ruff check .          All checks passed!
+ruff format --check . 103 files already formatted
+mypy                  Success: no issues found in 54 source files
+```
+
+**Line endings.** 21 tracked files were `w/crlf`; **zero `i/crlf` anywhere in the repo** (checked
+across every tracked file, not only the six path globs), so `.gitattributes` (`* text=auto eol=lf`)
+had already normalised each blob and step 2d's `--renormalize` branch does not apply. The 21:
+
+`docker-compose.yml` · `api/routes/_probe.py` · `core/audit/logger.py` · `core/auth/claims.py` ·
+`core/auth/dependencies.py` · `core/context.py` · `core/cost/limiter.py` · `core/errors.py` ·
+`core/prompting.py` · `core/redis.py` · `main.py` · `prompts/unit_a_v1.txt` ·
+`tools/httpx_transport.py` · `tests/helpers/fake_llm.py` · `tests/helpers/test_fake_llm.py` ·
+`tests/security/conftest.py` · `tests/security/test_errors.py` ·
+`tests/unit/test_assembled_prompt.py` · `tests/unit/test_health.py` ·
+`tests/unit/test_llm_seam.py` · `tests/unit/test_redis.py`
+
+**Compose.** `api: environment:` carried `DODEAL_REDIS_QUEUE_URL` (db0) and `DODEAL_REDIS_COST_URL`
+(db1) and no operational URL — confirmed; that omission is item 6.
+
+**The bypass warning.** `core/cost/limiter.py:123` read
+`_logger.warning("cost_cap_bypassed reason=cost_store_unavailable tenant=%s", tenant)` — the tenant
+interpolated into the message string. Target shape confirmed at
+`units/structured_intelligence/state.py:108-114`: `_bypass(code, tenant, request_id)` emitting
+`extra={"reason_code": ..., "tenant": ..., "request_id": ...}`.
+
+Every assertion on the event, before the change:
+
+| Where | What it asserted | Effect of 2c |
+| --- | --- | --- |
+| `test_cost.py:86` (`test_redis_down_fails_open_with_warning`) | `"cost_cap_bypassed" in r.getMessage()` — substring | passes unchanged; the message is still exactly that |
+| `test_cost.py` (`test_atomic_failure_leaves_neither_counter_touched`) | captures at WARNING but asserts on counters, not on text | untouched |
+| `test_logging_config.py:84-94` | emitted the **old formatted string by hand**, then asserted level, logger, and `"cost_cap_bypassed" in record["message"]` | rewritten to the new call shape — it was testing a string the code no longer emits |
+| `docs/runbooks/secret-rotation.md:178` | names `cost_cap_bypassed` as the alert to look for | still accurate; the event name did not change, so the runbook is not edited |
+| `state.py:23` (docstring) | "the same shape as `core/cost/limiter.py`'s `cost_cap_bypassed`" | **not** stale — aspirational before, literally true now, so it is left alone |
+
+`tests/security/test_log_safety.py` declares sentinels as a module-level constant (`SENTINEL`,
+shaped like real note content) plus a `log_capture` fixture attaching the **real** `JsonFormatter`
+to the whole `dodeal_ai` tree, and a `_lines()` helper parsing the emitted JSON — so a new sentinel
+drives the real code path and asserts on the parsed line.
+
+**`.env.example` is still unreadable.** `Get-Content .env.example` →
+`blocked. For security, Claude Code may only access files in the allowed working directories`. The
+same denial Phase B hit. Step 2b skipped.
+
+**What changed:**
+
+- `docker-compose.yml` — `DODEAL_REDIS_OPERATIONAL_URL: redis://redis:6379/2` under
+  `api: environment:`, directly after `DODEAL_REDIS_COST_URL`. Item 6.
+- `src/dodeal_ai/core/cost/limiter.py` — the fail-open warning now emits `cost_cap_bypassed` with
+  `extra={"reason_code": "cost_store_unavailable", "tenant": tenant}` instead of interpolating the
+  tenant into the message; the comment above it records why there is no `request_id`. Item 8.
+- `tests/unit/test_cost.py` — one test added: the `LogRecord` carries `reason_code` and `tenant` as
+  attributes, and `getMessage()` is exactly `cost_cap_bypassed`.
+- `tests/unit/test_logging_config.py` — the hand-rolled old string replaced by the real call shape;
+  now asserts `message == "cost_cap_bypassed"` plus top-level `reason_code` and `tenant` in the JSON.
+- `tests/security/test_log_safety.py` — one sentinel added: driving a real Redis outage through
+  `enforce_cost`, the tenant label appears in the `tenant` field and **never** inside `message`.
+- 21 files rewritten CRLF → LF in the working tree. **Zero content change** — see below.
+- `CAMPAIGN_REPORT.md` — this block.
+
+**Decisions taken here:**
+
+- Step 2d was run **first**, before any content edit, so its "no change" evidence is about endings
+  alone and not entangled with the other three changes. The alternative — prompt order — costs
+  nothing but makes the `git diff` proof ambiguous.
+- `docker-compose.yml` has **never** been newline-terminated (`HEAD:docker-compose.yml` ends
+  `...unless-stopped`, no trailing byte). Left as it is: adding one would be a second change to a
+  file the prompt says nothing else changes. Cost: the file is still not newline-terminated.
+- The new sentinel uses `tenant-b`, per the fixture-naming rule, rather than a bespoke
+  `TENANT-SENTINEL` string. `tenant-b` cannot occur inside the fixed event name, so the absence
+  assertion is just as sharp.
+
+**Tree disagreements:**
+
+- **`git status` does not go quiet after the LF rewrite, contrary to step 2d.** All 21 files showed
+  ` M` while `git diff`, `git diff HEAD` and `git diff --cached` were all **empty**, and per file
+  the worktree hash equalled the index blob equalled the HEAD blob (`git hash-object` vs
+  `git ls-files -s` vs `git rev-parse HEAD:<path>`). The cause is `core.autocrlf=true` inherited
+  from the **system** gitconfig (`C:/Program Files/Git/etc/gitconfig` — Git-for-Windows' installer
+  default) fighting `.gitattributes`' `eol=lf`: the index stat cache goes permanently dirty for a
+  file whose working copy is LF while autocrlf says it "should" be CRLF, and
+  `git update-index --really-refresh` returns rc=1 `needs update` for exactly those 21.
+  `git add -- <path>` settles each entry and stages **nothing** (`git diff --cached` stayed empty).
+  So step 2d held in substance — the rewrite contributed zero bytes to the commit — and only the
+  porcelain marker misbehaved. This is the failure `.gitattributes`' own header comment warns
+  about, seen from the other side.
+- Not a disagreement, but worth recording: the campaign's stopping chain is four blocks, while
+  session 1's block records a fifth, `scripts/check_coverage_floors.py`. It was run: all floors met.
+
+**Tests:** 2 added; suite **399 total**, **98.99 %** (floor 92); all 10 per-file floors met,
+`limiter.py` still at 100 %. No floor added or changed. mypy: 54 source files, clean.
+
+**For the lead:**
+
+- **`.env.example` line not added; path denied; the lead adds it by hand:**
+  `DODEAL_REDIS_OPERATIONAL_URL=redis://localhost:6379/2`, directly after `DODEAL_REDIS_COST_URL`
+  to keep the file in `Settings` source order. This is the second session to hit the denial — the
+  request has been open since Phase B.
+- **Phase C's sha, for Phase D to backfill: `317619f`.**
+- `core.autocrlf=true` is set in this machine's system gitconfig. It cannot corrupt a blob here
+  (`.gitattributes` normalises on commit), but it makes `git status` report phantom modifications
+  after any LF rewrite. Worth `git config --global core.autocrlf input` on dev machines; this
+  session did not change git config.
+- `scripts/check_coverage_floors.py` prints 18 rows but reports "All 10 coverage floors met" —
+  `config.py`, `state.py` and `pipeline.py` each match two globs and are checked twice against
+  different floors. Harmless today; confusing when Phase H raises `pipeline.py`'s floor, because
+  the 90 row and the 95 row will both still apply.
+- `AIService.zip` is untracked at the repo root and was left alone. If it is not deliberate it
+  wants a `.gitignore` line or a delete.
+
 ---
 
 ## Fail-open / fail-closed matrix (§1 — do not reopen)

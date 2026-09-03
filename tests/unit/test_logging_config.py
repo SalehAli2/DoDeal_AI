@@ -82,16 +82,22 @@ def test_deny_audit_line_is_warning_under_real_config(capsys):
 
 
 def test_cost_cap_bypassed_reaches_same_json_stream_at_warning(capsys):
+    # The exact call shape core/cost/limiter.py makes: event name as the
+    # message, everything else through extra=.
     configure_logging()
     logging.getLogger("dodeal_ai.cost").warning(
-        "cost_cap_bypassed reason=cost_store_unavailable tenant=%s", "tenant-a"
+        "cost_cap_bypassed",
+        extra={"reason_code": "cost_store_unavailable", "tenant": "tenant-a"},
     )
 
     line = capsys.readouterr().out.strip().splitlines()[-1]
     record = json.loads(line)
     assert record["level"] == "WARNING"
     assert record["logger"] == "dodeal_ai.cost"
-    assert "cost_cap_bypassed" in record["message"]
+    assert record["message"] == "cost_cap_bypassed"
+    # extra= lands at the TOP level, indexable like the audit fields above.
+    assert record["reason_code"] == "cost_store_unavailable"
+    assert record["tenant"] == "tenant-a"
 
 
 def test_third_party_logger_stays_at_warning(capsys):

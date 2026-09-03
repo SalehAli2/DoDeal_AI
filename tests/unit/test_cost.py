@@ -86,6 +86,22 @@ async def test_redis_down_fails_open_with_warning(fake, caplog):
     assert any("cost_cap_bypassed" in r.getMessage() for r in caplog.records)
 
 
+async def test_bypass_warning_carries_structured_fields_not_a_message(fake, caplog):
+    # The bypass line is what an alert fires on, so the tenant has to be a
+    # FIELD a collector can filter, not a fragment of prose it has to parse.
+    # Same shape as db2's _bypass(); the JSON formatter lifts extra= to the
+    # top level.
+    fake.raise_on_eval = True
+    with caplog.at_level("WARNING", logger="dodeal_ai.cost"):
+        await enforce_cost("tenant-a", "42")
+
+    record = next(r for r in caplog.records if r.getMessage() == "cost_cap_bypassed")
+    assert record.reason_code == "cost_store_unavailable"
+    assert record.tenant == "tenant-a"
+    # The message is the event name and nothing else -- no tenant in it.
+    assert record.getMessage() == "cost_cap_bypassed"
+
+
 async def test_atomic_failure_leaves_neither_counter_touched(fake, caplog):
     # Tenant and user counters increment in one atomic script execution. If
     # Redis fails, neither counter should show any change -- not a partial

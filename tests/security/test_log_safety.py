@@ -29,6 +29,7 @@ from starlette.requests import Request
 
 from dodeal_ai.core.audit.logger import audit
 from dodeal_ai.core.config import get_settings
+from dodeal_ai.core.cost import limiter
 from dodeal_ai.core.errors import unhandled_exception_handler
 from dodeal_ai.core.logging_config import JsonFormatter
 from dodeal_ai.core.resilience import ExternalCallError, call_with_watchdog
@@ -228,3 +229,30 @@ def test_audit_fields_still_reach_the_top_level_of_the_line(log_capture):
     assert line["tenant"] == "tenant-b"
     assert line["request_id"] == "req-2"
     assert line["reason_code"] == "tenant_mismatch"
+
+
+class _DeadCostClient:
+    """A cost client whose only script execution raises — the Redis outage the
+    limiter fails OPEN on."""
+
+    async def eval(self, *args, **kwargs):
+        raise limiter.redis.RedisError("down")
+
+
+async def test_cost_bypass_keeps_the_tenant_in_a_field_not_in_the_message(
+    log_capture, settings_env, monkeypatch
+):
+    # Not note content, but the same rule: an identifier belongs in a FIELD a
+    # collector can filter, never interpolated into prose under "message".
+    # This line is what a spend-cap alert fires on, so its shape is a contract.
+    monkeypatch.setattr(limiter, "get_cost_client", lambda: _DeadCostClient())
+
+    await limiter.enforce_cost("tenant-b", "42")  # must NOT raise
+
+    line = next(x for x in _lines(log_capture) if x["message"] == "cost_cap_bypassed")
+    assert line["level"] == "WARNING"
+    assert line["logger"] == "dodeal_ai.cost"
+    assert line["reason_code"] == "cost_store_unavailable"
+    assert line["tenant"] == "tenant-b"
+    # The tenant label is nowhere in the message text.
+    assert "tenant-b" not in line["message"]

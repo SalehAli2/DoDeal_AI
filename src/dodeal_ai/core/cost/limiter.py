@@ -119,9 +119,15 @@ async def enforce_cost(tenant: str, subject: str, amount: int = 1) -> None:
         )
     except redis.RedisError:
         # Fail open (money guard, not security guard). Allow, but log loudly so
-        # a bypassed cap is always observable and can be alerted on.
+        # a bypassed cap is always observable and can be alerted on. Structured
+        # fields, not an interpolated message -- the same shape as db2's
+        # _bypass(): the JSON formatter lifts extra= onto the top level, so a
+        # collector can filter on tenant without parsing the message. No
+        # request_id: enforce_cost is called from Gate 4 and from workers and
+        # never receives one.
         _logger.warning(
-            "cost_cap_bypassed reason=cost_store_unavailable tenant=%s", tenant
+            "cost_cap_bypassed",
+            extra={"reason_code": "cost_store_unavailable", "tenant": tenant},
         )
         return
 
