@@ -51,6 +51,16 @@ from dodeal_ai.units.structured_intelligence.schemas import (
 CLASSIFY_TEMPLATE = "structured_intelligence/classify_v1.txt"
 CLASSIFY_LABEL = "llm.unit_a.classify"
 
+# What this task's answer may cost (register item 15). The answer is one object
+# with one field, and that field's value comes from a fixed ASCII vocabulary:
+# {"note_type": "no_contact"} is 27 characters. NOTHING here scales with the
+# note, so unlike vague detection this ceiling does not move with the note's
+# language -- an Arabic note and an English one produce the same eleven-token
+# answer. The headroom is for a model that prefaces or fences its reply: that
+# still fits, and is then rejected as MALFORMED, which is a diagnosis. A ceiling
+# tight enough to truncate it would report the same fault as truncation.
+CLASSIFY_MAX_OUTPUT_TOKENS = 64
+
 # What the classifier is allowed to see of the lead, and nothing else. Four
 # fields that help place an ambiguous note ("interested in the same one" reads
 # differently on a leasing enquiry than on a sale) and cannot identify the
@@ -94,14 +104,16 @@ def build_classification_prompt(note: LeadNote, lead: Lead) -> AssembledPrompt:
 async def classify(
     client: LLMClient, note: LeadNote, lead: Lead, *, settings: Settings
 ) -> tuple[ClassificationOutput, LLMResponse]:
-    """One model call. Returns the validated answer and the raw response, whose
-    `model` is stamped on the judgement even when the answer suppresses it."""
+    """One model call, or two if the first answer is malformed. Returns the
+    validated answer and the raw response, whose `model` is stamped on the
+    judgement even when the answer suppresses it."""
     return await call_model(
         client,
         build_classification_prompt(note, lead),
         ClassificationOutput,
         CLASSIFY_LABEL,
         settings=settings,
+        max_output_tokens=CLASSIFY_MAX_OUTPUT_TOKENS,
     )
 
 

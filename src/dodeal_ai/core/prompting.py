@@ -26,7 +26,7 @@ sections in that order; don't interleave stable and variable content.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 # The prompts shipped inside the package, next to core/. Always present in an
@@ -56,10 +56,10 @@ class AssembledPrompt:
               untrusted text and is excluded from repr so it can never reach a
               log line by accident (same rule as LLMResponse.text).
     tail:     a trusted trailing instruction rendered AFTER the data section.
-              Reserved for the Step 10 reprompt ("stricter instruction in the
-              variable tail so the cached prefix still hits"). Always sourced
-              from a versioned file, never from a caller. Empty today;
-              build_prompt() does not populate it yet.
+              The Step 10 reprompt ("stricter instruction in the variable tail
+              so the cached prefix still hits"). Always sourced from a versioned
+              file, never from a caller. build_prompt() leaves it empty; only
+              with_tail() fills it, and only from a template name.
 
     `.text` renders the flat prompt. With an empty tail it is byte-identical to
     what build_prompt() returned before this type existed — a test guards that.
@@ -112,6 +112,24 @@ def build_prompt(template_name: str, caller_data: str) -> AssembledPrompt:
         stable=system,
         variable=f"{_DATA_START}\n{safe_data}\n{_DATA_END}",
     )
+
+
+def with_tail(prompt: AssembledPrompt, template_name: str) -> AssembledPrompt:
+    """The same prompt again, with a trusted trailing instruction after the data.
+
+    THE POINT IS WHAT IT DOES NOT DO. `stable` and `variable` are carried across
+    untouched — not reloaded, not re-neutralised, not rebuilt — so the second
+    prompt differs from the first in the tail and in nothing else. That is what
+    makes the reprompt honest: the model is not asked a subtly different
+    question the second time, and the cached prefix still hits. Re-calling
+    build_prompt() would produce the same two strings today and would be a place
+    for them to drift tomorrow.
+
+    The tail comes from a versioned FILE, by name, like every other prompt text
+    in this repo. There is no parameter that takes a string, because the one
+    string that must never land here is the output that was just rejected.
+    """
+    return replace(prompt, tail=_load_template(template_name))
 
 
 def _neutralise_delimiters(text: str) -> str:

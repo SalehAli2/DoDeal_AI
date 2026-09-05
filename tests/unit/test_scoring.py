@@ -8,7 +8,7 @@ the 70 line are pinned by hand-computed expectations.
 
 The three ways marks can be wrong are tested twice over: once against
 `compute_score` directly, and once through the model call, because they have to
-fail as `OutputValidationError` for Phase G's single reprompt to cover them.
+fail as `OutputValidationError` for the single reprompt to cover them.
 """
 
 from __future__ import annotations
@@ -439,9 +439,10 @@ def test_no_template_in_the_set_names_the_arithmetic(template):
         assert word not in text, f"{template} must not mention {word!r}"
 
 
-def test_the_prompt_set_is_the_eight_files_this_campaign_ships():
+def test_the_prompt_set_is_the_nine_files_this_campaign_ships():
     assert sorted(p.name for p in _PROMPT_DIR.glob("*.txt")) == [
         "classify_v1.txt",
+        "reprompt_tail_v1.txt",
         "score_v1.txt",
         "vague_callback_v1.txt",
         "vague_discovery_v1.txt",
@@ -456,12 +457,19 @@ def test_the_prompt_set_is_the_eight_files_this_campaign_ships():
 
 
 async def _score(payload_or_response, note_type=NoteType.DISCOVERY, config=CONFIG):
+    """Score against a model that gives the SAME answer to both calls.
+
+    Twice, because from Phase G a malformed answer earns one reprompt: proving
+    that a SHAPE is rejected means proving it is still rejected when the model
+    repeats it. A well-formed answer never reaches the second entry -- the
+    call-count assertions below are what keeps that honest.
+    """
     scripted = (
         payload_or_response
         if hasattr(payload_or_response, "text")
         else json_response(payload_or_response)
     )
-    client = FakeLLM(scripted)
+    client = FakeLLM(scripted, scripted)
     output, llm_response = await score_note(
         client, _note(), note_type, config=config, settings=get_settings()
     )
@@ -484,7 +492,7 @@ async def test_valid_marks_come_back_parsed():
     assert client.call_count == 1
 
 
-async def test_a_bad_mark_fails_the_call_so_the_reprompt_will_cover_it():
+async def test_a_bad_mark_fails_the_call_so_the_reprompt_covers_it():
     # The reason validate_marks runs inside the call rather than after it.
     with pytest.raises(MalformedOutputError):
         await _score(
@@ -540,13 +548,17 @@ async def test_prose_instead_of_an_object_is_rejected():
         await _score(response("I'd give this one about 70 out of 100."))
 
 
-async def test_a_rejected_answer_costs_exactly_one_call():
-    client = FakeLLM(response("not json"), json_response({"marks": {}}))
+async def test_a_rejected_answer_costs_exactly_two_calls():
+    # The reprompt, and then it stops -- the third scripted answer is one the
+    # model never gets to give, so a loop would show up as a pass.
+    client = FakeLLM(
+        response("not json"), response("still not json"), json_response({"marks": {}})
+    )
     with pytest.raises(MalformedOutputError):
         await score_note(
             client, _note(), NoteType.DISCOVERY, config=CONFIG, settings=get_settings()
         )
-    assert client.call_count == 1
+    assert client.call_count == 2
 
 
 async def test_the_rejected_marks_are_not_logged(caplog):

@@ -34,10 +34,12 @@ from dodeal_ai.core.errors import unhandled_exception_handler
 from dodeal_ai.core.logging_config import JsonFormatter
 from dodeal_ai.core.resilience import ExternalCallError, call_with_watchdog
 from dodeal_ai.core.validation import OutputValidationError, validate_output
-from dodeal_ai.schemas.lead import LeadNotesResponse
+from dodeal_ai.schemas.lead import Lead, LeadNotesResponse
+from dodeal_ai.units.structured_intelligence.classify import classify
 from dodeal_ai.units.structured_intelligence.llm_call import parse_output
 from dodeal_ai.units.structured_intelligence.schemas import ClassificationOutput
-from tests.helpers.fake_llm import json_response, response
+from tests.helpers.fake_leads import note
+from tests.helpers.fake_llm import FakeLLM, json_response, response
 
 # Shaped like the content this service actually handles: a phone number and a
 # budget inside a note body. If any of these tests can find it in a log line,
@@ -310,3 +312,47 @@ def test_a_note_shaped_model_answer_is_not_echoed_by_the_error(log_capture):
     _assert_sentinel_absent(log_capture)
     assert SENTINEL not in str(raised.value)
     assert SENTINEL not in repr(raised.value.errors)
+
+
+# --- the reprompt: a rejected answer is written down twice, and neither ------
+# --- time is it quoted ------------------------------------------------------
+
+
+async def test_a_reprompt_logs_the_label_and_never_the_rejected_answer(
+    log_capture, settings_env
+):
+    # The reprompt is the one path that handles a rejected answer TWICE: once to
+    # reject it, once to decide to ask again. Both lines are emitted here, and
+    # the second is the newer of the two.
+    client = FakeLLM(
+        response(f"I would say this note is about {SENTINEL}"),
+        json_response({"note_type": "discovery"}),
+    )
+    await classify(client, note(10, "A note."), Lead(id=1), settings=get_settings())
+
+    assert client.call_count == 2
+    _assert_sentinel_absent(log_capture)
+
+    line = next(x for x in _lines(log_capture) if x["message"] == "reprompt_issued")
+    assert line["level"] == "WARNING"
+    assert line["reason_code"] == "reprompt_issued"
+    assert line["label"] == "llm.unit_a.classify"
+
+
+async def test_the_rejected_answer_is_not_carried_into_the_second_prompt(
+    log_capture, settings_env
+):
+    # Not a log line, but the same rule and the same reason: the prompt is the
+    # other place a rejected answer could be written down. `.variable` is
+    # excluded from repr precisely because it must never be printable, so this
+    # asserts on `.text`, which is what would actually be sent.
+    client = FakeLLM(
+        response(f"the note said {SENTINEL}"),
+        json_response({"note_type": "discovery"}),
+    )
+    await classify(client, note(10, "A note."), Lead(id=1), settings=get_settings())
+
+    second = client.prompts[1].text
+    assert SENTINEL not in second
+    assert "0501234567" not in second
+    _assert_sentinel_absent(log_capture)

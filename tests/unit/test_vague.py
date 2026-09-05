@@ -9,8 +9,8 @@ not that pydantic works.
 The per-type restriction is the one rule that cannot be a field constraint:
 `validate_output` has no context channel, so "client_said may not be reported
 for a no_contact note" depends on something the schema cannot see. It runs
-inside the validated call so it fails the same way, and so Phase G's single
-reprompt will cover it.
+inside the validated call so it fails the same way, and so the single reprompt
+covers it.
 """
 
 from __future__ import annotations
@@ -70,14 +70,21 @@ def _not_vague() -> dict:
 
 
 async def _detect(payload_or_response, note_type: NoteType = NoteType.DISCOVERY):
-    """Run one detection against a scripted model, returning the answer, the raw
-    response and the client (so the caller can count calls)."""
+    """Run one detection against a model that gives the SAME answer to both
+    calls, returning the answer, the raw response and the client (so the caller
+    can count calls).
+
+    Twice, because from Phase G a malformed answer earns one reprompt: proving
+    that a SHAPE is rejected means proving it is still rejected when the model
+    repeats it. A well-formed answer never reaches the second entry -- the
+    call-count assertions below are what keeps that honest.
+    """
     scripted = (
         payload_or_response
         if hasattr(payload_or_response, "text")
         else json_response(payload_or_response)
     )
-    client = FakeLLM(scripted)
+    client = FakeLLM(scripted, scripted)
     output, llm_response = await detect_vagueness(
         client, _note(), note_type, config=CONFIG, settings=get_settings()
     )
@@ -334,9 +341,8 @@ async def test_client_said_is_allowed_for_every_other_type(note_type):
 async def test_the_restriction_is_a_rejection_not_a_silent_drop():
     # Dropping the disallowed component and carrying on would hand the decision
     # step an answer no model gave.
-    client = FakeLLM(
-        json_response(_vague(missing=["client_said"], prompt="What did they say?"))
-    )
+    answer = json_response(_vague(missing=["client_said"], prompt="What did they say?"))
+    client = FakeLLM(answer, answer)
     with pytest.raises(MalformedOutputError):
         await detect_vagueness(
             client,
@@ -345,7 +351,7 @@ async def test_the_restriction_is_a_rejection_not_a_silent_drop():
             config=CONFIG,
             settings=get_settings(),
         )
-    assert client.call_count == 1
+    assert client.call_count == 2
 
 
 def test_the_restriction_comes_from_the_tenant_config_not_from_code():
@@ -375,10 +381,14 @@ async def test_prose_instead_of_an_object_is_rejected():
         await _detect(response("The note looks a bit thin to me."))
 
 
-async def test_a_rejected_answer_costs_exactly_one_call():
-    client = FakeLLM(response("not json"), json_response(_not_vague()))
+async def test_a_rejected_answer_costs_exactly_two_calls():
+    # The reprompt, and then it stops -- the third scripted answer is a valid
+    # one the model never gets to give, so a loop would show up as a pass.
+    client = FakeLLM(
+        response("not json"), response("still not json"), json_response(_not_vague())
+    )
     with pytest.raises(MalformedOutputError):
         await detect_vagueness(
             client, _note(), NoteType.DISCOVERY, config=CONFIG, settings=get_settings()
         )
-    assert client.call_count == 1
+    assert client.call_count == 2

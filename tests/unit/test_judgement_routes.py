@@ -28,9 +28,20 @@ from dodeal_ai.core.resilience import ExternalCallError
 from dodeal_ai.main import app
 from dodeal_ai.tools.leads import get_leads_client
 from dodeal_ai.units.structured_intelligence import state
+from dodeal_ai.units.structured_intelligence.classify import (
+    CLASSIFY_MAX_OUTPUT_TOKENS,
+)
+from dodeal_ai.units.structured_intelligence.scoring import SCORE_MAX_OUTPUT_TOKENS
+from dodeal_ai.units.structured_intelligence.vague import VAGUE_MAX_OUTPUT_TOKENS
 from tests.helpers import tokens
 from tests.helpers.fake_leads import FakeLeadsClient, lead, note
-from tests.helpers.fake_llm import FAKE_MODEL, FakeLLM, json_response, response
+from tests.helpers.fake_llm import (
+    FAKE_MODEL,
+    FakeLLM,
+    json_response,
+    response,
+    truncated,
+)
 from tests.helpers.fake_operational_redis import FakeOperationalRedis
 
 JUDGE = "/api/v1/notes/judgements"
@@ -523,8 +534,8 @@ def test_the_response_carries_the_request_id(client):
 
 
 def test_three_model_calls_on_the_happy_path(client, llm):
-    # Classification, vague detection, scoring. A fourth would mean something
-    # was issued twice; a second reprompt is Phase G and is not one of these.
+    # Classification, vague detection, scoring. A fourth would mean one of them
+    # reprompted -- which only a malformed answer buys, and none of these is.
     client.post(JUDGE, json=_body(), headers=_headers())
     assert llm.call_count == 3
 
@@ -558,7 +569,7 @@ def test_a_judgement_is_logged_without_note_text(client, json_log):
     line = next(x for x in _lines(json_log) if x["message"] == "judgement_suppressed")
     assert line["suppressed_reason"] == "not_scorable"
     assert line["suppressed_detail"] == "not_implemented"
-    assert line["model_calls"] == 3
+    assert line["model_passes"] == 3
     assert line["tenant"] == "tenant-a"
 
 
@@ -658,14 +669,15 @@ def test_a_suppressed_classification_is_logged_by_code_not_by_text(
     line = next(x for x in _lines(json_log) if x["message"] == "judgement_suppressed")
     assert line["suppressed_detail"] == "system_event"
     assert line["note_type"] == "system_event"
-    assert line["model_calls"] == 1
+    assert line["model_passes"] == 1
 
 
 # --- the model failing, through HTTP ----------------------------------------
 
 
 def test_malformed_model_output_is_503_malformed_output(client, llm):
-    llm.rescript(response("I think this one is a viewing, probably."))
+    prose = response("I think this one is a viewing, probably.")
+    llm.rescript(prose, prose)
     r = client.post(JUDGE, json=_body(), headers=_headers())
 
     assert r.status_code == 503
@@ -674,12 +686,13 @@ def test_malformed_model_output_is_503_malformed_output(client, llm):
         "reason": "malformed_output",
         "request_id": r.headers["X-Request-ID"],
     }
+    assert llm.call_count == 2
 
 
 def test_malformed_output_releases_the_idempotency_key(client, llm, operational):
     # Otherwise the caller is told 409 for the next 24 hours for a judgement
     # that never happened.
-    llm.rescript(response("not json"), *_happy_path())
+    llm.rescript(response("not json"), response("still not json"), *_happy_path())
     assert client.post(JUDGE, json=_body(), headers=_headers()).status_code == 503
     assert operational.store == {}
     assert client.post(JUDGE, json=_body(), headers=_headers()).status_code == 200
@@ -689,12 +702,92 @@ def test_the_rejected_output_never_reaches_the_response_or_the_log(
     client, llm, json_log
 ):
     secret = "SENTINEL-0501234567 villa budget 4.2M"
-    llm.rescript(response(secret))
+    llm.rescript(response(secret), response(secret))
     r = client.post(JUDGE, json=_body(), headers=_headers())
 
     assert secret not in r.text
     assert secret not in json_log.getvalue()
     assert "0501234567" not in json_log.getvalue()
+
+
+# --- the reprompt, through the whole pipeline -------------------------------
+
+
+def test_a_reprompt_on_one_pass_does_not_re_issue_the_other(client, llm, json_log):
+    # Register item 14 meets Phase G. Vague detection and scoring are issued
+    # together, and each enters call_model separately -- so a malformed vague
+    # answer buys VAGUE a second call and leaves scoring alone. Four calls, not
+    # five, and only one of them carries a tail.
+    llm.rescript(
+        _classified("discovery"),
+        response("The note looks a bit thin to me."),
+        _vague_answer(),
+        _score_answer(),
+    )
+    r = client.post(JUDGE, json=_body(), headers=_headers())
+
+    assert r.status_code == 200
+    assert llm.call_count == 4
+
+    classify_p, vague_p, vague_again, score_p = llm.prompts
+    assert classify_p.stable.startswith("You classify one CRM lead note")
+    assert vague_p.stable.startswith("You decide whether one CRM lead note")
+    assert score_p.stable.startswith("You mark one CRM lead note")
+
+    # The reprompt is vague detection's, and it is the same prompt plus a tail.
+    assert vague_again.stable == vague_p.stable
+    assert vague_again.variable == vague_p.variable
+    assert vague_again.tail and not vague_p.tail
+    # Scoring answered first time and was never re-issued.
+    assert not score_p.tail
+
+    reprompts = [x for x in _lines(json_log) if x["message"] == "reprompt_issued"]
+    assert [x["label"] for x in reprompts] == ["llm.unit_a.vague"]
+
+
+def test_a_persistently_malformed_pass_is_503_and_releases_the_key(
+    client, llm, operational
+):
+    # Two calls on that pass, then it stops; the key is released so the caller
+    # can retry rather than being told 409 for a judgement that never happened.
+    llm.rescript(response("not json"), response("still not json"), *_happy_path())
+    r = client.post(JUDGE, json=_body(), headers=_headers())
+
+    assert r.status_code == 503
+    assert r.json()["reason"] == "malformed_output"
+    assert llm.call_count == 2
+    assert operational.store == {}
+
+    assert client.post(JUDGE, json=_body(), headers=_headers()).status_code == 200
+
+
+def test_each_pass_sends_its_own_output_ceiling(client, llm):
+    # Register item 15: three passes, three ceilings, none of them the seam's
+    # default. Vague detection has the largest because it is the only answer
+    # that comes back in the language of the note.
+    client.post(JUDGE, json=_body(), headers=_headers())
+
+    assert [c.max_output_tokens for c in llm.calls] == [
+        CLASSIFY_MAX_OUTPUT_TOKENS,
+        VAGUE_MAX_OUTPUT_TOKENS,
+        SCORE_MAX_OUTPUT_TOKENS,
+    ]
+    assert None not in [c.max_output_tokens for c in llm.calls]
+
+
+def test_a_truncated_answer_is_reprompted_not_accepted(client, llm):
+    # MAX_TOKENS is malformed even when the fragment parses. Without this the
+    # judgement would be stamped on the beginning of an answer.
+    llm.rescript(
+        truncated(json.dumps({"note_type": "discovery"})),
+        _classified("discovery"),
+        _vague_answer(),
+        _score_answer(),
+    )
+    r = client.post(JUDGE, json=_body(), headers=_headers())
+
+    assert r.status_code == 200
+    assert llm.call_count == 4
 
 
 def test_a_provider_failure_is_503_model_unavailable(client, llm):

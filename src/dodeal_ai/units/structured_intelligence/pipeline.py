@@ -11,18 +11,26 @@ the step after it costs:
   5. read the rate limit                 (fail open)
   6. read the attempt count              (fail open)
   7. SEAM[STEP3] token pre-flight        (no-op today)
-  8. classify, THEN vague + score        three model calls, two round-trips
+  8. classify, THEN vague + score        three passes, two round-trips
   9. compute, decide                     in code, never from the model
  10. increment counters ONLY if a prompt was actually sent
+
+A PASS IS NOT A CALL. Each of the three passes is one validated model call, and
+a malformed answer buys that pass one reprompt (llm_call.call_model) -- so the
+happy path is three calls and a judgement that reprompted once costs four. The
+pipeline counts passes because passes are what it can see; `reprompt_issued`
+names the pass that needed a second attempt.
 
 WHY 8 IS "classify, THEN the other two" (register item 14). Classification must
 finish first: the vague template is chosen by type and the applicable components
 are chosen by type, so neither of the other two prompts can even be ASSEMBLED
 until the answer is in. Vague detection and scoring, on the other hand, do not
 depend on each other at all -- so they are issued together with asyncio.gather
-and the happy path costs two round-trips, not three, while the call count stays
-three. `return_exceptions=False`: the first failure propagates through the
-release-on-error path below and the key is released exactly once.
+and the happy path costs two round-trips, not three, while the happy-path call
+count stays three. `return_exceptions=False`: the first failure propagates
+through the release-on-error path below and the key is released exactly once --
+and because each pass owns its own reprompt, a reprompt on one of the two
+re-issues that one alone.
 
 Step 9 is HALF built: the score is computed, and a mark the model returned out
 of range fails here rather than in the phase that would have acted on it. What
@@ -279,7 +287,7 @@ async def judge_note(
             detail=SuppressedDetail.NOTE_TOO_SHORT,
             config=config,
         )
-        _log_outcome(scope, judgement, model_calls=0)
+        _log_outcome(scope, judgement, model_passes=0)
         return judgement
 
     # --- reserve: the only thing between a double-submit and paying twice ---
@@ -321,7 +329,7 @@ async def judge_note(
         classification, response = await classify(
             deps.llm, note, lead, settings=deps.settings
         )
-        model_calls = 1
+        model_passes = 1
         analysis = NoteAnalysis(note_type=classification.note_type)
         score: NoteScore | None = None
 
@@ -350,7 +358,7 @@ async def judge_note(
                     settings=deps.settings,
                 ),
             )
-            model_calls = 3
+            model_passes = 3
 
             vague_output, _ = vague_result
             score_output, _ = score_result
@@ -388,7 +396,7 @@ async def judge_note(
         )
         raise
 
-    _log_outcome(scope, judgement, model_calls=model_calls, score=score)
+    _log_outcome(scope, judgement, model_passes=model_passes, score=score)
     return judgement
 
 
@@ -396,7 +404,7 @@ def _log_outcome(
     scope: TenantScope,
     judgement: Judgement,
     *,
-    model_calls: int,
+    model_passes: int,
     score: NoteScore | None = None,
 ) -> None:
     """One structured line per judgement.
@@ -405,6 +413,14 @@ def _log_outcome(
     of a fixed vocabulary. NEVER the note text, never the reasoning, never the
     clarification prompt -- the whole point of the unit is that it reads note
     bodies, so this is the log line most likely to leak one.
+
+    `model_passes` counts PASSES, not calls, and the field is named for what it
+    counts. A pass that reprompted cost two calls, and the pipeline cannot see
+    that: the reprompt lives inside `call_model`, which is the point -- one
+    place owns the untrusted parse and its one recovery. The line that says a
+    pass needed two calls is `reprompt_issued`, which carries the label of the
+    pass it was issued for. A field called `model_calls` that could be short by
+    up to three would be worse than one that says what it means.
 
     `score` is the computed score when there IS one but the judgement does not
     yet carry it -- the state between Phase F and Phase H. It puts the band and
@@ -421,7 +437,7 @@ def _log_outcome(
                 "note_type": judgement.analysis.note_type,
                 "suppressed_reason": judgement.suppressed.reason.value,
                 "suppressed_detail": judgement.suppressed.detail_code.value,
-                "model_calls": model_calls,
+                "model_passes": model_passes,
                 **(
                     {"band": score.band.value, "denominator": score.denominator}
                     if score is not None
@@ -441,6 +457,6 @@ def _log_outcome(
             "band": judgement.score.band.value,
             "action": judgement.decision.action.value,
             "prompt_sent": judgement.decision.prompt_sent,
-            "model_calls": model_calls,
+            "model_passes": model_passes,
         },
     )

@@ -60,6 +60,11 @@ _FLOORS: dict[str, float] = {
     # silently wrong total, not a crash -- and it is pure functions over marks
     # and config, so there is no excuse for an uncovered line.
     "src/dodeal_ai/units/structured_intelligence/scoring.py": 100,
+    # The untrusted-parse boundary: the ONE place model output becomes a typed
+    # object, and the one place a malformed answer decides its own fate. Every
+    # branch here is a security branch -- truncation, decode failure, schema
+    # failure, rule failure, the single reprompt, and the 503 after it.
+    "src/dodeal_ai/units/structured_intelligence/llm_call.py": 100,
     # 90 while the pipeline is still a stub ending at SEAM[STEP3]; raised in
     # Phase H once classify/vague/score/compute/decide exist.
     "src/dodeal_ai/units/structured_intelligence/pipeline.py": 90,

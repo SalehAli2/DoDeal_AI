@@ -453,6 +453,128 @@ test.
   would guard the class of bug rather than this instance — not done here, since this commit is
   scoped to the hotfix.
 
+### 5 Sep 2026 — session 5 (Phase G)
+
+**Scope of this session:** Phase G only. It stops at the boundary before H and does not start it.
+
+**Spec provenance.** Read from `docs/campaign/UNIT_A_PROJECT1_CAMPAIGN_PROMPT.md` in the repository
+(38 674 bytes — unchanged since session 3), not a pasted copy. `### Phase J — the ledger commit` is at
+line 479 and `## 7. Never, in any phase` at line 521, so the file is complete. First line of every phase
+section D–J, quoted:
+
+| Line | First line of the section |
+| --- | --- |
+| 334 | `### Phase D — classification` |
+| 354 | `### Phase E — vague detection` |
+| 368 | `### Phase F — scoring` |
+| 398 | ``### Phase G — reprompt once via `AssembledPrompt.tail` `` |
+| 414 | `### Phase H — decide, clarification loop, rate limit. **The lead reviews this phase's report hardest.**` |
+| 457 | `### Phase I — prompt hardening, adversarial suite, OWASP checkpoint, eval marker` |
+| 479 | `### Phase J — the ledger commit` |
+
+**Resume point.** Phases A–F are `DONE`. **The first phase not `DONE` is G.** No sha to backfill: session 4
+already backfilled Phase F's `2f2dbfb` into its heading, and the current head `d0fa1e1` is that session's
+hotfix, not a phase commit.
+
+**Tree state.** Branch `scaffold/core-governance-homes`, head `d0fa1e1`, **0 commits ahead of
+`origin/scaffold/core-governance-homes`** — the lead has pushed A–F and the hotfix.
+`git status --porcelain`:
+
+```
+ M .env.example        <- the lead's edit, still unstaged; untouched again
+?? AIService.zip       <- untracked, left alone
+?? docs/campaign/      <- the spec itself, untracked; the lead's to commit
+```
+
+`?? docs/audit/2026-09-05-sweep.md` appeared **during** this session, after the work started. It is the
+lead's, untracked, and was not touched, staged or read into the phase. It does change what the fourth
+stopping-chain block reports — see the closing chain below and "For the lead".
+
+**Stopping chain before any change — green:**
+
+```
+601 passed, 7 deselected in 9.38s
+Required test coverage of 92.0% reached. Total coverage: 99.12%
+ruff check .          All checks passed!
+ruff format --check . 111 files already formatted
+mypy                  Success: no issues found in 58 source files
+check_coverage_floors All 11 coverage floors met.
+```
+
+#### The five verifications §4 demands
+
+**(a) Fail-open / fail-closed, five lines.** Unchanged from session 3 and re-checked against the code, not
+the report: (1) auth and tenancy **CLOSED**, 401/403 with `audit(decision="deny")`; (2) request cost (Gate 4)
+with db1 down **OPEN**, `cost_cap_bypassed` at WARNING; (3) idempotency with db2 down **CLOSED**, 503
+`idempotency_unavailable` — `state.reserve_idempotency` raises `IdempotencyUnavailableError`, caught at
+`pipeline.py:303`; (4) rate limit and attempt counter with db2 down **OPEN**, `rate_limit_bypassed` /
+`attempt_counter_bypassed` once per call; (5) model failure **enumerated** — `LLMProviderError` → 503
+`model_unavailable`, `retry=False`, never retried, key released. **Phase G adds no sixth policy.** The
+reprompt is not a retry and is not a fail-open: a malformed answer is still an enumerated failure, it just
+takes two calls to reach it instead of one.
+
+**(b) The three reachable endpoints, and nothing is `[V]`.** `LeadsClient` still exposes exactly `get_leads`
+(`tools/leads.py:95`), `get_lead` (`:104`) and `get_lead_notes` (`:111`), each taking a `TenantScope`. No
+fourth method, no query parameter. `ASSUMPTIONS.md:23` still reads "Nothing is tagged `[V]`", and this phase
+adds none — it touches no backend call at all.
+
+**(c) `AssembledPrompt.tail`.** Reserved, until this phase, for exactly the Step 10 reprompt: "a trusted
+trailing instruction rendered AFTER the data section … always sourced from a versioned file, never from a
+caller." `.text` renders `stable + "\n\n" + variable` and appends `+ "\n\n" + tail` only when the tail is
+non-empty, which is what makes "the first prompt is byte-identical" provable rather than asserted.
+**This is the phase that fills it**, through the one function that can: `core/prompting.py:117 with_tail`.
+
+**(d) The five provisional answers, and what `SEAM[STEP3]` blocks.** Unchanged and un-reopened: Q1 (the CRM
+forwards the end user's JWT; correction behind D1's seam), Q6 (`system_event` suppresses `not_scorable`;
+nothing to rescore), Q7 (rate limit keys on `scope.subject`, never `note.author_id`), Q8 (the note is on page
+one; paging is step 4), Q13 (`deal_specifics_applicable=False`, denominator 100 → 80; never rescore history).
+`SEAM[STEP3]` blocks the **token-budget pre-flight** — `core/cost/limiter.py::token_preflight` is a loud
+no-op logging `token_preflight_bypassed` once per process, and until step 3 lands **no real provider may be
+wired**. Phase G calls the model twice on a bad answer and still touches neither: both calls go through the
+same `complete_once`, behind the same seam, against `FakeLLM`.
+
+**(e) Why the band is derived and never accepted.** Unchanged: a band is defensible only because it is
+reproducible from marks + `TenantConfig` + four version stamps, so `total`, `denominator`, `band` and
+`decision` are computed in code and no model-output schema has a band or a total field. **Phase G is where
+that gets its sharpest test**: the reprompt is the one path that sends a second prompt, and if the rejected
+answer were fed back, a model could restate a total until something accepted it. It is not fed back — there
+is no parameter on `with_tail` that takes a string.
+
+#### Inspection — the seams Phase G sits on
+
+| Path | What it is, in one line |
+| --- | --- |
+| `core/prompting.py:102` | `build_prompt(template_name, caller_data) -> AssembledPrompt`; loads through `_load_template` (`:92`, `PromptError` if missing, `.strip()`ed) and neutralises either delimiter found in caller data. **No tail parameter** — that gap is this phase's work. |
+| `core/prompting.py:48` | `AssembledPrompt` is `frozen=True, slots=True` with `variable` at `repr=False`, so `dataclasses.replace` is available and a tail cannot mutate a prompt a caller still holds. |
+| `units/.../llm_call.py:205` | **`call_model`, not `call_validated`** — the tree's name for §5's function, same signature shape (`-> tuple[M, LLMResponse]`), and its own docstring already said "PHASE G inserts the single reprompt … the call sites do not change when it does". |
+| `units/.../llm_call.py:157` | `parse_output(response, schema, label, *, check)` — the ONE untrusted-parse boundary. It already took the whole `LLMResponse`, not just `.text`, so `finish_reason` was already in scope for the MAX_TOKENS rule. |
+| `core/llm/client.py:36` | `FinishReason.STOP / MAX_TOKENS / OTHER`; the comment on `MAX_TOKENS` already reads "Step 10 treats this differently from a complete-but-malformed response". |
+| `core/llm/client.py:116` | `complete(prompt, *, max_output_tokens: int \| None = None)`; `None` = `Settings.llm_max_output_tokens`. The seam has always had the per-call ceiling; nothing was passing one. |
+| `core/config.py:111-113` | `llm_max_output_tokens: int = 1024`, and its comment ALREADY reads "Headroom for Arabic, which costs roughly 1.5-3x the tokens of equivalent English. **Tasks override per call.**" Register item 15 is the tree's own outstanding instruction, not a new idea. |
+| `tests/helpers/fake_llm.py:78` | `RecordedCall(prompt, max_output_tokens)` — the fake already records the ceiling, so item 15 is testable with no helper change. `truncated(text)` (`:58`) already builds a MAX_TOKENS reply, described as "the likeliest malformed case". |
+| `tests/unit/test_scoring.py:431` | The template grep is parametrised over `_PROMPT_DIR.glob("*_v1.txt")`, so a new `reprompt_tail_v1.txt` is checked for `total`/`band`/`poor`/`excellent` automatically. The sibling test pins the filename list and needed updating from eight to nine. |
+| `scripts/check_coverage_floors.py:46` | `units/structured_intelligence/**` at 95, so `llm_call.py` inherits 95 and only a higher floor needs its own row. |
+
+**Two rulings from the lead, recorded before the work started:**
+
+- **§2.3's fourth denominator "75" is a document defect.** 60 is correct for `no_contact` in every case, Q13
+  resolved or not, and the tree is right. This closes the Phase F disagreement and the "For the lead" item it
+  raised; no code, test or config changes — `test_denominator_for_no_contact_with_q13_resolved_is_still_60`
+  already asserts 60 and carries the arithmetic in a comment. Phase J's ASSUMPTIONS §3.4 entry should list
+  the denominators as **100 / 80 / 60**, not 100/80/60/75.
+- **Per-task token ceilings (register item 15) are sized from the longest ARABIC notes, not English.** Arabic
+  runs roughly 2–3× the tokens per word; a ceiling set on English turns ordinary Arabic notes into MAX_TOKENS
+  truncation, which this phase treats as malformed — so an English-sized ceiling would not degrade an Arabic
+  note gracefully, it would spend its one reprompt and then 503 it. Sized accordingly below.
+
+**Tree disagreements found in Phase 0:** none new. The two session 3 recorded still stand — **there is still
+no fake CRM app, no 127-note corpus and no injection fixtures** (which is why the ceilings below are sized
+from the schema's own cap and a stated tokens-per-word model rather than measured against a corpus; **Phase I
+is still the phase that must build the corpus or scale to constructed fixtures**), and `validate_output`'s
+`label` is still keyword-only where §4 writes it positionally.
+
+---
+
 ## Fail-open / fail-closed matrix (§1 — do not reopen)
 
 | # | Concern | Store / failure | Policy | Observable |
@@ -1039,9 +1161,189 @@ until Phase H fills in `decide`). mypy: 58 source files, clean. Integration suit
 - `pipeline.py`'s floor is still 90 while `decide` is missing; Phase H raises it to 95 and the
   `score=` parameter on `_log_outcome` disappears with the `not_implemented` stub.
 
-## Phase G
+## Phase G — reprompt once via `AssembledPrompt.tail`   STATUS: DONE <sha>
 
-**STATUS: NOT STARTED**
+**What changed:**
+
+- `src/dodeal_ai/prompts/structured_intelligence/reprompt_tail_v1.txt` — new. The stricter
+  instruction: the object and nothing else, no fence, every field present and no field extra,
+  values from the fixed lists, "keep it compact", "this is the second and last attempt".
+- `src/dodeal_ai/core/prompting.py` — `with_tail(prompt, template_name)`: the same prompt with a
+  trusted trailing instruction loaded by name. `stable` and `variable` are CARRIED, not rebuilt.
+  `AssembledPrompt.tail`'s docstring no longer says "empty today".
+- `src/dodeal_ai/units/structured_intelligence/llm_call.py` — `call_model` now sends, validates,
+  and on `OutputValidationError` logs `reprompt_issued`, rebuilds through `with_tail` and sends
+  once more; a second failure is `MalformedOutputError`. `parse_output` rejects `MAX_TOKENS` as
+  `output_truncated` before it decodes. `complete_once` takes a REQUIRED keyword
+  `max_output_tokens` and passes it to the client.
+- `classify.py` / `vague.py` / `scoring.py` — one output ceiling each (register item 15):
+  `CLASSIFY_MAX_OUTPUT_TOKENS = 64`, `VAGUE_MAX_OUTPUT_TOKENS = 1024`,
+  `SCORE_MAX_OUTPUT_TOKENS = 256`, each with its arithmetic in the comment beside it.
+- `src/dodeal_ai/units/structured_intelligence/pipeline.py` — the log field `model_calls` is now
+  `model_passes`, and the module docstring says why a pass is not a call.
+- `scripts/check_coverage_floors.py` — `llm_call.py` at 100.
+- `tests/unit/test_reprompt.py` — new, 22 tests.
+- `tests/unit/test_assembled_prompt.py` — 4 `with_tail` tests.
+- `tests/unit/test_judgement_routes.py` — 4 tests added (reprompt on one pass only, the 503 +
+  release, the three ceilings over HTTP, truncation reprompted); 3 rewritten for two calls.
+- `tests/unit/test_classification.py`, `test_vague.py`, `test_scoring.py` — the three helpers script
+  the same answer twice; the "costs exactly one call" tests are now "exactly two".
+- `tests/security/test_log_safety.py` — 2 sentinels: the reprompt line, and the second prompt.
+- `CAMPAIGN_REPORT.md` — the session 5 Phase 0 block and this one.
+
+**Decisions taken here:**
+
+- **The tail is applied with `dataclasses.replace`, not by re-calling `build_prompt`.** §5 requires
+  `.stable` and `.variable` byte-identical with only `.tail` differing; `replace` makes that true by
+  CONSTRUCTION rather than by coincidence — the two strings are the same objects, not two loads of
+  the same file. **The alternative:** re-assemble through `build_prompt` and set the tail. It would
+  produce identical bytes today, at the cost of a second template read and a second delimiter
+  neutralisation per reprompt, and of a place for the two to drift the day either changes. A test
+  asserts the byte-identity anyway, because the guarantee is what the phase is for.
+- **`with_tail` takes a template NAME and there is no parameter that takes a string.** The one string
+  that must never be appended is the answer that was just rejected, and the surest way to keep it out
+  is to have no channel for it. **The alternative** — `with_tail(prompt, text)` — is one line shorter
+  and puts the boundary back in the caller's discretion.
+- **The tail lives in `core/prompting.py`, the template name in `llm_call.py`.** The type owns the
+  guarantee about its own fields; the unit owns which file it uses. `_load_template` stays private.
+- **One tail file for all three passes, not three.** What it says — answer with the object, nothing
+  around it, every field, values from the fixed lists — is the same whichever object was asked for.
+  Three files would be three ways of saying it, and three chances for two of them to disagree. A test
+  proves the tail is identical whatever the failure was, which is also what proves it is not derived
+  from the rejected answer.
+- **The reprompt lives in `call_model`, so it is per pass and not per request.** Vague detection and
+  scoring run concurrently (register item 14); each enters `call_model` separately, so a reprompt on
+  one re-issues that one and nothing else. There is no shared attempt state. **The alternative** —
+  one reprompt budget per judgement — would make the two concurrent passes contend for it and make
+  the outcome depend on which of them failed first.
+- **The tree's `call_model` was extended in place; §5's `call_validated` is not added.** Same
+  signature shape, same return, and its own docstring already named this phase as the one that fills
+  it. A second name for one function is the thing the repo's own docstrings warn about
+  (`band_for`, `is_thin` — the same ruling as Phase F).
+- **MAX_TOKENS is rejected BEFORE the JSON decode, not after it.** A truncated reply almost always
+  fails to parse anyway, so the check looks redundant — until the fragment happens to parse and
+  happens to satisfy the schema, and a judgement is stamped on the beginning of an answer. It gets
+  its own error type, `output_truncated`, not `json_invalid`, because the two send an operator to
+  different places: one to the ceiling, one to the template. A test drives a truncated reply whose
+  text is a COMPLETE valid object, which is the case that would otherwise pass.
+- **The reprompt carries the SAME ceiling as the first call.** Raising it on the second attempt would
+  make the second call differ in two ways, and the tail is already the lever: "keep it compact, an
+  answer cut off part-way through is rejected exactly as a wrong one is". **The alternative** — a
+  larger ceiling on the retry — hides an undersized ceiling behind a paid second call on every
+  Arabic note instead of surfacing it.
+- **Ceilings are per-task constants beside each task's template and label, not `TenantConfig` fields
+  and not one shared table.** `TenantConfig` is the rubric seam — per-tenant and business-changeable
+  — and an output ceiling is neither. The number lives next to the thing that knows what the answer
+  looks like. **The alternative** — a settings field per task — makes three deployment knobs whose
+  wrong value is a 503, and `Settings.llm_max_output_tokens` already exists as the default these
+  override.
+- **`max_output_tokens` is a REQUIRED keyword on `complete_once` and `call_model`.** The seam's
+  `None` (= the configured default) was available and is exactly what nobody revisits; requiring the
+  argument means a fourth task cannot be added without someone deciding what its answer costs.
+- **The three numbers, and the arithmetic behind them.** The rule is the lead's: size on the longest
+  ARABIC answer, never the English one, because truncation is malformed here and an English-sized
+  ceiling would spend an Arabic note's one reprompt and then 503 it. Only ONE of the three answers
+  carries the note's language back:
+  - **vague = 1024.** The only pass with free text in it. Structure ~40 tokens; the clarification
+    prompt is capped by the schema at 300 characters, which at ~5 characters an Arabic word and
+    ~4 tokens a word (2–3× English's ~1.3) is ~240 tokens; `reasoning` is one or two sentences the
+    schema does not cap at all, so allow the same again. ~520 worst case, doubled for a model that
+    formats across lines. It coincides with `Settings.llm_max_output_tokens`, which was sized the
+    same way for the same reason — this pass is why that default is 1024.
+  - **classify = 64.** `{"note_type": "no_contact"}` is 27 ASCII characters from a fixed vocabulary.
+    Nothing in it scales with the note, so it does not move with Arabic. The headroom is so that a
+    fenced or prefaced reply FITS and is rejected as malformed — a ceiling tight enough to truncate
+    it would report the wrong fault.
+  - **score = 256.** Five fixed ASCII keys and five whole numbers, ~110 characters, or twice that
+    pretty-printed. Also language-invariant.
+  Three tests restate the arithmetic so that lowering a constant has to argue with it, including one
+  that computes the English-sized ceiling explicitly and asserts we are above it.
+- **The log field `model_calls` became `model_passes`.** After this phase the pipeline can no longer
+  know the call count — the reprompt is inside `call_model`, which is the point — so a field named
+  `model_calls` would be short by up to three. **The alternative:** thread a count back through
+  `call_model` → `classify`/`detect_vagueness`/`score_note` → the pipeline, turning three 2-tuples
+  into 3-tuples across five call sites and every test that unpacks them, to carry a number only a log
+  line reads. `reprompt_issued` already names the pass that needed a second call, so the two lines
+  together are a complete picture.
+- **The three task test helpers now script the SAME answer twice.** Every "this shape is rejected"
+  test is now a claim about a model that does not fix itself, which is what a rejection means after
+  the reprompt exists. A valid answer never reaches the second entry, and the `call_count == 1`
+  assertions on the happy paths are what keeps that honest — if a valid answer ever earned a
+  reprompt, those fail. **The alternative** — passing the bad answer twice at ~40 call sites — is the
+  same fact written 40 times.
+- **`llm_call.py` gets a 100 floor.** §5 names no floor for this phase. It is the one place model
+  output becomes a typed object and now the one place a malformed answer decides its own fate; every
+  branch in it is a security branch. It costs one more row in the floors table (see the lead's note
+  about double-counted globs) and it is at 100 % today.
+
+**Tree disagreements:**
+
+- **§5 names the function `call_validated`; the tree has `call_model`.** Same signature shape, same
+  return type, and `call_model`'s own docstring (written in Phase D) already said Phase G would fill
+  it and that "the call sites do not change when it does". Followed the tree — the campaign's rule —
+  and did not add a second name.
+- **§5 says the reprompt is issued "on `OutputValidationError` (including MAX_TOKENS truncation)".**
+  In the tree, a MAX_TOKENS response was NOT an `OutputValidationError` unless its text also failed
+  to parse: `complete_once` returned it and `parse_output` looked only at `.text`. Making §5's
+  parenthesis true required a rule, so one was added — and it is written as its own error type rather
+  than folded into `json_invalid`. Not a disagreement about intent; a gap between the sentence and
+  the code, closed in the code.
+- **Register item 15 is not in §5's Phase G section at all** — it arrives as the lead's instruction
+  this session. It is implemented here because truncation is the failure it prevents and this is the
+  phase where truncation becomes malformed. Recorded so a reader of §5 alone is not surprised by it.
+  (The register itself is still not in the tree; "register item 15" is a pointer into a document this
+  repository does not hold — the same gap session 4 recorded for item 7 and "Appendix B #11".)
+- **The concurrent issue order with a reprompt in it is an event-loop property, not a contract.**
+  Verified empirically: `classify` (1), `vague` (2), `vague` reprompt (3), `score` (4) — the vague
+  coroutine runs to completion before scoring issues its call, because `asyncio.wait_for` on 3.12
+  awaits the coroutine inline and `FakeLLM.complete` never suspends. The route test does NOT depend on
+  that order to pair answers with consumers: it asserts on the recorded PROMPTS (which template, which
+  one carries a tail), so a future interleaving change is a loud, immediately-readable failure rather
+  than a confusing validation error. Same approach Phase F took, extended to the reprompt.
+
+**Tests:** 32 added (22 `test_reprompt.py` + 4 `test_assembled_prompt.py` + 4 routes + 2 log-safety),
+plus one more case in the template-grep parametrisation, which now sweeps the tail file too — 33 more
+collected. 5 existing renamed ("one call" → "two calls", "eight files" → "nine"), and the three task
+helpers plus 6 route/unit tests rewritten for two calls. Suite **634 total, 99.13 %** (floor 92). **12 floors met,
+one new:** `src/dodeal_ai/units/structured_intelligence/llm_call.py = 100` (actual 100 %). `classify.py`,
+`vague.py`, `scoring.py`, `schemas.py`, `state.py`, `config.py` all at 100 %; `pipeline.py` 97.85 %
+against its 90 floor, unchanged — its only gap is still the `judgement_completed` branch, unreachable
+until Phase H fills in `decide`. mypy: 58 source files, clean. Integration suite re-run separately
+(`-m integration`): **7 passed**. Wheel rebuilt and inspected: **nine** prompt files ship, including
+`reprompt_tail_v1.txt`.
+
+Closing chain: `pytest` 634 passed / 99.13 %; `ruff check .` all checks passed; `ruff format --check`
+**102 files already formatted over `src tests scripts`** (the unscoped run names one untracked file
+that is not this phase's — see "For the lead"); `mypy` clean over 58 source files;
+`check_coverage_floors` all 12 met.
+
+**For the lead:**
+
+- **The §2.3 "75" is now closed** by your ruling: 60 for `no_contact` in every case, the tree is right,
+  no code change. Phase J's ASSUMPTIONS §3.4 entry should read **100 / 80 / 60**.
+- **The Arabic ceilings are reasoned, not measured, because there is no corpus in the tree.** The
+  numbers come from the schema's own 300-character cap plus a stated 2–3× tokens-per-word model, and
+  the tests carry that arithmetic explicitly. **When the corpus lands (Phase I), the honest check is
+  to tokenise the longest Arabic notes' expected answers against the real provider's tokeniser and
+  confirm 1024 still clears them.** Until then the failure mode is visible rather than silent: an
+  undersized ceiling shows up as `output_truncated` in `output_validation_failed`, followed by
+  `reprompt_issued`, on the vague label.
+- **`model_calls` → `model_passes` is a log-field rename** on `judgement_suppressed` /
+  `judgement_completed`. Nothing outside this repo consumes it yet, but if a dashboard has been drafted
+  against the old name, this is the moment to change it.
+- Phase H still raises `pipeline.py`'s floor to 95 and deletes the `not_implemented` stub; the
+  `score=` parameter on `_log_outcome` goes with it.
+- **`uv run ruff format --check .` is RED, and the one file it names is not this phase's.** An
+  untracked `docs/audit/2026-09-05-sweep.md` appeared mid-session; ruff formats Python code blocks
+  inside Markdown, and one block in it (`test_normalise_tenant_label_never_returns_anything_but_none_or_a_valid_label`,
+  around line 190) has a blank-line difference. The chain is green over everything else —
+  `ruff format --check src tests scripts` → **102 files already formatted**, and
+  `--check . --exclude docs` → **106 files already formatted**. The file was not touched, not
+  formatted and not staged: it is yours, it is untracked, and reformatting a document I do not own to
+  make my own chain report green would be the wrong fix. Either the block gets its blank line or
+  `docs/` joins ruff's `extend-exclude` — your call, and it is a one-line change either way.
+- `.env.example` is still modified-unstaged in the working tree and was not touched. `AIService.zip`
+  and `docs/campaign/` are still untracked and were left alone.
 
 ## Phase H
 

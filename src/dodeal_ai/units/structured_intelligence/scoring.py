@@ -22,7 +22,7 @@ and everything downstream follows from it.
 THE THREE WAYS MARKS CAN BE WRONG -- a mark for a component that does not apply,
 a missing mark for one that does, and a mark outside [0, weight] -- are all
 `OutputValidationError`. They are enforced through `llm_call.parse_output`'s
-check hook, INSIDE the validated call, because Phase G's single reprompt is
+check hook, INSIDE the validated call, because the single reprompt is
 defined over that exception: a bound checked after the call returned would be a
 malformed answer that never earned its reprompt. And they cannot be schema
 constraints, because the bound is the TENANT's weight and `validate_output` has
@@ -49,6 +49,15 @@ from dodeal_ai.units.structured_intelligence.schemas import (
 
 SCORE_TEMPLATE = "structured_intelligence/score_v1.txt"
 SCORE_LABEL = "llm.unit_a.score"
+
+# What this task's answer may cost (register item 15). Five fixed ASCII keys and
+# five whole numbers -- around 110 characters, or roughly twice that if the
+# model formats the object across lines. Like classification and unlike vague
+# detection, NOTHING in this answer comes back in the note's language, so the
+# ceiling does not move with Arabic. The headroom is for formatting and for a
+# fenced reply, which fits and is then rejected as malformed rather than
+# truncated: two faults that would otherwise be reported as one.
+SCORE_MAX_OUTPUT_TOKENS = 256
 
 
 def applicable_components(
@@ -242,14 +251,16 @@ async def score_note(
     config: TenantConfig,
     settings: Settings,
 ) -> tuple[ScoreOutput, LLMResponse]:
-    """One model call. Returns the validated marks -- already bounded against
-    this tenant's weights by the check hook -- and the raw response, whose
-    `model` the judgement is stamped with."""
+    """One model call, or two if the first answer is malformed. Returns the
+    validated marks -- already bounded against this tenant's weights by the
+    check hook -- and the raw response, whose `model` the judgement is stamped
+    with."""
     return await call_model(
         client,
         build_score_prompt(note, note_type, config),
         ScoreOutput,
         SCORE_LABEL,
         settings=settings,
+        max_output_tokens=SCORE_MAX_OUTPUT_TOKENS,
         check=marks_check(note_type, config),
     )

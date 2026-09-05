@@ -61,10 +61,17 @@ def _note(text: str = NOTE_TEXT):
     return note(NOTE_ID, text)
 
 
-async def _classify(*script):
-    """Run one classification against a scripted model, returning the answer,
-    the raw response and the client (so the caller can count calls)."""
-    client = FakeLLM(*script)
+async def _classify(scripted):
+    """Run one classification against a model that gives the SAME answer to both
+    calls, returning the answer, the raw response and the client (so the caller
+    can count calls).
+
+    Twice, because from Phase G a malformed answer earns one reprompt: proving
+    that a SHAPE is rejected means proving it is still rejected when the model
+    repeats it. A well-formed answer never reaches the second entry -- the
+    call-count assertions below are what keeps that honest.
+    """
+    client = FakeLLM(scripted, scripted)
     output, llm_response = await classify(
         client, _note(), _lead(), settings=get_settings()
     )
@@ -106,7 +113,7 @@ async def test_a_missing_field_is_malformed():
         await _classify(json_response({}))
 
 
-# --- malformed means malformed: no repair, one call ------------------------
+# --- malformed means malformed: no repair, one reprompt --------------------
 
 
 async def test_prose_around_the_object_is_malformed():
@@ -116,25 +123,26 @@ async def test_prose_around_the_object_is_malformed():
 
 async def test_a_code_fence_is_malformed_not_stripped():
     # Repairing this in code would make the answer partly ours. The single
-    # reprompt (Phase G) is the one recovery there is.
+    # reprompt is the one recovery there is.
     with pytest.raises(MalformedOutputError):
         await _classify(response('```json\n{"note_type": "discovery"}\n```'))
 
 
 async def test_a_truncated_response_is_malformed():
-    client = FakeLLM(truncated('{"note_type": "disc'))
+    client = FakeLLM(*([truncated('{"note_type": "disc')] * 2))
     with pytest.raises(MalformedOutputError):
         await classify(client, _note(), _lead(), settings=get_settings())
-    assert client.call_count == 1
+    assert client.call_count == 2
 
 
-async def test_malformed_output_costs_exactly_one_call():
-    # Phase G adds the reprompt; until it does, a bad answer is one call and a
-    # 503, never a silent second attempt.
-    client = FakeLLM(response("not json at all"))
+async def test_malformed_output_costs_exactly_two_calls():
+    # One reprompt, and then it stops. A model that ignored the template and
+    # then ignored the tail is not talked round on a third attempt, and every
+    # attempt is paid for by someone waiting on a note.
+    client = FakeLLM(response("not json at all"), response("still not json"))
     with pytest.raises(MalformedOutputError):
         await classify(client, _note(), _lead(), settings=get_settings())
-    assert client.call_count == 1
+    assert client.call_count == 2
 
 
 async def test_malformed_output_is_a_503_with_its_own_reason_code():
@@ -145,7 +153,7 @@ async def test_malformed_output_is_a_503_with_its_own_reason_code():
 
 async def test_the_rejected_output_is_not_carried_on_the_error():
     secret = "SENTINEL-0501234567 villa budget 4.2M"
-    client = FakeLLM(response(secret))
+    client = FakeLLM(response(secret), response(secret))
     with pytest.raises(MalformedOutputError) as raised:
         await classify(client, _note(), _lead(), settings=get_settings())
 
