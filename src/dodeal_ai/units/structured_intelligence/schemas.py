@@ -153,16 +153,23 @@ class SuppressedReason(StrEnum):
 class SuppressedDetail(StrEnum):
     """The specific cause under a SuppressedReason.
 
-    NOTE_TOO_SHORT pairs with INSUFFICIENT_EVIDENCE. The other three pair with
-    NOT_SCORABLE: SYSTEM_EVENT and UNCLASSIFIABLE come from the classifier,
-    NOT_IMPLEMENTED is the SEAM[STEP3] stub's answer until the pipeline is
-    filled in.
+    NOTE_TOO_SHORT pairs with INSUFFICIENT_EVIDENCE. The other two pair with
+    NOT_SCORABLE, and BOTH come from the classifier: a machine timeline entry
+    (SYSTEM_EVENT, ASSUMPTION[Q6]) and a note it could not place at all
+    (UNCLASSIFIABLE).
+
+    There is no member for "the pipeline has not been built yet". A fourth,
+    NOT_IMPLEMENTED, existed between phases F and H and was set when a note had
+    been fully scored but there was no Decision to publish beside the score.
+    Phase H deleted it with the gap it named, and a grep test refuses it back
+    into src/ -- a suppression code that means "our fault, not the note's" is
+    indistinguishable to the CRM from one that means "this note cannot be
+    scored", and the second is the only kind this vocabulary is for.
     """
 
     NOTE_TOO_SHORT = "note_too_short"
     SYSTEM_EVENT = "system_event"
     UNCLASSIFIABLE = "unclassifiable"
-    NOT_IMPLEMENTED = "not_implemented"
 
 
 # ---------------------------------------------------------------------------
@@ -319,13 +326,36 @@ class Suppressed(BaseModel):
 
 
 class Decision(BaseModel):
-    """What we advise, and what actually happened to the clarification prompt."""
+    """What we advise, and what actually happened to the clarification prompt.
+
+    NOTHING HERE COMES FROM A MODEL. Every field is computed by decide() from
+    the total, the tenant's thresholds and two counters read out of db2 -- there
+    is no field a model output could populate, which is why no output schema
+    needs to be checked for one.
+
+    `attempt` is the count AFTER this request: a judgement that sent a prompt
+    reports the attempt it just spent, and one that withheld reports the count
+    unchanged. `attempts_remaining` is clamped at 0 rather than going negative,
+    so a cap that is lowered while counters are live reads as "none left"
+    instead of "minus one".
+    """
 
     action: DecisionAction
     prompt_sent: bool
     prompt_withheld: PromptWithheld | None = None
     attempt: int
     attempts_remaining: int
+
+    # Register item 33, the resubmission reference. The hex SHA-256 of the note
+    # as it was FIRST prompted on, when db2 still holds that note's attempt
+    # state; null otherwise, and null on the primary route always -- there, this
+    # request IS the first prompt or there was none.
+    #
+    # It exists so the CRM can link a resubmission to the judgement it followed
+    # WITHOUT this service holding history: we keep one digest for the life of
+    # an attempt counter, they keep the judgement. A fingerprint and never note
+    # text -- the CRM already has the text, and we do not store it anywhere.
+    original_note_fingerprint: str | None = None
 
 
 class Versions(BaseModel):

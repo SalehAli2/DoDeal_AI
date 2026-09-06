@@ -4,7 +4,10 @@
                (tenant, note, note-text fingerprint).
   rate limit   How many clarification prompts has this USER been sent in the
                window? Keyed on the subject asking, never on the note's author.
-  attempts     How many clarification prompts has THIS note already drawn?
+  attempts     How many clarification prompts has THIS note already drawn, and
+               -- beside the counter, on the same TTL and the same fail-open
+               policy -- WHICH note text the first of them was sent about
+               (register item 33, the resubmission reference).
 
 THE THREE FAILURE POLICIES ARE NOT THE SAME, and this module is where that is
 enforced rather than remembered:
@@ -103,6 +106,18 @@ def _rate_limit_key(tenant: str, subject: str) -> str:
 
 def _attempt_key(tenant: str, lead_id: int, note_id: int) -> str:
     return f"attempt:{tenant}:{lead_id}:{note_id}"
+
+
+def _attempt_fingerprint_key(tenant: str, lead_id: int, note_id: int) -> str:
+    """Beside the attempt counter, same (tenant, lead, note), same TTL.
+
+    A SECOND KEY rather than a hash holding both. The two are written in the
+    same breath and expire on the same TTL, so the only thing a hash would add
+    is that they expire on ONE ttl instead of two identical ones -- and it would
+    cost the fork of _incr_with_window, which the rate limit and the attempt
+    counter share today. See the phase report for the full comparison.
+    """
+    return f"attempt_fp:{tenant}:{lead_id}:{note_id}"
 
 
 def _bypass(code: str, tenant: str, request_id: str) -> None:
@@ -250,3 +265,74 @@ async def increment_attempts(
         )
     except redis.RedisError:
         _bypass("attempt_counter_bypassed", tenant, request_id)
+
+
+# --- the resubmission reference (register item 33): also fails OPEN --------
+
+
+async def write_attempt_fingerprint(
+    tenant: str,
+    lead_id: int,
+    note_id: int,
+    fingerprint: str,
+    *,
+    ttl: int,
+    request_id: str,
+) -> None:
+    """Record WHICH note text we prompted on, beside the attempt counter.
+
+    Written at the one moment a prompt is actually sent, with the attempt key's
+    own TTL, so the reference lives exactly as long as the counter it belongs
+    to and dies with it. A resubmission arriving later reads it back and the
+    CRM can link the two without this service holding any history.
+
+    SET NX, so this is the FIRST prompted text and stays it. The cap is 1 today
+    and a second prompt cannot happen -- but the field is specified as the note
+    "as it was first prompted on", and NX makes that true by construction
+    instead of by the cap's current value.
+
+    THE VALUE IS A FINGERPRINT, NEVER NOTE TEXT. It is the same digest the
+    idempotency key already carries, and it is stored raw here (not inside the
+    key) because it is read BACK, which a key name cannot be without a scan.
+
+    Fails OPEN with the attempt counter's own code: this is a reference for a
+    later request, and losing it costs a null field, never a judgement.
+    """
+    try:
+        await get_operational_client().set(
+            _attempt_fingerprint_key(tenant, lead_id, note_id),
+            fingerprint,
+            nx=True,
+            ex=ttl,
+        )
+    except redis.RedisError:
+        _bypass("attempt_counter_bypassed", tenant, request_id)
+
+
+async def read_attempt_fingerprint(
+    tenant: str, lead_id: int, note_id: int, *, request_id: str
+) -> str | None:
+    """The note text we first prompted on for this note, or None.
+
+    None means all of: no prompt was ever sent for this note, the reference
+    expired with its counter, or the store is unreachable. The response field
+    is documented as "the fingerprint or null" precisely because those collapse
+    -- a caller that cannot find a reference does the same thing in all three
+    cases, and distinguishing them would leak how long we keep state.
+    """
+    try:
+        raw = await get_operational_client().get(
+            _attempt_fingerprint_key(tenant, lead_id, note_id)
+        )
+    except redis.RedisError:
+        _bypass("attempt_counter_bypassed", tenant, request_id)
+        return None
+    if raw is None:
+        return None
+    # decode_responses=True on the operational client (core/redis.py), so redis
+    # hands back str; the redis-py stub is typed for both settings. Narrowed the
+    # way pipeline.py narrows a ClassifierOutput -- str() would be worse than
+    # useless here, since str(b"ab") is "b'ab'" and would ship a fingerprint
+    # that matches nothing.
+    assert isinstance(raw, str)
+    return raw

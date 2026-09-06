@@ -1,11 +1,11 @@
-"""judge_note called directly, for the contracts the routes cannot yet reach.
+"""judge_note called directly, for the contracts the routes reach awkwardly.
 
-The release-on-failure path is the important one. Nothing after the
-reservation raises in the current stub -- the two counter reads fail open and
-the token pre-flight is a no-op -- so through HTTP this path is unreachable
-today. It becomes the difference between "retry your request" and "409 for the
-next 24 hours" the moment the model calls land in the next phase, so it is
-tested now, at the seam, rather than after something starts depending on it.
+The release-on-failure path is the important one. Through HTTP it is reachable
+only through a model failure, which is one specific way of failing after the
+reservation; here the failure is INJECTED at the token pre-flight, so the
+release is exercised for "anything at all raised after we reserved" rather than
+for the one cause the route tests happen to have. It is the difference between
+"retry your request" and "409 for the next 24 hours".
 """
 
 from __future__ import annotations
@@ -199,7 +199,8 @@ async def test_after_a_release_the_same_request_succeeds(
 
     # Without the release this would be 409 for the next 24 hours.
     judgement = await judge_note(_scope(), _request(), resubmission=False, deps=deps)
-    assert judgement.suppressed is not None
+    assert judgement.suppressed is None
+    assert judgement.score is not None and judgement.decision is not None
 
 
 async def test_the_original_failure_is_not_replaced_by_the_release(
@@ -322,7 +323,7 @@ async def test_vague_and_scoring_are_issued_before_either_returns(
     assert llm.call_count == 3  # both issued...
     llm.released.set()  # ...and only now allowed to return
     judgement = await task
-    assert judgement.suppressed is not None
+    assert judgement.score is not None
 
 
 async def test_a_scoring_failure_releases_the_key_exactly_once(
@@ -412,7 +413,7 @@ async def test_a_no_contact_note_is_scored_against_the_narrower_rubric(
 
     await judge_note(_scope(), _request(), resubmission=False, deps=deps)
 
-    line = next(x for x in json_capture() if x["message"] == "judgement_suppressed")
+    line = next(x for x in json_capture() if x["message"] == "judgement_completed")
     # 48 of 60 -> 80, good. client_said and deal_specifics left the denominator.
     assert line["denominator"] == 60
     assert line["band"] == "good"

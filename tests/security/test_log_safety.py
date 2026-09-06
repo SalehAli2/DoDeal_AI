@@ -35,11 +35,13 @@ from dodeal_ai.core.logging_config import JsonFormatter
 from dodeal_ai.core.resilience import ExternalCallError, call_with_watchdog
 from dodeal_ai.core.validation import OutputValidationError, validate_output
 from dodeal_ai.schemas.lead import Lead, LeadNotesResponse
+from dodeal_ai.units.structured_intelligence import state
 from dodeal_ai.units.structured_intelligence.classify import classify
 from dodeal_ai.units.structured_intelligence.llm_call import parse_output
 from dodeal_ai.units.structured_intelligence.schemas import ClassificationOutput
 from tests.helpers.fake_leads import note
 from tests.helpers.fake_llm import FakeLLM, json_response, response
+from tests.helpers.fake_operational_redis import FakeOperationalRedis
 
 # Shaped like the content this service actually handles: a phone number and a
 # budget inside a note body. If any of these tests can find it in a log line,
@@ -312,6 +314,40 @@ def test_a_note_shaped_model_answer_is_not_echoed_by_the_error(log_capture):
     _assert_sentinel_absent(log_capture)
     assert SENTINEL not in str(raised.value)
     assert SENTINEL not in repr(raised.value.errors)
+
+
+# --- the resubmission reference: a fingerprint stored as a VALUE ------------
+
+
+async def test_the_resubmission_reference_never_reaches_a_log_line(
+    log_capture, monkeypatch
+):
+    # Register item 33 is the one place this service stores a note fingerprint
+    # as a VALUE rather than inside a key. A digest in the log stream is a
+    # stable identifier for one specific note body -- it does not read as note
+    # text, which is exactly why it could slip past a reviewer -- and the store
+    # failure path is where a value would be interpolated by mistake.
+    fingerprint = state.note_fingerprint(SENTINEL)
+    monkeypatch.setattr(
+        state,
+        "get_operational_client",
+        lambda: FakeOperationalRedis(raise_on={"set", "get"}),
+    )
+
+    await state.write_attempt_fingerprint(
+        "tenant-a", 1656, 10, fingerprint, ttl=21600, request_id="req-sentinel"
+    )
+    read = await state.read_attempt_fingerprint(
+        "tenant-a", 1656, 10, request_id="req-sentinel"
+    )
+
+    assert read is None  # fails OPEN, with no new bypass code
+    _assert_sentinel_absent(log_capture)
+    assert fingerprint not in log_capture.getvalue()
+    assert "attempt_fp:" not in log_capture.getvalue()
+
+    line = _lines(log_capture)[-1]
+    assert line["reason_code"] == "attempt_counter_bypassed"
 
 
 # --- the reprompt: a rejected answer is written down twice, and neither ------

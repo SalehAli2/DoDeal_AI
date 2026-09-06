@@ -32,13 +32,14 @@ through the release-on-error path below and the key is released exactly once --
 and because each pass owns its own reprompt, a reprompt on one of the two
 re-issues that one alone.
 
-Step 9 is HALF built: the score is computed, and a mark the model returned out
-of range fails here rather than in the phase that would have acted on it. What
-is missing is `decide` -- so a note that survives classification still returns
-Suppressed(not_scorable, not_implemented), because a scored judgement needs a
-Decision beside it (§2.5) and there is not one yet. That detail code is the
-marker for what is left: Phase H deletes it from src/ and a test greps for it,
-so the stub cannot outlive the work.
+WHY THE COUNTERS MOVE LAST, AND ONLY SOMETIMES. Step 10 runs after the
+judgement exists and outside the release-on-error block, because by then the
+request has been answered: the note was fetched, three calls were paid for, and
+a decision was made. An unreachable db2 at that moment must not undo any of
+that, so the increments fail open (state.py) AND sit where a raise could not
+reach the release path. And they move only when a prompt was ACTUALLY SENT --
+a counter that advanced on a withheld prompt would rate-limit a salesperson for
+questions they never received.
 
 WHY THIS ORDER, at the two places it matters:
 
@@ -71,30 +72,36 @@ from dodeal_ai.core.errors import (
     IdempotencyUnavailableResponse,
     NoteNotFoundError,
 )
-from dodeal_ai.core.llm import LLMClient
+from dodeal_ai.core.llm import LLMClient, LLMResponse
 from dodeal_ai.core.resilience import ExternalCallError
 from dodeal_ai.schemas.lead import Lead, LeadNote
 from dodeal_ai.tools.keys import BackendKeyError
 from dodeal_ai.tools.leads import LeadsClient
 from dodeal_ai.units.structured_intelligence import state
 from dodeal_ai.units.structured_intelligence.classify import (
+    CLASSIFY_LABEL,
     classify,
     suppression_for,
 )
 from dodeal_ai.units.structured_intelligence.config import TenantConfig
+from dodeal_ai.units.structured_intelligence.decide import decide
 from dodeal_ai.units.structured_intelligence.schemas import (
+    Decision,
     Judgement,
     JudgementRequest,
     NoteAnalysis,
-    NoteScore,
     NoteType,
     Suppressed,
     SuppressedDetail,
     SuppressedReason,
     Versions,
 )
-from dodeal_ai.units.structured_intelligence.scoring import compute_score, score_note
-from dodeal_ai.units.structured_intelligence.vague import detect_vagueness
+from dodeal_ai.units.structured_intelligence.scoring import (
+    SCORE_LABEL,
+    compute_score,
+    score_note,
+)
+from dodeal_ai.units.structured_intelligence.vague import VAGUE_LABEL, detect_vagueness
 
 _logger = logging.getLogger("dodeal_ai.unit_a")
 
@@ -269,9 +276,13 @@ async def judge_note(
     subjects from a service principal get labelled asserted.
 
     `resubmission` changes what happens to the clarification prompt, never what
-    is fetched or scored: attempts are READ and never incremented, and any
-    prompt is withheld with prompt_withheld="resubmission". That branch lands
-    with the decision step; today both entry points reach the same seam.
+    is fetched or scored: the note goes through the same three passes and the
+    same arithmetic, attempts are READ and never incremented, and any prompt is
+    withheld with prompt_withheld="resubmission". It is also the only route that
+    reads back the resubmission reference (register item 33) -- and even there
+    it is the FINGERPRINT that decides 200 versus 409, exactly as on the primary
+    route. An edited note is a new fingerprint and so a new judgement; an
+    unedited one is a duplicate whichever route it arrives on.
     """
     config = deps.config
     lead, note = await _fetch_note(scope, request, deps)
@@ -305,16 +316,21 @@ async def judge_note(
     if not claimed:
         raise DuplicateRequestError()
 
+    decision: Decision | None = None
     try:
         # ASSUMPTION[Q7]: the rate limit is keyed on scope.subject -- who is
         # ASKING -- not on note.author_id, who WROTE the note. The limit exists
         # to stop us pestering one person, and the person we would pester is
         # the one making the request. Both reads fail OPEN (0), so a db2 blip
         # cannot 503 a judgement that is otherwise fine.
-        await state.read_rate_limit(
+        #
+        # Read HERE, before anything is spent, and carried down to decide():
+        # re-reading them after the model calls would let a counter moved by a
+        # concurrent request change this judgement's answer halfway through.
+        rate_count = await state.read_rate_limit(
             scope.tenant, scope.subject, request_id=scope.request_id
         )
-        await state.read_attempts(
+        attempts = await state.read_attempts(
             scope.tenant,
             request.lead_id,
             request.note_id,
@@ -326,15 +342,24 @@ async def judge_note(
         await token_preflight(scope)
 
         # --- classify: the first thing that costs money ---------------------
-        classification, response = await classify(
+        classification, classify_response = await classify(
             deps.llm, note, lead, settings=deps.settings
         )
         model_passes = 1
-        analysis = NoteAnalysis(note_type=classification.note_type)
-        score: NoteScore | None = None
 
         detail = suppression_for(classification.note_type)
-        if detail is None:
+        if detail is not None:
+            judgement = _suppressed(
+                scope,
+                request,
+                author_id=author_id,
+                reason=SuppressedReason.NOT_SCORABLE,
+                detail=detail,
+                config=config,
+                analysis=NoteAnalysis(note_type=classification.note_type),
+                model_version=classify_response.model,
+            )
+        else:
             # suppression_for returned None, so this is one of the six scored
             # types -- narrowed here because ClassifierOutput also admits the
             # "unclassifiable" string, which stopped above.
@@ -360,8 +385,8 @@ async def judge_note(
             )
             model_passes = 3
 
-            vague_output, _ = vague_result
-            score_output, _ = score_result
+            vague_output, vague_response = vague_result
+            score_output, score_response = score_result
             analysis = NoteAnalysis(
                 note_type=note_type,
                 is_vague=vague_output.is_vague,
@@ -370,24 +395,56 @@ async def judge_note(
                 reasoning=vague_output.reasoning,
             )
             score = compute_score(score_output.marks, note_type, config)
+            decision = decide(
+                score,
+                analysis,
+                attempts=attempts,
+                rate_count=rate_count,
+                config=config,
+                resubmission=resubmission,
+            )
+            if resubmission:
+                # Read only here: the reference belongs to a Decision, and a
+                # judgement that suppressed or failed has none to hang it on --
+                # so the primary route and every stop before this point spend no
+                # db2 read on it. decide()'s signature is fixed and takes no
+                # store, which is right: this is a REFERENCE the CRM links on,
+                # not an input to the decision.
+                decision = decision.model_copy(
+                    update={
+                        "original_note_fingerprint": (
+                            await state.read_attempt_fingerprint(
+                                scope.tenant,
+                                request.lead_id,
+                                request.note_id,
+                                request_id=scope.request_id,
+                            )
+                        )
+                    }
+                )
 
-            # SEAM: decide() lands in Phase H, and only then can the judgement
-            # carry the score -- §2.5's scored shape is score AND decision, and
-            # half of it would be a judgement the CRM cannot act on. The
-            # arithmetic runs now regardless, so an out-of-range mark fails in
-            # the phase that produced it.
-            detail = SuppressedDetail.NOT_IMPLEMENTED
-
-        judgement = _suppressed(
-            scope,
-            request,
-            author_id=author_id,
-            reason=SuppressedReason.NOT_SCORABLE,
-            detail=detail,
-            config=config,
-            analysis=analysis,
-            model_version=response.model,
-        )
+            _check_one_model_answered(
+                scope,
+                (
+                    (CLASSIFY_LABEL, classify_response),
+                    (VAGUE_LABEL, vague_response),
+                    (SCORE_LABEL, score_response),
+                ),
+            )
+            judgement = Judgement(
+                note_id=request.note_id,
+                lead_id=request.lead_id,
+                author_id=author_id,
+                analysis=analysis,
+                score=score,
+                decision=decision,
+                suppressed=None,
+                # The SCORING pass's model, not the classifier's: the marks are
+                # what the judgement is, and on a reprompted pass it is the
+                # second response -- the call the marks actually came from.
+                versions=_versions(config, score_response.model),
+                request_id=scope.request_id,
+            )
     except Exception:
         # Reserved, then failed: release so the caller can retry instead of
         # being told 409 for a judgement that never happened.
@@ -396,8 +453,74 @@ async def judge_note(
         )
         raise
 
-    _log_outcome(scope, judgement, model_passes=model_passes, score=score)
+    # --- step 10: the counters, only for a prompt that is actually sent -----
+    #
+    # OUTSIDE the try, deliberately. The judgement exists: the note was
+    # fetched, three calls were paid for, a decision was made. A db2 outage now
+    # must not release the reservation and turn an answered request into a 503,
+    # so these calls are placed where a raise could not reach the release path
+    # -- as well as failing open inside state.py. Both guards, because one of
+    # them is a promise another module keeps.
+    #
+    # decision is None on every suppressed judgement, so a suppressed note
+    # never moves a counter -- and neither does a resubmission, which withholds
+    # its prompt by policy and so never reaches prompt_sent.
+    if decision is not None and decision.prompt_sent:
+        await state.increment_rate_limit(
+            scope.tenant,
+            scope.subject,
+            ttl=config.rate_limit_window_seconds,
+            request_id=scope.request_id,
+        )
+        await state.increment_attempts(
+            scope.tenant,
+            request.lead_id,
+            request.note_id,
+            ttl=config.attempt_ttl_seconds,
+            request_id=scope.request_id,
+        )
+        # Register item 33: the note we are prompting on, recorded beside the
+        # counter it belongs to, at the one moment prompt_sent becomes true.
+        await state.write_attempt_fingerprint(
+            scope.tenant,
+            request.lead_id,
+            request.note_id,
+            fingerprint,
+            ttl=config.attempt_ttl_seconds,
+            request_id=scope.request_id,
+        )
+
+    _log_outcome(scope, judgement, model_passes=model_passes)
     return judgement
+
+
+def _check_one_model_answered(
+    scope: TenantScope, responses: tuple[tuple[str, LLMResponse], ...]
+) -> None:
+    """Log when the three passes did not all come back from the same model.
+
+    `model_version` stamps ONE string, and the judgement is stamped with
+    scoring's -- so if the provider rolled a model between the classify call
+    and the score call, the stamp is true for the marks and quietly not true
+    for the classification. That is a real thing to know about a deployment and
+    an invisible one otherwise, so it gets a line.
+
+    THE LABELS ONLY. The pass labels are a fixed vocabulary (`llm.unit_a.*`);
+    the note is not in scope here and never could be. It is a WARNING rather
+    than a failure because a mixed judgement is not wrong -- every pass
+    validated -- it is merely stamped less precisely than the field suggests.
+    """
+    if len({response.model for _, response in responses}) == 1:
+        return
+    _logger.warning(
+        "model_version_mismatch",
+        extra={
+            "reason_code": "model_version_mismatch",
+            "tenant": scope.tenant,
+            "request_id": scope.request_id,
+            "labels": ",".join(label for label, _ in responses),
+        },
+    )
 
 
 def _log_outcome(
@@ -405,7 +528,6 @@ def _log_outcome(
     judgement: Judgement,
     *,
     model_passes: int,
-    score: NoteScore | None = None,
 ) -> None:
     """One structured line per judgement.
 
@@ -422,11 +544,17 @@ def _log_outcome(
     pass it was issued for. A field called `model_calls` that could be short by
     up to three would be worse than one that says what it means.
 
-    `score` is the computed score when there IS one but the judgement does not
-    yet carry it -- the state between Phase F and Phase H. It puts the band and
-    the denominator on the line so the arithmetic is observable before `decide`
-    exists to publish it. Phase H moves both onto the completed line, where they
-    belong, and this parameter goes away with the stub.
+    THE SCORE IS READ OFF THE JUDGEMENT, not passed alongside it. Between
+    phases F and H this function took a `score=` parameter, because the
+    arithmetic ran but the judgement could not yet carry it; `decide()` closed
+    that gap, so the parameter went with it. Two sources for one number is how
+    a log line starts disagreeing with the response it describes.
+
+    `prompt_withheld` is on the line and not only in the response. It is the
+    difference between "we asked" and "we chose not to", and the alert worth
+    having is on a WITHHELD reason appearing far more often than expected --
+    a rate limit set too low reads, in the response alone, as a service that
+    simply asks fewer questions.
     """
     if judgement.suppressed is not None:
         _logger.info(
@@ -438,16 +566,12 @@ def _log_outcome(
                 "suppressed_reason": judgement.suppressed.reason.value,
                 "suppressed_detail": judgement.suppressed.detail_code.value,
                 "model_passes": model_passes,
-                **(
-                    {"band": score.band.value, "denominator": score.denominator}
-                    if score is not None
-                    else {}
-                ),
             },
         )
         return
 
     assert judgement.score is not None and judgement.decision is not None
+    withheld = judgement.decision.prompt_withheld
     _logger.info(
         "judgement_completed",
         extra={
@@ -455,8 +579,11 @@ def _log_outcome(
             "request_id": scope.request_id,
             "note_type": judgement.analysis.note_type,
             "band": judgement.score.band.value,
+            "denominator": judgement.score.denominator,
             "action": judgement.decision.action.value,
             "prompt_sent": judgement.decision.prompt_sent,
+            "prompt_withheld": withheld.value if withheld is not None else None,
+            "attempt": judgement.decision.attempt,
             "model_passes": model_passes,
         },
     )

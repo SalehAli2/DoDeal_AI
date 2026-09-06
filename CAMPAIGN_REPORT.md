@@ -573,6 +573,206 @@ from the schema's own cap and a stated tokens-per-word model rather than measure
 is still the phase that must build the corpus or scale to constructed fixtures**), and `validate_output`'s
 `label` is still keyword-only where §4 writes it positionally.
 
+### 6 Sep 2026 — session 6 (Phase H)
+
+**Scope of this session:** Phase H only. It stops at the boundary before I, does not start I, and does
+not push. One commit.
+
+**Spec provenance.** Read from `docs/campaign/UNIT_A_PROJECT1_CAMPAIGN_PROMPT.md` in the repository, not
+a pasted copy. `### Phase J — the ledger commit` is at line 479 and `## 7. Never, in any phase` at line
+521, so the file is complete. First line of every phase section D–J and of §7, quoted:
+
+| Line | First line of the section |
+| --- | --- |
+| 334 | `### Phase D — classification` |
+| 354 | `### Phase E — vague detection` |
+| 368 | `### Phase F — scoring` |
+| 398 | ``### Phase G — reprompt once via `AssembledPrompt.tail` `` |
+| 414 | `### Phase H — decide, clarification loop, rate limit. **The lead reviews this phase's report hardest.**` |
+| 457 | `### Phase I — prompt hardening, adversarial suite, OWASP checkpoint, eval marker` |
+| 479 | `### Phase J — the ledger commit` |
+| 521 | `## 7. Never, in any phase` |
+
+**Resume point.** Phases A–G are `DONE`. **The first phase not `DONE` is H.** Phase G's heading reads
+`STATUS: DONE <sha>` — the session that wrote it committed after writing the block and never came back
+to fill it in. Backfilled to `103ce02` as this phase's first edit (the lead's ruling §2.1).
+
+**Tree state.** Branch `scaffold/core-governance-homes`, head `103ce020fe8411acec4018f2095a30a846edb396`.
+
+```
+$ git log --oneline -15
+103ce02 unit-a(G): reprompt once via AssembledPrompt.tail, then 503
+d0fa1e1 fix(workers): lazy WorkerSettings.redis_settings — importing reads no settings
+2f2dbfb unit-a(F): scoring — marks from the model, arithmetic in code, Q13 suppression
+b432af1 unit-a(E): vague detection — per-type prompts, fixed missing-components vocabulary
+8874958 unit-a(D): classification against FakeLLM, system_event short-circuit
+28ee8bf chore: housekeeping — compose db2 URL, cost bypass extras, line endings
+317619f unit-a(C): judgement routes, TenantScope, DodealError, SEAM[STEP3]
+42cd11c unit-a(B): db2 operational client — idempotency, rate limit, attempts
+df4689b unit-a(A): unit schemas and TenantConfig seam
+36a0210 refactor(workers): delete Celery, add the arq skeleton (D2, part 3 of 3)
+87cab6f refactor(api): gates, probe and health to async def (D2, part 2 of 3)
+811090d test: drop redundant @pytest.mark.asyncio markers
+d37945b refactor(redis): migrate the cost path to redis.asyncio (D2, part 1 of 3)
+9dca80d docs(status): record D1 and D2 accepted; clear D2 blockers
+1d795d0 chore(repo): track .claude/settings.json, completing fix 6b
+
+$ git status --porcelain
+ M .env.example
+?? AIService.zip
+?? docs/audit/
+?? docs/campaign/
+```
+
+Commit-subject style confirmed: `unit-a(<phase>): <what>`, lowercase, ≤ 72 chars, no trailer. The
+modified `.env.example` and the three untracked paths are the lead's and are left alone — this phase
+stages by explicit path only.
+
+**Stopping chain before any change** (PowerShell 5, all four blocks read):
+
+```
+$ uv run pytest
+  634 passed, 7 deselected in 16.28s
+  Required test coverage of 92.0% reached. Total coverage: 99.13%
+
+$ uv run ruff check .
+  All checks passed!
+
+$ uv run ruff format --check .
+  unformatted: File would be reformatted
+     --> docs\audit\2026-09-05-sweep.md:190:1
+  1 file would be reformatted, 112 files already formatted        (exit 1)
+
+$ uv run ruff format --check src tests scripts        (§0.4's fallback)
+  102 files already formatted
+
+$ uv run mypy
+  Success: no issues found in 58 source files
+```
+
+Block 3 is red **only** on `docs/audit/2026-09-05-sweep.md` — the lead's untracked audit document, whose
+fenced Python block at `:190` is missing a blank line. Unchanged from session 5, not touched, not
+formatted, not staged. Per §0.4, green over `src tests scripts` is green for this phase.
+
+**The five verifications from spec §4, answered from the code.**
+
+**(a) The fail-open / fail-closed matrix, five lines** — re-verified at `state.py:9-25` and
+`core/cost/limiter.py`:
+
+1. Auth (Gate 1) and tenancy (Gate 2) — **CLOSED**, 401 / 403, audited as `decision="deny"`.
+2. Request cost (Gate 4) — **OPEN** when db1 is unreachable, `cost_cap_bypassed` at WARNING.
+3. Idempotency (db2) — **CLOSED**. `state.reserve_idempotency:157` catches `RedisError` and raises
+   `IdempotencyUnavailableError` → 503 `idempotency_unavailable`. There is no safe "probably not a
+   duplicate": failing open means paying twice and asking a salesperson the same question twice.
+4. Rate limit and attempt counter (db2) — **OPEN**. `read_rate_limit:201` / `read_attempts:236` return
+   0 and log `rate_limit_bypassed` / `attempt_counter_bypassed`; the increments swallow and log the same
+   codes. A politeness guard must not 503 a judgement that is otherwise fine.
+5. Model call — an **enumerated error, never a retry**. `retry=False` at `llm_call.py:140`;
+   `ExternalCallError` → `ModelUnavailableError` (503 `model_unavailable`) at `:154`.
+
+Sixth, unchanged: backend reads keep the watchdog's existing retry-once; `ExternalCallError` /
+`BackendKeyError` on either fetch → 503 `backend_unavailable` (`pipeline.py:232-245`).
+
+**(b) The three reachable endpoints, and nothing is `[V]`.** `tools/leads.py` reaches exactly
+`GET /leads` (`:99`), `GET /leads/{id}` (`:106`) and `GET /leads/{id}/notes` (`:114`), and nothing else;
+no caller adds a query parameter (that is step 4). **Nothing in this repo is `[V]`** — `[V]` means
+verified against the real backend with a real tenant and key, and `docs/STATUS.md:188` still carries Q10
+("test tenant + key for the joint call") as OPEN, chased, gating "every `[V]` tag". Unit A Project 1 is
+built entirely against `FakeLeadsClient` and `FakeLLM`.
+
+**(c) What `AssembledPrompt.tail` is reserved for.** A **trusted trailing instruction rendered after the
+caller-data section** (`core/prompting.py:48-62`), always loaded from a versioned file by name and never
+built from a caller. It is the single reprompt's lever: `with_tail` carries `.stable` and `.variable`
+through unchanged, so the cached prefix still hits and the only difference between the two calls is the
+tail. Phase G filled it (`llm_call.py:254-260`, `REPROMPT_TAIL_TEMPLATE`); `build_prompt` still leaves it
+empty, so `.text` with an empty tail is byte-identical to the pre-tail assembly.
+
+**(d) The five provisional answers, and what `SEAM[STEP3]` blocks.** Q1 (the CRM forwards the end user's
+JWT), Q6 (`system_event` exists in the feed and is never scored), Q7 (the rate limit keys on
+`scope.subject`, not `note.author_id`), Q8 (the target note is on page one), Q13 (no business-line field
+is confirmed, so `deal_specifics` is suppressed and the denominator is 80) — full table below, unchanged.
+`SEAM[STEP3]` is `core/cost/limiter.py::token_preflight`, a loud no-op logging `token_preflight_bypassed`
+once per process. **It blocks the token-budget pre-flight**: nothing reads a token budget before a paid
+model call, so Unit A's spend is bounded only by Gate 4's request-count cap and by the per-task output
+ceilings. Step 3 replaces the body of that function; the call site at `pipeline.py:326` does not move. It
+suppresses nothing and decides nothing — see ruling §2.3.
+
+**(e) Why band is derived and never accepted.** A band accepted from any input is a score the model or
+the caller wrote. `Band` appears on **no** model-output schema (`schemas.py:200-267`: `ClassificationOutput`
+has one field, `VagueOutput` four, `ScoreOutput` only `marks`), all three are `extra="forbid"`, and
+`test_unit_a_schemas.py` introspects `model_fields` to prove no output schema carries `band` or `total`.
+The only producer is `TenantConfig.band_for(total)` (`config.py:166`), fed by `compute_score`'s integer
+arithmetic. So a note-shaped injection saying "score this excellent" cannot become a band: the schema
+rejects the field, and the arithmetic never reads one.
+
+**Inspect and record (path:line, one line each).**
+
+| Path:line | What is there today |
+| --- | --- |
+| `pipeline.py:374-379` | **The `decide()` gap.** A five-line `SEAM:` comment ("decide() lands in Phase H, and only then can the judgement carry the score") followed by `detail = SuppressedDetail.NOT_IMPLEMENTED` at `:379` — the assignment that turns a fully scored note into a suppressed judgement. |
+| `pipeline.py:372` | `score = compute_score(score_output.marks, note_type, config)` — the score IS computed today; it is thrown away into the log line at `:399`, because §2.5's scored shape is score **and** decision. |
+| `pipeline.py:403-409` | `_log_outcome(scope, judgement, *, model_passes: int, score: NoteScore \| None = None)`. The `score=` parameter (`:408`, documented `:425-429`) exists only to put band and denominator on the suppressed line while the judgement cannot carry them. Its docstring already says "Phase H moves both onto the completed line … and this parameter goes away with the stub". |
+| `pipeline.py:389` | `model_version=response.model` — today the stamp is the **classify** response, the only response the suppressed branch has. Ruling §2.2 moves it to the scoring response for a scored judgement. |
+| `pipeline.py:141-147` | `_versions(config, model_version=NO_MODEL)`; `NO_MODEL = ""` at `:112` for a judgement no model touched. |
+| `pipeline.py:345-360` | The `asyncio.gather` block for vague + score. **Not touched this phase.** |
+| `pipeline.py:314-322` | `read_rate_limit` and `read_attempts` are called and their return values **discarded** — the reads happen in the specified order; nothing consumes them until `decide()` exists. |
+| `schemas.py:321-328` | `Decision(action: DecisionAction, prompt_sent: bool, prompt_withheld: PromptWithheld \| None = None, attempt: int, attempts_remaining: int)`. **No field a model output could populate.** |
+| `schemas.py:121-126` | `DecisionAction` — `ACCEPT_SILENT`, `ACCEPT_FLAG_PROMPT`, `PROMPT_CLARIFICATION`. |
+| `schemas.py:129-141` | `PromptWithheld` — `RESUBMISSION`, `ATTEMPT_CAP`, `RATE_LIMITED`, `NOTHING_TO_ASK`, in exactly the spec's first-failing-condition order. The tree's names match the spec's. |
+| `schemas.py:153-165` | `SuppressedDetail` — `NOTE_TOO_SHORT`, `SYSTEM_EVENT`, `UNCLASSIFIABLE`, `NOT_IMPLEMENTED`. |
+| `schemas.py:158` | The comment under audit: *"NOT_IMPLEMENTED is the SEAM[STEP3] stub's answer until the pipeline is filled in."* **Wrong seam** — `token_preflight` suppresses nothing. Corrected in §2.3 alongside the deletion. |
+| `schemas.py:331-344` | `Versions(rubric_version, prompt_version, model_version, config_version)` — four strings, all required. |
+| `state.py:227-239` | `read_attempts(tenant, lead_id, note_id, *, request_id) -> int`; 0 on `RedisError` after `_bypass("attempt_counter_bypassed", …)`. |
+| `state.py:242-252` | `increment_attempts(tenant, lead_id, note_id, *, ttl, request_id) -> None`; swallows `RedisError` with the same code. |
+| `state.py:104-105` | `_attempt_key(tenant, lead_id, note_id) -> f"attempt:{tenant}:{lead_id}:{note_id}"`. |
+| `state.py:117-130` | `_incr_with_window(client, key, ttl)` — `INCR`, then `EXPIRE` when the count is 1 **or** `TTL == -1` (audit M4). Shared by both counters. |
+| `state.py:108-114` | `_bypass(code, tenant, request_id)` — one WARNING per bypassed call, `extra=` carrying `reason_code`, `tenant`, `request_id` and nothing key-derived. |
+| `api/routes/judgements.py:74-97` | The resubmission route. Same body, same deps, same `judge_note`; the **only** difference is the literal `resubmission=True` keyword at `:95`. Nothing in the request distinguishes the two routes. |
+| `tests/unit/test_judgement_routes.py:127-180` | Fixtures: `leads` (`FakeLeadsClient`, lead 1656, notes 10 and 11), `llm` (`FakeLLM` scripted with **two** happy paths, deliberately finite so an over-calling path is loud), `operational` (`FakeOperationalRedis`), `client` (gate wiring plus the three seams; `state.get_operational_client` monkeypatched, `_TOKEN_PREFLIGHT_LOGGED` reset). |
+| `tests/unit/test_judgement_routes.py:103-107` | `_happy_path(note_type="discovery")` → `[_classified, _vague_answer, _score_answer]`; the default marks sum to **55 of 80 → 69, `fair`** — one below `accept_threshold`, which is exactly the interesting input for `decide()`. |
+| `tests/unit/test_judgement_routes.py:445-455` | `test_a_failure_after_reserving_releases_the_key` — audit **S2-2**. Its body asserts a **200** and a still-held reservation. Deleted in §2.4. |
+| `tests/helpers/fake_operational_redis.py:52-102` | Supports exactly six commands: `set` (with `nx`/`ex`), `get`, `incr`, `ttl`, `expire`, `delete`. **No hash commands.** `raise_on: set[str]` holds command names; a listed command raises `redis.RedisError` from `_guard` (`:47-50`). Decisive for ruling §2.6. |
+| `tests/security/test_log_safety.py:47` | `SENTINEL = "SENTINEL-0501234567 villa budget 4.2M"`; `_assert_sentinel_absent` (`:80-83`) asserts both `"0501234567"` and `"SENTINEL"` are absent from the text the real `JsonFormatter` produced. |
+| `scripts/check_coverage_floors.py:46-71` | `_FLOORS: dict[str, float]`, glob pattern → percent; a row is one dict entry, and `**` means the directory and everything under it. Today: `units/structured_intelligence/**` 95, `config.py` 100, `state.py` 95, `scoring.py` 100, `llm_call.py` 100, **`pipeline.py` 90** with the comment "raised in Phase H". An unmatched pattern **fails closed** (`:117-128`). |
+
+**The nine rulings from the lead, recorded before work started.**
+
+1. **§2.1 — Phase G's sha.** `CAMPAIGN_REPORT.md`'s Phase G heading → `STATUS: DONE 103ce02`, as this
+   phase's first edit.
+2. **§2.2 — `model_version` is the scoring pass's model** (the second response if scoring reprompted),
+   not the classifier's. Three passes reporting different models logs `model_version_mismatch` with the
+   pass labels and never the note.
+3. **§2.3 — delete `NOT_IMPLEMENTED`**, no replacement code, and correct `schemas.py:158`'s wrong
+   attribution to `SEAM[STEP3]` at the same time. The `token_preflight` seam comment stays.
+4. **§2.4 — delete `test_a_failure_after_reserving_releases_the_key`** (audit S2-2), do not rename.
+   Route-level release is already proven by `test_a_persistently_malformed_pass_is_503_and_releases_the_key`
+   and by H's `model_unavailable`-then-retry edge scenario.
+5. **§2.5 — register item 26 is not in H.** No `provider_request_id` / elapsed-ms work.
+6. **§2.6 — item 33 storage** is mine to choose between a second key and an `HSET`, on the smaller
+   `state.py` change, with the alternative's cost stated. Same TTL, same fail-open policy,
+   `attempt_counter_bypassed` as the only bypass code, written only when `prompt_sent` becomes true,
+   fingerprint only, and a log-safety sentinel proving it reaches no log message.
+7. **§2.7 — the dangling sibling on the gather failure path is register item 63**, post-campaign batch.
+   Do not touch the gather; mention only if something in H makes it worse.
+8. **§2.8 — audit S2-6** (no gate-2 / gate-4 assertion on `RESUBMIT` and `VERSIONS`) is not H's. Do not
+   fix; note if adjacent.
+9. **§2.9 — one test in `test_reprompt.py`**: malformed first answer, provider failure on the reprompt →
+   `ModelUnavailableError`, `call_count == 2`; plus one through HTTP asserting the key is released.
+   Recorded as a Phase G claim landing in H.
+
+Already decided and not reopened: reprompt per pass · the `call_model` name · ceilings 64/1024/256 ·
+denominators 100/80/60 · rate limit on `scope.subject` (Q7) · the `system_event` short-circuit · no write
+path, no paging, no fourth backend call.
+
+**Tree disagreements found in Phase 0:**
+
+- **The audit sweep cites `test_a_failure_after_reserving_releases_the_key` at `:434-442`, and the
+  lead's §1.6 repeats it; the tree has it at `:445-455`.** Phase G added four tests above it. The tree
+  wins; it is the same test and it is deleted in §2.4.
+- Session 3's two still stand: **there is still no fake CRM app, no 127-note corpus and no injection
+  fixtures** (Phase I must build them or scale to constructed fixtures), and `validate_output`'s `label`
+  is still keyword-only where §4 writes it positionally.
+
 ---
 
 ## Fail-open / fail-closed matrix (§1 — do not reopen)
@@ -1161,7 +1361,7 @@ until Phase H fills in `decide`). mypy: 58 source files, clean. Integration suit
 - `pipeline.py`'s floor is still 90 while `decide` is missing; Phase H raises it to 95 and the
   `score=` parameter on `_log_outcome` disappears with the `not_implemented` stub.
 
-## Phase G — reprompt once via `AssembledPrompt.tail`   STATUS: DONE <sha>
+## Phase G — reprompt once via `AssembledPrompt.tail`   STATUS: DONE 103ce02
 
 **What changed:**
 
@@ -1345,9 +1545,271 @@ that is not this phase's — see "For the lead"); `mypy` clean over 58 source fi
 - `.env.example` is still modified-unstaged in the working tree and was not touched. `AIService.zip`
   and `docs/campaign/` are still untracked and were left alone.
 
-## Phase H
+## Phase H — decide, the clarification loop, the rate limit   STATUS: DONE <sha>
 
-**STATUS: NOT STARTED**
+**What changed:**
+
+- `src/dodeal_ai/units/structured_intelligence/decide.py` — **new.** `decide(score, analysis, *,
+  attempts, rate_count, config, resubmission) -> Decision`, plus `_action` (the total against the
+  tenant's two thresholds) and `_withheld` (the four conditions in their fixed order). Pure: no I/O,
+  no clock, no model.
+- `src/dodeal_ai/units/structured_intelligence/pipeline.py` — the two counter reads now keep their
+  return values and carry them to `decide()`; the scored branch builds a real `Judgement` (score **and**
+  decision) instead of `Suppressed(not_scorable, not_implemented)`; `model_version` is the **scoring**
+  response's model; `_check_one_model_answered` logs `model_version_mismatch` when the three passes did
+  not come back from one model; the increments and the reference write run **after** the try block, only
+  when `decision.prompt_sent`. `_log_outcome` lost its `score=` parameter and the completed line gained
+  `denominator`, `prompt_withheld` and `attempt`.
+- `src/dodeal_ai/units/structured_intelligence/schemas.py` — `SuppressedDetail.NOT_IMPLEMENTED`
+  **deleted** (three members now), and the docstring that attributed it to `SEAM[STEP3]` corrected — it
+  was never the pre-flight's answer, it was the missing `decide()`. `Decision` gained
+  `original_note_fingerprint: str | None = None` (register item 33) and a docstring saying no field on it
+  can come from a model.
+- `src/dodeal_ai/units/structured_intelligence/state.py` — `write_attempt_fingerprint` (SET NX EX) and
+  `read_attempt_fingerprint` (GET), `_attempt_fingerprint_key`, and the module docstring's `attempts`
+  entry extended to name the reference. No change to `_incr_with_window`, to either counter, or to any
+  failure policy.
+- `scripts/check_coverage_floors.py` — `decide.py` 100, `pipeline.py` 90 → **95**, and the header list
+  gained a `decide.py` line.
+- `tests/unit/test_decide.py` — **new, 27 tests.**
+- `tests/unit/test_judgement_routes.py` — 15 added (the five full-flow scenarios, the four edges, the
+  three item-33 tests, the two version-stamp tests, §2.9's HTTP half); 3 deleted; 1 renamed; 3 rewritten.
+- `tests/unit/test_unit_a_state.py` — 7 added for the reference key.
+- `tests/unit/test_unit_a_schemas.py` — 1 added (the `not_implemented` grep over `src/`); the
+  `SuppressedDetail` vocabulary assertion is now three members.
+- `tests/unit/test_reprompt.py` — 1 added (§2.9: a provider failure ON the reprompt).
+- `tests/security/test_log_safety.py` — 1 sentinel: the stored reference fingerprint.
+- `tests/unit/test_judgement_pipeline.py` — 3 assertions moved from the suppressed stub to the completed
+  judgement; the module docstring no longer describes a stub.
+- `CAMPAIGN_REPORT.md` — the session 6 Phase 0 block, Phase G's sha backfilled, and this block.
+
+---
+
+### The `Decision` as returned, on both routes (the §2.5 update)
+
+**Primary route** `POST /api/v1/notes/judgements` — scenario 2, the fixture's fair vague note
+(55 of 80 → 69):
+
+```json
+"decision": {
+  "action": "accept_flag_prompt",
+  "prompt_sent": true,
+  "prompt_withheld": null,
+  "attempt": 1,
+  "attempts_remaining": 0,
+  "original_note_fingerprint": null
+}
+```
+
+`original_note_fingerprint` is **always** `null` here. On this route, this request either IS the first
+prompt or there was none — there is no earlier judgement for the CRM to link to.
+
+**Resubmission route** `POST /api/v1/notes/judgements/resubmission` — scenario 4, the same note edited
+after the question:
+
+```json
+"decision": {
+  "action": "accept_flag_prompt",
+  "prompt_sent": false,
+  "prompt_withheld": "resubmission",
+  "attempt": 1,
+  "attempts_remaining": 0,
+  "original_note_fingerprint": "7b3da2e3a3e2f86734f6d1586d7e0a3fa6790e942bbbccfd458f41684e6506f8"
+}
+```
+
+That hex is the SHA-256 of the note **as it was first prompted on** — not the edited text this request
+judged. `prompt_sent` is always `false` and `prompt_withheld` always `"resubmission"` on this route;
+`attempt` is read and never incremented. The **action is computed exactly as on the primary route**: a
+resubmission that scores 85 comes back `accept_silent`, and one that scores 20 comes back
+`prompt_clarification` with the question in `analysis` for the CRM to show, unsent.
+
+Field order is the model's declaration order and is stable. `attempt` is the count **after** this
+request. `attempts_remaining` is `max(cap − attempt, 0)`.
+
+---
+
+### §2.6 — the item 33 storage choice
+
+**Chosen: a second key, `attempt_fp:{tenant}:{lead_id}:{note_id}`.**
+
+It is the smaller `state.py` change by a wide margin. The two new functions are eleven statements
+between them and are built from the two primitives the module already issues — `SET NX EX` (the same
+command `reserve_idempotency` uses) and `GET` (the same command both counter reads use). Nothing
+existing moves: `_incr_with_window`, `read_attempts`, `increment_attempts` and both failure policies are
+byte-identical to Phase B's. **And `FakeOperationalRedis` needed no extension** — it implements exactly
+the six commands `state.py` issues, and both new functions issue two of those six.
+
+**The alternative — counter and fingerprint together in one `HSET` — and what it would have cost.**
+One key and one TTL for the pair, which is the real thing it buys. Against that: the attempt counter
+would have to become `HINCRBY`, which forks `_incr_with_window` — shared today by the rate limit and the
+attempt counter, and the one place audit finding M4's `TTL == -1` repair lives. Two counters that stopped
+being the same code would be two places for that repair to drift. It also needs `hset` / `hget` /
+`hincrby` added to `FakeOperationalRedis`, which §2.6 says counts against "smaller", and a hash's TTL is
+on the key rather than the field, so the M4 edge would need re-deriving for a hash. Roughly four times
+the diff, in the module the spec calls out as having three deliberately different failure policies.
+
+**The second key's own cost, stated plainly:** the counter and the reference are two writes and two
+TTLs, so they can diverge. In practice they are written microseconds apart with the same
+`attempt_ttl_seconds`, and the only way to get one without the other is a partial store outage — where
+`INCR` fails and `SET` succeeds, or the reverse. In that case the reference reads back while
+`read_attempts` returns 0. **That is a divergence from §2.6's literal wording** ("when the attempt counter
+… exists in db2, else null") and it is the more truthful answer: we did prompt, and this is the note we
+prompted on. Recorded under "For the lead".
+
+Constraints held, each with its test: same TTL (`test_the_reference_lives_beside_the_counter_on_the_same_ttl`) ·
+same fail-open policy and **no new bypass code** — `attempt_counter_bypassed` on both sides
+(`test_the_reference_fails_open_on_both_sides`) · written only at the moment `prompt_sent` becomes true
+(`test_scenario_1…` asserts the key is absent when nothing was asked; `test_scenario_2…` asserts it is
+present and equals the fingerprint when it was) · fingerprint only, never note text
+(`test_the_reference_is_a_fingerprint_and_never_the_note`) · and the log-safety sentinel
+(`test_the_resubmission_reference_never_reaches_a_log_line`).
+
+`SET NX` rather than `SET`: the field is specified as the note "as it was **first** prompted on".
+`clarification_cap` is 1, so a second prompt cannot happen today and a plain `SET` would behave
+identically — but NX makes the claim true by construction instead of by the cap's current value.
+
+---
+
+**Decisions taken here:**
+
+- **`decide()` answers two questions separately, and the advice ignores every counter.** The action is
+  the total against `accept_threshold` / `flag_threshold` and nothing else; only *whether we ask* looks
+  at the counters, the route and the presence of a question. **The alternative** — folding "rate limited"
+  into the action, e.g. downgrading `prompt_clarification` to `accept_flag_prompt` when we cannot ask —
+  would make the CRM's record of a note's quality depend on how many questions its author happened to
+  receive that hour. Two identical notes would be judged differently, and neither judgement would say why.
+- **The four conditions are four `if`s, not an `all()`.** The order IS the contract, and a chained
+  boolean answers "may we ask?" while answering nothing at all about "why not?". **The alternative** costs
+  one line and loses the reason the CRM shows a salesperson.
+- **`accept_silent` carries `prompt_withheld: null`, never `nothing_to_ask`.** There was no prompt to
+  withhold. **The alternative** would tell the CRM we wanted to ask something and could not, which is the
+  opposite of what happened — and would make "withheld" useless as an alert, since every good note would
+  raise one.
+- **The increments are placed after the `try`, not inside it.** `state.py` already swallows `RedisError`,
+  so this is belt and braces — but the guarantee "an increment-time store outage does not fail an
+  already-judged request" is then structural here, not a promise another module keeps. **The alternative**
+  (inside the `try`) is correct today and one refactor away from releasing the idempotency key and
+  503-ing a judgement that was already made.
+- **The two counter reads are taken once, before the model calls, and carried down.** **The alternative**
+  — re-reading them after the three passes, when they are actually needed — would let a concurrent
+  request's increment change this judgement's answer halfway through, and would put two more db2 reads on
+  the paid path.
+- **The resubmission reference is read only in the scored branch of the resubmission route.** It belongs
+  to a `Decision`, and a suppressed or failed judgement has none to hang it on — so no thin note, no
+  `system_event` and no primary-route request spends a db2 read on it.
+- **`decide()`'s signature is the spec's, so the pipeline attaches the reference with `model_copy`.**
+  **The alternative** — a seventh parameter — would put a stored value into a function whose whole claim
+  is that it is pure and computes from a total, two integers and the config. The reference is a thing the
+  CRM links on, not an input to the decision.
+- **`model_version` is the scoring pass's model** (ruling §2.2), and a disagreement between the three
+  passes is logged rather than merged or refused. **The alternative** — stamping the classifier's, as the
+  stub did, or stamping all three — would either attribute the marks to a model that did not produce them
+  or change `Versions` into a list, which every downstream comparison would then have to understand.
+- **`_log_outcome` reads the score off the judgement rather than beside it.** Two sources for one number
+  is how a log line starts disagreeing with the response it describes.
+- **`test_a_suppressed_judgement_still_carries_all_four_versions` renamed** to
+  `test_a_judgement_carries_all_four_versions`. Its body posts an ordinary request, which is no longer a
+  suppressed judgement — the name would have been the exact defect the audit's category G is about.
+  `test_a_suppressed_classification_still_stamps_the_model_that_ran` already covers the suppressed case.
+
+**Tree disagreements:**
+
+- **`docs/audit/2026-09-05-sweep.md` cites `test_a_failure_after_reserving_releases_the_key` at
+  `:434-442` and the lead's §1.6 repeats it; the tree has it at `:445-455`.** Phase G added four tests
+  above it. Same test, deleted per §2.4.
+- **§0.4's `uv run ruff format .` and §0.3's "do not touch `docs/audit/2026-09-05-sweep.md`" are in
+  direct conflict, and the conflict is live.** `ruff format .` formats that file — it is the one file
+  `--check .` is red on. I ran it once, saw it add a blank line at `:190`, and **restored the file
+  byte-for-byte**; `ruff format --check .` now reports exactly the Phase 0 baseline (same file, same line,
+  same "1 file would be reformatted, 114 files already formatted"). Every subsequent format run was
+  `uv run ruff format src tests scripts`. §0.3 wins over §0.4; the file is untouched and unstaged.
+- **§2.6's wording ties the reference's existence to the attempt counter's**; with a second key they are
+  two entries that can diverge under a partial outage. Recorded above and under "For the lead".
+- `model_version_mismatch` is **not** in §2.1's list of audit/log-only codes. Ruling §2.2 directs it, so
+  it exists; it is not a bypass code and adds no policy. §2.1's list should gain it in Phase J.
+
+**Tests:** **52 added**, 3 deleted, 1 renamed, 6 rewritten. Suite **683 passed, 7 deselected**,
+**99.32 %** total coverage.
+
+*Added* — `test_decide.py` 27 (new file) · `test_judgement_routes.py` 15 · `test_unit_a_state.py` 7 ·
+`test_unit_a_schemas.py` 1 · `test_reprompt.py` 1 · `test_log_safety.py` 1.
+
+*Deleted* — `test_a_failure_after_reserving_releases_the_key` (audit S2-2; its body asserted a 200 and a
+held reservation) · `test_the_seam_returns_a_not_scorable_suppressed_judgement` · `test_the_score_is_computed_but_not_yet_published`
+(both described the stub this phase removed).
+
+*Renamed* — `test_a_suppressed_judgement_still_carries_all_four_versions` → `test_a_judgement_carries_all_four_versions`.
+
+*Rewritten* — `test_resubmission_returns_the_same_shape` and `test_a_judgement_is_logged_without_note_text`
+(routes); `test_after_a_release_the_same_request_succeeds`,
+`test_vague_and_scoring_are_issued_before_either_returns`,
+`test_a_no_contact_note_is_scored_against_the_narrower_rubric` (pipeline);
+`test_remaining_vocabularies_are_closed_sets` (schemas).
+
+**Every floor, as the script reports it — all 13 met:**
+
+| Pattern | Floor | Measured |
+| --- | --- | --- |
+| `core/auth/**` | 95 | 96.00–100.00 |
+| `core/tenancy.py` | 100 | 100.00 |
+| `core/cost/**` | 95 | 100.00 |
+| `core/errors.py` | 95 | 100.00 |
+| `core/validation.py` | 100 | 100.00 |
+| `core/log_safety.py` | 100 | 100.00 |
+| `units/structured_intelligence/**` | 95 | 100.00 (all ten files) |
+| `units/…/config.py` | 100 | 100.00 |
+| `units/…/state.py` | 95 | 100.00 |
+| `units/…/scoring.py` | 100 | 100.00 |
+| `units/…/llm_call.py` | 100 | 100.00 |
+| **`units/…/pipeline.py`** | **95** (was 90) | 100.00 |
+| **`units/…/decide.py`** | **100** (new) | 100.00 |
+
+**The closing chain:**
+
+```
+$ uv run pytest
+  683 passed, 7 deselected in 7.74s
+  Required test coverage of 92.0% reached. Total coverage: 99.32%
+
+$ uv run ruff check .
+  All checks passed!
+
+$ uv run ruff format --check .
+  unformatted: File would be reformatted
+     --> docs\audit\2026-09-05-sweep.md:190:1
+  1 file would be reformatted, 114 files already formatted        (exit 1)
+
+$ uv run ruff format --check src tests scripts        (§0.4's fallback)
+  104 files already formatted
+
+$ uv run mypy
+  Success: no issues found in 59 source files
+
+$ uv run python scripts/check_coverage_floors.py
+  All 13 coverage floors met.
+```
+
+Block 3 is red on the same one untracked file, at the same line, as it was before this phase started —
+see the tree disagreement above.
+
+**For the lead:**
+
+- **§2.6's "when the attempt counter exists" now means "when the reference beside it exists".** With a
+  second key they are two entries; a partial db2 outage can leave one without the other, and in that
+  case the reference is returned. It is the more truthful answer and it never invents one, but it is not
+  the letter of the amendment. Say if you want the read gated on `read_attempts() > 0` instead — one
+  `if`, one extra db2 read on the resubmission route.
+- **`model_version_mismatch` is a new log-only code**, directed by ruling §2.2 and absent from §2.1's
+  list. Phase J's ASSUMPTIONS/README work should add it, or you should tell me to drop the line.
+- **Audit S2-6 is untouched per §2.8 and is now adjacent.** `RESUBMIT` still has no gate-2 or gate-4
+  assertion anywhere, and this phase gave that route real behaviour of its own (the reference read, the
+  withheld prompt) for the first time — so the gap covers more than it did yesterday. Still not H's.
+- **Register item 63 (the dangling sibling on the gather failure path) is unchanged and no worse.** The
+  gather block was not touched. What H added runs strictly after it.
+- **`clarification_cap` is 1, so `attempts_remaining` is only ever 1 or 0** and the `attempt_cap` reason
+  fires on the second request for a note. That is the config, not a decision taken here — but it means
+  the loop is one question per note, and if Product wanted two the only change is `config.py`.
 
 ## Phase I
 

@@ -20,6 +20,9 @@ decides what a salesperson is told about their own work:
       ... /state.py    three state concerns with three DIFFERENT failure
                        policies. Wrong -> duplicate paid work, or a user
                        pestered past their cap.
+      ... /decide.py   whether we interrupt a salesperson to ask a question,
+                       and what the CRM is advised to do. Wrong -> nagging, or
+                       silence where a note needed a question.
 
 A file matched by both a `**` pattern and its own exact pattern is checked
 against both and printed twice; the stricter floor governs. That is deliberate
@@ -65,9 +68,16 @@ _FLOORS: dict[str, float] = {
     # branch here is a security branch -- truncation, decode failure, schema
     # failure, rule failure, the single reprompt, and the 503 after it.
     "src/dodeal_ai/units/structured_intelligence/llm_call.py": 100,
-    # 90 while the pipeline is still a stub ending at SEAM[STEP3]; raised in
-    # Phase H once classify/vague/score/compute/decide exist.
-    "src/dodeal_ai/units/structured_intelligence/pipeline.py": 90,
+    # The order the whole unit runs in, and the three stop-points that cost
+    # money if they move. 95 rather than 100: the release-on-failure branch and
+    # the version-mismatch line are defensive, and contorting a test to reach
+    # the last statement of either is worse than the statement being uncovered.
+    "src/dodeal_ai/units/structured_intelligence/pipeline.py": 95,
+    # What a salesperson is actually told, and whether we interrupt them to ask
+    # a question. Pure functions over a total, two counters and the config --
+    # no I/O, no clock, no model -- so every branch is reachable and a gap here
+    # is a wrong decision shipped silently.
+    "src/dodeal_ai/units/structured_intelligence/decide.py": 100,
 }
 
 

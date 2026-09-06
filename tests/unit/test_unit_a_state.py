@@ -18,10 +18,12 @@ from dodeal_ai.units.structured_intelligence.state import (
     increment_attempts,
     increment_rate_limit,
     note_fingerprint,
+    read_attempt_fingerprint,
     read_attempts,
     read_rate_limit,
     release_idempotency,
     reserve_idempotency,
+    write_attempt_fingerprint,
 )
 from tests.helpers.fake_operational_redis import (
     TTL_NO_EXPIRY,
@@ -36,6 +38,7 @@ REQUEST_ID = "req-1"
 
 IDEM_TTL = 86400
 WINDOW = 3600
+ATTEMPT_TTL = 21600
 
 # Shaped like a real fingerprint: 64 hex chars. Bound to a NAME here and only
 # ever passed by name, never written as a literal on a line that could end up
@@ -328,6 +331,149 @@ async def test_attempt_key_carries_tenant_lead_and_note(
 ) -> None:
     await increment_attempts(TENANT, LEAD_ID, NOTE_ID, ttl=21600, request_id=REQUEST_ID)
     assert f"attempt:{TENANT}:{LEAD_ID}:{NOTE_ID}" in fake.store
+
+
+# --- the resubmission reference (register item 33) --------------------------
+
+
+async def test_the_reference_starts_absent(fake: FakeOperationalRedis) -> None:
+    assert (
+        await read_attempt_fingerprint(TENANT, LEAD_ID, NOTE_ID, request_id=REQUEST_ID)
+        is None
+    )
+
+
+async def test_the_reference_reads_back_what_was_written(
+    fake: FakeOperationalRedis,
+) -> None:
+    await write_attempt_fingerprint(
+        TENANT,
+        LEAD_ID,
+        NOTE_ID,
+        SENTINEL_FINGERPRINT,
+        ttl=ATTEMPT_TTL,
+        request_id=REQUEST_ID,
+    )
+    assert (
+        await read_attempt_fingerprint(TENANT, LEAD_ID, NOTE_ID, request_id=REQUEST_ID)
+        == SENTINEL_FINGERPRINT
+    )
+
+
+async def test_the_reference_lives_beside_the_counter_on_the_same_ttl(
+    fake: FakeOperationalRedis,
+) -> None:
+    # The two are written in the same breath and must die together: a reference
+    # that outlived its counter would point at a judgement whose attempt state
+    # is gone.
+    await increment_attempts(
+        TENANT, LEAD_ID, NOTE_ID, ttl=ATTEMPT_TTL, request_id=REQUEST_ID
+    )
+    await write_attempt_fingerprint(
+        TENANT,
+        LEAD_ID,
+        NOTE_ID,
+        SENTINEL_FINGERPRINT,
+        ttl=ATTEMPT_TTL,
+        request_id=REQUEST_ID,
+    )
+
+    counter = f"attempt:{TENANT}:{LEAD_ID}:{NOTE_ID}"
+    reference = f"attempt_fp:{TENANT}:{LEAD_ID}:{NOTE_ID}"
+    assert reference in fake.store
+    assert fake.ttls[reference] == fake.ttls[counter] == ATTEMPT_TTL
+
+
+async def test_the_reference_is_the_first_one_written(
+    fake: FakeOperationalRedis,
+) -> None:
+    # SET NX. The field is specified as the note as it was FIRST prompted on;
+    # the cap makes a second prompt impossible today, and NX makes the claim
+    # true by construction rather than by the cap's current value.
+    other = "a1" * 32
+    await write_attempt_fingerprint(
+        TENANT,
+        LEAD_ID,
+        NOTE_ID,
+        SENTINEL_FINGERPRINT,
+        ttl=ATTEMPT_TTL,
+        request_id=REQUEST_ID,
+    )
+    await write_attempt_fingerprint(
+        TENANT, LEAD_ID, NOTE_ID, other, ttl=ATTEMPT_TTL, request_id=REQUEST_ID
+    )
+    assert (
+        await read_attempt_fingerprint(TENANT, LEAD_ID, NOTE_ID, request_id=REQUEST_ID)
+        == SENTINEL_FINGERPRINT
+    )
+
+
+async def test_the_reference_is_scoped_per_tenant_lead_and_note(
+    fake: FakeOperationalRedis,
+) -> None:
+    await write_attempt_fingerprint(
+        TENANT,
+        LEAD_ID,
+        NOTE_ID,
+        SENTINEL_FINGERPRINT,
+        ttl=ATTEMPT_TTL,
+        request_id=REQUEST_ID,
+    )
+    assert f"attempt_fp:{TENANT}:{LEAD_ID}:{NOTE_ID}" in fake.store
+    for tenant, lead_id, note_id in (
+        ("tenant-b", LEAD_ID, NOTE_ID),
+        (TENANT, 1657, NOTE_ID),
+        (TENANT, LEAD_ID, 11),
+    ):
+        assert (
+            await read_attempt_fingerprint(
+                tenant, lead_id, note_id, request_id=REQUEST_ID
+            )
+            is None
+        )
+
+
+async def test_the_reference_fails_open_on_both_sides(failing, json_log) -> None:
+    # No new bypass code: this is the attempt counter's state, and it borrows
+    # the attempt counter's policy and its one code.
+    failing("get", "set")
+
+    await write_attempt_fingerprint(
+        TENANT,
+        LEAD_ID,
+        NOTE_ID,
+        SENTINEL_FINGERPRINT,
+        ttl=ATTEMPT_TTL,
+        request_id=REQUEST_ID,
+    )
+    assert (
+        await read_attempt_fingerprint(TENANT, LEAD_ID, NOTE_ID, request_id=REQUEST_ID)
+        is None
+    )
+
+    codes = [line["reason_code"] for line in _lines(json_log)]
+    assert codes == ["attempt_counter_bypassed", "attempt_counter_bypassed"]
+
+
+async def test_no_reference_fingerprint_reaches_a_log_line(failing, json_log) -> None:
+    # The value stored here IS a note fingerprint -- the one place in this
+    # module where the digest is a VALUE rather than part of a key -- so the
+    # sentinel matters more here than anywhere else.
+    failing("get", "set")
+
+    await write_attempt_fingerprint(
+        TENANT,
+        LEAD_ID,
+        NOTE_ID,
+        SENTINEL_FINGERPRINT,
+        ttl=ATTEMPT_TTL,
+        request_id=REQUEST_ID,
+    )
+    await read_attempt_fingerprint(TENANT, LEAD_ID, NOTE_ID, request_id=REQUEST_ID)
+
+    text = json_log.getvalue()
+    assert SENTINEL_FINGERPRINT not in text
+    assert "attempt_fp:" not in text
 
 
 # --- the two OPEN failure policies -----------------------------------------

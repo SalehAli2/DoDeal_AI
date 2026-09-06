@@ -5,6 +5,8 @@ carry a band or a total.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -30,6 +32,12 @@ from dodeal_ai.units.structured_intelligence.schemas import (
 # The three schemas that describe UNTRUSTED model output. Kept as a tuple so a
 # new output schema added without a band/total guard fails the loop below.
 _OUTPUT_SCHEMAS = (ClassificationOutput, VagueOutput, ScoreOutput)
+
+_SRC = Path(__file__).resolve().parents[2] / "src" / "dodeal_ai"
+
+# The detail code Phase H deleted. Kept here as the ONE spelling in the repo,
+# so the grep below is the thing that would have to be edited to let it back.
+_DELETED_DETAIL_CODE = "not_" + "implemented"
 
 
 # --- vocabularies ----------------------------------------------------------
@@ -89,12 +97,38 @@ def test_remaining_vocabularies_are_closed_sets() -> None:
         "insufficient_evidence",
         "not_scorable",
     ]
+    # Three, not four: `not_implemented` was deleted in Phase H with the gap it
+    # named. The vocabulary says why a NOTE cannot be scored, never why we have
+    # not finished building.
     assert [d.value for d in SuppressedDetail] == [
         "note_too_short",
         "system_event",
         "unclassifiable",
-        "not_implemented",
     ]
+
+
+def test_the_not_implemented_detail_code_is_gone_from_src() -> None:
+    """The stub cannot outlive the work it stood in for.
+
+    `not_implemented` meant "we have not built this yet", which to the CRM is
+    indistinguishable from "this note cannot be scored" -- the same 200, the
+    same suppressed shape, and no way to tell an unfinished service from an
+    unscoreable note. Phase H deleted it with the decide() gap it named. This
+    greps src/ rather than asserting on the enum, because the enum is only one
+    of the places a string can come back.
+    """
+    offenders = []
+    for path in sorted(_SRC.rglob("*.py")):
+        for number, line in enumerate(
+            path.read_text(encoding="utf-8").splitlines(), start=1
+        ):
+            if _DELETED_DETAIL_CODE in line:
+                offenders.append(f"{path.relative_to(_SRC).as_posix()}:{number}")
+
+    assert offenders == [], (
+        f"{_DELETED_DETAIL_CODE!r} was deleted in Phase H with the gap it named; "
+        f"found again in: {offenders}"
+    )
 
 
 # --- the request -----------------------------------------------------------

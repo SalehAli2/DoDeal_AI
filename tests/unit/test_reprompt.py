@@ -29,7 +29,8 @@ import json
 import pytest
 
 from dodeal_ai.core.config import get_settings
-from dodeal_ai.core.errors import MalformedOutputError
+from dodeal_ai.core.errors import MalformedOutputError, ModelUnavailableError
+from dodeal_ai.core.llm import LLMErrorReason, LLMProviderError
 from dodeal_ai.core.prompting import _load_template
 from dodeal_ai.schemas.lead import Lead
 from dodeal_ai.units.structured_intelligence.classify import (
@@ -120,6 +121,31 @@ async def test_two_bad_answers_end_in_malformed_output():
     assert client.call_count == 2
     assert raised.value.http_status == 503
     assert raised.value.reason_code == "malformed_output"
+
+
+async def test_a_provider_failure_on_the_reprompt_is_model_unavailable():
+    """The second call is a REAL call and can fail like any other.
+
+    A malformed first answer earns the reprompt; the provider then does not
+    answer at all. Those are different failures with different fixes, so the
+    caller is told what actually happened last -- model_unavailable, "try
+    again" -- and not malformed_output, which would send them looking at a
+    model that never got to reply.
+
+    Two calls, not three: the reprompt is the ONE recovery, and it does not
+    earn a recovery of its own.
+    """
+    client = FakeLLM(
+        response("not json"),
+        LLMProviderError(LLMErrorReason.UNAVAILABLE, transient=True),
+        json_response(GOOD_CLASSIFICATION),
+    )
+    with pytest.raises(ModelUnavailableError) as raised:
+        await classify(client, _note(), _lead(), settings=get_settings())
+
+    assert client.call_count == 2
+    assert raised.value.reason_code == "model_unavailable"
+    assert raised.value.http_status == 503
 
 
 async def test_the_judgement_is_stamped_with_the_call_it_came_from():

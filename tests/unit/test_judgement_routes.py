@@ -442,37 +442,10 @@ def test_counter_stores_down_do_not_fail_the_request(client, operational):
     assert r.status_code == 200
 
 
-def test_a_failure_after_reserving_releases_the_key(client, leads, operational):
-    # Reserve succeeds, then the notes fetch fails -> the caller must be able
-    # to retry rather than being told 409 for a judgement that never happened.
-    # (Reservation happens after the fetch, so this drives the release through
-    # the counter path instead.)
-    operational.raise_on.add("get")
-    first = client.post(JUDGE, json=_body(), headers=_headers())
-    assert first.status_code == 200
-    assert operational.store  # the reservation is held for a real judgement
+# --- the judged shape ------------------------------------------------------
 
 
-# --- the not_implemented shape ---------------------------------------------
-
-
-def test_the_seam_returns_a_not_scorable_suppressed_judgement(client):
-    r = client.post(JUDGE, json=_body(), headers=_headers())
-
-    assert r.status_code == 200
-    body = r.json()
-    assert body["suppressed"] == {
-        "reason": "not_scorable",
-        "detail_code": "not_implemented",
-    }
-    assert body["score"] is None
-    assert body["decision"] is None
-    assert body["note_id"] == NOTE_ID
-    assert body["lead_id"] == LEAD_ID
-    assert body["author_id"] == 27
-
-
-def test_a_suppressed_judgement_still_carries_all_four_versions(client):
+def test_a_judgement_carries_all_four_versions(client):
     versions = client.post(JUDGE, json=_body(), headers=_headers()).json()["versions"]
     assert versions == {
         "rubric_version": "note_rubric_v1",
@@ -501,19 +474,6 @@ def test_the_analysis_carries_all_three_passes(client):
         "clarification_prompt": "Which Tuesday are you calling, and what will you cover?",
         "reasoning": "The follow-up has no date.",
     }
-
-
-def test_the_score_is_computed_but_not_yet_published(client, json_log):
-    # §2.5's scored shape is score AND decision. decide() is Phase H, and half a
-    # scored judgement is one the CRM cannot act on -- so the arithmetic runs and
-    # the result is logged, not returned.
-    body = client.post(JUDGE, json=_body(), headers=_headers()).json()
-    assert body["score"] is None
-    assert body["decision"] is None
-
-    line = next(x for x in _lines(json_log) if x["message"] == "judgement_suppressed")
-    assert line["band"] == "fair"  # 55 of 80 -> 69
-    assert line["denominator"] == 80  # ASSUMPTION[Q13]: deal_specifics is out
 
 
 def test_a_thin_note_has_no_note_type_at_all(client, leads):
@@ -558,19 +518,41 @@ def test_the_tool_layer_sees_the_verified_tenant(client, leads):
 
 def test_resubmission_returns_the_same_shape(client):
     r = client.post(RESUBMIT, json=_body(), headers=_headers())
+
     assert r.status_code == 200
-    assert r.json()["suppressed"]["detail_code"] == "not_implemented"
+    body = r.json()
+    assert set(body) == {
+        "note_id",
+        "lead_id",
+        "author_id",
+        "analysis",
+        "score",
+        "decision",
+        "suppressed",
+        "versions",
+        "request_id",
+    }
+    # Same body, same shape. The difference is policy, not structure: nothing
+    # is ever asked on this route.
+    assert body["decision"]["prompt_sent"] is False
+    assert body["decision"]["prompt_withheld"] == "resubmission"
 
 
 def test_a_judgement_is_logged_without_note_text(client, json_log):
     client.post(JUDGE, json=_body(), headers=_headers())
 
     assert GOOD_NOTE not in json_log.getvalue()
-    line = next(x for x in _lines(json_log) if x["message"] == "judgement_suppressed")
-    assert line["suppressed_reason"] == "not_scorable"
-    assert line["suppressed_detail"] == "not_implemented"
+    line = next(x for x in _lines(json_log) if x["message"] == "judgement_completed")
+    assert line["band"] == "fair"  # 55 of 80 -> 69
+    assert line["denominator"] == 80  # ASSUMPTION[Q13]: deal_specifics is out
+    assert line["action"] == "accept_flag_prompt"
+    assert line["prompt_sent"] is True
+    assert line["prompt_withheld"] is None
+    assert line["attempt"] == 1
     assert line["model_passes"] == 3
     assert line["tenant"] == "tenant-a"
+    # The question we asked is not on the line either -- it is model output.
+    assert "Which Tuesday" not in json_log.getvalue()
 
 
 # --- the SEAM[STEP3] stub ---------------------------------------------------
@@ -805,4 +787,330 @@ def test_a_provider_failure_releases_the_key_so_a_retry_works(client, llm, opera
     )
     assert client.post(JUDGE, json=_body(), headers=_headers()).status_code == 503
     assert operational.store == {}
+    assert client.post(JUDGE, json=_body(), headers=_headers()).status_code == 200
+
+
+# --- Phase H: the five full-flow scenarios ----------------------------------
+#
+# One request each, end to end: the gate chain, the fake CRM, the fake
+# operational store and a scripted FakeLLM. What they assert that the unit
+# tests cannot is the JOIN -- that the total the arithmetic produced reaches
+# the decision the CRM is shown, and that the counters moved exactly when a
+# question was actually asked.
+
+RATE_KEY = "ratelimit:tenant-a:42"
+ATTEMPT_KEY = f"attempt:tenant-a:{LEAD_ID}:{NOTE_ID}"
+ATTEMPT_FP_KEY = f"attempt_fp:tenant-a:{LEAD_ID}:{NOTE_ID}"
+
+
+def _idem_key(text: str = GOOD_NOTE) -> str:
+    return f"idem:tenant-a:judge_note:{NOTE_ID}:{state.note_fingerprint(text)}"
+
+
+def test_scenario_1_a_good_note_is_accepted_silently(client, llm, operational):
+    # 65 of 80 -> 81, `good`, at or above accept_threshold. Nothing is asked,
+    # because there is nothing wrong with the note -- and so nothing is counted.
+    llm.rescript(
+        _classified("discovery"),
+        _vague_answer(is_vague=False, missing=[], prompt=None),
+        _score_answer(next_step_date=20, clarity=10),
+    )
+    r = client.post(JUDGE, json=_body(), headers=_headers())
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["score"]["total"] == 81
+    assert body["score"]["band"] == "good"
+    assert body["suppressed"] is None
+    assert body["decision"] == {
+        "action": "accept_silent",
+        "prompt_sent": False,
+        # NOT nothing_to_ask: there was no prompt to withhold. A reason here
+        # would tell the CRM we wanted to ask something and could not.
+        "prompt_withheld": None,
+        "attempt": 0,
+        "attempts_remaining": 1,
+        "original_note_fingerprint": None,
+    }
+    assert llm.call_count == 3
+    assert RATE_KEY not in operational.store
+    assert ATTEMPT_KEY not in operational.store
+
+
+def test_scenario_2_a_fair_vague_note_is_flagged_and_the_prompt_is_sent(
+    client, operational
+):
+    # The fixture's default answers: 55 of 80 -> 69, one mark below the accept
+    # threshold, and vague with one thing missing. This is the case the whole
+    # clarification loop exists for.
+    body = client.post(JUDGE, json=_body(), headers=_headers()).json()
+
+    assert body["score"]["total"] == 69
+    assert body["score"]["band"] == "fair"
+    assert body["score"]["denominator"] == 80  # ASSUMPTION[Q13]
+    assert body["decision"] == {
+        "action": "accept_flag_prompt",
+        "prompt_sent": True,
+        "prompt_withheld": None,
+        "attempt": 1,
+        "attempts_remaining": 0,
+        "original_note_fingerprint": None,  # always null on the primary route
+    }
+
+    # Both counters moved, each with its own window.
+    assert operational.store[RATE_KEY] == "1"
+    assert operational.store[ATTEMPT_KEY] == "1"
+    assert operational.ttls[RATE_KEY] == 3600
+    assert operational.ttls[ATTEMPT_KEY] == 21600
+    # And the reference a later resubmission will read back.
+    assert operational.store[ATTEMPT_FP_KEY] == state.note_fingerprint(GOOD_NOTE)
+    assert operational.ttls[ATTEMPT_FP_KEY] == operational.ttls[ATTEMPT_KEY]
+
+
+def test_scenario_3_a_poor_note_at_the_rate_limit_is_advised_but_not_asked(
+    client, llm, operational
+):
+    # rate_limit_per_hour is 3 and this subject is already at 3. The ADVICE is
+    # unchanged -- the note is poor and the CRM is told so -- but we do not add
+    # a fourth question to someone's day.
+    operational.store[RATE_KEY] = "3"
+    llm.rescript(
+        _classified("discovery"),
+        _vague_answer(),
+        _score_answer(what_happened=5, client_said=3, next_step_date=3, clarity=1),
+    )
+    body = client.post(JUDGE, json=_body(), headers=_headers()).json()
+
+    assert body["score"]["total"] == 15  # 12 of 80
+    assert body["score"]["band"] == "poor"
+    assert body["decision"]["action"] == "prompt_clarification"
+    assert body["decision"]["prompt_sent"] is False
+    assert body["decision"]["prompt_withheld"] == "rate_limited"
+    assert body["decision"]["attempt"] == 0
+    # The question was still computed and is still in the response: the CRM
+    # can show it. What it may not do is claim WE asked it.
+    assert body["analysis"]["clarification_prompt"] is not None
+
+    assert operational.store[RATE_KEY] == "3"  # not incremented
+    assert ATTEMPT_KEY not in operational.store
+
+
+def test_scenario_4_a_resubmission_is_a_new_judgement_that_asks_nothing(
+    client, leads, operational
+):
+    first = client.post(JUDGE, json=_body(), headers=_headers())
+    assert first.json()["decision"]["prompt_sent"] is True
+
+    # The salesperson edited the note in answer to the question. Same note_id,
+    # different text -- so a different fingerprint, and a new judgement.
+    leads.notes[LEAD_ID] = [
+        note(NOTE_ID, GOOD_NOTE + " Confirmed Tuesday 3pm at the New Cairo office.")
+    ]
+    again = client.post(RESUBMIT, json=_body(), headers=_headers())
+
+    assert again.status_code == 200  # not 409
+    decision = again.json()["decision"]
+    assert decision["action"] == "accept_flag_prompt"
+    assert decision["prompt_sent"] is False
+    assert decision["prompt_withheld"] == "resubmission"
+    assert decision["attempt"] == 1  # read, never incremented
+    assert decision["attempts_remaining"] == 0
+    # Register item 33: the note we FIRST prompted on, so the CRM can link this
+    # judgement to the one it followed without us holding any history.
+    assert decision["original_note_fingerprint"] == state.note_fingerprint(GOOD_NOTE)
+    assert operational.store[ATTEMPT_KEY] == "1"
+
+
+def test_scenario_5_an_identical_second_save_is_409_with_zero_model_calls(
+    client, llm, operational
+):
+    # The reservation the first save left behind. Nothing is fetched twice and
+    # nothing is paid for twice -- the count is asserted, not assumed.
+    operational.store[_idem_key()] = "1"
+
+    r = client.post(JUDGE, json=_body(), headers=_headers())
+
+    assert r.status_code == 409
+    assert r.json()["reason"] == "duplicate_request"
+    assert llm.call_count == 0
+
+
+# --- Phase H: the four edges ------------------------------------------------
+
+
+def test_a_note_already_at_the_attempt_cap_withholds_for_that_reason(
+    client, operational
+):
+    # clarification_cap is 1 and this note has already had its question. The
+    # cap is about the NOTE; the rate limit is about the person -- and the cap
+    # is checked first, because it is the more specific fact.
+    operational.store[ATTEMPT_KEY] = "1"
+
+    decision = client.post(JUDGE, json=_body(), headers=_headers()).json()["decision"]
+
+    assert decision["action"] == "accept_flag_prompt"
+    assert decision["prompt_sent"] is False
+    assert decision["prompt_withheld"] == "attempt_cap"
+    assert decision["attempt"] == 1
+    assert decision["attempts_remaining"] == 0
+    assert operational.store[ATTEMPT_KEY] == "1"  # unchanged
+    assert RATE_KEY not in operational.store
+
+
+def test_a_fair_but_not_vague_note_withholds_because_there_is_nothing_to_ask(
+    client, llm
+):
+    # 69, so the action is still accept_flag_prompt -- but the vague pass found
+    # nothing missing, so there is no question. "Nothing to ask" is a REASON,
+    # not an absent field the CRM has to interpret.
+    llm.rescript(
+        _classified("discovery"),
+        _vague_answer(is_vague=False, missing=[], prompt=None),
+        _score_answer(),
+    )
+    body = client.post(JUDGE, json=_body(), headers=_headers()).json()
+
+    assert body["score"]["band"] == "fair"
+    assert body["decision"]["action"] == "accept_flag_prompt"
+    assert body["decision"]["prompt_sent"] is False
+    assert body["decision"]["prompt_withheld"] == "nothing_to_ask"
+    assert body["analysis"]["clarification_prompt"] is None
+
+
+def test_the_counter_store_being_down_bypasses_it_without_failing_the_request(
+    client, operational, json_log
+):
+    # Both reads AND both increments are broken. The reads fail open to 0, so
+    # the prompt is sent; the increments are dropped. A politeness guard being
+    # unavailable must not 503 a judgement that is otherwise fine.
+    operational.raise_on.update({"get", "incr"})
+
+    r = client.post(JUDGE, json=_body(), headers=_headers())
+
+    assert r.status_code == 200
+    assert r.json()["decision"]["prompt_sent"] is True
+    codes = [x.get("reason_code") for x in _lines(json_log)]
+    assert "rate_limit_bypassed" in codes
+    assert "attempt_counter_bypassed" in codes
+
+
+def test_a_model_failure_then_a_retry_of_the_same_note_is_a_full_judgement(
+    client, llm, operational
+):
+    # The release path, at the route level: a 503 of OURS must not cost the
+    # caller a 409 for the next 24 hours. And the failed attempt cost nothing
+    # -- one prompt was sent in total, so the attempt counter reads 1, not 2.
+    llm.rescript(
+        LLMProviderError(LLMErrorReason.UNAVAILABLE, transient=True),
+        *_happy_path(),
+    )
+    assert client.post(JUDGE, json=_body(), headers=_headers()).status_code == 503
+    assert operational.store == {}
+
+    again = client.post(JUDGE, json=_body(), headers=_headers())
+
+    assert again.status_code == 200
+    assert again.json()["decision"]["prompt_sent"] is True
+    assert operational.store[ATTEMPT_KEY] == "1"
+
+
+# --- the resubmission reference (register item 33) --------------------------
+
+
+def test_a_resubmission_with_no_prior_prompt_carries_a_null_reference(client):
+    # Nothing was ever asked about this note, so there is nothing to link to.
+    decision = client.post(RESUBMIT, json=_body(), headers=_headers()).json()[
+        "decision"
+    ]
+    assert decision["original_note_fingerprint"] is None
+
+
+def test_the_reference_is_null_when_the_attempt_store_is_down(
+    client, operational, json_log
+):
+    # Fails OPEN with the attempt counter's own code -- no new bypass code, and
+    # no 503. A missing reference costs a null field, never a judgement.
+    operational.store[ATTEMPT_FP_KEY] = state.note_fingerprint(GOOD_NOTE)
+    operational.raise_on.add("get")
+
+    body = client.post(RESUBMIT, json=_body(), headers=_headers()).json()
+
+    assert body["decision"]["original_note_fingerprint"] is None
+    codes = [x.get("reason_code") for x in _lines(json_log)]
+    assert "attempt_counter_bypassed" in codes
+
+
+def test_the_reference_is_a_fingerprint_and_never_the_note(client, operational):
+    client.post(JUDGE, json=_body(), headers=_headers())
+
+    stored = operational.store[ATTEMPT_FP_KEY]
+    assert stored == state.note_fingerprint(GOOD_NOTE)
+    assert GOOD_NOTE not in stored
+    assert len(stored) == 64 and set(stored) <= set("0123456789abcdef")
+
+
+# --- the version stamp is the pass the judgement came from ------------------
+
+
+def test_the_stamp_is_the_model_that_scored_not_the_one_that_classified(
+    client, llm, json_log
+):
+    # The marks ARE the judgement, so the stamp is the model that produced
+    # them. A provider that rolled a model between the first call and the third
+    # would otherwise have the judgement attributed to the wrong one.
+    llm.rescript(
+        _classified("discovery"),
+        _vague_answer(),
+        json_response(
+            {
+                "marks": {
+                    "what_happened": 20,
+                    "client_said": 15,
+                    "next_step_date": 15,
+                    "clarity": 5,
+                }
+            },
+            model="model-that-scored",
+        ),
+    )
+    body = client.post(JUDGE, json=_body(), headers=_headers()).json()
+
+    assert body["versions"]["model_version"] == "model-that-scored"
+
+    # And the disagreement is observable rather than silent.
+    line = next(x for x in _lines(json_log) if x["message"] == "model_version_mismatch")
+    assert line["level"] == "WARNING"
+    assert line["labels"] == "llm.unit_a.classify,llm.unit_a.vague,llm.unit_a.score"
+    assert line["tenant"] == "tenant-a"
+    # Labels, never content.
+    assert GOOD_NOTE not in json_log.getvalue()
+
+
+def test_three_passes_from_one_model_log_no_mismatch(client, json_log):
+    client.post(JUDGE, json=_body(), headers=_headers())
+    assert not [x for x in _lines(json_log) if x["message"] == "model_version_mismatch"]
+
+
+# --- Phase G's claim, landed (§2.9) -----------------------------------------
+
+
+def test_a_provider_failure_on_the_reprompt_is_model_unavailable_and_releases(
+    client, llm, operational
+):
+    # The first answer was malformed, so the pass earned its one reprompt -- and
+    # THAT call is the one the provider failed. The caller is told the model was
+    # unavailable, which is what happened, not malformed_output, which is what
+    # the first answer was.
+    llm.rescript(
+        response("not json"),
+        LLMProviderError(LLMErrorReason.UNAVAILABLE, transient=True),
+        *_happy_path(),
+    )
+    r = client.post(JUDGE, json=_body(), headers=_headers())
+
+    assert r.status_code == 503
+    assert r.json()["reason"] == "model_unavailable"
+    assert llm.call_count == 2
+    assert operational.store == {}  # released, so the retry below is not a 409
+
     assert client.post(JUDGE, json=_body(), headers=_headers()).status_code == 200
