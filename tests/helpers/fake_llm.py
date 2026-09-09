@@ -8,16 +8,37 @@ must never grow one.
 No sleeping, no network, no randomness. Responses are popped in order. An
 exhausted script is a test bug and raises — it never returns a default, so a
 path that calls the model more times than the test expected fails loudly.
+
+TWO WAYS TO SCRIPT IT, AND WHY THE SECOND EXISTS. The positional script
+(constructor, `script`, `rescript`) answers calls in arrival order, which is
+exact and readable for a test that knows the order. But vague detection and
+scoring are issued together under `asyncio.gather`, and arrival order there is
+a SCHEDULING ACCIDENT: it holds only because gather steps its tasks in argument
+order and nothing between the pipeline and this fake ever suspends. Nothing in
+the pipeline promises it, and a test that scripts two answers positionally is
+silently asserting it.
+
+So `script_for(template_name, *responses)` queues answers against the TEMPLATE
+that will be sent, resolved through `build_prompt` -- the same loader the
+pipeline assembles with, never a test re-reading the file. A gathered pass then
+gets its own answer whichever task the loop happens to run first, and a caller
+scripting a corpus does not have to know the order at all.
+
+PRECEDENCE, in one rule: if a template queue EXISTS for `prompt.stable`, the
+answer comes from it; otherwise the positional script serves the call. Existing
+is not the same as non-empty -- an exhausted template queue raises rather than
+falling through to the positional script, because a silent fall-through would
+answer a scoring call with whatever the test had lined up for something else.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from dodeal_ai.core.llm import FinishReason, LLMResponse
-from dodeal_ai.core.prompting import AssembledPrompt
+from dodeal_ai.core.prompting import AssembledPrompt, build_prompt
 
 FAKE_MODEL = "fake-model-pinned"
 
@@ -80,6 +101,17 @@ class RecordedCall:
     max_output_tokens: int | None
 
 
+@dataclass(slots=True)
+class _TemplateQueue:
+    """The answers queued for one template, and the name to blame when they run
+    out. Keyed by the template's stable text, but the NAME is what a failing
+    test needs to read, so it is carried alongside rather than reverse-looked-up
+    from a path."""
+
+    template_name: str
+    items: list[LLMResponse | BaseException] = field(default_factory=list)
+
+
 class FakeLLM:
     """Structurally satisfies LLMClient. tests/helpers/test_fake_llm.py asserts
     this both for mypy (typed assignment) and at runtime (isinstance)."""
@@ -88,6 +120,9 @@ class FakeLLM:
         self, *script: LLMResponse | BaseException, hold_after: int | None = None
     ) -> None:
         self._script: list[LLMResponse | BaseException] = list(script)
+        # stable template text -> that template's queue. Empty unless a test
+        # calls script_for(), so the positional fake is untouched by this.
+        self._by_template: dict[str, _TemplateQueue] = {}
         self.calls: list[RecordedCall] = []
         # Calls past this many are RECORDED and then block on `released`, so a
         # test can observe how many are in flight at once. None (the default) is
@@ -108,6 +143,34 @@ class FakeLLM:
         what happened.
         """
         self._script[:] = script
+
+    def script_for(
+        self, template_name: str, *responses: LLMResponse | BaseException
+    ) -> None:
+        """Queue answers for whichever call is assembled from `template_name`.
+
+        The template is resolved through `build_prompt`, so the key is the exact
+        `stable` string the pipeline will produce -- including under
+        `DODEAL_PROMPTS_DIR`, which a test that read the file itself would miss.
+        An unknown name raises `PromptError` here, at the line that named it,
+        rather than never matching a call and looking like a pipeline bug.
+
+        A QUEUE, not one answer. The second call for a pass is the reprompt, and
+        `with_tail` changes only the tail -- `stable` is carried across
+        untouched -- so the reprompt lands on this same queue and pops the NEXT
+        item. That is what lets a test say "malformed, then good" for one
+        template without knowing where in the call order either lands.
+
+        Calling it twice for the same template appends; it never replaces. Two
+        notes' worth of answers for one template is the corpus case, and a
+        second call that silently discarded the first would lose one.
+        """
+        stable = build_prompt(template_name, "").stable
+        queue = self._by_template.get(stable)
+        if queue is None:
+            queue = _TemplateQueue(template_name=template_name)
+            self._by_template[stable] = queue
+        queue.items.extend(responses)
 
     @property
     def call_count(self) -> int:
@@ -130,11 +193,24 @@ class FakeLLM:
             # Recorded BEFORE the wait, so call_count reflects calls ISSUED, not
             # calls completed -- which is the whole point of the mechanism.
             await self.released.wait()
+        item = self._next_for(prompt)
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+    def _next_for(self, prompt: AssembledPrompt) -> LLMResponse | BaseException:
+        """The precedence rule, in one place: a template queue if this prompt
+        has one, the positional script otherwise. An existing-but-empty queue
+        raises HERE rather than falling through -- see the module docstring."""
+        queue = self._by_template.get(prompt.stable)
+        if queue is not None:
+            if not queue.items:
+                raise FakeLLMExhausted(
+                    f"FakeLLM: template queue exhausted for {queue.template_name}"
+                )
+            return queue.items.pop(0)
         if not self._script:
             raise FakeLLMExhausted(
                 f"FakeLLM: no scripted response for call {len(self.calls)}"
             )
-        item = self._script.pop(0)
-        if isinstance(item, BaseException):
-            raise item
-        return item
+        return self._script.pop(0)

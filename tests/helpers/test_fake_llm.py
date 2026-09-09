@@ -1,14 +1,63 @@
-"""FakeLLM satisfies the seam and behaves like a strict script."""
+"""FakeLLM satisfies the seam and behaves like a strict script.
+
+The template-directed half of the file is about ONE hazard: vague detection and
+scoring are gathered, so which of them reaches the fake first is a scheduling
+accident, and a positional script quietly depends on it. Those tests run the
+real `detect_vagueness` and `score_note` under a real `asyncio.gather`, in both
+argument orders, because a fake that only worked in the order the pipeline
+happens to use today would be exactly the bug this piece exists to remove.
+"""
 
 from __future__ import annotations
 
+import asyncio
+import re
+
 import pytest
 
+from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.llm import FinishReason, LLMClient, LLMErrorReason, LLMProviderError
 from dodeal_ai.core.prompting import AssembledPrompt
-from tests.helpers.fake_llm import FakeLLM, FakeLLMExhausted, response, truncated
+from dodeal_ai.units.structured_intelligence.config import get_tenant_config
+from dodeal_ai.units.structured_intelligence.schemas import ComponentName, NoteType
+from dodeal_ai.units.structured_intelligence.scoring import (
+    SCORE_TEMPLATE,
+    build_score_prompt,
+    score_note,
+)
+from dodeal_ai.units.structured_intelligence.vague import detect_vagueness, template_for
+from tests.helpers.fake_leads import note
+from tests.helpers.fake_llm import (
+    FakeLLM,
+    FakeLLMExhausted,
+    json_response,
+    response,
+    truncated,
+)
 
 PROMPT = AssembledPrompt(stable="S", variable="V")
+
+CONFIG = get_tenant_config("tenant-a")
+NOTE_TYPE = NoteType.DISCOVERY
+NOTE = note(10, "Called the client, discussed the New Cairo 3BR, following up Tuesday.")
+VAGUE_TEMPLATE = template_for(NOTE_TYPE)
+
+VAGUE_ANSWER = {
+    "is_vague": True,
+    "missing_components": ["next_step_with_date"],
+    "clarification_prompt": "When are you following up with this client?",
+    "reasoning": "No date was given for the next step.",
+}
+# The four components applicable to a discovery note under the shipped config
+# (deal_specifics is suppressed by Q13), each mark inside its weight.
+SCORE_ANSWER = {
+    "marks": {
+        "what_happened": 20,
+        "client_said": 15,
+        "next_step_date": 20,
+        "clarity": 8,
+    }
+}
 
 
 def test_satisfies_protocol_statically_and_at_runtime() -> None:
@@ -68,3 +117,81 @@ def test_response_factory_carries_configurable_tokens() -> None:
 
 def test_truncated_sets_max_tokens() -> None:
     assert truncated("cut").finish_reason is FinishReason.MAX_TOKENS
+
+
+# --- template-directed scripting --------------------------------------------
+
+
+@pytest.mark.parametrize("score_first", [False, True])
+async def test_template_answers_land_on_the_right_pass_in_either_gather_order(
+    score_first: bool,
+) -> None:
+    fake = FakeLLM()  # no positional script at all: both answers are directed
+    fake.script_for(VAGUE_TEMPLATE, json_response(VAGUE_ANSWER))
+    fake.script_for(SCORE_TEMPLATE, json_response(SCORE_ANSWER))
+    settings = get_settings()
+
+    vague = detect_vagueness(fake, NOTE, NOTE_TYPE, config=CONFIG, settings=settings)
+    score = score_note(fake, NOTE, NOTE_TYPE, config=CONFIG, settings=settings)
+    # Reversing the ARGUMENTS to gather is what reverses arrival order; the
+    # coroutines above have not started yet.
+    if score_first:
+        (score_out, _), (vague_out, _) = await asyncio.gather(score, vague)
+    else:
+        (vague_out, _), (score_out, _) = await asyncio.gather(vague, score)
+
+    assert vague_out.is_vague is True
+    assert score_out.marks[ComponentName.WHAT_HAPPENED] == 20
+    assert fake.call_count == 2
+
+
+async def test_template_queue_drains_in_order_across_a_reprompt() -> None:
+    fake = FakeLLM()
+    fake.script_for(SCORE_TEMPLATE, response("not json"), json_response(SCORE_ANSWER))
+
+    out, _ = await score_note(
+        fake, NOTE, NOTE_TYPE, config=CONFIG, settings=get_settings()
+    )
+
+    assert out.marks[ComponentName.WHAT_HAPPENED] == 20
+    assert fake.call_count == 2
+    # Why the second call stayed on this queue: with_tail changes the tail and
+    # nothing else, so `stable` -- the key -- is the same string both times.
+    assert fake.prompts[1].stable == fake.prompts[0].stable
+    assert fake.prompts[1].tail
+
+
+async def test_exhausted_template_queue_names_the_template_and_never_falls_back() -> (
+    None
+):
+    # A positional answer IS available. The empty queue must still raise: a
+    # fall-through would answer a scoring call with someone else's response.
+    fake = FakeLLM(json_response(SCORE_ANSWER))
+    fake.script_for(SCORE_TEMPLATE, json_response(SCORE_ANSWER))
+    prompt = build_score_prompt(NOTE, NOTE_TYPE, CONFIG)
+
+    await fake.complete(prompt)
+    with pytest.raises(FakeLLMExhausted, match=re.escape(SCORE_TEMPLATE)):
+        await fake.complete(prompt)
+
+    assert fake.call_count == 2  # the failing call is still recorded
+
+
+async def test_positional_still_serves_a_prompt_with_no_template_queue() -> None:
+    fake = FakeLLM(response("one"), response("two"))
+    fake.script_for(SCORE_TEMPLATE, json_response(SCORE_ANSWER))
+
+    # PROMPT.stable is "S": no queue, so the positional script serves it.
+    assert (await fake.complete(PROMPT)).text == "one"
+    assert (await fake.complete(PROMPT)).text == "two"
+    # ...and it drew from the positional script only -- the scoring queue is
+    # still full.
+    scored = await fake.complete(build_score_prompt(NOTE, NOTE_TYPE, CONFIG))
+    assert "marks" in scored.text
+
+
+def test_still_satisfies_llmclient_with_a_template_queue_in_use() -> None:
+    fake = FakeLLM()
+    fake.script_for(SCORE_TEMPLATE, response("x"))
+    client: LLMClient = fake  # mypy checks the signature here
+    assert isinstance(client, LLMClient)

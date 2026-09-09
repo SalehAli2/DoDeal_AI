@@ -1816,7 +1816,7 @@ see the tree disagreement above.
 Phase I is being taken in pieces at the lead's direction (a divergence from §0.1's one-commit-per-phase,
 recorded here so the next session does not read it as drift). The phase is `DONE` only when every piece is.
 
-### Piece I.1 — vendor fake CRM fixtures   STATUS: DONE <sha pending>
+### Piece I.1 — vendor fake CRM fixtures   STATUS: DONE ba44c5c
 
 **What changed:**
 
@@ -1895,6 +1895,68 @@ piece adds nothing under `src/`, and `scripts/check_coverage_floors.py` only gov
   records. Say the word and I.2 adds a separate accessor — I will not fold them into `notes`.
 - **The lead count a downstream eval quotes is 1447, not 1448.** One is in the file and not in the
   client. Worth knowing before anyone writes "the 1448-lead corpus" into a document.
+
+### Piece I.2 — FakeLLM prompt-directed scripting   STATUS: DONE <sha pending>
+
+**What changed:**
+
+- `tests/helpers/fake_llm.py` — added `FakeLLM.script_for(template_name, *responses)`, which resolves the
+  template's `stable` text through `build_prompt` (the same loader the pipeline assembles with, never a
+  test re-reading the file) and queues the responses under that string. Added `_TemplateQueue` (the
+  queued items plus the template NAME, so an exhaustion message can blame something a reader
+  recognises) and `FakeLLM._by_template`. `complete()` now delegates the choice of answer to
+  `_next_for(prompt)`; everything else in it — the call record, the `hold_after` wait, raising a
+  scripted exception — is unchanged and in the same order.
+- `tests/helpers/test_fake_llm.py` — 6 tests added (5 functions, one parametrized over both gather orders).
+- Untouched, as required: the constructor, `script`, `rescript`, `hold_after`, `calls`, `prompts`,
+  `call_count`, and the positional exhaustion message. No existing test changed. No change under `src/`.
+
+**The precedence rule:** if a template queue **exists** for `prompt.stable`, the answer comes from it;
+otherwise the positional script serves the call, exactly as before. *Exists* is not *non-empty* — an
+exhausted template queue raises `FakeLLMExhausted` naming the template rather than falling through to the
+positional script, because a silent fall-through would answer a scoring call with whatever the test had
+lined up for something else. A reprompt stays on its queue for free: `with_tail` carries `stable` across
+untouched and changes only the tail, so the second call for a pass pops the next item.
+
+**Why it was needed (Phase 0 finding):** positional scripting survives the vague/score `asyncio.gather`
+today only because gather wraps its arguments into tasks in argument order and steps them FIFO, and
+nothing between the pipeline and the fake suspends — `build_prompt` is sync, `asyncio.wait_for` with a
+positive timeout awaits the coroutine directly rather than creating a task, and `FakeLLM.complete` never
+awaits anything unless `hold_after` is set. So `detect_vagueness`, gather's first argument, runs straight
+into `complete()` and takes script slot 1. That is a scheduling accident the pipeline never promised, and
+Piece I.7 cannot script 127 notes against it. Verified both ways before writing the tests:
+`gather(vague, score)` arrives `['vague', 'score']` and `gather(score, vague)` arrives `['score', 'vague']`,
+so the parametrized test is not a no-op.
+
+**Decisions taken here:**
+
+- **`script_for` appends on a second call for the same template; it never replaces.** Two notes' worth of
+  answers for one template is precisely the I.7 corpus case, and a second call that silently discarded the
+  first would lose one. The alternative — replace, mirroring `rescript` — reads tidier in a two-line test
+  and quietly breaks the case this piece exists to serve.
+- **Keyed on `stable`, carrying the name alongside.** `stable` is what `complete()` can actually see, but
+  a failing test needs to read `structured_intelligence/score_v1.txt`, not 40 lines of template. Reverse-
+  looking-up the name from the text at failure time would have worked and would have been one more thing
+  to be wrong.
+- **An unknown template name raises `PromptError` inside `script_for`,** at the line that named it, rather
+  than never matching a call and presenting as a pipeline bug. This is free — it falls out of resolving
+  through `build_prompt` — and it is the reason to resolve through the loader rather than a literal.
+- **The precedence check lives in `_next_for`, not inline in `complete()`.** `complete()` keeps its
+  record-then-hold-then-answer shape unchanged, which is what makes "no existing test changes" checkable
+  by reading rather than by running.
+
+**Tree disagreements:** none. `.env.example`, `AIService.zip`, `docs/audit/` and `docs/campaign/` remain
+modified/untracked and were left alone; staging was by explicit path.
+
+**Tests:** 6 added; suite **694** total, **99.32 %** coverage; all 13 per-file floors met. No new floors —
+this piece adds nothing under `src/`, and `scripts/check_coverage_floors.py` only governs `src/`.
+
+**For the lead:**
+
+- **The gather-order accident is now covered but not removed.** Every test still using two positional
+  responses across that gather passes for the reason described above, not because the order is
+  guaranteed. Those are not wrong today and I did not touch them (this piece may not change an existing
+  test's expectations) — but if you want them converted to `script_for`, that is its own piece.
 
 ## Phase J
 
