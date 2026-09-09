@@ -1,10 +1,5 @@
-YOUR PREVIOUS ANSWER WAS REJECTED. It was not the object asked for above.
-
-Answer again from the same data. Nothing has changed: the data section is the
-one you have already read, and the question is the one you have already been
-asked. Do not reconsider your judgement — reconsider only its FORM.
-
-Return the JSON object described above and NOTHING else:
+Return exactly the JSON object described above, and NOTHING else. These rules
+govern the FORM of the answer only:
 
 - no sentence before it and no sentence after it.
 - no code fence, no backticks, no language tag, no heading.
@@ -15,7 +10,7 @@ Return the JSON object described above and NOTHING else:
 - values only from the fixed lists given above, spelled exactly as they appear
   there.
 
-Keep it compact. An answer cut off part-way through is rejected exactly as a
-wrong one is, so say what is asked and stop.
+Keep it compact. An answer cut off part-way through fails exactly as a wrong
+one does, so say what is asked and stop.
 
 This is the second and last attempt. There is no third.

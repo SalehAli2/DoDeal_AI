@@ -1896,7 +1896,7 @@ piece adds nothing under `src/`, and `scripts/check_coverage_floors.py` only gov
 - **The lead count a downstream eval quotes is 1447, not 1448.** One is in the file and not in the
   client. Worth knowing before anyone writes "the 1448-lead corpus" into a document.
 
-### Piece I.2 — FakeLLM prompt-directed scripting   STATUS: DONE <sha pending>
+### Piece I.2 — FakeLLM prompt-directed scripting   STATUS: DONE 335abf4
 
 **What changed:**
 
@@ -1957,6 +1957,72 @@ this piece adds nothing under `src/`, and `scripts/check_coverage_floors.py` onl
   responses across that gather passes for the reason described above, not because the order is
   guaranteed. Those are not wrong today and I did not touch them (this piece may not change an existing
   test's expectations) — but if you want them converted to `script_for`, that is its own piece.
+
+### Piece I.3 — reprompt tail without the previous-answer fiction   STATUS: DONE <sha pending>
+
+**What changed:**
+
+- `src/dodeal_ai/prompts/structured_intelligence/reprompt_tail_v1.txt` — rewritten in place. **No version
+  bump:** no judgement has ever been produced by this file, so there is no past output whose provenance a
+  `_v2` would preserve. This is the only file under `src/` this piece touches.
+- `tests/unit/test_reprompt.py` — 1 test added, `test_the_tail_does_not_pretend_there_was_a_previous_answer`.
+- No code change. `llm_call.py` is untouched, there is still exactly one tail, and no existing test's
+  expectations changed.
+
+**The opening line, before and after:**
+
+- **Was:** `YOUR PREVIOUS ANSWER WAS REJECTED. It was not the object asked for above.`
+- **Now:** `Return exactly the JSON object described above, and NOTHING else. These rules govern the FORM
+  of the answer only:`
+
+**Why it was wrong:** every model call is a fresh prompt carrying no history. The model has not seen an
+earlier answer, has not been told one was turned down, and has read nothing before the prompt in its
+hands. The old tail asserted all three — a previous answer, its rejection, and a data section "you have
+already read" — and then asked the model to *reconsider* something it never produced. A model has no
+honest way to comply with that, and what it does instead is unpredictable: the likeliest failure is that
+it invents the answer it is supposed to be revising. The three fictional paragraphs are gone; the form
+rules they preceded are unchanged, bullet for bullet.
+
+**Kept, deliberately:** the whole bullet list (no prose, no fence, every field asked for and none other,
+value kinds, fixed-list values spelled exactly), the compactness sentence, and
+`This is the second and last attempt. There is no third.` as the final line. The tail still names no
+field, component, note type, weight, threshold or band — it says nothing a per-task template does not
+already say, which is why one file can serve all three passes.
+
+**Decisions taken here:**
+
+- **The compactness line was reworded, not kept verbatim.** It read "...is **rejected** exactly as a wrong
+  one is", and `rejected` is one of the four words the new test pins out. Meaning preserved exactly —
+  "An answer cut off part-way through **fails** exactly as a wrong one does, so say what is asked and
+  stop." The alternative, keeping the word and dropping it from the test's list, would have left the tail
+  free to drift back toward the language of rejection one edit at a time.
+- **The test pins four words, not a whole-file hash.** A hash would fail on every wording improvement and
+  teach the next person to update it without reading. The four words are the ones that carried the
+  fiction, so the test fails only when the fiction returns.
+- **`This is the second and last attempt` stays, on instruction.** Noting for the record that it is the
+  one sentence left that tells the model something about a history it cannot see — it is a true statement
+  about the call budget rather than a claim about the model's own past output, and it was explicitly
+  required to keep, so it stayed. See **For the lead** if you want it revisited.
+
+**Tests:** 1 added; suite **695** total, **99.32 %** coverage; all 13 per-file floors met. No new floors.
+`tests/unit/test_reprompt.py` re-run on its own before the new test was written: **23/23 passing**,
+including `test_the_tail_is_the_versioned_file_verbatim` and
+`test_the_tail_never_names_what_was_wrong_with_the_answer`.
+
+**Tree disagreements:** none. `.env.example`, `AIService.zip`, `docs/audit/` and `docs/campaign/` remain
+modified/untracked and were left alone; staging was by explicit path.
+
+**For the lead:**
+
+- **Review finding F4 — one tail serves both form failures and content failures, where a second tail
+  selected by error class would say something more useful — is DEFERRED to the post-campaign batch. It is
+  explicitly not this piece,** which was forbidden from adding a second tail. This rewrite does not close
+  F4 and does not make it harder: the file is now purely a form instruction, which is the natural first
+  half of any later split.
+- **`This is the second and last attempt. There is no third.` is the last remaining sentence about a past
+  the model cannot observe.** It is true of the system rather than of the model, and it is what stops a
+  model from padding for a third try — but if you want the tail to make no claim about attempt ordering
+  at all, that is a one-line change and its own decision.
 
 ## Phase J
 

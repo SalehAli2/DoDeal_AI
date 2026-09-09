@@ -220,6 +220,28 @@ async def test_the_tail_never_names_what_was_wrong_with_the_answer():
     assert from_prose.prompts[1].tail == from_bad_shape.prompts[1].tail
 
 
+def test_the_tail_does_not_pretend_there_was_a_previous_answer():
+    """Every call is a fresh prompt and the model has no history.
+
+    It has not seen an earlier answer, has not been told one was turned down,
+    and has read nothing before the prompt it is holding. So a tail that opened
+    "YOUR PREVIOUS ANSWER WAS ..." and asked the model to reconsider its
+    judgement was describing a conversation that never happened -- and a model
+    told to revisit something it never produced has no honest way to comply.
+
+    What the second attempt actually needs is a stricter statement of the FORM
+    and nothing about a past. These four words are the ones that carried the
+    fiction; they are pinned out so it cannot come back in a rewrite.
+    """
+    tail = _load_template(REPROMPT_TAIL_TEMPLATE)
+    for fiction in ("previous", "rejected", "reconsider", "already"):
+        assert fiction not in tail.lower(), fiction
+
+    # The call budget is the one true thing the tail says about the attempt,
+    # and it stays last so it is the last thing read.
+    assert tail.endswith("This is the second and last attempt. There is no third.")
+
+
 # --- truncation is malformed ------------------------------------------------
 
 
