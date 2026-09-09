@@ -35,7 +35,10 @@ absent from the note:
                        attempt produced.
 - next_step_with_date  what happens next AND when, as a date or a named
                        day. "Will follow up" is not a next step; "calling
-                       Tuesday morning" is.
+                       Tuesday morning" is. A relative time anchored to
+                       when the note was written also counts as a date —
+                       for example "tomorrow", "after 2 hrs", "next
+                       Tuesday", "end of the week".
 
 client_said is NOT on that list for this note type, and must never appear in
 your answer. The client was not reached — there is nothing they said, and asking

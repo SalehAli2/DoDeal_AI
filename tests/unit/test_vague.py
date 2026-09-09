@@ -177,6 +177,30 @@ def test_no_template_carries_a_weight_or_a_threshold(note_type):
         assert forbidden not in stable
 
 
+# The relative-time sentence, in the words all six templates carry it in. A
+# template that accepted only a calendar date or a named day would report
+# next_step_with_date missing on a note that says exactly when the next step is
+# -- and "cb tmrw" is how the corpus actually writes it.
+RELATIVE_TIME_SENTENCE = (
+    "A relative time anchored to when the note was written also counts as a "
+    'date — for example "tomorrow", "after 2 hrs", "next Tuesday", '
+    '"end of the week".'
+)
+
+
+def _collapsed(text: str) -> str:
+    """Template text with the line wrapping taken out. The sentence is the same
+    words in every file but wraps differently in each, so compare it unwrapped
+    rather than pinning six line breaks."""
+    return " ".join(text.split())
+
+
+@pytest.mark.parametrize("note_type", SCORED_TYPES)
+def test_every_template_accepts_a_relative_time_as_a_date(note_type):
+    stable = build_vague_prompt(_note(), note_type).stable
+    assert RELATIVE_TIME_SENTENCE in _collapsed(stable)
+
+
 @pytest.mark.parametrize("note_type", SCORED_TYPES)
 def test_every_template_forbids_the_generic_question(note_type):
     # The one string this unit shows a human. "Please improve this note" tells

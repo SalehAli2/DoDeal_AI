@@ -414,6 +414,33 @@ def test_the_template_name_is_versioned():
     assert SCORE_TEMPLATE == "structured_intelligence/score_v1.txt"
 
 
+# --- what next_step_date accepts (MASTER_SPEC §2.4) -------------------------
+
+# Word for word what the six vague templates carry, so the two passes agree on
+# what a date is.
+RELATIVE_TIME_SENTENCE = (
+    "A relative time anchored to when the note was written also counts as a "
+    'date — for example "tomorrow", "after 2 hrs", "next Tuesday", '
+    '"end of the week".'
+)
+# An explicit closure IS the next step: there is no next step, and the note
+# says why. Without this the rubric marked a finished deal down for failing to
+# name a follow-up it should never have -- and vague_won_lost_v1.txt already
+# accepted a closure, so the two passes disagreed about the same note.
+CLOSURE_SENTENCE = (
+    "Full marks also for an explicit closure with a stated reason — the deal "
+    "closed, the client bought elsewhere or withdrew, the lead was dropped — "
+    "because nothing follows and the note says so."
+)
+
+
+def test_the_score_template_accepts_relative_times_and_closures():
+    stable = build_score_prompt(_note(), NoteType.DISCOVERY, CONFIG).stable
+    collapsed = " ".join(stable.split())
+    assert RELATIVE_TIME_SENTENCE in collapsed
+    assert CLOSURE_SENTENCE in collapsed
+
+
 # --- no template may carry the arithmetic -----------------------------------
 
 

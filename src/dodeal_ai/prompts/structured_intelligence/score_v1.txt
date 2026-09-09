@@ -23,7 +23,13 @@ WHAT EACH COMPONENT MEANS:
                     salesperson's verdict on how it went.
 - next_step_date    what happens next, AND when, as a date or a named day. Full
                     marks: both. Part marks: an action with no date, or a date
-                    with no action. No marks: neither.
+                    with no action. No marks: neither. A relative time anchored
+                    to when the note was written also counts as a date — for
+                    example "tomorrow", "after 2 hrs", "next Tuesday", "end of
+                    the week". Full marks also for an explicit closure with a
+                    stated reason — the deal closed, the client bought elsewhere
+                    or withdrew, the lead was dropped — because nothing follows
+                    and the note says so.
 - deal_specifics    the concrete particulars actually named — the figures, the
                     unit, the terms, the timing. Full marks: enough that the
                     next person needs no other source. No marks: none given.

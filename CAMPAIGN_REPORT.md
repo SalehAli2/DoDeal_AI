@@ -1958,7 +1958,7 @@ this piece adds nothing under `src/`, and `scripts/check_coverage_floors.py` onl
   guaranteed. Those are not wrong today and I did not touch them (this piece may not change an existing
   test's expectations) — but if you want them converted to `script_for`, that is its own piece.
 
-### Piece I.3 — reprompt tail without the previous-answer fiction   STATUS: DONE <sha pending>
+### Piece I.3 — reprompt tail without the previous-answer fiction   STATUS: DONE 86a0b3c
 
 **What changed:**
 
@@ -2023,6 +2023,52 @@ modified/untracked and were left alone; staging was by explicit path.
   the model cannot observe.** It is true of the system rather than of the model, and it is what stops a
   model from padding for a third try — but if you want the tail to make no claim about attempt ordering
   at all, that is a one-line change and its own decision.
+
+### Piece I.4 — relative times and closures in the templates   STATUS: DONE <sha pending>
+
+**What changed:**
+
+- The six `vague_*_v1.txt` — one sentence added to the `next_step_with_date` entry, identical in all six.
+- `score_v1.txt` — the same sentence added under `next_step_date`, plus the closure sentence.
+- `tests/unit/test_vague.py` — 1 test, parametrised over the six scored types (6 cases).
+- `tests/unit/test_scoring.py` — 1 test.
+- Nothing else under `src/`. No code change.
+
+**The two sentences, verbatim** (they wrap differently per file; these are the words):
+
+> A relative time anchored to when the note was written also counts as a date — for example "tomorrow",
+> "after 2 hrs", "next Tuesday", "end of the week".
+
+> Full marks also for an explicit closure with a stated reason — the deal closed, the client bought
+> elsewhere or withdrew, the lead was dropped — because nothing follows and the note says so.
+
+**Why:** the corpus writes "cb tmrw" far more often than a calendar date, and a template that accepted only
+a date or a named day would report `next_step_with_date` missing on notes that state exactly when the next
+step is. The closure sentence aligns `score_v1.txt` with MASTER_SPEC §2.4 and with `vague_won_lost_v1.txt`,
+which already accepted an explicit closure — until now the two passes could disagree about the same
+finished deal, vague detection calling it complete while scoring marked it down for a follow-up it should
+never have had.
+
+**Decisions taken here:**
+
+- **The sentence went into the `next_step_with_date` fixed-list entry, not the "What a useful one contains"
+  bullet.** The phrase quoted in the instruction appears in both places in four of the six templates — but
+  `vague_no_contact_v1.txt` and `vague_won_lost_v1.txt` have no matching "useful one contains" bullet, so
+  the fixed-list entry is the only location common to all six, and "same sentence, same words, in all six"
+  is only satisfiable there. It is also the definitional one: it is what the model reports against.
+- **The tests compare with line wrapping collapsed.** The words are identical everywhere; the wrapping is
+  not, because the two files indent differently. Pinning six exact line breaks would fail on the next
+  reflow and teach the next person to re-paste rather than read.
+
+**Tree disagreements:** none. `AIService.zip` is no longer in the working tree — removed outside this
+session; it was untracked and was never staged here either way. `.env.example`, `docs/audit/` and
+`docs/campaign/` remain modified/untracked and were left alone.
+
+**Tests:** 7 added (6 parametrised cases + 1); suite **702** total, **99.32 %** coverage; all 13 per-file
+floors met. No new floors. `test_scoring.py`, `test_vague.py` and `test_classification.py` were run on
+their own after the template edits and before the new tests: **179/179 passing**, unchanged.
+
+**For the lead:** empty.
 
 ## Phase J
 
