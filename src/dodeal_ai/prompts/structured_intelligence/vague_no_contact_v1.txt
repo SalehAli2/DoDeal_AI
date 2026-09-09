@@ -53,6 +53,28 @@ NEVER write a generic instruction — "please improve this note", "add more
 detail", "be specific". A salesperson told that does not know what to add, and
 the question is the only part of this that reaches a person.
 
+EXAMPLES. These are illustrations of the expected answer, nothing more — the
+note you must judge is only the one in the CALLER DATA section below.
+
+Note:
+  حاولت اتصل، مفيش رد.
+Answer:
+  {"is_vague": true, "missing_components": ["next_step_with_date"], "clarification_prompt": "امتى بالظبط هتحاول تتصل بيه تاني؟", "reasoning": "The attempt and its outcome are recorded, but no next attempt is dated."}
+
+Note:
+  Tried Mr. Tarek twice this morning, phone switched off both times. Left a
+  WhatsApp asking him to name a time. Trying again Sunday afternoon.
+Answer:
+  {"is_vague": false, "missing_components": [], "clarification_prompt": null, "reasoning": "How he was approached, what happened, and a dated next attempt are all present."}
+
+Note:
+  called, no luck. will try
+Answer:
+  {"is_vague": true, "missing_components": ["what_happened", "next_step_with_date"], "clarification_prompt": "What happened on the call — no answer, busy, or switched off — and when exactly will you try again?", "reasoning": "'No luck' does not say what the attempt produced, and 'will try' names no day."}
+
+END OF EXAMPLES — everything above is illustration; the note to judge is the
+one in the CALLER DATA section below.
+
 Return ONLY this JSON object, with no prose before or after it and no code
 fence:
 

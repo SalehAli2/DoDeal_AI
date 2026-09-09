@@ -52,6 +52,29 @@ NEVER write a generic instruction — "please improve this note", "add more
 detail", "be specific". A salesperson told that does not know what to add, and
 the question is the only part of this that reaches a person.
 
+EXAMPLES. These are illustrations of the expected answer, nothing more — the
+note you must judge is only the one in the CALLER DATA section below.
+
+Note:
+  كلمته، قالي مشغول دلوقتي. هيرد عليا.
+Answer:
+  {"is_vague": true, "missing_components": ["next_step_with_date"], "clarification_prompt": "اتفقتوا على ميعاد محدد للمكالمة الجاية إمتى؟", "reasoning": "The client was reached and said he was busy, but no agreed time is recorded."}
+
+Note:
+  Reached Ms. Nour, she was travelling and could not talk. Asked to be called
+  Saturday morning, said she wants to go through the payment plan then.
+  Calling Saturday 10am.
+Answer:
+  {"is_vague": false, "missing_components": [], "clarification_prompt": null, "reasoning": "Her state, what she asked for in her own words, and the agreed day are all recorded."}
+
+Note:
+  cb tmrw
+Answer:
+  {"is_vague": true, "missing_components": ["what_happened", "client_said"], "clarification_prompt": "Did you actually reach the client, and what did they say about why they could not talk now?", "reasoning": "A time is fixed but nothing records that contact was made or what the client said."}
+
+END OF EXAMPLES — everything above is illustration; the note to judge is the
+one in the CALLER DATA section below.
+
 Return ONLY this JSON object, with no prose before or after it and no code
 fence:
 

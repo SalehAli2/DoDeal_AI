@@ -2070,6 +2070,72 @@ their own after the template edits and before the new tests: **179/179 passing**
 
 **For the lead:** empty.
 
+### Piece I.5 — few-shot examples   STATUS: DONE <sha pending>
+
+**What changed:**
+
+- `classify_v1.txt` — **5 examples**.
+- `vague_no_contact_v1.txt`, `vague_callback_v1.txt`, `vague_discovery_v1.txt`, `vague_viewing_v1.txt`,
+  `vague_negotiation_v1.txt`, `vague_won_lost_v1.txt` — **3 examples each** (18 in total).
+- Not touched, as required: `score_v1.txt` and `reprompt_tail_v1.txt`.
+- `tests/unit/test_scoring.py` — 5 new test functions covering all nine templates (35 cases with the
+  parametrisation).
+- No code change. Nothing else under `src/`.
+
+**Placement, in every one of the seven:** after the rules, before the `Return ONLY this JSON object` line.
+Opened with "EXAMPLES. These are illustrations of the expected answer, nothing more — the note you must
+judge/classify is only the one in the CALLER DATA section below." and closed with "END OF EXAMPLES —
+everything above is illustration; the note to judge/classify is the one in the CALLER DATA section below."
+
+**Coverage:** every example is invented — English-dominant with Egyptian and Levantine Arabic, mixed
+script, shorthand (`no ans`, `sent wp`, `cb tmrw`, `f/u`, `2x`), deliberate misspellings (`intersted`,
+`viewng`, `negotiaton`, `droped`), lengths from one line to four. `classify_v1.txt` covers `no_contact`,
+`discovery`, `negotiation`, `system_event` and `unclassifiable`, with the discovery example mixed-language
+and the negotiation example exercising the furthest-progress precedence rule. Each vague template carries
+one vague example with an **Arabic** clarification question, one non-vague example, and one shorthand
+example. Invented names (Hala, Tarek, Nour, Sayed, Dalia) and invented developments (Zahra Gardens, Cedar
+Walk) were checked against `tenant-a.json` and appear nowhere in it; no digit run of 8 or more anywhere.
+
+**Decisions taken here:**
+
+- **"One clear case per type across the set" was read as across the seven templates, not within
+  `classify_v1.txt` alone.** Eight distinct answers (seven types plus `unclassifiable`) cannot fit in the
+  "three to five examples per template" cap, so the two instructions are only jointly satisfiable on this
+  reading — and it is the natural one: each vague template is type-specific, so the six of them supply a
+  clear case for each of the six scored types, and classify supplies `system_event`, `unclassifiable` and
+  the mixed-language note. The conservative choice was to honour the stated cap rather than exceed it;
+  raising `classify_v1.txt` to eight examples is a one-file change if you want per-type coverage there
+  too. **Recorded for the lead below.**
+- **Three examples per vague template, not five.** Every example is text sent on every request, and the
+  three chosen (Arabic-question vague, non-vague, shorthand vague) are the three distinct behaviours the
+  template has to demonstrate. A fourth would repeat one of them at real token cost.
+- **`score_v1.txt` gets no examples, and the test pins that.** Its examples would have to be marks, and a
+  mark in a template is the arithmetic leaking into the prompt — the thing
+  `test_no_template_in_the_set_names_the_arithmetic` exists to prevent.
+
+**Tests added (5 functions, 35 parametrised cases):** no template carries `dodealcrm.com`, `DODEAL_`,
+`tenant-a` or `tenant-b`; no template carries a run of 8+ digits; no template contains `_DATA_START` or
+`_DATA_END`; each of the seven judging templates has an `EXAMPLES.` section and an `END OF EXAMPLES` line,
+before the return line; and the set of example-carrying templates is exactly those seven. The existing
+`test_no_template_in_the_set_names_the_arithmetic` (no weight, threshold, band, total) is untouched and
+still passes over all nine files.
+
+**Stable-identity confirmed:** `test_the_second_prompt_differs_only_in_the_tail` and
+`test_the_type_chooses_the_template_that_is_sent` re-run on their own and pass —
+examples live in the stable half and do not vary per note. `test_vague.py` and `test_classification.py`
+together: 118/118.
+
+**Tree disagreements:** none.
+
+**Tests:** 35 added; suite **737** total, **99.32 %** coverage; all 13 per-file floors met. No new floors.
+
+**For the lead:**
+
+- **`classify_v1.txt` shows 5 of the 8 possible answers.** `callback`, `viewing` and `won_lost` have no
+  worked example in the classification prompt — they have one each in their own vague template, which is
+  the reading that let the 3-to-5 cap stand. If you would rather the classifier see all eight, say so and
+  it is three more examples in one file.
+
 ## Phase J
 
 **STATUS: NOT STARTED**

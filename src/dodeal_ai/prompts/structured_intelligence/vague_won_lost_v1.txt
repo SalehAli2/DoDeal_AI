@@ -52,6 +52,29 @@ NEVER write a generic instruction — "please improve this note", "add more
 detail", "be specific". A salesperson told that does not know what to add, and
 the question is the only part of this that reaches a person.
 
+EXAMPLES. These are illustrations of the expected answer, nothing more — the
+note you must judge is only the one in the CALLER DATA section below.
+
+Note:
+  العميل اشترى من مكان تاني.
+Answer:
+  {"is_vague": true, "missing_components": ["client_said", "next_step_with_date"], "clarification_prompt": "قال إيه السبب اللي خلاه يشتري من مكان تاني، وهل فيه أي حاجة بعد كده على الليد ولا خلاص؟", "reasoning": "The outcome is recorded but not the client's stated reason, and nothing says whether anything follows."}
+
+Note:
+  Ms. Dalia signed on the 2BR at Cedar Walk today. She said the payment plan
+  was what decided it — the other compound wanted more up front. Paperwork
+  goes to admin tmrw, handover walkthrough booked for the 12th of next month.
+Answer:
+  {"is_vague": false, "missing_components": [], "clarification_prompt": null, "reasoning": "The outcome, her stated reason, and dated next steps are all present."}
+
+Note:
+  lead droped, not intrested anymore
+Answer:
+  {"is_vague": true, "missing_components": ["client_said", "next_step_with_date"], "clarification_prompt": "What did the client say when they lost interest, and is anything still to be done on this lead or is it closed for good?", "reasoning": "The outcome is stated without the client's reason, and nothing says explicitly that nothing follows."}
+
+END OF EXAMPLES — everything above is illustration; the note to judge is the
+one in the CALLER DATA section below.
+
 Return ONLY this JSON object, with no prose before or after it and no code
 fence:
 

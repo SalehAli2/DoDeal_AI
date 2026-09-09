@@ -51,6 +51,30 @@ NEVER write a generic instruction — "please improve this note", "add more
 detail", "be specific". A salesperson told that does not know what to add, and
 the question is the only part of this that reaches a person.
 
+EXAMPLES. These are illustrations of the expected answer, nothing more — the
+note you must judge is only the one in the CALLER DATA section below.
+
+Note:
+  اتكلمت مع العميل النهاردة، مهتم بالكمبوند. هيرد عليا.
+Answer:
+  {"is_vague": true, "missing_components": ["client_said", "next_step_with_date"], "clarification_prompt": "العميل قال إيه بالظبط عن الميزانية والمساحة اللي محتاجها، وامتى هتكلمه تاني؟", "reasoning": "Interest is recorded but not the requirement in the client's own terms, and no follow-up is dated."}
+
+Note:
+  Called Ms. Hala. Wants 3BR in Zahra Gardens, up to 4.5M, handover within a
+  year — it is for the family and the kids start school next term. She is
+  comparing two other compounds on payment terms. Sending floor plans today,
+  calling her back Sunday morning.
+Answer:
+  {"is_vague": false, "missing_components": [], "clarification_prompt": null, "reasoning": "What was discussed, her requirement in her own terms, and a dated next step are all present."}
+
+Note:
+  disc call done, client intersted, budget ok, will f/u
+Answer:
+  {"is_vague": true, "missing_components": ["client_said", "next_step_with_date"], "clarification_prompt": "What did the client actually say they need — figure, area and unit type — and when exactly are you following up?", "reasoning": "'Budget ok' is the salesperson's verdict rather than the client's terms, and 'will f/u' names no day."}
+
+END OF EXAMPLES — everything above is illustration; the note to judge is the
+one in the CALLER DATA section below.
+
 Return ONLY this JSON object, with no prose before or after it and no code
 fence:
 

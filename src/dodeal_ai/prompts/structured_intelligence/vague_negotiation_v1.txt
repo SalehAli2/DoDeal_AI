@@ -52,6 +52,30 @@ NEVER write a generic instruction — "please improve this note", "add more
 detail", "be specific". A salesperson told that does not know what to add, and
 the question is the only part of this that reaches a person.
 
+EXAMPLES. These are illustrations of the expected answer, nothing more — the
+note you must judge is only the one in the CALLER DATA section below.
+
+Note:
+  عرضت عليه الخصم. مردش لسه.
+Answer:
+  {"is_vague": true, "missing_components": ["client_said", "next_step_with_date"], "clarification_prompt": "هو قال إيه على العرض، وامتى هتتابع معاه؟", "reasoning": "An offer was put to the client but neither his position nor a dated follow-up is recorded."}
+
+Note:
+  Put the revised plan to Mr. Tarek: 10% down, the rest over four years, unit
+  price held at the launch rate. He is holding out for 8% down because he has
+  a payment on another property in March, and said he will not move above that.
+  Taking it to management today, answer to him by Wednesday.
+Answer:
+  {"is_vague": false, "missing_components": [], "clarification_prompt": null, "reasoning": "The terms named, his position in his own words and the reason for it, and a dated next step are all present."}
+
+Note:
+  negotiaton ongoing, price discused, f/u
+Answer:
+  {"is_vague": true, "missing_components": ["what_happened", "client_said", "next_step_with_date"], "clarification_prompt": "What figures or terms were actually put to the client, what did they come back with, and when are you following up?", "reasoning": "No numbers, no client position, and no dated next step."}
+
+END OF EXAMPLES — everything above is illustration; the note to judge is the
+one in the CALLER DATA section below.
+
 Return ONLY this JSON object, with no prose before or after it and no code
 fence:
 

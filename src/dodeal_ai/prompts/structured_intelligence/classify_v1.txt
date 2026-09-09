@@ -44,6 +44,41 @@ Judge only what the note says. Do not infer an interaction that is not
 described, and do not use the lead context to invent one — the context is there
 to disambiguate the note, not to replace it.
 
+EXAMPLES. These are illustrations of the expected answer, nothing more — the
+note you must classify is only the one in the CALLER DATA section below.
+
+Note:
+  no ans 2x, phone ringing bs mafeesh had. sent wp msg.
+Answer:
+  {"note_type": "no_contact"}
+
+Note:
+  Spoke w/ Ms. Hala. Looking for 3BR in Zahra Gardens, budget around 4.5M,
+  عايزة تسليم قريب علشان المدرسة. Nothing decided yet, f/u after 2 hrs.
+Answer:
+  {"note_type": "discovery"}
+
+Note:
+  Client saw the unit last week and liked it. Today we went through the payment
+  plan — he asked for 10% down instead of 15%, and a better rate on the corner
+  unit. Raised it with management, will revert cb tmrw.
+Answer:
+  {"note_type": "negotiation"}
+
+Note:
+  Lead assigned to sales user 41 by manager. Stage changed: New -> Contacted.
+  Automated reminder scheduled.
+Answer:
+  {"note_type": "system_event"}
+
+Note:
+  ok noted
+Answer:
+  {"note_type": "unclassifiable"}
+
+END OF EXAMPLES — everything above is illustration; the note to classify is the
+one in the CALLER DATA section below.
+
 Return ONLY this JSON object, with no prose before or after it and no code
 fence:
 

@@ -15,11 +15,13 @@ from __future__ import annotations
 
 import dataclasses
 import pathlib
+import re
 
 import pytest
 
 from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.errors import MalformedOutputError
+from dodeal_ai.core.prompting import _DATA_END, _DATA_START
 from dodeal_ai.core.validation import OutputValidationError
 from dodeal_ai.units.structured_intelligence.config import get_tenant_config
 from dodeal_ai.units.structured_intelligence.schemas import (
@@ -464,6 +466,69 @@ def test_no_template_in_the_set_names_the_arithmetic(template):
     text = (_PROMPT_DIR / template).read_text(encoding="utf-8").lower()
     for word in _FORBIDDEN:
         assert word not in text, f"{template} must not mention {word!r}"
+
+
+# --- what a shipped template may not carry ----------------------------------
+
+_ALL_TEMPLATES = sorted(p.name for p in _PROMPT_DIR.glob("*_v1.txt"))
+# The seven that judge a note and therefore carry worked examples. score_v1.txt
+# is not one: its examples would have to be marks, and a mark in a template is
+# the arithmetic leaking into the prompt. The tail is not one either -- it is a
+# form instruction with nothing to illustrate.
+_EXAMPLE_TEMPLATES = [n for n in _ALL_TEMPLATES if n.startswith(("classify", "vague_"))]
+_LEAKS = ("dodealcrm.com", "DODEAL_", "tenant-a", "tenant-b")
+_DIGIT_RUN = re.compile(r"\d{8,}")
+
+
+@pytest.mark.parametrize("template", _ALL_TEMPLATES)
+def test_no_template_carries_a_host_a_setting_or_a_tenant(template):
+    text = (_PROMPT_DIR / template).read_text(encoding="utf-8").lower()
+    for leak in _LEAKS:
+        assert leak.lower() not in text, f"{template} must not mention {leak!r}"
+
+
+@pytest.mark.parametrize("template", _ALL_TEMPLATES)
+def test_no_template_carries_a_long_run_of_digits(template):
+    # Eight digits or more in a shipped prompt is a phone number or an id that
+    # came from somewhere real. The examples are invented, and this is what
+    # keeps them invented: a real note pasted in as an example would almost
+    # certainly bring one of these with it.
+    text = (_PROMPT_DIR / template).read_text(encoding="utf-8")
+    found = _DIGIT_RUN.search(text)
+    assert found is None, f"{template} carries a digit run: {found and found.group()}"
+
+
+@pytest.mark.parametrize("template", _ALL_TEMPLATES)
+def test_no_template_contains_the_caller_data_delimiters(template):
+    # build_prompt writes these around the UNTRUSTED section, and
+    # _neutralise_delimiters defangs only the CALLER's copy. One inside a
+    # trusted template would give a note a second thing to imitate and no
+    # neutralisation covering it.
+    text = (_PROMPT_DIR / template).read_text(encoding="utf-8")
+    assert _DATA_START not in text, template
+    assert _DATA_END not in text, template
+
+
+@pytest.mark.parametrize("template", _EXAMPLE_TEMPLATES)
+def test_every_judging_template_carries_examples_before_the_return_line(template):
+    text = (_PROMPT_DIR / template).read_text(encoding="utf-8")
+    assert "EXAMPLES." in text, template
+    assert "END OF EXAMPLES" in text, template
+    # After the rules, before the answer shape: an example that followed the
+    # return line would be the last thing read and could be copied out whole.
+    assert text.index("EXAMPLES.") < text.index("Return ONLY this JSON object")
+
+
+def test_the_seven_judging_templates_are_the_ones_that_carry_examples():
+    assert _EXAMPLE_TEMPLATES == [
+        "classify_v1.txt",
+        "vague_callback_v1.txt",
+        "vague_discovery_v1.txt",
+        "vague_negotiation_v1.txt",
+        "vague_no_contact_v1.txt",
+        "vague_viewing_v1.txt",
+        "vague_won_lost_v1.txt",
+    ]
 
 
 def test_the_prompt_set_is_the_nine_files_this_campaign_ships():
