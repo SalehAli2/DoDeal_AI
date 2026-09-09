@@ -17,14 +17,30 @@ pipeline be written against a distinction the real client cannot make.
 
 The fake DOES record the scope it was called with, so a test can prove the
 tenant reaching the tool layer is the one the gates verified.
+
+TWO WAYS TO BUILD ONE. `lead()`/`note()` hand-build the two or three records a
+unit test reasons about by name. `load_fixture_client()` loads the whole
+vendored fake-CRM corpus (`tests/fixtures/fake_crm/tenant-a.json`) through the
+SAME schemas the real client parses backend JSON with, so the corpus is proven
+to match the shape the backend returns rather than assumed to. The eval suite
+needs the corpus; every existing test keeps its hand-built records.
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from pydantic import ValidationError
 
 from dodeal_ai.core.context import TenantScope
 from dodeal_ai.schemas.lead import Lead, LeadNote
+
+FIXTURE_PATH = (
+    Path(__file__).resolve().parents[1] / "fixtures" / "fake_crm" / "tenant-a.json"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +59,15 @@ class FakeLeadsClient:
     notes: dict[int, list[LeadNote]] = field(default_factory=dict)
     raise_on: dict[str, Exception] = field(default_factory=dict)
     calls: list[RecordedFetch] = field(default_factory=list)
+    # Provenance, set only by load_fixture_client: the generator seed the
+    # vendored corpus was produced with. None for a hand-built fake, which has
+    # no generator and no seed to be wrong about.
+    seed: str | None = None
+    # How many records in the vendored corpus the schemas REJECTED and the
+    # loader therefore did not hold. Zero for a hand-built fake. Pinned by
+    # tests/unit/test_fake_crm_fixture.py so a regeneration cannot raise it
+    # quietly.
+    skipped_invalid_leads: int = 0
 
     def _record(self, method: str, scope: TenantScope, lead_id: int | None) -> None:
         self.calls.append(
@@ -87,4 +112,60 @@ def note(
         author=author,
         author_id=author_id,
         createdAt=created_at,
+    )
+
+
+def load_fixture_client(path: Path = FIXTURE_PATH) -> FakeLeadsClient:
+    """The whole vendored fake-CRM corpus as a FakeLeadsClient.
+
+    Every lead goes through `Lead` and every note through `LeadNote` -- the
+    same models `LeadsClient` validates real backend JSON with. A corpus that
+    cannot be parsed by them is not a corpus the pipeline could ever have run
+    on, and this raises at load time rather than at the note that breaks.
+
+    Notes are kept in the file's own per-lead order (newest first, which is the
+    order the backend returns and the order Design A's page-one match depends
+    on). The loader never sorts, dedupes or repairs: what it hands back is what
+    the vendor generated, or it raises.
+
+    `timeline_events` is a SEPARATE top-level key in the file and is not loaded
+    here. It is not what `GET /leads/{id}/notes` returns, and folding it into
+    `notes` would silently grow the 127-note corpus the campaign counts.
+
+    ONE LEAD IN THE CORPUS DOES NOT VALIDATE. Lead 1661 carries
+    `bookedAmount: "1,250,000"` -- a formatted string where the schema says
+    `float | None`, and `schemas/lead.py` says in as many words that this
+    field's real type is UNCONFIRMED. The loader skips it and counts it rather
+    than doing either of the two things that would hide it: coercing the string
+    (which would invent a parse rule -- comma as a thousands separator, not the
+    decimal comma half the world writes -- for a field nobody has confirmed) or
+    relaxing `Lead` (src/ is not this piece's to change). The count is pinned in
+    tests/unit/test_fake_crm_fixture.py, so a second bad lead fails a test
+    instead of vanishing. See CAMPAIGN_REPORT.md, Piece I.1, for the lead.
+
+    A skipped lead does NOT cost its notes. The two live under different
+    top-level keys, and 1661 has none in any case; dropping notes over an
+    unrelated money field would shrink the corpus for no reason.
+    """
+    payload: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+
+    leads: dict[int, Lead] = {}
+    skipped = 0
+    for raw in payload["leads"]:
+        try:
+            item = Lead.model_validate(raw)
+        except ValidationError:
+            skipped += 1
+            continue
+        leads[item.id] = item
+
+    notes = {
+        int(lead_id): [LeadNote.model_validate(raw) for raw in raw_notes]
+        for lead_id, raw_notes in payload["notes"].items()
+    }
+    return FakeLeadsClient(
+        leads=leads,
+        notes=notes,
+        seed=payload["seed"],
+        skipped_invalid_leads=skipped,
     )

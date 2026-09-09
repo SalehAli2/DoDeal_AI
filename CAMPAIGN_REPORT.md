@@ -1545,7 +1545,7 @@ that is not this phase's — see "For the lead"); `mypy` clean over 58 source fi
 - `.env.example` is still modified-unstaged in the working tree and was not touched. `AIService.zip`
   and `docs/campaign/` are still untracked and were left alone.
 
-## Phase H — decide, the clarification loop, the rate limit   STATUS: DONE <sha>
+## Phase H — decide, the clarification loop, the rate limit   STATUS: DONE ae62103
 
 **What changed:**
 
@@ -1813,7 +1813,88 @@ see the tree disagreement above.
 
 ## Phase I
 
-**STATUS: NOT STARTED**
+Phase I is being taken in pieces at the lead's direction (a divergence from §0.1's one-commit-per-phase,
+recorded here so the next session does not read it as drift). The phase is `DONE` only when every piece is.
+
+### Piece I.1 — vendor fake CRM fixtures   STATUS: DONE <sha pending>
+
+**What changed:**
+
+- `tests/fixtures/fake_crm/tenant-a.json` — **new to git** (the lead copied it into the working tree; this
+  commit vendors it). 1448 leads, 127 notes across 19 leads, 27 `timeline_events` across 20 leads,
+  seed `fake-dodeal-crm-seed-1`, tenant label `tenant-a`.
+- `tests/helpers/fake_leads.py` — added `FIXTURE_PATH` and
+  `load_fixture_client(path: Path = FIXTURE_PATH) -> FakeLeadsClient`, which parses the corpus through
+  `Lead` and `LeadNote` — the same models `LeadsClient` validates real backend JSON with — so the corpus
+  is *proven* to match the backend's shape rather than assumed to. Two new `FakeLeadsClient` fields,
+  both defaulted and both set only by the loader: `seed` (provenance) and `skipped_invalid_leads`.
+  `lead()` and `note()` are untouched; every existing test still hand-builds its own records.
+- `tests/unit/test_fake_crm_fixture.py` — **new.** Five tripwires on the corpus.
+- No change under `src/`. No existing test's data changed.
+
+**Phase 0 findings (the numbers the tripwires pin):**
+
+- seed `fake-dodeal-crm-seed-1` · 1448 leads · 127 notes.
+- **No note has `"note": null`.** Review finding F1's hazard is not present in this fixture, so no skip
+  path, no `skipped_null_notes` field and no null-count assertion were added — per instruction. The
+  guard is implicit instead: `LeadNote` requires a non-null `note`, so a regenerated corpus that
+  reintroduced one would fail at load, inside `test_every_loaded_note_is_a_lead_note`.
+- Every one of the 127 notes carries all five of `id`, `note`, `author`, `author_id`, `createdAt`.
+  `author` is null on 11 of them, which `LeadNote` allows and documents (deleted author account).
+- Note ids are unique across the corpus and each lead's notes are already newest-first, so the loader
+  preserves file order and never sorts.
+
+**Decisions taken here:**
+
+- **Lead 1661 does not validate, and the loader skips it rather than repairing it.** It carries
+  `bookedAmount: "1,250,000"` — a formatted string where `Lead.bookedAmount` is `float | None`. It is
+  the only such record in 1448, and it has no notes, so the 127-note corpus is untouched by the skip.
+  The two alternatives both cost more than they save: *coercing* the string would invent a parse rule
+  for a field `schemas/lead.py` explicitly calls UNCONFIRMED (and "1,250" is a thousands separator in
+  one locale and a decimal comma in another — the fixture cannot tell us which the backend means), and
+  *relaxing* `Lead` is a change under `src/`, which this piece is forbidden. So: skip, count, pin the
+  count at exactly 1. A second bad lead fails `test_skipped_invalid_lead_count_is_pinned` instead of
+  disappearing into a `try`.
+- **`timeline_events` is not loaded into `notes`.** It is a separate top-level key (27 records, same
+  five fields), and it is not what `GET /leads/{id}/notes` returns. Folding it in would grow the corpus
+  the campaign counts from 127 to 154 and would feed machine timeline text to the note pipeline as if a
+  salesperson had written it. Cost of the alternative: the `system_event` path loses its natural corpus
+  and Phase I.2+ must build one — cheap, and correct, versus a silent 21 % corpus inflation.
+- **A skipped lead does not cost its notes.** Leads and notes live under different top-level keys;
+  dropping a lead's notes over an unrelated money field would shrink the corpus for no reason. Moot
+  today (1661 has none), stated so the next reader does not have to re-derive it.
+- **The seed lives on the client, not in a module constant.** A constant would restate the seed rather
+  than read it, which is not a tripwire. `client.seed` is read from the file every load.
+
+**Tree disagreements:**
+
+- **`Lead.bookedAmount` vs the corpus** — the disagreement above. Per §0's "the code is the fact", the
+  tree wins: the schema is unchanged and the fixture record is skipped and counted. This is the first
+  hard evidence in the repo about what that field can actually contain, and it needs a ruling — see
+  **For the lead**.
+- **The working tree was not clean at Phase 0.** `.env.example` is still modified-unstaged and was not
+  touched (§0.8). `AIService.zip` and `docs/audit/2026-09-05-sweep.md` remain untracked and were left
+  alone. `docs/campaign/UNIT_A_PROJECT1_CAMPAIGN_PROMPT.md` is the lead's own spec drop and is the
+  lead's to commit, not a session's (§0.13). Staging was by explicit path, so none of it was swept in.
+- **Phase H's block read `STATUS: DONE <sha>`** and was backfilled to `ae62103` as this piece's first
+  edit, per the report's sha convention.
+
+**Tests:** 5 added; suite 688 total, 99.32 % coverage; all 13 per-file floors met. No new floors — this
+piece adds nothing under `src/`, and `scripts/check_coverage_floors.py` only governs `src/`.
+
+**For the lead:**
+
+- **What is `bookedAmount`'s real type?** The corpus says a lead can carry `"1,250,000"`. If the backend
+  really can send that, `Lead` is wrong today and the real `LeadsClient` will raise on that lead in
+  production — a one-line validator, but a change under `src/` and not this piece's. If instead the
+  fixture generator is wrong, regenerate lead 1661 as an int or null and
+  `SKIPPED_INVALID_LEADS` drops to 0 in the same commit. Either way this is a real question, not a
+  fixture blemish; I have deliberately not answered it.
+- **Are `timeline_events` meant to be reachable through `get_lead_notes`?** If the `system_event`
+  short-circuit is supposed to be exercised against the corpus, something has to serve those 27
+  records. Say the word and I.2 adds a separate accessor — I will not fold them into `notes`.
+- **The lead count a downstream eval quotes is 1447, not 1448.** One is in the file and not in the
+  client. Worth knowing before anyone writes "the 1448-lead corpus" into a document.
 
 ## Phase J
 
