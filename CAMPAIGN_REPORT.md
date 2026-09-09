@@ -1811,7 +1811,7 @@ see the tree disagreement above.
   fires on the second request for a note. That is the config, not a decision taken here — but it means
   the loop is one question per note, and if Product wanted two the only change is `config.py`.
 
-## Phase I
+## Phase I — prompt hardening, adversarial suite, OWASP checkpoint, eval marker   STATUS: DONE <sha pending>
 
 Phase I is being taken in pieces at the lead's direction (a divergence from §0.1's one-commit-per-phase,
 recorded here so the next session does not read it as drift). The phase is `DONE` only when every piece is.
@@ -2212,6 +2212,106 @@ hostile string, which a corpus note does not contain.
   counts pinned in `test_fake_crm_fixture.py`, which is exactly the tripwire working.
 - **`unit_a_v1.txt` does not exist.** If a tenth template was intended (a shared preamble, say), it was
   never written and nothing references it. Say if it should be.
+
+### Piece I.7 — OWASP note and eval skeleton   STATUS: DONE <sha pending>
+
+**What changed:**
+
+- `docs/security/owasp-llm-unit-a.md` — **new.** One paragraph each for LLM01, 02, 05, 07 and 10, each
+  naming the control by file and function and the test that proves it; a table of the five that do not
+  apply and why; a standing-caveats section.
+- `README.md` — linked from the **Security model** section and added to the documentation index.
+- `pyproject.toml` — `eval` marker registered beside `integration`. The structural eval runs in the
+  default suite (`addopts` deselects only `integration`); only the quality eval is skipped.
+- `tests/eval/test_structural_eval.py` — **new**, 4 tests.
+- `tests/eval/test_quality_eval.py` — **new**, 1 skipped placeholder. No provider code.
+- `tests/helpers/fake_leads.py` — added `load_fixture_timeline_events(path)`.
+- No `tests/eval/__init__.py`: nothing under `tests/` has one, and `pythonpath = ["."]` already makes
+  `tests.helpers` importable. Adding one here alone would have been the odd file out.
+- No change under `src/`.
+
+**The structural eval:** all 127 corpus notes through `judge_note` with `FakeLLM` scripted per template
+(classify → `discovery`, the discovery vague template, the score template, each queued 127 times). Every
+note yields either a scored judgement (score and decision present, `suppressed` null) or a suppression
+(score and decision null, `suppressed` present) — never a mixture, never an exception, and `versions` on
+both shapes. **9 notes suppress as `note_too_short`** and that number is pinned; the other 118 score. A
+second test re-runs just those 9 against a **completely empty** `FakeLLM`, so any model call at all would
+raise, and asserts `call_count == 0` and an empty operational store — thin evidence reserves nothing and
+spends nothing. A fourth test states the claim on its own, collecting every exception across the corpus
+and asserting the list is empty, so a failure names it rather than reporting a shape mismatch.
+
+**The timeline half:** all 27 `timeline_events` through the same path with classify scripted to
+`system_event`. Every one comes back `not_scorable` / `system_event`, and the test asserts that **every
+call the model received was a classification call** — the vague and score queues were deliberately filled
+and never popped, so a stray call would have shown up as a prompt that is not a classify prompt.
+
+**Decisions taken here:**
+
+- **`load_fixture_timeline_events` returns a mapping, not a client.** Handing back a `FakeLeadsClient`
+  with timeline events sitting in the `notes` slot would be exactly the conflation Piece I.1 refused. It
+  validates them through `LeadNote` for the same reason the note loader does.
+- **The `eval` marker is registered but nothing is deselected by it.** The brief says the structural eval
+  runs in CI; the marker exists so the eval suite can be *selected* (`-m eval`) and so the quality
+  placeholder has somewhere to hang. `addopts` was not touched.
+- **The wheel check was run** because `pyproject.toml` changed (§0.2): `uv build` then
+  `scripts/verify_wheel.py` on the built wheel — **`wheel import check: OK`**. Only a pytest marker moved,
+  so packaging was never at risk, but the rule says whenever, not whenever it looks risky.
+- **Every test name cited in the OWASP note was verified to exist** by matching the document's
+  `test_*` references against `def test_*` across `tests/`. One was wrong on the first pass
+  (`test_no_shipped_template_contains_the_caller_data_delimiters` for
+  `test_no_template_contains_the_caller_data_delimiters`) and was corrected. A security note whose
+  evidence column points at tests that do not exist is worse than no note.
+
+**Tree disagreements:** none new.
+
+**Tests:** 5 added (4 + 1 skipped); suite **796** passing + 1 skipped, **99.32 %** coverage; all 13
+per-file floors met. No new floors.
+
+**For the lead:**
+
+- **The positional-gather conversion was NOT done, per the "if and only if" condition** — this piece
+  touched `tests/helpers/fake_leads.py`, `tests/eval/`, `pyproject.toml`, `README.md` and
+  `docs/security/`, and none of the affected test files. The list, for whenever you want it:
+  **`tests/unit/test_judgement_pipeline.py`** (`_happy_path()` at line 97, used by the `llm` fixture and
+  by `test_the_happy_path_costs_three_calls`) and **`tests/unit/test_judgement_routes.py`**
+  (`_happy_path()` at line 103, used by the `llm` fixture and by roughly ten call sites including the
+  `rescript` ones). Both build `[classified, vague, score]` positionally across the gather. They pass
+  today for the scheduling reason recorded in Piece I.2, not a guaranteed one.
+
+### Phase I — summary
+
+**What changed, across the seven pieces:** the vendored 127-note corpus and its loader (I.1); template-
+directed scripting in `FakeLLM` (I.2); the reprompt tail rewritten without its previous-answer fiction
+(I.3); relative times and explicit closures accepted by the rubric templates (I.4); few-shot examples in
+the seven judging templates (I.5); a 55-test adversarial suite (I.6); the OWASP checkpoint and the eval
+skeleton (I.7). Under `src/`, this phase changed **prompt text only** — eight `.txt` files. No Python
+under `src/` was touched in any of the seven pieces.
+
+**Decisions worth carrying forward:** vendor data the schemas reject is skipped, counted and pinned, never
+repaired (I.1); an existing-but-empty template queue raises rather than falling through to the positional
+script (I.2); the tail is a form instruction and says nothing about a past the model cannot see (I.3);
+"one clear case per type" is satisfied across the seven templates rather than within `classify_v1.txt`,
+which is what let the 3–5 example cap stand (I.5); delimiter claims are about counts, never absence (I.6).
+
+**Tree disagreements found in this phase:** `Lead.bookedAmount` versus the corpus (I.1, open — see below);
+no `unit_a_v1.txt` exists, the shipped set is nine templates (I.6); the corpus reuses note bodies, 127
+notes carrying 57 distinct texts (I.6).
+
+**Tests:** 109 added across the phase (687 → 796 passing, plus 1 skipped). Coverage **99.32 %**, unchanged
+— this phase added no `src/` statements to cover. All 13 per-file floors met; no new floors.
+
+**Suite at the end of Phase I:** 796 passing, 1 skipped, 7 deselected, 99.32 % coverage.
+
+**For the lead, phase-level — four open items:**
+
+1. **`bookedAmount` may be a string.** Lead 1661 carries `"1,250,000"`. Needs confirming against the real
+   export; if the backend really sends that, `Lead` is wrong today and the real `LeadsClient` will raise
+   on that lead in production.
+2. **The corpus is 57 distinct notes, not 127.** Fine for a structural eval, misleading for any quality
+   number.
+3. **Two test files still script the gather positionally.** Named in I.7 above.
+4. **Review finding F4 remains deferred** to the post-campaign batch: one reprompt tail serves both form
+   and content failures.
 
 ## Phase J
 

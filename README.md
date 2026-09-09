@@ -463,6 +463,7 @@ Checks 1-4 are the same ones run locally by the stopping chain and by the pre-co
 - **Structured, single-line JSON logging.** Every `dodeal_ai` logger writes one JSON object per line to standard output, ready for a log collector. Deny lines are never dropped or sampled.
 - **Server-side prompt assembly.** Caller-supplied data is always treated as data, never as an instruction, and is placed in a clearly delimited section that cannot be escaped by forging the delimiter.
 - **Tenant isolation by subdomain.** The token's tenant claim is authoritative; the request's host subdomain must match it, or the request is denied.
+- **OWASP LLM Top 10 checkpoint for Unit A.** [`docs/security/owasp-llm-unit-a.md`](docs/security/owasp-llm-unit-a.md) records the five items that apply to the judgement pipeline (LLM01, 02, 05, 07, 10), the control in code that answers each, and the test that would fail if it were removed — plus why the other five do not apply today.
 
 ## Documentation index
 
@@ -474,6 +475,7 @@ Checks 1-4 are the same ones run locally by the stopping chain and by the pre-co
 | `docs/STATUS.md` | The build register: build position, decisions, the audit-finding register, open questions and their owners, and the steps ahead. |
 | `docs/decisions/` | Design notes for decisions taken before the dependent code is written. `0001` covers the principal model (who calls us, and as whom) and the execution model (one, not three). |
 | `docs/runbooks/secret-rotation.md` | How to rotate the JWT verification key and the per-tenant `DD-API-KEY`s, why rotation means a deploy, and how to establish blast radius from the audit log after a compromise. |
+| `docs/security/owasp-llm-unit-a.md` | The OWASP LLM Top 10 checkpoint for Unit A: which items apply, the control in code that answers each, and the test that proves it. |
 | `CONTRIBUTING.md` | Local setup, architectural rules, deliberate decisions, the security checkpoint habit, and commit style. |
 
 ## Contributing

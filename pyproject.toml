@@ -26,6 +26,7 @@ packages = ["src/dodeal_ai"]
   addopts = "--cov=src/dodeal_ai --cov-report=term-missing --cov-report=json -m \"not integration\""
   markers = [
     "integration: starts a local ASGI-backed fake HTTP server; excluded from the default run (pytest -m integration to run it).",
+    "eval: runs the whole vendored note corpus through the pipeline against FakeLLM. STRUCTURAL only -- it asserts every note yields a Judgement or a Suppressed state and never an exception, not that any judgement is good. Included in the default run: it is hermetic and fast, and a corpus note that crashes the pipeline should break CI. The real-model quality eval is tests/eval/test_quality_eval.py and is skipped unless DODEAL_EVAL_REAL=1.",
   ]
 
 [tool.coverage.report]

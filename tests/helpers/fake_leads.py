@@ -169,3 +169,27 @@ def load_fixture_client(path: Path = FIXTURE_PATH) -> FakeLeadsClient:
         seed=payload["seed"],
         skipped_invalid_leads=skipped,
     )
+
+
+def load_fixture_timeline_events(
+    path: Path = FIXTURE_PATH,
+) -> dict[int, list[LeadNote]]:
+    """The corpus's `timeline_events`, keyed by lead id, validated as LeadNotes.
+
+    SEPARATE FROM load_fixture_client ON PURPOSE. These 27 records are the
+    machine-written half of the fixture -- assignments, stage changes, import
+    traces -- and folding them into `notes` would grow the 127-note corpus the
+    campaign counts and feed CRM timeline text to the pipeline as though a
+    salesperson had typed it. They validate as `LeadNote` because that is the
+    shape the backend would return them in, and a caller that WANTS to exercise
+    the system_event path (the eval suite does) builds its own client from them.
+
+    Returned as a mapping rather than a client for the same reason: handing back
+    a FakeLeadsClient with timeline events sitting in the `notes` slot would be
+    the very conflation this function exists to avoid.
+    """
+    payload: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+    return {
+        int(lead_id): [LeadNote.model_validate(raw) for raw in raw_events]
+        for lead_id, raw_events in payload["timeline_events"].items()
+    }
