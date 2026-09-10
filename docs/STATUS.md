@@ -41,7 +41,7 @@ answer) · `UNASKED` (question identified, not yet sent).
 | **Phase G** — reprompt once via `AssembledPrompt.tail`, then 503 | DONE | `103ce02` |
 | **Phase H** — decide, the clarification loop, the rate limit | DONE | `ae62103` |
 | **Phase I** — prompt hardening, adversarial suite, OWASP checkpoint, eval marker (7 pieces) | DONE | `ba44c5c` · `335abf4` · `86a0b3c` · `d0c9acf` · `f17da28` · `257da13` · `403afa7` |
-| **Phase J** — the ledger commit: README provisional answers, ASSUMPTIONS, STATUS, marker reconciliation | DONE | this commit |
+| **Phase J** — the ledger commit: README provisional answers, ASSUMPTIONS, STATUS, marker reconciliation | DONE | `d93d936` |
 | Step 3 — token counters (`enforce_token_cost`, pre-flight read, breaker, TTL fix, Lua under fakeredis). **Now also: replace `SEAM[STEP3]` (the no-op pre-flight stub in `units/structured_intelligence/pipeline.py`); `/ready` to report db2; socket timeouts for the operational client.** | NEXT | — |
 | Step 4 — tool layer: query params, paging, error taxonomy, retry policy, pooled transport, per-item validation. **Now also: read-after-write bounded re-read on the note fetch (candidate — see §2 debts).** | after step 3 | — |
 | Steps 5–13 | per ed3 §15 | — |

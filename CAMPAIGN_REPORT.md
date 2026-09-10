@@ -2313,7 +2313,7 @@ notes carrying 57 distinct texts (I.6).
 4. **Review finding F4 remains deferred** to the post-campaign batch: one reprompt tail serves both form
    and content failures.
 
-## Phase J — the ledger commit   STATUS: DONE <sha pending>
+## Phase J — the ledger commit   STATUS: DONE d93d936
 
 > **Resume, 10 September.** This phase stopped red on 9 September and was resumed the next day. The
 > BLOCKED report below is kept verbatim, because it is the record of what was wrong and one of its
@@ -2556,7 +2556,7 @@ per-file floors met; wheel builds and imports.
 | I.5 | few-shot examples | `f17da28` |
 | I.6 | adversarial suite | `257da13` |
 | I.7 | OWASP note and eval skeleton | `403afa7` |
-| J | ledger — README provisional answers, ASSUMPTIONS, STATUS, marker reconciliation | this commit |
+| J | ledger — README provisional answers, ASSUMPTIONS, STATUS, marker reconciliation | `d93d936` |
 
 ### Suite at head
 
