@@ -74,8 +74,9 @@ the templates are also checked for content that must not leave the building: no 
 name, no tenant name, no credential-shaped string, no long digit run.
 
 **Proved by** `tests/security/test_unit_a_injection.py::test_no_shipped_template_carries_a_secret_a_host_or_a_tenant`
-and `test_no_shipped_template_carries_a_long_digit_run` (both over all nine shipped templates),
-`test_the_shipped_set_is_the_nine_files_that_exist`, and
+and `test_no_shipped_template_carries_a_long_digit_run` (both over the nine Unit A templates under
+`prompts/structured_intelligence/`),
+`test_the_unit_a_template_set_is_the_nine_files_under_structured_intelligence`, and
 `tests/unit/test_scoring.py::test_the_prompt_set_is_the_nine_files_this_campaign_ships`.
 
 ## LLM07 — Insecure plugin design (here: the tool layer)

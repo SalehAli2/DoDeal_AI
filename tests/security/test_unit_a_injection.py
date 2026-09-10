@@ -401,7 +401,7 @@ _SECRET_SHAPED = re.compile(
 )
 
 
-def test_the_shipped_set_is_the_nine_files_that_exist():
+def test_the_unit_a_template_set_is_the_nine_files_under_structured_intelligence():
     # The campaign brief says "the ten shipped, including unit_a_v1.txt", and
     # it is right: `unit_a_v1.txt` DOES exist, one level up at
     # src/dodeal_ai/prompts/. It is the Phase 0 placeholder that
