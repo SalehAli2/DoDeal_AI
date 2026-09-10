@@ -7,6 +7,14 @@ dist/
 
 .venv/
 
+# Delivery artefacts. A packaged copy of the source is a build OUTPUT, and the
+# repository is the source -- committing one means the same code exists twice,
+# with no way to tell which is current. AIService.zip is named as well as the
+# glob because that is the one that kept reappearing in `git status` and being
+# skipped by hand, commit after commit.
+AIService.zip
+*.zip
+
 .env
 .env.*
 !.env.example
