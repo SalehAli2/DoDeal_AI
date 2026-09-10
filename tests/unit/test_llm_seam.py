@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import typing
 
 import pytest
@@ -153,7 +154,11 @@ def test_factory_behaviour(
 # 7 -------------------------------------------------------------------------
 class _StructuralClient:
     async def complete(
-        self, prompt: AssembledPrompt, *, max_output_tokens: int | None = None
+        self,
+        prompt: AssembledPrompt,
+        *,
+        profile: str,
+        max_output_tokens: int | None = None,
     ) -> LLMResponse:
         return _response()
 
@@ -173,3 +178,23 @@ def test_prompt_parameter_type_matches_builder_return() -> None:
     hints = typing.get_type_hints(LLMClient.complete)
     assert hints["prompt"] is AssembledPrompt
     assert typing.get_type_hints(build_prompt)["return"] is AssembledPrompt
+
+
+# 9 -------------------------------------------------------------------------
+def test_profile_is_a_required_keyword_on_the_protocol() -> None:
+    """Piece M's one interface change: keyword-only, required, and a str."""
+    parameter = inspect.signature(LLMClient.complete).parameters["profile"]
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameter.default is inspect.Parameter.empty
+    assert typing.get_type_hints(LLMClient.complete)["profile"] is str
+
+
+def test_the_protocol_still_has_exactly_one_method() -> None:
+    # The seam grew a keyword, not a surface. A second method is how a caller
+    # starts choosing a provider.
+    methods = [
+        name
+        for name in LLMClient.__protocol_attrs__  # type: ignore[attr-defined]
+        if not name.startswith("_")
+    ]
+    assert methods == ["complete"]

@@ -24,6 +24,9 @@ pipeline assembles with, never a test re-reading the file. A gathered pass then
 gets its own answer whichever task the loop happens to run first, and a caller
 scripting a corpus does not have to know the order at all.
 
+Every call records the `profile` it named (`calls[i].profile`), so a test can
+pair a profile with the TEMPLATE that was sent rather than with arrival order.
+
 PRECEDENCE, in one rule: if a template queue EXISTS for `prompt.stable`, the
 answer comes from it; otherwise the positional script serves the call. Existing
 is not the same as non-empty -- an exhausted template queue raises rather than
@@ -98,6 +101,7 @@ class FakeLLMExhausted(AssertionError):
 @dataclass(frozen=True, slots=True)
 class RecordedCall:
     prompt: AssembledPrompt
+    profile: str
     max_output_tokens: int | None
 
 
@@ -180,14 +184,23 @@ class FakeLLM:
     def prompts(self) -> list[AssembledPrompt]:
         return [c.prompt for c in self.calls]
 
+    @property
+    def profiles(self) -> list[str]:
+        """The profile named on each call, in arrival order. A test that cares
+        WHICH pass named it pairs it with `calls[i].prompt`, never the index."""
+        return [c.profile for c in self.calls]
+
     async def complete(
         self,
         prompt: AssembledPrompt,
         *,
+        profile: str,
         max_output_tokens: int | None = None,
     ) -> LLMResponse:
         self.calls.append(
-            RecordedCall(prompt=prompt, max_output_tokens=max_output_tokens)
+            RecordedCall(
+                prompt=prompt, profile=profile, max_output_tokens=max_output_tokens
+            )
         )
         if self.hold_after is not None and len(self.calls) > self.hold_after:
             # Recorded BEFORE the wait, so call_count reflects calls ISSUED, not

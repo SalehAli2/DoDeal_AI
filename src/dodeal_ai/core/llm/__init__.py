@@ -35,5 +35,7 @@ def get_llm_client() -> LLMClient:
     settings = get_settings()
     if settings.llm_provider is None or not settings.llm_model:
         raise LLMConfigurationError()
-    # Adapter lands in Step 14; until then a configured provider is loud, not silent.
+    # Adapter lands in Step 14 / register item 76: it owns the profile table
+    # (core/llm/profiles.py) and stays behind this parameterless factory.
+    # Until then a configured provider is loud, not silent.
     raise NotImplementedError("llm_provider_not_wired")

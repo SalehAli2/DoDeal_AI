@@ -20,8 +20,9 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, SecretStr, ValidationError
+from pydantic import BaseModel, Field, SecretStr, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings.exceptions import SettingsError
 
 
 class ConfigError(RuntimeError):
@@ -37,6 +38,20 @@ class LLMProvider(str, Enum):
     fails at settings load (ConfigError), not at the first model call."""
 
     ANTHROPIC = "anthropic"
+
+
+class ModelProfile(BaseModel):
+    """One named task's model choice. Validated HERE, so a bad profile fails at
+    settings construction rather than at the first model call (report R17)."""
+
+    model_config = {"frozen": True}
+
+    provider: LLMProvider
+    # No default: a profile that names no model is a config error, not a
+    # silent fall-through to llm_model.
+    model: str = Field(min_length=1)
+    temperature: float = Field(default=0.0, ge=0.0, le=1.0)
+    max_output_tokens: int | None = None
 
 
 class Settings(BaseSettings):
@@ -111,6 +126,12 @@ class Settings(BaseSettings):
     # Default output ceiling. Headroom for Arabic, which costs roughly 1.5-3x
     # the tokens of equivalent English. Tasks override per call.
     llm_max_output_tokens: int = 1024
+    # Per-task model choices, keyed by profile name (core/llm/profiles.py), read
+    # as JSON, e.g. DODEAL_LLM_PROFILES={"unit_a.classify":{"provider":
+    # "anthropic","model":"<id>","temperature":0}}. A name that is not here
+    # falls back to the llm_provider/llm_model pair above at temperature 0,
+    # which is what a single-model deployment configures and nothing else.
+    llm_profiles: dict[str, ModelProfile] = {}
     # The provider API key lands in Step 14 with the adapter: a SecretStr with
     # no default and no placeholder, the same fail-closed shape dd_api_keys uses.
 
@@ -164,7 +185,10 @@ def _build_settings(**overrides) -> Settings:
     """
     try:
         return Settings(**overrides)
-    except ValidationError as exc:
+    except (ValidationError, SettingsError) as exc:
+        # SettingsError, not ValidationError, is what a JSON field with
+        # unparseable text raises (dd_api_keys, llm_profiles). Both mean the
+        # same thing here: the configuration is unusable.
         raise ConfigError(
             "Missing or invalid required configuration; refusing to start."
         ) from exc

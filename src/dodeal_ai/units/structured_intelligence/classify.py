@@ -37,6 +37,7 @@ from __future__ import annotations
 
 from dodeal_ai.core.config import Settings
 from dodeal_ai.core.llm import LLMClient, LLMResponse
+from dodeal_ai.core.llm.profiles import PROFILE_UNIT_A_CLASSIFY
 from dodeal_ai.core.prompting import AssembledPrompt, build_prompt
 from dodeal_ai.schemas.lead import Lead, LeadNote
 from dodeal_ai.units.structured_intelligence.llm_call import call_model
@@ -113,6 +114,7 @@ async def classify(
         ClassificationOutput,
         CLASSIFY_LABEL,
         settings=settings,
+        profile=PROFILE_UNIT_A_CLASSIFY,
         max_output_tokens=CLASSIFY_MAX_OUTPUT_TOKENS,
     )
 

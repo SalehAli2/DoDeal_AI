@@ -13,9 +13,9 @@ Deliberately NOT on the Protocol, and where each lives instead:
   - per-tenant quota       -> Gate 4 (core/cost)
   - validation             -> core/validation.py (LLMResponse.text is untrusted)
   - cost charging          -> core/cost::enforce_token_cost, after the call
-  - temperature            -> adapter-fixed at 0 for every call. The adapter
-                              receives an opaque prompt and cannot tell tasks
-                              apart. Revisit at Step 23 if narration needs it.
+  - provider, model, temperature
+                           -> the profile table in core/llm/profiles.py. The
+                              caller names a profile; the adapter resolves it.
 
 The prompt argument is core/prompting.AssembledPrompt and passes through
 UNCHANGED. An adapter reads .stable and .variable (for a cache breakpoint) and
@@ -117,7 +117,9 @@ class LLMClient(Protocol):
         self,
         prompt: AssembledPrompt,
         *,
+        profile: str,
         max_output_tokens: int | None = None,
     ) -> LLMResponse:
-        """Send the assembled prompt unchanged. None = configured default
-        (Settings.llm_max_output_tokens); Unit B passes its own."""
+        """Send the assembled prompt unchanged. `profile` names the calling TASK
+        (core/llm/profiles.py) and is the only thing a caller says about the
+        model; None max_output_tokens = Settings.llm_max_output_tokens."""

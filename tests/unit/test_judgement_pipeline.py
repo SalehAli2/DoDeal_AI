@@ -37,6 +37,11 @@ from dodeal_ai.core.errors import (
     NoteNotFoundError,
 )
 from dodeal_ai.core.llm import LLMErrorReason, LLMProviderError
+from dodeal_ai.core.llm.profiles import (
+    PROFILE_UNIT_A_CLASSIFY,
+    PROFILE_UNIT_A_SCORE,
+    PROFILE_UNIT_A_VAGUE,
+)
 from dodeal_ai.core.logging_config import JsonFormatter
 from dodeal_ai.core.prompting import AssembledPrompt, build_prompt
 from dodeal_ai.core.resilience import ExternalCallError
@@ -44,7 +49,10 @@ from dodeal_ai.middleware import inflight
 from dodeal_ai.middleware.inflight import InflightCounter
 from dodeal_ai.tools.keys import BackendKeyError
 from dodeal_ai.units.structured_intelligence import state
-from dodeal_ai.units.structured_intelligence.classify import CLASSIFY_TEMPLATE
+from dodeal_ai.units.structured_intelligence.classify import (
+    CLASSIFY_MAX_OUTPUT_TOKENS,
+    CLASSIFY_TEMPLATE,
+)
 from dodeal_ai.units.structured_intelligence.config import get_tenant_config
 from dodeal_ai.units.structured_intelligence.pipeline import JudgementDeps, judge_note
 from dodeal_ai.units.structured_intelligence.schemas import (
@@ -52,8 +60,14 @@ from dodeal_ai.units.structured_intelligence.schemas import (
     NoteType,
     SuppressedDetail,
 )
-from dodeal_ai.units.structured_intelligence.scoring import SCORE_TEMPLATE
-from dodeal_ai.units.structured_intelligence.vague import template_for
+from dodeal_ai.units.structured_intelligence.scoring import (
+    SCORE_MAX_OUTPUT_TOKENS,
+    SCORE_TEMPLATE,
+)
+from dodeal_ai.units.structured_intelligence.vague import (
+    VAGUE_MAX_OUTPUT_TOKENS,
+    template_for,
+)
 from tests.helpers.fake_leads import FakeLeadsClient, lead, note
 from tests.helpers.fake_llm import FakeLLM, json_response, response
 from tests.helpers.fake_operational_redis import FakeOperationalRedis
@@ -479,7 +493,11 @@ class _OnePassHeld:
         self.call_count = 0
 
     async def complete(
-        self, prompt: AssembledPrompt, *, max_output_tokens: int | None = None
+        self,
+        prompt: AssembledPrompt,
+        *,
+        profile: str,
+        max_output_tokens: int | None = None,
     ):
         self.call_count += 1
         if prompt.stable == self._held:
@@ -488,7 +506,9 @@ class _OnePassHeld:
             await self.release.wait()
         elif prompt.stable == self._failing:
             await self.entered.wait()
-        return await self._inner.complete(prompt, max_output_tokens=max_output_tokens)
+        return await self._inner.complete(
+            prompt, profile=profile, max_output_tokens=max_output_tokens
+        )
 
 
 def _deps_with(llm, leads: FakeLeadsClient) -> JudgementDeps:
@@ -863,3 +883,84 @@ async def test_the_pipeline_uses_the_monotonic_clock(monkeypatch, deps, operatio
 
     # entry, then a start+end for each of the three passes, then the outcome.
     assert reads["n"] >= 8
+
+
+# --- each pass names its own profile (Piece M, report R17) ------------------
+
+# Profile per TEMPLATE, which is the pairing that matters. Asserting against
+# arrival order would re-pin the gather's scheduling accident that `script_for`
+# exists to remove: vague and scoring are issued together and either may land
+# first.
+_PROFILE_BY_TEMPLATE = {
+    CLASSIFY_TEMPLATE: PROFILE_UNIT_A_CLASSIFY,
+    VAGUE_TEMPLATE: PROFILE_UNIT_A_VAGUE,
+    SCORE_TEMPLATE: PROFILE_UNIT_A_SCORE,
+}
+
+
+async def test_each_pass_names_its_own_profile(operational, leads):
+    """One scored judgement names classify, vague and score -- each paired with
+    the template that was actually sent."""
+    llm = FakeLLM()
+    llm.script_for(CLASSIFY_TEMPLATE, _classified("discovery"))
+    llm.script_for(VAGUE_TEMPLATE, _vague_answer())
+    llm.script_for(SCORE_TEMPLATE, _score_answer())
+
+    judgement = await judge_note(
+        _scope(), _request(), resubmission=False, deps=_deps_with(llm, leads)
+    )
+    assert judgement.suppressed is None and judgement.score is not None
+
+    stable_to_profile = {
+        build_prompt(template, "").stable: profile
+        for template, profile in _PROFILE_BY_TEMPLATE.items()
+    }
+    paired = {stable_to_profile[call.prompt.stable]: call.profile for call in llm.calls}
+    assert paired == {
+        PROFILE_UNIT_A_CLASSIFY: PROFILE_UNIT_A_CLASSIFY,
+        PROFILE_UNIT_A_VAGUE: PROFILE_UNIT_A_VAGUE,
+        PROFILE_UNIT_A_SCORE: PROFILE_UNIT_A_SCORE,
+    }
+    assert llm.call_count == 3
+
+
+async def test_the_reprompt_runs_on_the_same_profile(operational, leads):
+    # The second attempt is the same task said more strictly. A different
+    # profile there would make the reprompt a second variable.
+    llm = FakeLLM()
+    llm.script_for(CLASSIFY_TEMPLATE, _classified("discovery"))
+    llm.script_for(VAGUE_TEMPLATE, response("not json at all"), _vague_answer())
+    llm.script_for(SCORE_TEMPLATE, _score_answer())
+
+    await judge_note(
+        _scope(), _request(), resubmission=False, deps=_deps_with(llm, leads)
+    )
+
+    vague_stable = build_prompt(VAGUE_TEMPLATE, "").stable
+    vague_calls = [c for c in llm.calls if c.prompt.stable == vague_stable]
+    assert len(vague_calls) == 2
+    assert {c.profile for c in vague_calls} == {PROFILE_UNIT_A_VAGUE}
+
+
+async def test_each_pass_sends_its_own_task_ceiling(operational, leads):
+    # The three ceilings are per task and unchanged by Piece M: a profile may
+    # lower one at the adapter, never at the call site.
+    llm = FakeLLM()
+    llm.script_for(CLASSIFY_TEMPLATE, _classified("discovery"))
+    llm.script_for(VAGUE_TEMPLATE, _vague_answer())
+    llm.script_for(SCORE_TEMPLATE, _score_answer())
+
+    await judge_note(
+        _scope(), _request(), resubmission=False, deps=_deps_with(llm, leads)
+    )
+
+    ceilings = {
+        build_prompt(template, "").stable: ceiling
+        for template, ceiling in (
+            (CLASSIFY_TEMPLATE, CLASSIFY_MAX_OUTPUT_TOKENS),
+            (VAGUE_TEMPLATE, VAGUE_MAX_OUTPUT_TOKENS),
+            (SCORE_TEMPLATE, SCORE_MAX_OUTPUT_TOKENS),
+        )
+    }
+    for call in llm.calls:
+        assert call.max_output_tokens == ceilings[call.prompt.stable]

@@ -7,7 +7,7 @@ not duplicate it. This file is about the *build*; ASSUMPTIONS is about the *cont
 Update rule: every commit that changes a row here updates this file in the same commit. If a row's status
 and the tree disagree, the tree is right and this file is wrong — fix the file.
 
-**Last updated:** 10 Sep 2026, after Unit A Project 1 phases A–J, Piece K and Piece L — the judgement pipeline is built end to end against `FakeLLM` and the vendored fake CRM (head of `scaffold/core-governance-homes`, CI green). **Nothing in Unit A has been verified against a real model or a real backend; nothing is marked `[V]`** (ASSUMPTIONS §8.11).
+**Last updated:** 10 Sep 2026, after Unit A Project 1 phases A–J, Piece K, Piece L and Piece M — the judgement pipeline is built end to end against `FakeLLM` and the vendored fake CRM (head of `scaffold/core-governance-homes`, CI green). **Nothing in Unit A has been verified against a real model or a real backend; nothing is marked `[V]`** (ASSUMPTIONS §8.11).
 
 Status vocabulary: `DONE` (committed, CI green) · `PLANNED` (prompt written, not run) · `NEXT` (the next step
 in the sequence) · `BLOCKED <on>` · `PROPOSED` (decision written, not accepted) · `OPEN` (question asked, no
@@ -44,6 +44,7 @@ answer) · `UNASKED` (question identified, not yet sent).
 | **Phase J** — the ledger commit: README provisional answers, ASSUMPTIONS, STATUS, marker reconciliation | DONE | `d93d936` |
 | **Piece K** — the direct judgement route: `judge_note_direct`, `DirectJudgementRequest`, `note_too_long`, `max_note_chars`, `config_version` → `tenant-cfg-default-2` | DONE | `d9e0486` |
 | **Piece L** — the hardening trio: `gather_or_cancel` (register item 63), load shedding + the sync-client guard (73, 75), elapsed ms and in-flight count on the outcome lines (72) | DONE | `a6eca66` · `85aa3e0` · `fc346bc` |
+| **Piece M** — model profiles on the LLM seam: `profile` as a required keyword on `LLMClient.complete`, `core/llm/profiles.py` (the three Unit A names, `KNOWN_PROFILES`, `resolve_profile`, the fallback rule and the ceiling rule), `ModelProfile` + `DODEAL_LLM_PROFILES` validated at settings construction (register item 77) | DONE | `PIECE_M_SHA` |
 | Step 3 — token counters (`enforce_token_cost`, pre-flight read, breaker, TTL fix, Lua under fakeredis). **Now also: replace `SEAM[STEP3]` (the no-op pre-flight stub in `units/structured_intelligence/pipeline.py`); `/ready` to report db2; socket timeouts for the operational client.** | NEXT | — |
 | Step 4 — tool layer: query params, paging, error taxonomy, retry policy, pooled transport, per-item validation. **Now also: read-after-write bounded re-read on the note fetch (candidate — see §2 debts).** | after step 3 | — |
 | Steps 5–13 | per ed3 §15 | — |
@@ -66,6 +67,12 @@ item, not a first instalment.
 | 73 | Load shedding | `middleware/inflight.py`: an in-process counter, `DODEAL_MAX_INFLIGHT` (32, **provisional** — the load lane sets the real number), **503 `load_shed`** through the `DodealError` taxonomy, installed inside the request-id middleware and before everything else, slot released in a `finally`, `/health` and `/ready` exempt. `LoadShed` joins the taxonomy and `core/errors.py` gains `dodeal_error_response` (middleware cannot raise: `ExceptionMiddleware` is built inside the user middleware stack). | `85aa3e0` |
 | 75 | Sync-client guard | `tests/test_no_sync_clients.py` greps `src/dodeal_ai/` for `import requests`, `requests.`, `httpx.Client(`, `redis.Redis(`, `redis.StrictRedis(`, `time.sleep(`, `urllib.request` and fails naming the file and line. Runs inside CI check 4, not as a job of its own. | `85aa3e0` |
 | 72 | Elapsed time on the outcome lines | `elapsed_ms`, `classify_ms`, `vague_ms`, `score_ms` and `inflight` on **both** `judgement_completed` and `judgement_suppressed`, on **both** routes. `time.monotonic()` only; the clock starts at the entry point, so the fetch route's two backend calls are inside `elapsed_ms`; a pass that did not run is **null**, never zero. | `fc346bc` |
+
+### Register item closed in Piece M
+
+| # | Item | What landed | Commit |
+| --- | --- | --- | --- |
+| 77 | Model profiles on the LLM seam | `profile: str` is a required keyword on `LLMClient.complete`; the factory stays parameterless so `dependency_overrides[get_llm_client]` keeps working. `core/llm/profiles.py` holds the three Unit A names, `KNOWN_PROFILES`, and `resolve_profile(settings, name)`. `ModelProfile` (provider, model, temperature 0–1, optional ceiling) and `llm_profiles` read from `DODEAL_LLM_PROFILES` as JSON, all validated at settings construction. **Fallback:** an unconfigured name resolves to the `llm_provider`/`llm_model` pair at temperature 0; neither is `LLMConfigurationError`. **Ceiling:** a profile may lower a task's ceiling (64 / 1024 / 256), never raise it. The three call sites pass their own constant; a grep test holds them to `KNOWN_PROFILES`. Item 76's adapter is what consumes `resolve_profile`. | `PIECE_M_SHA` |
 
 **Not in this piece:** register item 9 (gather the lead and notes fetches). `gather_or_cancel` is written so item 9 uses it unchanged — its two-argument form is generic and that is the shape item 9 needs.
 

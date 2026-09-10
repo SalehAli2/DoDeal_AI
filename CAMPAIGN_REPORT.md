@@ -2997,3 +2997,178 @@ the total, and `_Timings` says so where someone will read it.
 **Nothing in this piece has been verified against a real model, a real backend or real load.** Nothing is
 marked `[V]` (ASSUMPTIONS §8.11). In particular the load-shedding behaviour has been proved *correct*
 under twenty concurrent in-process requests and not *sized* against anything.
+
+---
+
+## Piece M: model profiles on the LLM seam   STATUS: DONE PIECE_M_SHA
+
+Not a campaign phase. Register item 77, one commit plus this backfill. The seam has always been able
+to say *what* to send; it could not say *which model* should read it. This is that, and it is
+deliberately the smallest version of it that a caller can use and an adapter can consume.
+
+**Suite:** 904 → **934 passing**, 1 skipped, 7 deselected. Coverage **99.40 %** (was 99.38). All 13 per-file
+floors met, no new floors. `llm_call.py` and `decide.py` stay at 100.
+
+---
+
+### R17 — profiles enter on the method, not on the factory
+
+*Refines master document §9.3.*
+
+**The constraint that decided it.** Every test in this repo injects `FakeLLM` through
+`app.dependency_overrides[get_llm_client]`, and `get_llm_client` takes no arguments. A factory that
+took a profile — `get_llm_client(profile)` — would be a different dependency per task, so the one
+override every test uses would stop covering all three passes on the day it landed. That is not a
+cost worth paying for a keyword that fits on the method.
+
+So: **one method, one parameterless factory, and `profile` as a required keyword on `complete`.**
+
+```
+complete(prompt, *, profile: str, max_output_tokens: int | None = None)
+```
+
+**The division of knowledge.** The caller names its TASK and knows nothing else — not a provider, not
+a model id, not a temperature. The adapter owns the table and resolves the name. That is what makes
+"run the vague pass on a bigger model" a config change rather than a code change, and it is why the
+temperature bullet in `client.py`'s "deliberately NOT on the Protocol" list changed rather than being
+deleted: temperature was adapter-fixed at 0 *because the adapter could not tell tasks apart*. It can
+now, so the reason has moved to the profile table and the fixed 0 has become a per-profile default.
+
+**Resolution does NOT run at the call site, and this was the one real design decision.** The obvious
+shape — `complete_once` resolves the profile and hands the adapter a `ResolvedProfile` — is wrong
+here, and provably so: every pipeline test injects `FakeLLM` with `llm_provider=None` and
+`llm_model=""`, so a call site that resolved would raise `LLMConfigurationError` on the first
+scripted judgement and take the whole suite with it. The call site therefore passes the name
+UNRESOLVED. `resolve_profile()` is the function item 76's adapter calls; today it is tested directly
+and nothing else invokes it.
+
+**Cost of the alternative:** every test would have to configure a provider and a model it never uses,
+to satisfy a resolution whose answer is then thrown away by a fake. That is a fixture change in every
+suite to buy nothing.
+
+**THE FALLBACK RULE.** A profile name that is not in `llm_profiles` resolves to the
+`llm_provider` / `llm_model` pair at temperature 0 with no ceiling of its own. So:
+
+| Deployment | What it configures |
+| --- | --- |
+| one model everywhere | `DODEAL_LLM_PROVIDER` + `DODEAL_LLM_MODEL`, no profiles at all |
+| one pass moved | the pair, plus the one profile that differs |
+| every pass pinned | three profiles; the pair becomes unused |
+
+An unknown name with **no** pair configured raises `LLMConfigurationError` — the existing no-argument
+exception, so the message stays the fixed `llm_not_configured` the factory already reports. It is the
+same fault said in the same words: the seam was asked for a model without being told which one.
+
+**THE CEILING RULE, in one sentence: a profile may LOWER a task's ceiling, never raise it.**
+
+`CLASSIFY_MAX_OUTPUT_TOKENS = 64`, `VAGUE_MAX_OUTPUT_TOKENS = 1024` and `SCORE_MAX_OUTPUT_TOKENS = 256`
+are unchanged and are still the numbers the call sites pass. `ResolvedProfile.effective_max_output_tokens(task_ceiling)`
+returns `min(task_ceiling, profile_ceiling)` when the profile sets one and `task_ceiling` when it does
+not. The result is the **effective ceiling**, and it is what a `MAX_TOKENS` finish reason is judged
+against in `llm_call.parse_output` — so lowering a ceiling makes truncation *more* likely and is a
+deliberate cap, while raising one is refused because the task constant is already sized against the
+longest answer that task can produce (the Arabic sizing note in `vague.py` is the reason the 1024
+exists at all). A profile that could raise it would be buying room the task has no use for.
+
+**Both attempts of a reprompt carry the same profile.** The second call is the same task said more
+strictly, not a different one; switching models between them would make the reprompt a second
+variable and the malformed-answer diagnosis worthless.
+
+---
+
+### What changed
+
+| File | What |
+| --- | --- |
+| `src/dodeal_ai/core/config.py` | `ModelProfile` (frozen `BaseModel`: provider, `model` with `min_length=1`, `temperature` `ge=0 le=1`, optional `max_output_tokens`); `llm_profiles: dict[str, ModelProfile]` read from `DODEAL_LLM_PROFILES` as JSON; `_build_settings` now also catches `SettingsError`. |
+| `src/dodeal_ai/core/llm/profiles.py` | **New.** The three names, `KNOWN_PROFILES`, `ResolvedProfile` with `effective_max_output_tokens`, and `resolve_profile`. |
+| `src/dodeal_ai/core/llm/client.py` | `profile: str` as a required keyword on `LLMClient.complete`, three-line docstring; the module docstring's temperature bullet becomes a provider/model/temperature bullet pointing at the profile table. |
+| `src/dodeal_ai/core/llm/__init__.py` | One comment: the adapter that lands in item 76 owns the profile table and stays behind the parameterless factory. No signature change. |
+| `src/dodeal_ai/units/structured_intelligence/llm_call.py` | `profile` threaded through `call_model` and `complete_once` as a required keyword, and onto the one `client.complete()` call — which serves both the first attempt and the reprompt. |
+| `.../classify.py`, `.../vague.py`, `.../scoring.py` | One import and one keyword each: its own constant. Ceilings untouched. |
+| `tests/helpers/fake_llm.py` | `RecordedCall.profile`, a `profiles` view, and `complete` takes the keyword. Still satisfies `LLMClient` for mypy and at runtime. |
+| `tests/unit/test_model_profiles.py` | **New**, 25 tests: resolution, the fallback rule in four shapes, five construction-time validation failures, the ceiling rule in both directions, and the grep over `src/dodeal_ai/units/`. |
+| `tests/unit/test_judgement_pipeline.py` | 3 added: the profile paired with its TEMPLATE, the reprompt on the same profile, each pass sending its own ceiling. `_OnePassHeld.complete` takes the keyword. |
+| `tests/unit/test_llm_seam.py` | 2 added: `profile` is keyword-only, required and a `str`; the Protocol still has exactly one method. `_StructuralClient` updated. |
+| `tests/helpers/test_fake_llm.py` | The recorded profile asserted alongside the recorded ceiling; the direct `complete()` calls name a profile. |
+| `README.md`, `ASSUMPTIONS.md` §8.4, `docs/STATUS.md` | The env var with a JSON example, the fallback rule, the ceiling rule, the new file, the new test module. |
+
+**The pairing test asserts profile against TEMPLATE, not against arrival order.** Vague detection and
+scoring are gathered and either may reach the fake first; a test that indexed `calls[1]` would be
+re-pinning exactly the scheduling accident `script_for` (Phase I.2) exists to remove. It builds
+`{stable text -> expected profile}` and compares the map, so the assertion is order-free by
+construction.
+
+**The grep test has teeth.** `test_the_unit_names_a_profile_at_all` fails closed if the pattern stops
+matching, so the KNOWN_PROFILES assertion cannot pass by searching an empty set — the same guard
+`test_no_sync_clients.py` uses. `llm_call.py`'s `profile=profile` pass-through is the one allowed
+non-constant and is named explicitly in the test rather than tolerated by a loose pattern.
+
+---
+
+### Decisions taken here, and their cost
+
+1. **`_build_settings` now catches `SettingsError` as well as `ValidationError`.** Verified, not
+   assumed: pydantic-settings raises `SettingsError` (a `ValueError`, **not** a `ValidationError`)
+   when a complex field's env value will not parse as JSON, so a malformed `DODEAL_LLM_PROFILES`
+   would have escaped the fail-closed conversion entirely. **This was already true of
+   `DODEAL_DD_API_KEYS`** and has been true since that field landed — a malformed key map raised a
+   bare `SettingsError` instead of `ConfigError`. The spec for this piece requires malformed JSON to
+   be a `ConfigError`, and the same three lines fix both. **Cost of the alternative** (catching it
+   only for profiles, e.g. with a validator): two different failure shapes for the same class of
+   typo, in the same file.
+2. **`LLMConfigurationError` was not given a message argument.** It is documented as "THE one
+   definition" with a fixed message, and the resolution failure IS the factory's failure — no
+   provider and no model. **Cost of the alternative:** a second message shape on an exception whose
+   whole design is that `str()` is fixed and log-safe.
+3. **`profiles.py` is not re-exported from `core/llm/__init__.py`.** One import path per name. The
+   package `__all__` is the seam's own surface and a profile name is not part of the seam; the
+   conservative reading of "one method, one factory" is to leave that surface alone. Trivially
+   reversible if the adapter makes it awkward.
+4. **`ResolvedProfile` is a frozen dataclass and `ModelProfile` is a pydantic model.** They look
+   redundant. They are not: `ModelProfile` is the CONFIG shape, validated at construction and
+   optional in every field the fallback supplies; `ResolvedProfile` is the RESOLVED shape, where
+   every field has an answer. Collapsing them would mean the adapter receiving a type whose
+   `temperature` might be unset. **Cost of the alternative:** the fallback rule becomes four
+   `or`-defaults at the adapter, in item 76, where nothing tests it yet.
+5. **The ceiling rule is a method on `ResolvedProfile`, not a branch in `complete_once`.** It is a
+   statement about a profile, it is pure, and it is testable without an adapter or a model call.
+   **Cost of the alternative:** the rule lives on the call path, where the only way to test it is to
+   configure settings that the injected-fake tests deliberately do not have.
+
+---
+
+### For the lead
+
+1. **`.env.example` was not touched** (campaign §0.8 forbids it), so `DODEAL_LLM_PROFILES` is
+   documented in the README configuration table and nowhere else. It is optional and defaults to an
+   empty map, so nothing breaks — but if you want it discoverable in the example file, that is one
+   line and it is yours to add, along with whatever that file's outstanding unstaged change is.
+2. **The `dd_api_keys` fail-closed gap was real and is now closed as a side effect.** A malformed
+   `DODEAL_DD_API_KEYS` used to raise a bare `SettingsError` past the `ConfigError` conversion. No
+   test covered it and none has been added for it here — decision 1 above explains why the fix
+   landed in this piece, but the missing test for that field is not this piece's to add.
+3. **Nothing configures a profile anywhere, deliberately.** No profile appears in any settings
+   fixture, no adapter reads one, and `resolve_profile` has exactly one caller: its own test module.
+   The three call sites name a profile that resolves to the fallback pair in every environment that
+   exists today. **This is the piece working as specified** — item 76 is what makes it load-bearing —
+   but it does mean the resolution path has never run under a real judgement.
+4. **`ModelProfile.temperature` is bounded 0–1 because that is what the spec says, and providers do
+   not agree on that range.** Anthropic's is 0–1; some others accept up to 2. If a second provider
+   joins `LLMProvider`, the bound is either per-provider or the loosest of them, and that is a
+   decision, not a widening.
+5. **A profile can name a provider the deployment has no credentials for**, and nothing catches it
+   until the adapter tries. Settings validate that the provider is a known `LLMProvider` member, not
+   that it is usable. The credential field itself lands with the adapter in item 76; pairing the two
+   checks is that piece's job.
+6. **Three names, and nothing enforces the namespace but a test.** `KNOWN_PROFILES` is a flat tuple
+   and `unit_a.` is a convention held by one assertion. When Unit B gets profiles, the question is
+   whether the vocabulary stays one tuple or becomes per-unit — worth deciding before there are six
+   names rather than after.
+7. **The `profile` keyword is required, so every future fake or adapter must accept it.** That is the
+   point, and it is also the one thing that will break an out-of-tree implementation of `LLMClient`
+   if one exists anywhere. None does in this repo — `FakeLLM`, `_StructuralClient` and `_OnePassHeld`
+   are all of them, and all three were updated.
+
+**Nothing in this piece has been verified against a real model or a real provider.** Nothing is marked
+`[V]` (ASSUMPTIONS §8.11). The profile table has never resolved to anything but a test fixture.

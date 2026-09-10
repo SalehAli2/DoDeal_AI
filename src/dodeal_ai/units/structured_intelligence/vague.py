@@ -36,6 +36,7 @@ from types import MappingProxyType
 
 from dodeal_ai.core.config import Settings
 from dodeal_ai.core.llm import LLMClient, LLMResponse
+from dodeal_ai.core.llm.profiles import PROFILE_UNIT_A_VAGUE
 from dodeal_ai.core.prompting import AssembledPrompt, PromptError, build_prompt
 from dodeal_ai.schemas.lead import LeadNote
 from dodeal_ai.units.structured_intelligence.config import TenantConfig
@@ -163,6 +164,7 @@ async def detect_vagueness(
         VagueOutput,
         VAGUE_LABEL,
         settings=settings,
+        profile=PROFILE_UNIT_A_VAGUE,
         max_output_tokens=VAGUE_MAX_OUTPUT_TOKENS,
         check=allowed_components_check(note_type, config),
     )

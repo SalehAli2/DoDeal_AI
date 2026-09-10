@@ -803,9 +803,9 @@ discovered at build time.
 
 ### 8.4 LLM seam — one thin interface, gateway concerns behind the factory
 - `LLMClient` is a `@runtime_checkable` Protocol with **exactly one method**:
-  `async complete(prompt: AssembledPrompt, *, max_output_tokens: int | None)`.
-  Async because Unit B's prompts are long; structural, so a fake in a test and a
-  real adapter satisfy it without inheriting anything.
+  `async complete(prompt: AssembledPrompt, *, profile: str, max_output_tokens:
+  int | None)`. Async because Unit B's prompts are long; structural, so a fake in
+  a test and a real adapter satisfy it without inheriting anything.
 - `LLMResponse` is a frozen slots dataclass: `text`, `input_tokens`,
   `output_tokens`, `model`, `finish_reason`, `provider_request_id`. Field names
   map one-to-one onto OpenTelemetry `gen_ai.*` attributes, so tracing at step 6
@@ -827,10 +827,32 @@ discovered at build time.
   until the adapter lands: loud, never silent.
 - **Deliberately NOT on the Protocol:** retries and timeouts (the watchdog, per
   call, `retry=False`), provider routing and fallback (behind the factory),
-  quota (Gate 4), validation (`core/validation.py`), cost charging, and
-  temperature (adapter-fixed at 0 — the adapter sees an opaque prompt and cannot
-  tell tasks apart).
-- **Seam:** `core/llm/client.py`, `core/llm/__init__.py`.
+  quota (Gate 4), validation (`core/validation.py`), cost charging, and the
+  model itself — provider, model id and temperature are the profile table's,
+  not a caller's.
+- **Model profiles are named PER TASK** (Piece M, `core/llm/profiles.py`;
+  campaign report R17, refining master document §9.3). `unit_a.classify`,
+  `unit_a.vague` and `unit_a.score` are the only names Unit A may pass, and a
+  test greps `src/dodeal_ai/units/` to keep it that way. The profile arrives as a
+  keyword on the METHOD and not on the factory, because every test injects
+  `FakeLLM` through `dependency_overrides[get_llm_client]` and a factory that
+  took an argument would break that on day one.
+- **The fallback pair serves single-model deployments.** A name absent from
+  `DODEAL_LLM_PROFILES` resolves to the `llm_provider` / `llm_model` pair at
+  temperature 0 with no ceiling of its own, so running one model everywhere is
+  the configuration that already exists and profiles are opt-in. An unknown name
+  with no pair configured raises the same `LLMConfigurationError`
+  (`llm_not_configured`) the factory does.
+- **The ceiling rule:** a profile's `max_output_tokens`, when set, is used only
+  if it is LOWER than the task's own ceiling (64 / 1024 / 256), never higher, and
+  the effective ceiling is what a `MAX_TOKENS` finish is judged against. The task
+  constants are sized against the longest answer each task can produce; a profile
+  that raised one would buy room the task has no use for.
+- **UNCONFIRMED, and deliberately so:** no profile is configured anywhere in this
+  repo, no adapter reads one, and nothing here has run against a real provider.
+  The resolution and the call-site discipline are what Piece M built; item 76's
+  adapter is what consumes them.
+- **Seam:** `core/llm/client.py`, `core/llm/profiles.py`, `core/llm/__init__.py`.
 
 ### 8.5 AssembledPrompt — the caching and trust boundary in one type
 - A frozen slots dataclass with three fields: `stable` (the trusted system

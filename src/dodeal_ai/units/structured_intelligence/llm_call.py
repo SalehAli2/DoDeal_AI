@@ -104,6 +104,7 @@ async def complete_once(
     label: str,
     *,
     settings: Settings,
+    profile: str,
     max_output_tokens: int,
 ) -> LLMResponse:
     """Send one prompt. No retry, the per-call LLM timeout, never the global.
@@ -119,6 +120,11 @@ async def complete_once(
     The seam's own default would have been the easy thing to fall back on; a
     default is exactly what nobody revisits.
 
+    `profile` is required for the same reason and names the TASK, never a model
+    (core/llm/profiles.py). It is passed through UNRESOLVED: the adapter owns
+    the table, and a profile may only LOWER the ceiling below, never raise it
+    (ResolvedProfile.effective_max_output_tokens; report R17).
+
     THE SIZING RULE every caller obeys (register item 15). A ceiling is sized
     against the LONGEST ARABIC answer the task can produce, never the English
     one. Arabic runs roughly 2-3x the tokens per word that English does, so a
@@ -130,7 +136,9 @@ async def complete_once(
     """
 
     async def _send() -> LLMResponse:
-        return await client.complete(prompt, max_output_tokens=max_output_tokens)
+        return await client.complete(
+            prompt, profile=profile, max_output_tokens=max_output_tokens
+        )
 
     try:
         return await call_with_watchdog(
@@ -209,6 +217,7 @@ async def call_model[M: BaseModel](
     label: str,
     *,
     settings: Settings,
+    profile: str,
     max_output_tokens: int,
     check: Callable[[M], None] | None = None,
 ) -> tuple[M, LLMResponse]:
@@ -236,9 +245,18 @@ async def call_model[M: BaseModel](
     `check` runs on both attempts. It is part of what a valid answer means, not
     a second opinion about a valid one -- so a rule the schema cannot hold earns
     the reprompt exactly as a missing field does.
+
+    BOTH attempts carry the SAME `profile`. The second call is the same task
+    said more strictly, not a different one, so switching models between them
+    would make the reprompt a second variable.
     """
     response = await complete_once(
-        client, prompt, label, settings=settings, max_output_tokens=max_output_tokens
+        client,
+        prompt,
+        label,
+        settings=settings,
+        profile=profile,
+        max_output_tokens=max_output_tokens,
     )
     try:
         return parse_output(response, schema, label, check=check), response
@@ -256,6 +274,7 @@ async def call_model[M: BaseModel](
         with_tail(prompt, REPROMPT_TAIL_TEMPLATE),
         label,
         settings=settings,
+        profile=profile,
         max_output_tokens=max_output_tokens,
     )
     try:

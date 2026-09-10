@@ -35,6 +35,7 @@ from collections.abc import Callable, Mapping
 
 from dodeal_ai.core.config import Settings
 from dodeal_ai.core.llm import LLMClient, LLMResponse
+from dodeal_ai.core.llm.profiles import PROFILE_UNIT_A_SCORE
 from dodeal_ai.core.prompting import AssembledPrompt, build_prompt
 from dodeal_ai.schemas.lead import LeadNote
 from dodeal_ai.units.structured_intelligence.config import TenantConfig
@@ -261,6 +262,7 @@ async def score_note(
         ScoreOutput,
         SCORE_LABEL,
         settings=settings,
+        profile=PROFILE_UNIT_A_SCORE,
         max_output_tokens=SCORE_MAX_OUTPUT_TOKENS,
         check=marks_check(note_type, config),
     )
