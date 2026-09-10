@@ -293,6 +293,23 @@ version against three endpoints."
 | **Never for pay** | Coaching only, never pay, commission or discipline. |
 | **Original preserved** | Trivially guaranteed today — we cannot modify a note. The rule stands for the day a write path appears. |
 
+**Decided during the Unit A Project 1 campaign (phases A–J).** Everything above predates the build;
+everything below was settled while building it and is equally ours, held until someone with authority
+disagrees.
+
+| Item | Position |
+| --- | --- |
+| **Attempt key** | `attempt:{tenant}:{lead_id}:{note_id}` — keyed on the note, not the person. The cap is "this note has been asked about once", so two salespeople sharing a lead cannot each spend an attempt on the same note. INCR, `EX` on create and whenever TTL is `-1`. |
+| **Fingerprint** | Hex SHA-256 of the **fetched note text** as UTF-8, with **no normalisation** — no trim, no case fold, no Unicode form change. Normalising would make two genuinely different notes look identical, and the fingerprint is what decides 200 versus 409. |
+| **Reserve and release** | The idempotency key is reserved (`SET NX EX`) **after the fetch and before any model call**, and released (`DEL`, best effort) on **every** non-200 outcome after reservation. So a `model_unavailable` can be retried by the caller without meeting a 409 for work that was never done. |
+| **`prompt_withheld`** | `null` when a prompt was sent **and** when the decision was `accept_silent` — there was nothing to withhold. Otherwise one of `resubmission`, `attempt_cap`, `rate_limited`, `nothing_to_ask`, in that fixed precedence. It names why a prompt that *would* have been sent was not. |
+| **Rate limit never 429** | Hitting the clarification rate limit on this route returns **200** with `prompt_withheld: "rate_limited"`, never a 429. The judgement was still produced and is still worth returning; only the question is withheld. A 429 would tell the CRM the request failed when it did not. |
+| **Thin evidence** | `min_note_chars 15`, `min_note_tokens 3`, both applied to the **stripped** text, and **both** must pass — "ok" fails on length, a long run of one repeated word fails on tokens. Whitespace-split, deliberately crude, and identical for Arabic, English and mixed text. Checked **before** any reservation and before any model call, so a thin note costs nothing. |
+| **Denominators** | 100 with everything applicable · **80** under Q13 (deal_specifics suppressed) · **60** for no_contact under Q13 · 75 for no_contact with Q13 resolved. **The 75 is not reachable** from §2.2's own weights: no_contact suppresses `client_said` *and* `deal_specifics` by type, so lifting Q13 leaves 25+25+10 = 60. Recorded as a disagreement between the campaign brief and the arithmetic; the tree is followed. See CAMPAIGN_REPORT.md, Phase F. |
+| **Band is derived** | Never accepted from any input and never returned by the model. A `band` or `total` field in a model answer is malformed output, rejected by `extra="forbid"`, and earns the single reprompt. |
+| **Relative times count as dates** | A time anchored to when the note was written — "tomorrow", "after 2 hrs", "next Tuesday", "end of the week" — satisfies `next_step_with_date`. The corpus writes `cb tmrw` far more often than a calendar date. |
+| **An explicit closure is a next step** | A stated outcome with a reason — closed, bought elsewhere, withdrew, dropped — takes full marks for `next_step_date`, because nothing follows and the note says so. |
+
 ### 3.5 Project 2 — analytics rules
 
 | Item | Position |
@@ -353,6 +370,16 @@ Ordered by what they release. Items 4.1–4.3 are the critical path.
   affects **what the backend returns to us**, not who called us. The open question
   is only whether the two id spaces match.
 - **If they differ:** we cannot join a caller to their own notes at all.
+- **Marker: `ASSUMPTION[Q7]`.** Grep it:
+  `src/dodeal_ai/units/structured_intelligence/pipeline.py` and `state.py`,
+  `README.md`'s provisional-answers table, and here. **Assumed:** they are
+  different id spaces, and the campaign never joins them. The rate limit is keyed
+  on the **verified `sub`** from `RequestContext`; the judgement reports the
+  note's `author_id` as it came from the backend; nothing anywhere compares the
+  two or resolves a name from either. **If they turn out to match:** nothing
+  breaks and nothing has to change — the join simply becomes possible, which is
+  what "coaching over time, per rep" would need. **If they differ (assumed):**
+  the correction path is a mapping table, and it is the backend's to provide.
 
 ### 4.3b Is `since` compared with an offset, or with naive local time?
 - `GET /leads` filters on `updatedAt` via `since` (§1.7). The CRM's internal
@@ -383,6 +410,20 @@ Ordered by what they release. Items 4.1–4.3 are the critical path.
   if a salesperson wrote it.
 - Either a filter requirement or a seventh note type. Confirm before the scoring
   prompt is written, or check it directly the moment a key exists.
+- **Marker: `ASSUMPTION[Q6]`.** Grep it:
+  `src/dodeal_ai/units/structured_intelligence/classify.py` and `schemas.py`,
+  `README.md`'s provisional-answers table, and here. **Decided rather than
+  waited for:** the seventh note type. `system_event` is a member of `NoteType`,
+  the classifier is told to decide it **first** and whatever else the text
+  mentions, and a note classified `system_event` is suppressed `not_scorable`
+  immediately — never vague-checked, never scored. So the endpoint may return
+  both and we are still correct; we do not need the answer to be safe, only to
+  know how often it happens. **If the endpoint returns notes only:** the type
+  costs one enum member and one branch that never fires, and nothing has to be
+  undone. **Verified against the corpus:** the vendored fixture keeps
+  `timeline_events` in a separate top-level key from `notes`, and
+  `tests/eval/test_structural_eval.py` runs all 27 of them through the pipeline
+  to prove each stops after classification with no vague and no score call.
 
 ### 4.6 Lower priority, ask when the work needs them
 - **User list** — id, name, team, manager, active flag. Releases labels on every
@@ -433,6 +474,17 @@ the whole of Project 1 rests on.
   trusting a forwarded host before knowing which hop is trusted hands Gate 2 to
   the caller. This travels with the authentication question above: same call,
   same conversation, and both are needed before route skeletons (step 6).
+- **Marker: `ASSUMPTION[Q1]`.** Grep it to find every place the assumption is
+  load-bearing: `src/dodeal_ai/units/structured_intelligence/pipeline.py`
+  (`judge_note`'s docstring), `README.md`'s provisional-answers table, and here.
+  **Assumed:** the CRM forwards the END USER's JWT, so the route runs Gate 1 →
+  Gate 2 → Gate 4 exactly as the probe route does. **If wrong:** the principal
+  source swaps behind the D1 seam. `judge_note` already takes a `TenantScope`
+  rather than a `RequestContext`, so the pipeline itself does not change — only
+  what builds the scope does, and subjects arriving from a service principal get
+  labelled `asserted` rather than `verified`. The rate limit is keyed on that
+  subject, so a service principal would collapse every salesperson into one
+  bucket: that is the line to re-read first.
 
 ### 5.2 Two business lines share one rubric `[DECIDE OURSELVES]`
 - The CRM serves **real estate and digital marketing**. The rubric's "deal
@@ -451,6 +503,20 @@ the whole of Project 1 rests on.
   determined, fall back to the three universal components and **suppress** the
   specifics weight rather than scoring zero.
 - Cheap now, expensive after launch — rescoring history is not something we do.
+- **Marker: `ASSUMPTION[Q13]`.** Grep it:
+  `src/dodeal_ai/units/structured_intelligence/config.py` (the two fields that
+  carry the decision), `README.md`'s provisional-answers table, and here. It is
+  also cited in `scoring.py` and in three test modules, which is deliberate —
+  the arithmetic changes when it resolves. **Assumed:** no lead field is
+  confirmed to carry the business line, so `business_line_field = None` and
+  `deal_specifics_applicable = False`; `deal_specifics` is suppressed for every
+  type and the denominator is 80 rather than 100. Suppressed is a **state**, not
+  a zero — the weight leaves the denominator instead of dragging the total down.
+  **If wrong / when answered:** set both fields in `config.py` and nothing else
+  moves — `applicable_components` reads them, the denominator becomes 100, and
+  `tests/unit/test_scoring.py::Q13_RESOLVED` already pins the resolved
+  arithmetic. Past judgements are **not** recomputed; they carry
+  `config_version` so a reader can see which rubric produced them.
 
 ### 5.3 Evaluation data
 - **300-500 real notes**, target 1,000: random not hand-picked, across at least
@@ -496,6 +562,31 @@ the whole of Project 1 rests on.
 
 - Owner must be someone in the business who manages salespeople (sales manager or head of sales), whose judgement reps would accept. Without a named owner the engineer invents the rubric, and an invented standard that judges employees is a real risk.
 - Name them before that output is built.
+
+## 5.10 Can the note being judged fall off page one?
+
+- **Marker: `ASSUMPTION[Q8]`.** Grep it:
+  `src/dodeal_ai/units/structured_intelligence/pipeline.py` (at `_fetch_note`),
+  `README.md`'s provisional-answers table, and here.
+- **Assumed:** notes come back newest first, 25 per page, and the note a caller
+  is asking about is on **page one** — so one un-paged fetch finds it. In
+  practice the CRM calls us right after the note is saved, which is exactly when
+  it is newest.
+- **Why it is a product question and not only a backend one:** the answer is
+  "how many notes does a busy lead accumulate before someone asks us about an
+  older one". The endpoint's paging behaviour is confirmed (§1.7); what is not
+  confirmed is whether the usage pattern ever reaches past 25.
+- **Nothing branches on it.** There is no paging code to take a second path, and
+  the note is matched **by id**, never by position (Design A) — so if the note
+  is not on page one the caller gets a clean `404 note_not_found`, never the
+  wrong note. That is the property worth having: the failure is visible and
+  correct, not silent and wrong.
+- **If wrong / correction path:** query parameters in `tools/leads.py` at
+  **step 4**, not a change in the pipeline. The campaign was explicitly barred
+  from adding them (§0.7).
+- **Watch for:** a rise in `note_not_found` on a route the CRM only calls with
+  ids it has just written. That is this assumption failing, and it is the
+  cheapest signal available today.
 
 
 
@@ -793,6 +884,38 @@ discovered at build time.
   frame's own source text cannot be mistaken for a leak.
 - **Seam:** `core/log_safety.py`, `core/validation.py`, `core/logging_config.py`.
 
+### 8.11 Unit A Project 1 — built against FakeLLM and the fake CRM, nothing `[V]`
+
+- **Nothing in this unit has been verified against a real dependency.** Not one
+  judgement has been produced by a real model, and not one note has been read
+  from a real CRM. Every claim in §3.4, every number in the report, and every
+  test in the suite is a claim about behaviour against
+  `tests/helpers/fake_llm.py` and `tests/fixtures/fake_crm/tenant-a.json`. The
+  `[V]` marker is not used anywhere in this section and must not be until a real
+  provider and a real backend key have both been exercised.
+- **The model.** `get_llm_client()` still raises. `FakeLLM` is injected through
+  `app.dependency_overrides` and the factory has **no test switch** — adding one
+  was forbidden for the whole campaign and remains the rule. What this means in
+  practice: prompts have never been read by a model, so nothing is known about
+  how any real model responds to them. The reprompt rate, the malformed-output
+  rate and the per-pass token cost are all **unmeasured**. Step 16 is where they
+  first become observable; step 18 is where quality is first measurable
+  (`tests/eval/test_quality_eval.py`, skipped until `DODEAL_EVAL_REAL=1`).
+- **The CRM.** The vendored corpus is generated, not exported. It is
+  **127 notes carrying only 57 distinct texts** across 19 leads, plus 27
+  `timeline_events` and 1448 leads — one of which (`1661`) does not satisfy
+  `Lead` and is skipped and counted by the loader. So the corpus proves the
+  pipeline *survives* real-shaped text; it proves nothing about the real
+  distribution of note types, lengths or languages.
+- **What IS established, and is worth keeping:** the pipeline runs every one of
+  the 127 notes to a `Judgement` or a `Suppressed` state and never an exception
+  (`tests/eval/test_structural_eval.py`); a note cannot forge a delimiter or
+  supply its own marks; a model cannot return a band or a total; and no note text
+  or model output reaches a log line on any path
+  (`tests/security/test_unit_a_injection.py`).
+- **Seam:** `core/llm/client.py` (`get_llm_client`), `tests/helpers/fake_llm.py`,
+  `tests/helpers/fake_leads.py`.
+
 ---
 
 # 9. PARKED
@@ -889,6 +1012,15 @@ discovered at build time.
   ping can exceed a default Kubernetes probe timeout.
 - Backend client: `backend_base_domain = "dodealcrm.com"` (still a placeholder;
   real hosts come from DevOps).
+- `redis_operational_url` — the **db2** connection Unit A's three state concerns
+  use (idempotency, the clarification rate limit, the attempt counter). Distinct
+  from the cost gate's client on purpose: different database, different failure
+  policies, and a Gate 4 outage must not take the judgement route's idempotency
+  with it. **`/ready` does not yet report db2** — it pings the cost client only,
+  so a service whose operational store is unreachable currently reports ready and
+  then denies every judgement with `503 idempotency_unavailable` (fail closed, by
+  design — see §3.4). Both the `/ready` probe and this client's socket timeouts
+  are **step 3**, together with the hardcoded timeouts above.
 - `dd_api_keys`: per-tenant map, **no default, fail closed** (`tools/keys.py`).
   The single shared `dd_api_key` with a placeholder default is **gone** — removed
   in fix 2, audit finding F2. There is no placeholder credential anywhere in the

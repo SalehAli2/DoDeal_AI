@@ -1811,7 +1811,7 @@ see the tree disagreement above.
   fires on the second request for a note. That is the config, not a decision taken here — but it means
   the loop is one question per note, and if Product wanted two the only change is `config.py`.
 
-## Phase I — prompt hardening, adversarial suite, OWASP checkpoint, eval marker   STATUS: DONE <sha pending>
+## Phase I — prompt hardening, adversarial suite, OWASP checkpoint, eval marker   STATUS: DONE 403afa7
 
 Phase I is being taken in pieces at the lead's direction (a divergence from §0.1's one-commit-per-phase,
 recorded here so the next session does not read it as drift). The phase is `DONE` only when every piece is.
@@ -2024,7 +2024,7 @@ modified/untracked and were left alone; staging was by explicit path.
   model from padding for a third try — but if you want the tail to make no claim about attempt ordering
   at all, that is a one-line change and its own decision.
 
-### Piece I.4 — relative times and closures in the templates   STATUS: DONE <sha pending>
+### Piece I.4 — relative times and closures in the templates   STATUS: DONE d0c9acf
 
 **What changed:**
 
@@ -2070,7 +2070,7 @@ their own after the template edits and before the new tests: **179/179 passing**
 
 **For the lead:** empty.
 
-### Piece I.5 — few-shot examples   STATUS: DONE <sha pending>
+### Piece I.5 — few-shot examples   STATUS: DONE f17da28
 
 **What changed:**
 
@@ -2136,7 +2136,7 @@ together: 118/118.
   the reading that let the 3-to-5 cap stand. If you would rather the classifier see all eight, say so and
   it is three more examples in one file.
 
-### Piece I.6 — adversarial suite   STATUS: DONE <sha pending>
+### Piece I.6 — adversarial suite   STATUS: DONE 257da13
 
 **What changed:** `tests/security/test_unit_a_injection.py` — **new**, 55 tests. No change under `src/`.
 
@@ -2213,7 +2213,7 @@ hostile string, which a corpus note does not contain.
 - **`unit_a_v1.txt` does not exist.** If a tenth template was intended (a shared preamble, say), it was
   never written and nothing references it. Say if it should be.
 
-### Piece I.7 — OWASP note and eval skeleton   STATUS: DONE <sha pending>
+### Piece I.7 — OWASP note and eval skeleton   STATUS: DONE 403afa7
 
 **What changed:**
 
@@ -2313,9 +2313,341 @@ notes carrying 57 distinct texts (I.6).
 4. **Review finding F4 remains deferred** to the post-campaign batch: one reprompt tail serves both form
    and content failures.
 
-## Phase J
+## Phase J — the ledger commit   STATUS: DONE <sha pending>
 
-**STATUS: NOT STARTED**
+> **Resume, 10 September.** This phase stopped red on 9 September and was resumed the next day. The
+> BLOCKED report below is kept verbatim, because it is the record of what was wrong and one of its
+> conclusions turned out to be false. **Read "Resume, 10 September" at the end of this block for what was
+> actually fixed** — including two errors of mine that the BLOCKED report did not catch and in one case
+> asserted the opposite of.
+
+### The BLOCKED report, 9 September — kept as written
+
+**Nothing is committed. The working tree carries all of Phase J's work, uncommitted and unstaged**, exactly
+as the stopping chain left it. The next session resumes here — do not redo phases A–I.
+
+### What failed
+
+`tests/unit/test_startup.py::test_backend_keys_missing_logs_error_when_map_is_empty`.
+
+```
+1 failed, 802 passed, 1 skipped, 7 deselected in 10.48s
+E       AssertionError: assert 'backend_keys_missing' in ''
+E        +  where '' = <LogCaptureFixture>.text
+---------------------------- Captured stdout call -----------------------------
+{"level":"ERROR","logger":"dodeal_ai.startup","message":"backend_keys_missing count=0",
+ "timestamp":"2026-09-09T21:51:13.929408+00:00"}
+```
+
+The other three blocks were not reached. `ruff check`, `ruff format --check` and `mypy` are unrun for this
+phase; the last four-block-green state is head `403afa7` (Piece I.7).
+
+### Why it failed, and why it is not a regression
+
+The failing test is the one the §6.9 one-liner was always going to touch, and **the fix is working as
+intended** — read the captured stdout above: the line now goes out as a properly formatted JSON object,
+which is the entire point of moving it. Before the move it was emitted *before* `configure_logging()` and
+went out through whatever handler `logging` happened to have — unformatted, and invisible to a collector
+that parses only the JSON lines every other startup event uses.
+
+The mechanism of the failure: `core/logging_config.py` line 95 does `root.handlers = [handler]` — it
+**replaces** the root logger's handlers rather than appending. `caplog` works by installing its own handler
+on the root. So with the log call now *after* `configure_logging()`, caplog's handler has already been
+evicted by the time the line is emitted, and `caplog.text` is empty even though the record was emitted and
+formatted correctly.
+
+So: the production behaviour is better than it was, and the test is asserting through a channel the fix
+deliberately closed. It is an invalidated test expectation, not a broken feature.
+
+### Not fixed forward, deliberately
+
+The unattended rules for this run are explicit: *"If the chain is red, do not fix forward, do not amend, do
+not skip. Stop, leave the working tree as it is."* Changing a test's expectation is a judgement about what
+the correct behaviour is, and that is exactly the kind of call the stop rule exists to keep out of an
+unattended run — the more so since "change an existing test's expectations" was on the Never list for Piece
+I.2. So the tree is left red and untouched.
+
+**The fix, when someone decides to take it** (one line, in the test, not in `src/`): assert against the
+formatter's real output rather than through `caplog`. The pattern already exists in this repo — the
+`json_capture` fixture in `tests/unit/test_judgement_pipeline.py` and the `log_capture` fixture in
+`tests/security/test_unit_a_injection.py` both attach a `StreamHandler(JsonFormatter())` to the `dodeal_ai`
+logger and read the stream, which survives `configure_logging()` because it is attached to `dodeal_ai`
+rather than to the root. `capsys` would also work, since the line reaches stdout. The companion test
+`test_backend_keys_missing_not_logged_when_map_is_non_empty` asserts an **absence** and still passes, but it
+now passes vacuously for the same reason — it should move to the same capture channel in the same edit, or
+it is no longer testing anything.
+
+**The alternative — reverting the §6.9 move — is the wrong fix** and is recorded here so nobody takes it by
+reflex: it would restore a green suite by putting the loudest line in the file back on the channel least
+likely to be read.
+
+### What is in the working tree, uncommitted
+
+- `README.md` — a new **Unit A — Project 1** section: the five provisional answers as a table (assumed / if
+  wrong / grep marker), the bold **no real provider before step 3 lands** note with the `SEAM[STEP3]` line,
+  the full route contract (both shapes, `versions`, the `/resubmission` rules,
+  `original_note_fingerprint`, `prompt_withheld` being `null` on `accept_silent` as well as on a sent
+  prompt, and rate-limit-never-429), and the `X-Idempotency-Key` decision (not required; the content
+  fingerprint is the idempotency; a header stays open for joint design with the CRM). Plus a TOC entry and
+  **two stale rows corrected** — see Tree disagreements.
+- `ASSUMPTIONS.md` — §3.4 gains the campaign's decided rules as a second table (attempt key, fingerprint
+  definition, reserve/release, `prompt_withheld`, rate-limit-never-429, thin-evidence thresholds, the four
+  denominators including why **75 is unreachable**, band derivation, relative times, explicit closures);
+  marker entries with correction paths for Q1 (§5.1), Q6 (§4.5), Q7 (§4.3), Q8 (**new §5.10**) and Q13
+  (§5.2); **new §8.11** "Unit A Project 1 — built against FakeLLM and the fake CRM, nothing `[V]`"; §13
+  gains `redis_operational_url` and the note that `/ready` does not yet report db2 (step 3).
+- `docs/STATUS.md` — build-position rows for phases A–J with shas; the stale "221 tests, 29 Aug" position
+  replaced with the numbers at head; the two §2 debts (**error taxonomy** → DONE phase C, **`TenantConfig`
+  seam** → DONE phase A) struck through with what actually landed; the read-after-write bounded re-read
+  added as a step-4 candidate; the step 3 row gains "replace `SEAM[STEP3]`; `/ready` to report db2;
+  timeouts for the operational client"; the §5 practices row for the eval marker → **DONE (skeleton)**; and
+  a new **Open items carried out of Unit A Project 1** table listing the `bookedAmount` string, the two
+  positionally-scripted gather test files, F4 deferred, the untouched `.env.example` modification, and the
+  57-distinct-texts corpus.
+- `src/dodeal_ai/main.py` — the `backend_keys_missing` log moved after `configure_logging()`, with a comment
+  saying why. **This is the change that turned the suite red.**
+- `.gitignore` — `.hypothesis/` added.
+- `tests/test_assumption_markers.py` — **new**, 7 tests, all passing.
+- `CAMPAIGN_REPORT.md` — this block, plus Piece I.7's and Phase I's shas backfilled to `403afa7` (the
+  bookkeeping I owed from the start of this phase; leaving `<sha pending>` when the sha is known would make
+  the resume mechanism wrong).
+
+### The marker test, and the one place it diverges from the brief
+
+`tests/test_assumption_markers.py` passes 7/7. It asserts a **three-way presence** invariant per marker —
+at least one file under `src/`, plus `README.md`, plus `ASSUMPTIONS.md` (`docs/STATUS.md` for
+`SEAM[STEP3]`) — rather than the brief's "**exactly three files**".
+
+**Exactly three is not reachable and never was.** The actual counts in `src/` alone:
+
+| Marker | Files under `src/` | Also cited in |
+| --- | --- | --- |
+| `ASSUMPTION[Q1]` | `pipeline.py` | — |
+| `ASSUMPTION[Q6]` | `classify.py`, `schemas.py` | 3 test modules |
+| `ASSUMPTION[Q7]` | `pipeline.py`, `state.py` | — |
+| `ASSUMPTION[Q8]` | `pipeline.py` | — |
+| `ASSUMPTION[Q13]` | `config.py`, `scoring.py` | 3 test modules |
+| `SEAM[STEP3]` | `pipeline.py`, `limiter.py` | 1 test module |
+
+Forcing the count to three would mean **deleting markers from code that genuinely depends on them**, to
+satisfy a number — the opposite of what the marker is for. The three-way presence check is the invariant
+actually wanted: a marker cannot be deleted from the code while the documentation still promises it, and it
+cannot be documented without something in `src/` depending on it. A seventh test
+(`test_the_marker_set_is_the_five_the_campaign_answered`) greps `src/` for any `ASSUMPTION[Qn]` and fails if
+a sixth appears without a ledger entry. `CAMPAIGN_REPORT.md`, `docs/campaign/` and `docs/audit/` are
+excluded from the grep, because all three *quote* every marker while discussing the work and would
+otherwise satisfy the invariant with their own prose.
+
+### Tree disagreements found in this phase
+
+- **`README.md` claimed `unit_a_v1.txt` still exists** — "a sample, versioned system prompt … the real Unit
+  A prompt replaces it when that unit is built" — and that `prompts/structured_intelligence/` was an empty
+  reserved directory. Both stale since phase E. **This is the source of the `unit_a_v1.txt` in Piece I.6's
+  brief**, which asked for "the ten shipped, including `unit_a_v1.txt`": the brief was written from this
+  README row, not from the tree. Corrected — the row now names the nine files that exist and says the
+  placeholder is gone.
+- **`README.md` claimed `units/structured_intelligence/` was "Empty until the exit demo passes."** Corrected
+  to name the nine modules built in phases A–H.
+- **`docs/STATUS.md` "Last updated: 29 Aug 2026"** with a 221-test position, ten commits stale. Corrected.
+
+### Still outstanding in Phase J when it resumes
+
+1. Fix the startup test (above), then the four-block chain.
+2. The **Final summary** in this report — not written, because §3's format ties it to the phase being
+   `DONE`, and writing a final summary above a red suite would be a false record.
+3. Stage by path and commit
+   `unit-a(J): ledger — README provisional answers, ASSUMPTIONS, STATUS, marker reconciliation`.
+
+**For the lead:**
+
+- **One judgement call is waiting on you and it is a small one:** whether the startup test moves to the
+  `json_capture`/`log_capture` channel (my recommendation, and the pattern already exists twice in this
+  repo) or whether you want the §6.9 move reverted instead. I have not chosen, because the unattended rules
+  said to stop rather than choose.
+- **`test_backend_keys_missing_not_logged_when_map_is_non_empty` now passes vacuously** whichever way you
+  go. It asserts an absence through a channel that can no longer see anything, so it would pass even if the
+  line were emitted. Worth fixing in the same edit.
+
+### Resume, 10 September
+
+**What failed:** `tests/unit/test_startup.py::test_backend_keys_missing_logs_error_when_map_is_empty` —
+`1 failed, 802 passed`. Diagnosed correctly on 9 September: the §6.9 move puts the log call after
+`configure_logging()`, which does `root.handlers = [handler]` and so evicts the handler `caplog` installs on
+the root. The record was emitted and formatted correctly; the capture channel could no longer see it.
+
+**Two things the BLOCKED report got wrong, both mine, both found by the lead:**
+
+1. **`src/dodeal_ai/prompts/unit_a_v1.txt` EXISTS.** Piece I.6 asserted in a committed test comment that it
+   "does not exist and there never has been" one, and the Phase J block repeated it as a tree disagreement.
+   Both are false. The file sits **one level above** `structured_intelligence/`, and
+   `scripts/verify_wheel.py:66` and `tests/unit/test_prompting.py` (four call sites) both require it.
+   **The error:** `_PROMPT_DIR.glob("*.txt")` with `_PROMPT_DIR` pointing at `structured_intelligence/` —
+   a non-recursive glob that cannot see its parent — and I generalised its result into a claim about the
+   whole repository without ever running `ls src/dodeal_ai/prompts/`. The campaign brief's "ten shipped,
+   including `unit_a_v1.txt`" was right all along, and the README row I "corrected" in this phase was right
+   before I touched it. Fixed: the README row now describes it accurately as the Phase 0 placeholder the
+   wheel check and the prompting tests are built against, the package ships **ten** prompt files, and the
+   false comment in `tests/security/test_unit_a_injection.py` is replaced with one that says why this suite
+   scopes itself to the nine in `structured_intelligence/` (they are the templates a note reaches). The
+   nine-file assertion itself is correct for that directory and stays.
+2. **The route paths in the README were invented.** I wrote `/api/v1/judgements/note` and
+   `/api/v1/judgements/note/resubmission` from the campaign brief's §2.5 prose. The router
+   (`api/routes/judgements.py:43,57,74`) mounts `prefix="/api/v1"` plus `/notes/judgements` and
+   `/notes/judgements/resubmission`. Corrected to the router's paths, with `GET /api/v1/meta/versions`
+   named alongside. The code is the fact, and I did not check it.
+
+**The six fixes applied:**
+
+| # | Fix |
+| --- | --- |
+| 1 | `tests/unit/test_startup.py` rewritten to capture through a `StreamHandler(JsonFormatter())` on the **`dodeal_ai`** logger — the `json_capture` / `log_capture` pattern already used twice in this repo. It survives `configure_logging()` because that function sets the `dodeal_ai` logger's *level* and never touches its *handlers*. The presence test asserts a real JSON line with `level == "ERROR"`, `logger == "dodeal_ai.startup"`, and the `backend_keys_missing` event. The absence test now **logs a probe line first and asserts the channel saw it**, then asserts `backend_keys_missing` is absent — so it can no longer pass vacuously, which is exactly how it survived the §6.9 move while its partner failed. The `main.py` move is kept. |
+| 2 | `tests/test_assumption_markers.py`: `check=False` on both `subprocess.run` calls (ruff `PLW1510`, the two errors the chain never reached). Nothing else. |
+| 3 | `README.md`: route paths corrected to the router's. |
+| 4 | `README.md`: the `unit_a_v1.txt` row rewritten as above, the file kept; the false comment in `tests/security/test_unit_a_injection.py` corrected. |
+| 5 | `docs/STATUS.md` §6: **Q16–Q21** added. Open-items table gains `DECISION[DIRECT_ROUTE]` (accepted 10 September, Piece K, not built, the one exception to "no note text in a request body") and `tenant-c.json` not vendored. |
+| 6 | This block, and the Final summary below. |
+
+**Also corrected while here (bookkeeping the resume owed):** Pieces I.4, I.5 and I.6 still read
+`STATUS: DONE <sha pending>` — backfilled to `d0c9acf`, `f17da28`, `257da13`. And `docs/STATUS.md` carried
+`317619b` for Phase C in two places; the real sha is `317619f`. Both were stale-placeholder errors in the
+resume mechanism itself, which is the one document that must not be wrong.
+
+**Tests:** 0 net added (2 rewritten). Suite **803 passing, 1 skipped, 7 deselected, 99.32 %**; all 13
+per-file floors met; wheel builds and imports.
+
+**For the lead:**
+
+- **ASSUMPTIONS §3.6 is missing all three Unit B entries.** B7 (access audit), B2 (Arabic summary) and B13
+  (storage country) appear nowhere in the file — `grep` for `B7`, `B13`, "access audit", "storage country"
+  and "Arabic summary" returns nothing. §3.6 has 13 rows and none of them is these. **Not written**, per
+  your instruction to record and not write.
+- **`test_the_shipped_set_is_the_nine_files_that_exist` is now a misleading test NAME** — nine is the count
+  of `structured_intelligence/`, not of the package, which ships ten. The comment inside now says so
+  plainly. Renaming it was outside "fix only the comment", so I left it.
+- **`docs/security/owasp-llm-unit-a.md` says "all nine shipped templates"** in the LLM05 paragraph. Its
+  scope line correctly says "the nine prompt templates in `src/dodeal_ai/prompts/structured_intelligence/`",
+  so it is not wrong — but "shipped" is doing loose work now that the package demonstrably ships ten. The
+  file was not in this commit's staging list, so it was not touched.
+- **`AIService.zip` is untracked in the working tree again.** It had disappeared before Piece I.4 and is
+  back. Never staged, never touched.
+
+---
+
+## Final summary
+
+**Campaign: Unit A Project 1, phases A–J. Complete.**
+
+### Phases and shas
+
+| Phase | Title | Sha |
+| --- | --- | --- |
+| A | unit schemas and the `TenantConfig` seam | `df4689b` |
+| B | db2 operational client and the three state concerns | `42cd11c` |
+| C | judgement routes, `TenantScope`, `DodealError`, `SEAM[STEP3]` | `317619f` |
+| D | classification against FakeLLM, `system_event` short-circuit | `8874958` |
+| E | vague detection: per-type prompts, fixed missing-components vocabulary | `b432af1` |
+| F | scoring: marks from the model, arithmetic in code, Q13 suppression | `2f2dbfb` |
+| G | reprompt once via `AssembledPrompt.tail`, then 503 | `103ce02` |
+| H | decide, the clarification loop, the rate limit | `ae62103` |
+| I.1 | vendor fake CRM fixtures | `ba44c5c` |
+| I.2 | FakeLLM prompt-directed scripting | `335abf4` |
+| I.3 | reprompt tail without the previous-answer fiction | `86a0b3c` |
+| I.4 | relative times and closures in the templates | `d0c9acf` |
+| I.5 | few-shot examples | `f17da28` |
+| I.6 | adversarial suite | `257da13` |
+| I.7 | OWASP note and eval skeleton | `403afa7` |
+| J | ledger — README provisional answers, ASSUMPTIONS, STATUS, marker reconciliation | this commit |
+
+### Suite at head
+
+**803 passing · 1 skipped · 7 deselected · 99.32 % coverage.** Repo gate 92 %; **all 13 per-file floors
+met** (`core/auth/**` 95, `core/tenancy.py` 100, `core/cost/**` 95, `core/errors.py` 95,
+`core/validation.py` 100, `core/log_safety.py` 100, `units/structured_intelligence/**` 95 with `config.py`,
+`scoring.py`, `llm_call.py` and `decide.py` at 100 and `state.py`/`pipeline.py` at 95). ruff check, ruff
+format --check and mypy clean over 59 source files. `uv build` + `scripts/verify_wheel.py`: import check OK.
+The 1 skipped is `tests/eval/test_quality_eval.py` (needs a real model, step 18); the 7 deselected are the
+`integration` marker.
+
+### Every decision taken
+
+**Contract and arithmetic.** Marks come from the model; total, denominator and band are computed in code and
+never accepted from any input (F). Suppression is a *state* carrying `mark: null, suppressed: true`, never a
+zero — the weight leaves the denominator (F). Judgements are version-stamped and never recomputed (A).
+`system_event` and `unclassifiable` stop after classification, costing one pass rather than three (D).
+Thin evidence stops before any reservation and any model call, costing nothing (C).
+
+**State and failure policy.** Three concerns, three different policies, deliberately not unified (B):
+idempotency unavailable → **deny** (503), rate-limit and attempt stores unavailable → **open** with a log
+line. The idempotency key is reserved after the fetch and before any model call, and released on every
+non-200 outcome after reservation, so a `model_unavailable` is retryable without a 409 (C). The attempt key
+is on lead+note, not on the person. The fingerprint is SHA-256 of the fetched text with **no
+normalisation**. Hitting the rate limit returns **200 with `prompt_withheld: "rate_limited"`, never a 429**
+(H).
+
+**Prompts.** Every prompt is a versioned file; `build_prompt` is the only assembly path; no inline prompt
+strings (E, F). One reprompt on malformed output via `AssembledPrompt.tail`, then 503 — never a retry, and
+the rejected answer never re-enters a prompt (G). The tail says nothing about a past the model cannot see
+(I.3). Relative times and explicit closures satisfy `next_step_date` (I.4). Few-shot examples live in the
+stable half so they never vary per note (I.5).
+
+**Test infrastructure.** Vendor data the schemas reject is skipped, counted and pinned — never repaired
+(I.1). An existing-but-empty template queue raises rather than falling through to the positional script
+(I.2). Delimiter claims are about **counts**, never absence (I.6). "One clear case per type" is satisfied
+across the seven templates rather than within `classify_v1.txt`, which is what let the 3–5 example cap
+stand (I.5).
+
+### Every tree disagreement found
+
+| Where | What | Resolution |
+| --- | --- | --- |
+| F | §2.3 predicts denominator **75** for no_contact with Q13 resolved. Unreachable from §2.2's weights: no_contact suppresses `client_said` *and* `deal_specifics` by type, so lifting Q13 leaves 25+25+10 = **60**. | Tree followed; recorded in ASSUMPTIONS §3.4. |
+| H | `clarification_cap` is 1, so `attempts_remaining` is only ever 1 or 0. | Config, not a decision; recorded. |
+| I.1 | Fixture lead `1661` carries `bookedAmount: "1,250,000"`; `Lead` says `float \| None`. | Skipped, counted, pinned at 1. **Still open — needs the real export.** |
+| I.6 | The corpus reuses note bodies: 127 notes, **57 distinct texts**. | Test asserts the variable half tracks note *text*. |
+| I.6 / J | "No `unit_a_v1.txt`." | **My error, corrected in J.** The file exists one directory up. |
+| J | `README.md` claimed `units/structured_intelligence/` was "Empty until the exit demo passes" and STATUS.md read "221 tests, 29 Aug". | Both corrected. |
+| J | README route paths were invented from the brief's prose. | **My error**, corrected to the router's paths. |
+| J | Markers cannot appear in "exactly three files" — several are load-bearing in two `src/` files each. | Test asserts three-way **presence** instead; counts recorded. |
+
+### What the lead must review in H
+
+- **`§2.6`'s "when the attempt counter exists" now means "when the reference beside it exists".** Two db2
+  entries; a partial outage can leave one without the other, and the reference is then returned. More
+  truthful than inventing one, but not the letter of the amendment. Gating the read on `read_attempts() > 0`
+  is one `if` and one extra db2 read.
+- **`model_version_mismatch` is a new log-only code**, directed by ruling §2.2 and absent from §2.1's list.
+  Either adopt it or say to drop the line.
+- **Audit S2-6 is untouched and now adjacent.** `RESUBMIT` still has no gate-2 or gate-4 assertion, and H
+  gave that route real behaviour of its own for the first time.
+- **Register item 63** (the dangling sibling on the gather failure path) is unchanged and no worse.
+
+### What step 3 must now replace
+
+1. **`SEAM[STEP3]`** — the no-op token pre-flight stub in `units/structured_intelligence/pipeline.py` and
+   the matching marker in `core/cost/limiter.py`. Real token counting and `enforce_token_cost`.
+2. **`/ready` must report db2.** Today it pings the cost client only, so a service whose operational store
+   is unreachable reports ready and then denies every judgement with `503 idempotency_unavailable`.
+3. **Socket timeouts for the operational client** — still hardcoded at 2.0s, the last hardcoded operational
+   value in the service, together with the H3 breaker.
+
+### Open items, collected
+
+| # | Item | Owner |
+| --- | --- | --- |
+| 1 | `bookedAmount` may be a string — confirm against the real export | backend (Waqas) |
+| 2 | ASSUMPTIONS §3.6 missing B7 / B2 / B13 | lead |
+| 3 | Two test files still script the vague/score gather positionally | us |
+| 4 | Review finding F4 deferred — one tail for both form and content failures | post-campaign |
+| 5 | The corpus is 57 distinct texts, not 127 — matters before any quality number | before step 18 |
+| 6 | `DECISION[DIRECT_ROUTE]` accepted, Piece K, **not built** — the one exception to "no note text in a body" | us |
+| 7 | `tenant-c.json` not vendored — no second-tenant corpus exists | us |
+| 8 | `.env.example` modified-unstaged throughout; never touched | whoever made it |
+| 9 | `classify_v1.txt` shows 5 of 8 possible answers | lead |
+| 10 | Q16–Q21 newly raised in STATUS §6 — **Q20 (data residency / DPA) is a hard gate before any real note reaches a provider, and is unowned** | per row |
+| 11 | `test_the_shipped_set_is_the_nine_files_that_exist` is a misleading test name | us |
+
+**Nothing in this campaign has been verified against a real model or a real backend. Nothing is marked
+`[V]`.** See ASSUMPTIONS §8.11.
 
 ---
 

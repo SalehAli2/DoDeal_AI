@@ -20,12 +20,18 @@ from dodeal_ai.middleware.request_id import RequestIDMiddleware
 async def lifespan(app: FastAPI):
     # Fail closed: if required config (signing key) is absent, refuse to start.
     settings = get_settings()
+    configure_logging()
     if not settings.dd_api_keys:
         # Not fail-closed: the gate chain and /ready must work before a key is
         # provisioned (Step 0). Loud so a deployment with no backend keys at
         # all is never silently discovered later as every data call 401ing.
+        #
+        # AFTER configure_logging(), deliberately (audit §6.9). Emitted before
+        # it, this line went out through whatever handler logging happened to
+        # have -- unformatted, and invisible to a collector that only parses the
+        # JSON lines every other startup event uses. The loudest line in the
+        # file was the one least likely to be seen.
         logging.getLogger("dodeal_ai.startup").error("backend_keys_missing count=0")
-    configure_logging()
     yield
     # Release the connection pools on shutdown. from_url opens no socket, so
     # constructing a client here only to close it costs nothing, and closing

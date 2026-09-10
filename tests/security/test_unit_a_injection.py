@@ -402,13 +402,21 @@ _SECRET_SHAPED = re.compile(
 
 
 def test_the_shipped_set_is_the_nine_files_that_exist():
-    # The campaign brief for this piece says "the ten shipped, including
-    # unit_a_v1.txt". There is no unit_a_v1.txt in the tree and there never has
-    # been -- the set is nine. The code is the fact (campaign §0); the
-    # disagreement is recorded in CAMPAIGN_REPORT.md, Piece I.6.
+    # The campaign brief says "the ten shipped, including unit_a_v1.txt", and
+    # it is right: `unit_a_v1.txt` DOES exist, one level up at
+    # src/dodeal_ai/prompts/. It is the Phase 0 placeholder that
+    # scripts/verify_wheel.py and tests/unit/test_prompting.py are built
+    # against -- generic, not Unit A's, and not used by the pipeline.
+    #
+    # This suite scopes itself to structured_intelligence/ on purpose: these
+    # are the templates a NOTE reaches, and they are the ones an injection can
+    # travel through. Nine is the count of that directory, not of the package.
+    # (An earlier version of this comment claimed the file did not exist. It
+    # was wrong -- the glob below never looks above its own directory, and the
+    # claim was generalised from it. See CAMPAIGN_REPORT.md, Phase J.)
     assert len(_SHIPPED) == 9
-    assert "unit_a_v1.txt" not in _SHIPPED
     assert "reprompt_tail_v1.txt" in _SHIPPED
+    assert "unit_a_v1.txt" not in _SHIPPED  # it is the PARENT directory's
 
 
 @pytest.mark.parametrize("template", _SHIPPED)

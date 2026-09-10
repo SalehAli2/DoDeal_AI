@@ -17,6 +17,7 @@ DODEAL AI is the intelligence layer that sits in front of the DODEAL CRM. It is 
 - [Testing](#testing)
 - [Code quality and tooling](#code-quality-and-tooling)
 - [Continuous integration](#continuous-integration)
+- [Unit A — Project 1 (note judgement)](#unit-a--project-1-note-judgement)
 - [Security model](#security-model)
 - [Documentation index](#documentation-index)
 - [Contributing](#contributing)
@@ -298,8 +299,11 @@ dodeal-ai/
 
 | File | Purpose |
 | --- | --- |
-| `unit_a_v1.txt` | A sample, versioned system prompt used to build and test the prompt builder. It is a placeholder; the real Unit A prompt replaces it when that unit is built. |
-| `assistant/`, `call_intelligence/`, `sales_automation/`, `structured_intelligence/` | Empty directories reserved for each unit's future versioned prompts. |
+| `unit_a_v1.txt` | A **generic placeholder from Phase 0** — a small, versioned system prompt used to build and exercise the prompt builder itself. It is **not** one of Unit A's nine templates and is not used by the judgement pipeline; it sits one level above `structured_intelligence/` and is deliberately kept, because `scripts/verify_wheel.py` asserts it is present in the installed package (the wheel-packaging check) and `tests/unit/test_prompting.py` builds every one of its prompt-assembly and delimiter-injection tests against it. Do not delete it: removing it breaks the wheel check and four prompting tests. |
+| `structured_intelligence/` | **Unit A's nine shipped templates.** `classify_v1.txt`; six per-type vague templates (`vague_no_contact_v1.txt`, `vague_callback_v1.txt`, `vague_discovery_v1.txt`, `vague_viewing_v1.txt`, `vague_negotiation_v1.txt`, `vague_won_lost_v1.txt`); `score_v1.txt`; and `reprompt_tail_v1.txt`, the trusted trailing instruction the single reprompt appends. Seven of the nine carry few-shot examples; `score_v1.txt` deliberately does not, since its examples would have to be marks. No template contains a weight, threshold, band, total, tenant name, host, or credential — asserted per file in `tests/unit/test_scoring.py` and `tests/security/test_unit_a_injection.py`. |
+| `assistant/`, `call_intelligence/`, `sales_automation/` | Empty directories reserved for each unit's future versioned prompts. |
+
+So the package ships **ten** prompt files: the nine Unit A templates plus the Phase 0 placeholder above them. Prompts are code: every one is a tracked, versioned file, `build_prompt` is the only assembly path, and there are no inline prompt strings anywhere in `src/`.
 
 Ships inside the package (not a repo-root directory) so an installed wheel has it. `DODEAL_PROMPTS_DIR` overrides the location for local prompt iteration only — see the configuration reference below.
 
@@ -323,7 +327,7 @@ Root contracts owned by the backend, kept inside the package for the same reason
 
 | Directory | Purpose |
 | --- | --- |
-| `structured_intelligence/` | Unit A, fast synchronous note scoring. Empty until the exit demo passes. Read-only; judgements are returned to the caller, which persists them. |
+| `structured_intelligence/` | Unit A, fast synchronous note scoring. **Built** (campaign phases A–J): `schemas.py`, `config.py` (the TenantConfig seam — the only source of a weight, threshold, cap or TTL), `state.py` (the three db2 concerns), `classify.py`, `vague.py`, `scoring.py`, `decide.py`, `llm_call.py` (the single untrusted-parse boundary), and `pipeline.py` (the order the whole unit runs in). Read-only; judgements are returned to the caller, which persists them. |
 | `call_intelligence/` | Unit B, slow asynchronous call analysis. Empty. |
 | `assistant/` | Unit C1, the conversational assistant. Empty. |
 | `sales_automation/` | Unit C2, deferred until after the pilot. Empty. |
@@ -454,6 +458,49 @@ All configuration is read through `Settings` in `core/config.py`. Every variable
 | 6 | Wheel build + install/import check | `uv build --wheel` then `uv run python scripts/verify_wheel.py dist/*.whl` |
 
 Checks 1-4 are the same ones run locally by the stopping chain and by the pre-commit hooks. Check 5 exists because the 92% gate is an average and can hide one security module rotting; check 6 is the only one that tests the artifact a deploy receives rather than the source tree.
+
+## Unit A — Project 1 (note judgement)
+
+> **No real provider before step 3 lands.** `get_llm_client()` still raises, and the factory has **no test switch** — one was forbidden for the whole build and remains forbidden. `FakeLLM` is injected through `app.dependency_overrides` and is the only model any of this has run against. The `SEAM[STEP3]` marker sits at the token pre-flight point in `units/structured_intelligence/pipeline.py` and in `core/cost/limiter.py`: it is a **no-op stub today**, and step 3 is what replaces it. Nothing in this unit is marked `[V]` — see `ASSUMPTIONS.md` §8.11.
+
+### Provisional answers
+
+Five questions were answered provisionally so the unit could be built. Each is marked in the code with a greppable token, so the blast radius of a wrong answer is `grep -r "ASSUMPTION\[Qn\]" src/`.
+
+| # | Assumed | If wrong | Grep marker |
+| --- | --- | --- | --- |
+| **Q1** | The CRM forwards the **end user's JWT** and tenant Host, so the judgement route runs Gate 1 → Gate 2 → Gate 4 exactly as the probe route does. | The principal source swaps behind the D1 seam. `judge_note` takes a `TenantScope`, not a `RequestContext`, so the pipeline does not change — only what builds the scope. A service principal would collapse every salesperson into one rate-limit bucket; that is the first line to re-read. | `ASSUMPTION[Q1]` |
+| **Q6** | `/leads/{id}/notes` **may** return timeline events as well as notes, so `system_event` is a real note type: decided first, suppressed `not_scorable`, never vague-checked, never scored. | Nothing to undo — the type costs one enum member and a branch that never fires. We do not need the answer to be correct, only to know how often it happens. | `ASSUMPTION[Q6]` |
+| **Q7** | The JWT `sub` and a note's `author_id` are **different id spaces**, and nothing joins them. The rate limit keys on the verified `sub`; the judgement reports `author_id` as the backend gave it. | If they match, nothing breaks — the join simply becomes possible, which is what per-rep coaching over time would need. If they differ, the correction is a mapping table and it is the backend's to provide. | `ASSUMPTION[Q7]` |
+| **Q8** | The note being judged is on **page one** of the lead's notes (newest first, 25 per page), so one un-paged fetch finds it. | The note is matched **by id**, never by position, so a miss is a clean `404 note_not_found` — never the wrong note. The fix is query parameters in `tools/leads.py` at **step 4**, not a pipeline change. Watch for a rise in `note_not_found`. | `ASSUMPTION[Q8]` |
+| **Q13** | **No lead field is confirmed to carry the business line**, so `deal_specifics` is suppressed for every note type and the denominator is 80, not 100. Suppressed is a *state*, not a zero — the weight leaves the denominator. | Set `business_line_field` and `deal_specifics_applicable` in `units/structured_intelligence/config.py`; nothing else moves. Past judgements are **not** recomputed — they carry `config_version` so a reader can see which rubric produced them. | `ASSUMPTION[Q13]` |
+
+`tests/test_assumption_markers.py` fails if any of these markers stops appearing in `src/`, this README, and `ASSUMPTIONS.md` together — so a marker cannot be deleted from the code while the documentation still claims it is there.
+
+### The route contract
+
+`POST /api/v1/notes/judgements` and `POST /api/v1/notes/judgements/resubmission` (the router in `api/routes/judgements.py` carries the `/api/v1` prefix; `GET /api/v1/meta/versions` returns the four version strings for this deployment and tenant). Body is **two integers** and nothing else (`{"lead_id": int, "note_id": int}`, `extra="forbid"`): the note is already saved in the CRM and is fetched by id, so **note text is never accepted in a request body**.
+
+A `200` carries one of two shapes, never a mixture:
+
+- **Judged** — `analysis` (note type, vagueness, missing components, the clarification question, reasoning), `score` (total, band, denominator, and all five components in fixed order with `mark: null, suppressed: true` on the suppressed ones), `decision` (action, whether a prompt was sent, `prompt_withheld`, attempt counts), `suppressed: null`, `versions`, `request_id`.
+- **Suppressed** — `score: null`, `decision: null`, `suppressed: {reason, detail_code}`, and `analysis` reduced to the classifier's answer if one was made. Either the note was too thin to judge (before any model call, costing nothing) or it was not scorable (`system_event`, `unclassifiable`).
+
+Both carry `versions`: `rubric_version`, `prompt_version`, `model_version` as the answering call reported it, and `config_version`. **The band and the total are derived in code and never accepted from any input** — a `band` or `total` field in a model answer is malformed output.
+
+`/resubmission` returns the same shape with `decision.prompt_sent` always `false` and `prompt_withheld: "resubmission"`; the attempt counter is read, never incremented; `decision.original_note_fingerprint` carries the first-prompted fingerprint or `null`. An edited note is a new fingerprint and therefore a new judgement, not a `409`.
+
+`prompt_withheld` is `null` both when a prompt was sent and when the decision was `accept_silent` — there was nothing to withhold. It is set only when a prompt that *would* otherwise have been sent was not, and then to one of `resubmission`, `attempt_cap`, `rate_limited`, `nothing_to_ask`.
+
+**Hitting the clarification rate limit is not a `429`.** It returns `200` with `prompt_withheld: "rate_limited"`: the judgement was still produced and is still worth returning, and a `429` would tell the CRM the request failed when it did not.
+
+Error bodies are a fixed `{detail, reason, request_id}`: `invalid_request` 422 · `note_not_found` 404 · `lead_not_found` 404 · `duplicate_request` 409 · `idempotency_unavailable` 503 · `backend_unavailable` 503 · `model_unavailable` 503 · `malformed_output` 503.
+
+### `X-Idempotency-Key` — not required
+
+The campaign decided **not** to require a caller-supplied idempotency header. **The content is the idempotency:** the key is `idem:{tenant}:judge_note:{note_id}:{fingerprint}`, where the fingerprint is a hex SHA-256 of the fetched note text as UTF-8 with no normalisation. It is reserved after the fetch and before any model call, and released on every non-200 outcome after reservation — so a `model_unavailable` can be retried without meeting a `409` for work that was never done.
+
+This is the safer default: a caller that forgets the header, or reuses one, cannot cause a duplicate paid judgement or suppress a legitimately different one. An edited note is a different fingerprint and is judged again, which is the behaviour the clarification loop needs. **A header remains open for joint design with the CRM** if they want caller-side retry semantics of their own; it would layer on top of the fingerprint, never replace it. If the operational store is unreachable the route **denies** (`503 idempotency_unavailable`) rather than risking duplicate paid work — the one fail-closed policy among the three state concerns.
 
 ## Security model
 

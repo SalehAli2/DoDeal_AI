@@ -7,7 +7,7 @@ not duplicate it. This file is about the *build*; ASSUMPTIONS is about the *cont
 Update rule: every commit that changes a row here updates this file in the same commit. If a row's status
 and the tree disagree, the tree is right and this file is wrong — fix the file.
 
-**Last updated:** 29 Aug 2026, after D2 part 3 — Celery deleted, arq skeleton in; the async migration is complete (head of `scaffold/core-governance-homes`, CI green).
+**Last updated:** 10 Sep 2026, after Unit A Project 1 phases A–J — the judgement pipeline is built end to end against `FakeLLM` and the vendored fake CRM (head of `scaffold/core-governance-homes`, CI green). **Nothing in Unit A has been verified against a real model or a real backend; nothing is marked `[V]`** (ASSUMPTIONS §8.11).
 
 Status vocabulary: `DONE` (committed, CI green) · `PLANNED` (prompt written, not run) · `NEXT` (the next step
 in the sequence) · `BLOCKED <on>` · `PROPOSED` (decision written, not accepted) · `OPEN` (question asked, no
@@ -32,14 +32,38 @@ answer) · `UNASKED` (question identified, not yet sent).
 | Audit fix 6a — code housekeeping (see §4 for contents) | DONE | `e138149` |
 | Audit fix 6b — repo/process housekeeping + ledger corrections (see §4, §7) | DONE | `4805dc1` + `1d795d0` |
 | Async migration (D2, commits a–c) — cost path on `redis.asyncio`; gates, probe and `/health` `async def`; Celery deleted, arq skeleton in | DONE | `d37945b` + `87cab6f` + D2 part 3 |
-| Step 3 — token counters (`enforce_token_cost`, pre-flight read, breaker, TTL fix, Lua under fakeredis) | NEXT | — |
-| Step 4 — tool layer: query params, paging, error taxonomy, retry policy, pooled transport, per-item validation | after step 3 | — |
+| **Unit A Project 1 — phase A** — unit schemas + the `TenantConfig` seam | DONE | `df4689b` |
+| **Phase B** — db2 operational client; idempotency, rate limit, attempt counter | DONE | `42cd11c` |
+| **Phase C** — judgement routes, `TenantScope`, `DodealError`, `SEAM[STEP3]` stub | DONE | `317619f` |
+| **Phase D** — classification against FakeLLM, `system_event` short-circuit | DONE | `8874958` |
+| **Phase E** — vague detection: per-type prompts, fixed missing-components vocabulary | DONE | `b432af1` |
+| **Phase F** — scoring: marks from the model, arithmetic in code, Q13 suppression | DONE | `2f2dbfb` |
+| **Phase G** — reprompt once via `AssembledPrompt.tail`, then 503 | DONE | `103ce02` |
+| **Phase H** — decide, the clarification loop, the rate limit | DONE | `ae62103` |
+| **Phase I** — prompt hardening, adversarial suite, OWASP checkpoint, eval marker (7 pieces) | DONE | `ba44c5c` · `335abf4` · `86a0b3c` · `d0c9acf` · `f17da28` · `257da13` · `403afa7` |
+| **Phase J** — the ledger commit: README provisional answers, ASSUMPTIONS, STATUS, marker reconciliation | DONE | this commit |
+| Step 3 — token counters (`enforce_token_cost`, pre-flight read, breaker, TTL fix, Lua under fakeredis). **Now also: replace `SEAM[STEP3]` (the no-op pre-flight stub in `units/structured_intelligence/pipeline.py`); `/ready` to report db2; socket timeouts for the operational client.** | NEXT | — |
+| Step 4 — tool layer: query params, paging, error taxonomy, retry policy, pooled transport, per-item validation. **Now also: read-after-write bounded re-read on the note fetch (candidate — see §2 debts).** | after step 3 | — |
 | Steps 5–13 | per ed3 §15 | — |
 | Step 0 — test tenant + key + joint call | BLOCKED on backend (Waqas) | — |
 | Step 14+ | BLOCKED on step 0 | — |
 
-Suite at head: 221 tests, 98.4% coverage (total floor 92, plus per-file floors on the deny-path modules),
-ruff/format/mypy clean, wheel installs and imports in a clean venv.
+Suite at head: **803 tests passing, 1 skipped, 7 deselected; 99.32% coverage** (total floor 92, plus 13
+per-file floors on the deny-path and judgement modules), ruff/format/mypy clean, wheel installs and imports
+in a clean venv. The skipped test is `tests/eval/test_quality_eval.py`, which needs a real model (step 18);
+the deselected 7 are the `integration` marker.
+
+### Open items carried out of Unit A Project 1
+
+| Item | Who / when |
+| --- | --- |
+| **`bookedAmount` may be a string.** Fixture lead `1661` carries `"1,250,000"` where `Lead.bookedAmount` is `float \| None`. The loader skips and counts it; the count is pinned at 1. **Confirm against the real export** — if the backend really sends that, `Lead` is wrong today and the real `LeadsClient` will raise on that lead in production. | backend (Waqas); ASSUMPTIONS §4.6 already asks for the `bookedAmount` contract |
+| **Two test files still script the vague/score gather positionally:** `tests/unit/test_judgement_pipeline.py` and `tests/unit/test_judgement_routes.py` (both via a local `_happy_path()`). They pass because `asyncio.gather` steps its tasks in argument order and nothing before the fake suspends — a scheduling accident, not a guarantee. `FakeLLM.script_for` (phase I.2) is the fix; converting them is its own commit. | us, unscheduled |
+| **Review finding F4 deferred:** one reprompt tail serves both form failures and content failures; a second tail selected by error class would say something more useful. | post-campaign batch |
+| **`.env.example` has been modified-unstaged in the working tree throughout the campaign** and was deliberately never touched (campaign §0.8 forbids it). Someone should look at what that change is and either commit or discard it. | whoever made it |
+| **The vendored corpus is 127 notes carrying only 57 distinct texts.** Harmless for the structural eval; misleading for any quality number computed over it. | before step 18 |
+| **`DECISION[DIRECT_ROUTE]` — accepted 10 September, to be built in Piece K. Not built.** It is **the one exception to "no note text in a request body"**: every route that exists today takes two integers and fetches the note by id (Design A), and this decision admits a route that does not. Nothing in the tree implements it yet, and §7 of the campaign prompt still forbids it — so the prohibition and the decision co-exist until K lands and the prohibition is amended in the same commit. Whoever builds K must state, in the same commit, what stops the direct route becoming the default path. | us, Piece K |
+| **`tenant-c.json` is not vendored.** Only `tests/fixtures/fake_crm/tenant-a.json` exists. Any test that needs a second tenant's corpus — cross-tenant isolation over real-shaped data, or a per-tenant config that actually differs — has nothing to read. Fixture tenants are `tenant-a` / `tenant-b` by convention, so a second corpus would be `tenant-b.json`; `tenant-c.json` is named here because that is how it was raised. | us, unscheduled |
 
 ---
 
@@ -71,8 +95,19 @@ ruff/format/mypy clean, wheel installs and imports in a clean venv.
 | D2 — one execution model | All-async: `redis.asyncio` on the request path, `async def` routes, workers on `arq` (an async-native, Redis-backed runner; a Streams consumer we own is the fallback) instead of Celery; `celery_app.py` deleted, not filled | ACCEPTED · engineering-only | Step 3 (cost client type), step 6, Unit B step 4 |
 
 ### Smaller design debts (fold into the step that first needs them)
-- Error taxonomy: one `DodealError(reason_code, http_status, gate)` base + one handler — step 4 or step 6.
-- `TenantConfig` seam (per-tenant weights/thresholds/catalogues, version-stamped) — before step 9.
+- ~~Error taxonomy: one `DodealError(reason_code, http_status, gate)` base + one handler — step 4 or step 6.~~
+  **DONE — phase C** (`317619f`). `core/errors.py` carries the base and one handler; every client-visible
+  reason code in Unit A goes through it with a fixed `{detail, reason, request_id}` body.
+- ~~`TenantConfig` seam (per-tenant weights/thresholds/catalogues, version-stamped) — before step 9.~~
+  **DONE — phase A** (`df4689b`). `units/structured_intelligence/config.py` is the only import path for a
+  weight, threshold, cap or TTL; `get_tenant_config(tenant)` returns the frozen default for every tenant,
+  version-stamped `tenant-cfg-default-1`. Per-tenant *variation* is still future work — the seam exists,
+  the values are one set.
+- **Read-after-write bounded re-read on the note fetch (candidate) — step 4.** The CRM calls us immediately
+  after saving a note. If the backend read is served by a replica, the note may not be there yet and the
+  caller gets `404 note_not_found` for a note that exists. Not observed — it cannot be, against a fake
+  backend — and deliberately not pre-solved: a blind re-read would double the read cost of every genuine
+  404. Decide it at step 4 with the paging work, when there is a real backend to measure against.
 - Cost accounting event (tenant, subject, unit, operation, tokens in/out, cached, model) alongside the
   enforcement counters — step 3 or step 14.
 - `Run` abstraction for aggregates (bound → refuse or execute → result) so background execution later does not
@@ -161,7 +196,7 @@ floors being the real gate; commit this STATUS file; apply the ledger correction
 | Secret-rotation runbook | fix 6b | DONE (`docs/runbooks/secret-rotation.md`) |
 | Metrics + tracing (OTel; `LLMResponse` fields already aligned) | step 6, after D2 | at the step |
 | Circuit breaker on Redis | step 3, after D2 | at the step |
-| Eval set as a `pytest -m eval` marker (structure vs FakeLLM in CI; quality vs real model on manual trigger) | step 13 | at the step |
+| Eval set as a `pytest -m eval` marker (structure vs FakeLLM in CI; quality vs real model on manual trigger) | phase I.7 | **DONE (skeleton)** — marker registered in `pyproject.toml`; `tests/eval/test_structural_eval.py` runs all 127 corpus notes and all 27 timeline events through the pipeline in the default suite; `tests/eval/test_quality_eval.py` is a skipped placeholder awaiting a real model (step 18). The quality half is the part still outstanding. |
 | Contract tests against the backend on a schedule | step 0 (needs a key) | at the step |
 | Graceful shutdown check under a real orchestrator | first deploy | at the step |
 | Log retention (90+ days) and encryption — BRD non-functional requirements | business + DevOps | no owner |
@@ -191,6 +226,12 @@ Sent to Waqas (one message, 26 Aug) unless marked UNASKED.
 | Q13 | Two business lines, one rubric (§5.2): which lead field identifies the line; checklist per line | Business (answerable from the sample) | OPEN | Step 9 |
 | Q14 | Written salary firewall (§5.6) | Business | OPEN | Before any write path exists |
 | Q15 | Evaluation data: 300–500 notes + 50 hand-scored; which tenant (127 vs ~9,000 notes) | Business | OPEN | Step 17, step 26 |
+| Q16 | What is the CRM's timeout on its call to us, and does it **retry synchronously** if we are slow? Three model calls plus two backend reads is not a sub-second route, and a synchronous retry against a route that reserves an idempotency key changes what the second attempt sees — it meets a `409 duplicate_request`, correctly, but only if their timeout is longer than our worst case. | Waqas | OPEN | Whether the per-call ceilings and the 10s global external timeout are compatible with their client; whether `409` is a state their UI can render |
+| Q17 | **If the CRM does not store and expose judgements, does this service hold score history?** §5.1 assumes they persist what we return. If they do not, every coaching measure over time is impossible — and the alternative is our first data at rest, with the privacy, isolation and residency consequences that carries. | Business + lead | TO RAISE | Step 15; whether Unit A needs a datastore at all |
+| Q18 | **Rate-limit window: 3 per hour, or 3 per day?** And does a fixed thin-state prompt (Q19) count against it? `rate_limit_per_hour 3 / rate_limit_window_seconds 3600` is recorded as our default and is what is built; nobody in the business has confirmed the shape. Three per hour is generous for one rep; three per day is a different product. | Business | TO RAISE (default **3 per hour** recorded and built) | The clarification loop's real cadence; `config.py` if it changes |
+| Q19 | **Does a thin note earn a fixed clarification prompt with no model call?** Today a note under the thin-evidence floor is suppressed silently: no prompt, no spend, nothing reaches the salesperson. A fixed, non-model prompt ("this note is too short to judge — what happened?") would be free and arguably more useful than silence. Deliberately not built: it puts text in front of a person, which is a product decision. | Business | TO RAISE | Whether `insufficient_evidence` stays a silent state; interacts with Q18 |
+| Q20 | **Data residency and a DPA for note text sent to a model provider — one answer per provider.** Note text is customer content and leaves our infrastructure the moment a real provider is wired. Which providers are permitted, in which regions, under what agreement, and with what retention on their side. | **UNOWNED — the lead finds the owner** | OPEN | **HARD GATE: no real note may reach any provider until this is answered.** Blocks step 16 and step 18, not just step 11 |
+| Q21 | Managed Redis: does the chosen offering support `SELECT` (we use three logical DBs — queue 0, cost 1, operational 2)? What is the edge/ingress **body-size limit**? And **where are JSON log lines shipped**, with what retention? | DevOps | UNASKED (in the meeting script) | db2 in production; the audit trail being readable at all; log retention is a BRD non-functional requirement with no owner |
 
 Client-expectation gaps (BRD/milestones vs settled position) to surface in writing, not reconcile in code:
 "repeat until clear" vs prompt-once; "final confirmed note saved" and "score tracked per rep" vs no write path
