@@ -7,7 +7,7 @@ not duplicate it. This file is about the *build*; ASSUMPTIONS is about the *cont
 Update rule: every commit that changes a row here updates this file in the same commit. If a row's status
 and the tree disagree, the tree is right and this file is wrong — fix the file.
 
-**Last updated:** 10 Sep 2026, after Unit A Project 1 phases A–J and Piece K — the judgement pipeline is built end to end against `FakeLLM` and the vendored fake CRM (head of `scaffold/core-governance-homes`, CI green). **Nothing in Unit A has been verified against a real model or a real backend; nothing is marked `[V]`** (ASSUMPTIONS §8.11).
+**Last updated:** 10 Sep 2026, after Unit A Project 1 phases A–J, Piece K and Piece L — the judgement pipeline is built end to end against `FakeLLM` and the vendored fake CRM (head of `scaffold/core-governance-homes`, CI green). **Nothing in Unit A has been verified against a real model or a real backend; nothing is marked `[V]`** (ASSUMPTIONS §8.11).
 
 Status vocabulary: `DONE` (committed, CI green) · `PLANNED` (prompt written, not run) · `NEXT` (the next step
 in the sequence) · `BLOCKED <on>` · `PROPOSED` (decision written, not accepted) · `OPEN` (question asked, no
@@ -43,16 +43,31 @@ answer) · `UNASKED` (question identified, not yet sent).
 | **Phase I** — prompt hardening, adversarial suite, OWASP checkpoint, eval marker (7 pieces) | DONE | `ba44c5c` · `335abf4` · `86a0b3c` · `d0c9acf` · `f17da28` · `257da13` · `403afa7` |
 | **Phase J** — the ledger commit: README provisional answers, ASSUMPTIONS, STATUS, marker reconciliation | DONE | `d93d936` |
 | **Piece K** — the direct judgement route: `judge_note_direct`, `DirectJudgementRequest`, `note_too_long`, `max_note_chars`, `config_version` → `tenant-cfg-default-2` | DONE | `d9e0486` |
+| **Piece L** — the hardening trio: `gather_or_cancel` (register item 63), load shedding + the sync-client guard (73, 75), elapsed ms and in-flight count on the outcome lines (72) | DONE | `a6eca66` · `85aa3e0` · `fc346bc` |
 | Step 3 — token counters (`enforce_token_cost`, pre-flight read, breaker, TTL fix, Lua under fakeredis). **Now also: replace `SEAM[STEP3]` (the no-op pre-flight stub in `units/structured_intelligence/pipeline.py`); `/ready` to report db2; socket timeouts for the operational client.** | NEXT | — |
 | Step 4 — tool layer: query params, paging, error taxonomy, retry policy, pooled transport, per-item validation. **Now also: read-after-write bounded re-read on the note fetch (candidate — see §2 debts).** | after step 3 | — |
 | Steps 5–13 | per ed3 §15 | — |
 | Step 0 — test tenant + key + joint call | BLOCKED on backend (Waqas) | — |
 | Step 14+ | BLOCKED on step 0 | — |
 
-Suite at head: **841 tests passing, 1 skipped, 7 deselected; 99.34% coverage** (total floor 92, plus 13
+Suite at head: **904 tests passing, 1 skipped, 7 deselected; 99.38% coverage** (total floor 92, plus 13
 per-file floors on the deny-path and judgement modules — `pipeline.py` is at 100% against its floor of 95),
 ruff/format/mypy clean, wheel installs and imports in a clean venv. The skipped test is `tests/eval/test_quality_eval.py`, which needs a real model (step 18);
 the deselected 7 are the `integration` marker.
+
+### Register items closed in Piece L
+
+Four items off the post-campaign register, in three commits. Each is the whole
+item, not a first instalment.
+
+| # | Item | What landed | Commit |
+| --- | --- | --- | --- |
+| 63 | The dangling sibling on the gather failure path | `core/resilience.py` gains `gather_or_cancel(*coros)`: cancels every unfinished task AND awaits it, re-raises the first exception unchanged, never swallows a caller's `CancelledError`. `pipeline.py` changes at the one gather call site. Reverting that line fails three tests. | `a6eca66` |
+| 73 | Load shedding | `middleware/inflight.py`: an in-process counter, `DODEAL_MAX_INFLIGHT` (32, **provisional** — the load lane sets the real number), **503 `load_shed`** through the `DodealError` taxonomy, installed inside the request-id middleware and before everything else, slot released in a `finally`, `/health` and `/ready` exempt. `LoadShed` joins the taxonomy and `core/errors.py` gains `dodeal_error_response` (middleware cannot raise: `ExceptionMiddleware` is built inside the user middleware stack). | `85aa3e0` |
+| 75 | Sync-client guard | `tests/test_no_sync_clients.py` greps `src/dodeal_ai/` for `import requests`, `requests.`, `httpx.Client(`, `redis.Redis(`, `redis.StrictRedis(`, `time.sleep(`, `urllib.request` and fails naming the file and line. Runs inside CI check 4, not as a job of its own. | `85aa3e0` |
+| 72 | Elapsed time on the outcome lines | `elapsed_ms`, `classify_ms`, `vague_ms`, `score_ms` and `inflight` on **both** `judgement_completed` and `judgement_suppressed`, on **both** routes. `time.monotonic()` only; the clock starts at the entry point, so the fetch route's two backend calls are inside `elapsed_ms`; a pass that did not run is **null**, never zero. | `fc346bc` |
+
+**Not in this piece:** register item 9 (gather the lead and notes fetches). `gather_or_cancel` is written so item 9 uses it unchanged — its two-argument form is generic and that is the shape item 9 needs.
 
 ### Open items carried out of Unit A Project 1
 

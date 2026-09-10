@@ -2762,3 +2762,238 @@ Running list, appended by every phase. Nothing here blocks the campaign.
   (nothing branches on it)". I have recorded the page-one/note-ordering reading above because it
   is the fetch-shaped assumption §1's Design A states. If Q8 is actually the
   `updatedAt`-bump question (ASSUMPTIONS §4.2), correct the row — no code depends on which it is.
+
+---
+
+## Piece L: hardening trio   STATUS: DONE a6eca66 · 85aa3e0 · fc346bc
+
+Not a campaign phase. Four register items in three commits plus this backfill, all of them the kind of
+thing that is invisible until the day it is not: a task nobody cancelled, a queue nobody bounded, a
+blocking call nobody noticed, and a latency number nobody could see.
+
+**Suite:** 841 → **904 passing**, 1 skipped, 7 deselected. Coverage **99.38 %** (was 99.34). All 13
+per-file floors met, no new floors. ruff/format/mypy clean at every commit.
+
+| Commit | Floor after | Suite after |
+| --- | --- | --- |
+| `a6eca66` — L.1 | 13/13, `pipeline.py` 100 % against 95 | 855 passing, 99.35 % |
+| `85aa3e0` — L.2 | 13/13 | 892 passing, 99.37 % |
+| `fc346bc` — L.3 | 13/13, `pipeline.py` 100 % | 904 passing, 99.38 % |
+
+---
+
+### L.1 — cancel the gather sibling (register item 63)   `a6eca66`
+
+**The bug, stated exactly.** `asyncio.gather(..., return_exceptions=False)` propagates the first
+exception and **leaves its siblings running**. When the vague pass failed, the scoring pass carried on:
+the request had already 503'd and released its idempotency key, and the abandoned pass then took its
+answer, found it malformed, logged `reprompt_issued` and spent a **fourth** model call on a judgement
+nobody would ever receive. It was recorded as "unchanged and no worse" at Phases F, H and J; this closes it.
+
+| File | What |
+| --- | --- |
+| `src/dodeal_ai/core/resilience.py` | `gather_or_cancel(*coros)`, plus `_first_exception` and `_cancel_and_drain`. Two overloads: a generic two-argument form (the only shape either caller needs) and a variadic `Any` fallback. |
+| `src/dodeal_ai/units/structured_intelligence/pipeline.py` | One code line: the gather at the vague/score call site. `import asyncio` goes with it — it was used for nothing else. The module docstring's `asyncio.gather` paragraph is rewritten to describe what the code now does. |
+| `tests/unit/test_resilience.py` | 8 added: order preserved, the empty call, the sibling cancelled, the sibling **awaited** and not merely cancelled, the exception object re-raised by identity, either side may fail, argument order decides which failure is raised, caller cancellation propagates and takes both children with it. |
+| `tests/unit/test_judgement_pipeline.py` | 6 added: both failure directions, both 503s the gather can produce, the key still released, and a sentinel note through the failing pass. |
+
+**The three promises, and where each is enforced.** *Nothing is left running* — the cancel-and-drain is
+in a `finally`, so it holds on the failure path, the caller-cancellation path, and any path a future
+edit invents; and it **awaits**, because `task.cancel()` only schedules a `CancelledError` and returning
+without the await is the leak itself. *The first exception is re-raised unchanged* — the same object, so
+`ModelUnavailableError` still reaches the pipeline's release-on-error block as itself and a 503 does not
+become a 500. *A caller's `CancelledError` is never swallowed* — a helper that caught it to do its
+cleanup and returned normally would make a cancelled request look like a completed one and leave both
+model calls running.
+
+**The tests have teeth, and this was verified rather than assumed.** The held pass in each is scripted
+**malformed-then-good** and released by the test only *after* the request has already failed. A cancelled
+task is gone by then and nothing happens; a leaked one wakes up, logs `reprompt_issued` and spends a
+fourth call. Reverting the one pipeline line to `asyncio.gather` **fails three of them**, with the
+leaked pass's `reprompt_issued` visible in the captured log. A test that only asserted "the exception
+came out" would have passed with the bug in place.
+
+**Decisions taken here, and their cost.**
+
+1. **"First" means argument order, not completion order.** `FIRST_EXCEPTION` returns as soon as one task
+   raises, so in practice exactly one has failed — but two can complete in the same loop iteration, and
+   then "first" has to mean something. **Cost of the alternative** (completion order): a call site
+   cannot predict it, so a test pinning which of two failures surfaces would be pinning a scheduling
+   accident. Argument order is the only rule visible from the call site.
+2. **Overloads rather than `Any`.** `a, b = await gather_or_cancel(x, y)` keeps its types, so the
+   unpacking on the next line is still checked. **Cost of the alternative:** `vague_result` becomes
+   `Any` and mypy stops checking every field access downstream of the gather.
+3. **The helper lives in `core/resilience.py`, not in the unit.** It is the same kind of statement
+   `call_with_watchdog` is — the one place that says what happens to a call that goes wrong — and item 9
+   needs it from a different module. **Cost of the alternative:** a second copy in the tool layer, and
+   the first divergence between them is a leak nobody is looking for.
+
+**Item 9 (gather the lead and notes fetches) is NOT in this piece**, as instructed. The two-argument
+overload is exactly its shape, so it is a call-site change when it lands and nothing here moves.
+
+---
+
+### L.2 — load shedding and the sync-client guard (items 73, 75)   `85aa3e0`
+
+| File | What |
+| --- | --- |
+| `src/dodeal_ai/core/config.py` | `max_inflight: int = Field(default=32, gt=0)`. **Provisional**; the load lane sets the real number. `0` would refuse every request including the first — a config typo indistinguishable from an outage — so it fails closed at settings load. |
+| `src/dodeal_ai/middleware/inflight.py` | New. `InflightCounter` (acquire/release/count, no lock — one loop, no await between the compare and the increment), the module-level counter, `current_inflight()`, and `InflightMiddleware`. |
+| `src/dodeal_ai/core/errors.py` | `LoadShed` (`load_shed`, 503) and `dodeal_error_response(exc, request_id)`. The handler now returns through it too, so there is one body builder and not two. |
+| `src/dodeal_ai/main.py` | `InflightMiddleware` registered **before** `RequestIDMiddleware`, which puts it **inside** — with the comment that says why, because the reversal is the thing a reader gets wrong. |
+| `tests/unit/test_inflight.py` | New, 22 tests. |
+| `tests/test_no_sync_clients.py` | New, 8 tests (7 patterns + a fail-closed check on the glob). |
+| `tests/security/test_log_safety.py` | The refused request as a sixth outcome: the note, `lead.project`, and the shed line carrying no tenant and no body. |
+| `tests/unit/test_dodeal_errors.py` | `LoadShed` in `_CODES`; `dodeal_error_response` builds the same body the handler would. |
+| `README.md`, `ASSUMPTIONS.md` | The error list, the config reference, the middleware table, a new repo-wide-guards test table, the CI note; ASSUMPTIONS §10.1. |
+
+**Where it sits is the whole design.** The refusal has to be cheaper than the work it refuses or it is
+not a defence. **After** the request id, so a refused caller has something to quote in a support ticket
+and the `WARNING` line correlates with their retry. **Before everything else**, so a refusal costs a
+counter comparison and no token verification, no tenant resolution, no body read, no Redis round-trip.
+
+**The ordering trap, recorded because it is silent.** Starlette's `add_middleware` **inserts at the
+front** of `user_middleware`, and `build_middleware_stack` wraps `reversed(middleware)` — so the front of
+that list is the **outermost** layer and the **last** `add_middleware` call is the **first** middleware a
+request meets. "Install it after the request-id middleware" therefore means *register it before*.
+Getting it backwards does not break anything visibly: the refusal keeps working and quietly carries
+`request_id: "unknown"`. `test_the_refusal_carries_the_request_id` is what pins it.
+
+**What the line carries, and what it must not.** The id and the count. **Never a tenant** — the gates
+have not run, so the only tenant available is the caller's own unverified claim about itself, and a log
+field a header can set is worse than no field. **Never a body** — it was never read, and reading one in
+order to log it would be precisely the expense this exists to avoid. The count and not the cap: the cap
+is in config and a reader can look it up, whereas how many were actually in flight when the refusals
+started is the number that says whether the cap is wrong.
+
+**The concurrency test is the one that matters.** Twenty requests at once against a stub slow route
+through an `httpx.ASGITransport` — one loop, so they really are concurrent, which `TestClient` (a thread
+per request) cannot produce. Exactly five admitted against a cap of five, exactly fifteen refused, and
+the admitted five are the *first* five to arrive. **Verified by breaking it**: putting a single
+`await asyncio.sleep(0)` between the compare and the increment admits all twenty and fails six tests in
+that file. "Some were refused" would have passed with the race in place.
+
+**Item 75.** One test file, seven patterns, styled on the shipped-template greps in `test_scoring.py`
+and `test_unit_a_injection.py`: read every module under `src/dodeal_ai/`, search, and fail naming the
+file and the line with the async spelling to use instead. It fails closed if the glob ever matches
+nothing, so a package rename cannot silently retire the guard. `time.sleep` and `urllib.request` are on
+the list although neither is a client: they block the loop identically, and the audit's Category I sweep
+already wants `time.sleep` gone on a determinism ground.
+
+**Decisions taken here, and their cost.**
+
+1. **503 `load_shed`, not 429.** 429 is Gate 4's, and it means "you have had your share". This means
+   "the service is full right now". **Cost of the alternative:** a CRM that back-offs per-user for a
+   condition that is per-pod, and a 429 rate in the dashboards that mixes two unrelated causes.
+2. **`dodeal_error_response` added rather than exporting `_unit_error_body`.** Middleware cannot raise a
+   `DodealError` — `ExceptionMiddleware` is built *inside* the user middleware stack, so it would come
+   back as a generic 500. **Cost of the alternative** (building the dict in the middleware): two
+   spellings of the error body, and the first divergence is a CRM branching on a `reason` that only some
+   refusals carry.
+3. **The counter is a named object, not a module-level `int`.** **Cost of the alternative:**
+   `_count -= 1` in a `finally` somewhere in a dispatch method, and "every increment is matched by a
+   decrement" becomes something a reader has to trace rather than read.
+4. **No lock.** One event loop, one process, and no `await` between the compare and the increment.
+   Recorded rather than assumed, because it is the assumption that makes the exactness test meaningful.
+5. **`/health` and `/ready` exempt by exact path, not prefix.** `/healthz` and `/health/../x` are
+   counted like anything else.
+
+**Tree disagreements — two, both resolved toward the prompt's intent.**
+
+1. **The README has no error *table*.** The enumerated codes are one prose line ("Error bodies are a
+   fixed `{detail, reason, request_id}`: …"). **Resolved:** `load_shed` 503 appended to that line, which
+   is the list the prompt means, and a full row added to the middleware table where `inflight.py` now
+   sits beside `request_id.py`.
+2. **The CI job list is a list of *commands*, mirroring `ci.yml` step for step.** Adding a seventh row
+   for `test_no_sync_clients.py` would claim a CI job the workflow does not have, and STATUS's own rule
+   is that when the file and the tree disagree the tree is right. **Resolved conservatively:** the guard
+   runs inside check 4 (`uv run pytest`), and a paragraph under the table says so and names both
+   repo-wide guards; a new `tests/` table documents the two files themselves. **For the lead** — see below.
+
+---
+
+### L.3 — elapsed milliseconds and in-flight count (register item 72)   `fc346bc`
+
+| File | What |
+| --- | --- |
+| `src/dodeal_ai/units/structured_intelligence/pipeline.py` | `_Timings` (frozen, four durations + `fields()`), `_ms_since`, `_timed`. Both entry points take `time.monotonic()` as their first statement and pass it to `_judge`. `_log_outcome` takes `timings` and spreads five numbers onto both events. |
+| `tests/unit/test_judgement_pipeline.py` | 8 added: the five on a scored judgement, three nulls on a length-gate suppression, one number and two nulls on a classification suppression, nothing else on the line changed, the fetch is inside `elapsed_ms`, `inflight` read from the middleware's counter, no field is a wall-clock reading, and the module reads `time.monotonic`. |
+| `tests/unit/test_direct_routes.py` | 4 added: the five on the direct route, scored and suppressed; the same five on the fetch route; and `inflight == 1` for a request that is genuinely in flight. |
+| `tests/security/test_log_safety.py` | The happy-path sentinel test now asserts the five are on the line it clears, so they are **inside** "no note text on any log line" rather than beside it. |
+
+**`time.monotonic()`, never a wall clock.** `datetime.now()` can go **backwards** across an NTP
+correction, and a negative duration in a latency panel is not a small error — it is a number nobody can
+interpret. These fields say how **long**, never **when**: nothing here is a timestamp, and
+`test_no_timing_field_is_a_wall_clock_timestamp` fails if one ever becomes one.
+
+**The clock starts at the entry point.** On the fetch route that puts the two backend calls inside
+`elapsed_ms`, which is the point — they are most of what a slow judgement on that route is, and a
+measurement beginning inside `_judge` would have been silent about them. A deliberately slowed
+`get_lead` proves it: `elapsed_ms >= 20` while `classify_ms` stays under 20, so the delay is in the
+total and demonstrably not in the passes.
+
+**Null, not zero, for a pass that did not run.** A suppressed note did not take no time to score; it did
+not score. Zero would average into a latency panel as a fast pass and quietly drag the number down. So a
+length-gate suppression carries three nulls, a classification suppression carries one number and two
+nulls, and only a scored judgement carries three numbers.
+
+**A clock each for the gathered passes.** One pair of readings around the gather would measure the
+slower of the two twice and say nothing about the other. Their sum can therefore **exceed** `elapsed_ms`,
+because they overlap — that being the whole reason they are gathered — so nothing here is a breakdown of
+the total, and `_Timings` says so where someone will read it.
+
+**Decisions taken here, and their cost.**
+
+1. **`inflight` is read at outcome time, inside `_log_outcome`.** The question it answers is "what else
+   was this pod doing when this judgement finished". **Cost of the alternative** (capturing it at entry):
+   a number about a moment that has passed, on a line about a moment that has not.
+2. **The unit imports `current_inflight` from `middleware/inflight.py`.** A unit holds a `TenantScope`
+   and no `Request`, so `app.state` is unreachable from it; the module-level counter is the only thing it
+   can read. The dependency is one function and one direction, and `middleware/` imports nothing from
+   `units/`. **For the lead** — see below.
+3. **A `_Timings` dataclass rather than four keyword arguments.** Four `int | None` in a row is exactly
+   the signature a caller gets wrong. **Cost of the alternative:** `_log_outcome` grows to eight
+   parameters and the four that are interchangeable by type sit next to each other.
+4. **`_timed` wraps the coroutine rather than the pipeline timing around the gather.** Keeps
+   `gather_or_cancel` ignorant of timing, which is right — it is about cancellation.
+
+---
+
+### For the lead
+
+1. **`elapsed_ms` is NOT on `external_call_failed` or `reprompt_issued`, deliberately.** The prompt
+   allowed either, conditional on the emitting site being able to see a start time. Neither can see the
+   **judgement's**: `external_call_failed` is emitted in `core/resilience.py`'s `call_with_watchdog` and
+   `reprompt_issued` in `units/.../llm_call.py`, and both are several frames below `_judge` with no
+   timestamp in scope. Each *could* trivially time its own attempt — but then `elapsed_ms` would mean
+   "the whole judgement" on two lines and "this one attempt" on two others, in the same log stream, and
+   the repo's own rule is that two meanings for one number is how a line starts disagreeing with itself.
+   **Recorded rather than plumbed**, as instructed. If you want per-attempt durations they should be a
+   differently named field (`attempt_ms`), which is a decision, not an omission.
+2. **The sync-client guard is not a CI *job*.** The README CI table mirrors `ci.yml` step for step, and
+   `ci.yml` has no such step — the test runs inside `uv run pytest` (check 4). Adding a row would have
+   made the README claim a job that does not exist. Say the word if you want a genuinely separate CI step
+   and it is four lines of `ci.yml` plus the row.
+3. **The `requests.` pattern matches English prose.** It caught a sentence in a docstring I had just
+   written ("…already holds `max_inflight` requests.") and the docstring was reworded rather than the
+   pattern loosened, because the pattern list is specified. It will do this again to anyone who ends a
+   sentence with the word "requests" inside `src/`. `\brequests\.\w` would fix it and would still catch
+   every real call; that is a one-character decision that is yours, not mine.
+4. **`middleware/inflight.py` has no per-file coverage floor.** It is at 100 % today. The floors are a
+   deny-path and judgement-module policy and adding a fourteenth is a change to that policy, so it was
+   not made. It is arguably a deny path now — it refuses requests — and worth a floor of 95 if you agree.
+5. **`units/` now imports from `middleware/`**, for `current_inflight` only. One function, one direction,
+   no cycle. The alternative is moving the counter into `core/` and letting the middleware import it from
+   there, which is probably where it belongs if a second reader ever appears.
+6. **32 is a placeholder and will be wrong.** It is not a measurement of anything. Until the load lane
+   sets it, a `load_shed` line in production means "this number is wrong", not "capacity was reached" —
+   and that reading is written into the config comment, the README and STATUS so it cannot be lost.
+7. **The Phase F, H and J reports still say register item 63 is "unchanged and no worse".** That was true
+   when written and has been left alone rather than edited; this block is where it is closed.
+8. **`DODEAL_MAX_INFLIGHT` is per pod.** Two replicas shed against their own ceilings, which is what a
+   per-pod ceiling means and is the only thing an in-process counter can do. A cluster-wide limit is the
+   edge's job, alongside Q21's body-size limit.
+
+**Nothing in this piece has been verified against a real model, a real backend or real load.** Nothing is
+marked `[V]` (ASSUMPTIONS §8.11). In particular the load-shedding behaviour has been proved *correct*
+under twenty concurrent in-process requests and not *sized* against anything.
