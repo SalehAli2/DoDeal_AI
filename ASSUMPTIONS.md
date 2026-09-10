@@ -1000,6 +1000,12 @@ discovered at build time.
 - Re-add **last**, alone, run the full suite immediately, watch the
   error/chain/audit tests. Read the cap **lazily** — never call `get_settings()`
   in middleware `__init__`.
+- **The in-app limit is not coming back.** The edge limit is DevOps's (Q21), and
+  a byte cap belongs where bytes are first accepted, not one layer inside the
+  app that has already read them. **Load shedding is a different guard** — a
+  count of requests in flight, not a size of one — and it lives in
+  `middleware/inflight.py` (Piece L, register item 73), where it does obey the
+  lazy-read rule this section wrote down.
 
 ### 10.2 Per-unit prompt-injection hardening
 - **Built:** the injection-resistant prompt builder and its structural tests.

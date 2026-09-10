@@ -3,6 +3,7 @@ reason code, and the body shape is the same for all of them."""
 
 from __future__ import annotations
 
+import json
 from http import HTTPStatus
 
 import pytest
@@ -14,10 +15,12 @@ from dodeal_ai.core.errors import (
     IdempotencyUnavailableResponse,
     InvalidRequestError,
     LeadNotFoundError,
+    LoadShed,
     MalformedOutputError,
     ModelUnavailableError,
     NoteNotFoundError,
     _unit_error_body,
+    dodeal_error_response,
 )
 
 # Every enumerated code the campaign defines, with the status it becomes.
@@ -30,6 +33,11 @@ _CODES = [
     (BackendUnavailableError, "backend_unavailable", 503),
     (ModelUnavailableError, "model_unavailable", 503),
     (MalformedOutputError, "malformed_output", 503),
+    # Raised by nothing -- middleware/inflight.py cannot raise it (the handlers
+    # live inside the middleware stack) and builds the response directly
+    # instead. It is in the taxonomy so that the code, the status and the body
+    # shape are the same ones every other refusal uses.
+    (LoadShed, "load_shed", 503),
 ]
 
 
@@ -78,3 +86,18 @@ def test_reason_codes_are_unique() -> None:
 def test_the_base_class_takes_a_code_and_a_status() -> None:
     exc = DodealError("something_specific", 418)
     assert (exc.reason_code, exc.http_status) == ("something_specific", 418)
+
+
+def test_a_middleware_gets_the_same_body_the_handler_would_build() -> None:
+    """`dodeal_error_response` exists because middleware cannot raise.
+
+    Starlette builds ExceptionMiddleware INSIDE the user middleware stack, so a
+    DodealError raised in middleware never reaches its handler -- it reaches
+    ServerErrorMiddleware and comes back as a generic 500. This renders the same
+    body directly, and two spellings of the error body is how a CRM ends up
+    branching on a `reason` that only some refusals carry.
+    """
+    response = dodeal_error_response(LoadShed(), "req-1")
+
+    assert response.status_code == 503
+    assert json.loads(response.body) == _unit_error_body("load_shed", 503, "req-1")

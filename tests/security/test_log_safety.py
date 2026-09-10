@@ -20,11 +20,17 @@ if raw content ever reaches a log line again. See ASSUMPTIONS §3.3.
 THE DIRECT ROUTE (Piece K, DECISION[DIRECT_ROUTE]) adds a channel this file did
 not have to cover before: note text now arrives in a REQUEST BODY on one route,
 so it is in scope for the request logger, the validation handler and the
-catch-all as well as for the pipeline. The last section drives a sentinel note
+catch-all as well as for the pipeline. The next section drives a sentinel note
 through that route on every outcome a request can have -- 200, two different
 422s, a 503 and a 500 -- with the handler attached to the ROOT logger at DEBUG,
 so "no log line at any level" means every logger in the process and not just
 ours.
+
+THE REFUSED REQUEST (Piece L, register item 73) is the sixth outcome and a
+different shape from the other five: load shedding answers before the gate chain
+and before anything reads the body, so the note is provably somewhere the
+service never looked -- and the refusal still writes a WARNING line of its own.
+The last section drives the sentinel through that too.
 """
 
 from __future__ import annotations
@@ -48,6 +54,7 @@ from dodeal_ai.core.logging_config import JsonFormatter
 from dodeal_ai.core.resilience import ExternalCallError, call_with_watchdog
 from dodeal_ai.core.validation import OutputValidationError, validate_output
 from dodeal_ai.main import app
+from dodeal_ai.middleware import inflight
 from dodeal_ai.schemas.lead import Lead, LeadNotesResponse
 from dodeal_ai.units.structured_intelligence import state
 from dodeal_ai.units.structured_intelligence.classify import (
@@ -707,3 +714,76 @@ def test_direct_unexpected_error_500_logs_no_lead_project(
 
     assert r.status_code == 500
     _assert_project_sentinel_absent(root_log_capture)
+
+
+# --- the refused request: a body that was never even read -------------------
+#
+# Load shedding (register item 73) refuses at the door, before the gate chain
+# and before anything reads the body. That makes it the ONE path where a note
+# can be in a request and provably nowhere else -- which is exactly why it needs
+# a test: the refusal writes a WARNING line of its own, and a line written about
+# a request nobody looked at is the easiest place to start looking at it.
+
+
+@pytest.fixture
+def _shed_everything(monkeypatch):
+    """A cap of zero, so the very next request is refused.
+
+    Zero is refused by `Settings` itself (a cap of 0 is a config typo that looks
+    like an outage), so the cap is stubbed at the read site rather than set --
+    which is also the honest shape of the test: what is being driven is the
+    refusal branch, not the configuring of it.
+    """
+
+    class _Full:
+        max_inflight = 0
+
+    monkeypatch.setattr(inflight, "get_settings", lambda: _Full())
+
+
+def test_a_shed_request_body_reaches_no_log_line(
+    direct_client, root_log_capture, _shed_everything
+):
+    r = direct_client.post(
+        DIRECT,
+        json=_direct_body(SENTINEL + " Following up Tuesday."),
+        headers=_direct_headers(),
+    )
+
+    assert r.status_code == 503
+    assert r.json()["reason"] == "load_shed"
+    _assert_sentinel_absent(root_log_capture)
+    assert SENTINEL not in r.text
+
+
+def test_a_shed_request_lead_project_reaches_no_log_line(
+    direct_client, root_log_capture, _shed_everything
+):
+    r = direct_client.post(
+        DIRECT,
+        json=_direct_body("Called the client, discussed the plot.", SENTINEL_PROJECT),
+        headers=_direct_headers(),
+    )
+
+    assert r.status_code == 503
+    _assert_project_sentinel_absent(root_log_capture)
+
+
+def test_the_shed_line_carries_no_tenant_and_no_body(
+    direct_client, root_log_capture, _shed_everything
+):
+    # The request carried a valid token for tenant-a and a note in its body. The
+    # line names neither: the gates have not run, so the tenant would be the
+    # caller's own unverified claim, and the body was never read.
+    r = direct_client.post(
+        DIRECT,
+        json=_direct_body(SENTINEL + " Following up Tuesday."),
+        headers=_direct_headers(),
+    )
+
+    assert r.status_code == 503
+    line = next(x for x in _lines(root_log_capture) if x.get("message") == "load_shed")
+    assert line["reason_code"] == "load_shed"
+    assert "tenant" not in line
+    assert "note_text" not in line
+    assert "tenant-a" not in json.dumps(line)

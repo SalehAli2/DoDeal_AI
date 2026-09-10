@@ -13,6 +13,7 @@ from dodeal_ai.core.redis import (
     get_cost_client,
     get_operational_client,
 )
+from dodeal_ai.middleware.inflight import InflightMiddleware
 from dodeal_ai.middleware.request_id import RequestIDMiddleware
 
 
@@ -42,6 +43,16 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="DODEAL AI Intelligence Layer", lifespan=lifespan)
+
+# MIDDLEWARE ORDER, and it is the reverse of how it reads. `add_middleware`
+# INSERTS AT THE FRONT of the list, and the front of that list is the OUTERMOST
+# layer -- so the LAST call below is the first middleware a request meets.
+# Registered inflight-then-request-id gives request-id OUTSIDE inflight, which
+# is the order that is wanted: a refused request still gets an id.
+#
+# Load shedding, innermost of the two and before routing, the gate chain and
+# any body read: a refusal must cost a counter comparison and nothing more.
+app.add_middleware(InflightMiddleware)
 
 # Starlette always wraps user middleware inside its own outermost
 # ServerErrorMiddleware, so this runs inside that fail-closed boundary but

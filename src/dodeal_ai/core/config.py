@@ -20,7 +20,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import SecretStr, ValidationError
+from pydantic import Field, SecretStr, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -132,6 +132,23 @@ class Settings(BaseSettings):
     cost_per_tenant_limit: int = 10000
     cost_per_user_limit: int = 1000
     cost_window_seconds: int = 86400  # 24h
+
+    # --- Load shedding (middleware/inflight.py) -----------------------------
+    # The number of requests allowed INSIDE the app at once. The next one is
+    # refused immediately with 503 load_shed rather than queued behind work the
+    # event loop cannot get to -- a queue that grows without a bound turns one
+    # slow dependency into every request timing out at the caller.
+    #
+    # PROVISIONAL. 32 is a placeholder chosen to be obviously a placeholder, not
+    # a measurement: the real number is a function of the model call's latency
+    # and the memory one in-flight judgement holds, and neither has been
+    # measured against a real provider. The LOAD LANE sets it. Until then, treat
+    # a load_shed line in production as "this number is wrong", not as capacity.
+    #
+    # gt=0: zero would refuse every request including the first, which is a
+    # config typo that looks exactly like an outage. It fails closed at startup
+    # (ConfigError) instead.
+    max_inflight: int = Field(default=32, gt=0)
 
     # --- Logging (core/logging_config.py) ------------------------------
     # Effective level for the "dodeal_ai" logger tree (audit, error, cost,

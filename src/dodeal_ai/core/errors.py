@@ -102,6 +102,22 @@ class MalformedOutputError(DodealError):
         super().__init__("malformed_output", 503)
 
 
+class LoadShed(DodealError):
+    """Refused at the door: `max_inflight` are already inside the app.
+
+    Not "something went wrong" -- nothing has. The request never entered the
+    gate chain, no tenant was resolved, no body was read and nothing was spent,
+    which is the whole point: a refusal has to be cheaper than the work it
+    refuses or it is not a defence. 503 and not 429 because this is about the
+    SERVICE's capacity right now, not about this caller's quota (429 belongs to
+    Gate 4, which is per-tenant and per-user); a caller reading the code should
+    hear "come back in a moment", not "you have had your share".
+    """
+
+    def __init__(self) -> None:
+        super().__init__("load_shed", 503)
+
+
 def _request_id(request: Request) -> str:
     return getattr(request.state, "request_id", "unknown")
 
@@ -144,6 +160,25 @@ def _unit_error_body(reason_code: str, http_status: int, request_id: str) -> dic
     }
 
 
+def dodeal_error_response(exc: DodealError, request_id: str) -> JSONResponse:
+    """A DodealError as its response, for a caller that cannot raise it.
+
+    The handler below is the ordinary path and every unit uses it. MIDDLEWARE
+    cannot: Starlette's ExceptionMiddleware -- which is what dispatches to the
+    handlers -- is built INSIDE the user middleware stack, so an exception
+    raised in middleware reaches ServerErrorMiddleware and comes back as a
+    generic 500, never as its own code. So the body is built here instead, by
+    the same function the handler uses, and a middleware returns it directly.
+
+    Sharing `_unit_error_body` is the point: two spellings of the error body is
+    how a CRM ends up branching on a `reason` that only some refusals carry.
+    """
+    return JSONResponse(
+        status_code=exc.http_status,
+        content=_unit_error_body(exc.reason_code, exc.http_status, request_id),
+    )
+
+
 async def dodeal_error_handler(request: Request, exc: Exception) -> JSONResponse:
     """Render a DodealError as its enumerated status and reason code.
 
@@ -162,10 +197,7 @@ async def dodeal_error_handler(request: Request, exc: Exception) -> JSONResponse
             "http_status": exc.http_status,
         },
     )
-    return JSONResponse(
-        status_code=exc.http_status,
-        content=_unit_error_body(exc.reason_code, exc.http_status, request_id),
-    )
+    return dodeal_error_response(exc, request_id)
 
 
 async def request_validation_handler(request: Request, exc: Exception) -> JSONResponse:

@@ -57,7 +57,7 @@ A successful pass through the live gates produces an immutable `RequestContext` 
 
 Two further layers support the gate chain rather than sitting inside it:
 
-- **Middleware** (`src/dodeal_ai/middleware/`) runs on every request regardless of route: request-id generation today, with logging and timing reserved for later.
+- **Middleware** (`src/dodeal_ai/middleware/`) runs on every request regardless of route: request-id generation and load shedding today, with logging and timing reserved for later.
 - **The error boundary** (`core/errors.py`) is the outermost handler. It never touches a deliberate 401, 403, or 429 response; it only catches genuinely unexpected exceptions, logs the real cause internally, and returns a generic 500 to the client.
 
 Two policies apply consistently across the whole gate chain:
@@ -162,6 +162,7 @@ dodeal-ai/
 │   │   ├── authz/permissions.py
 │   │   ├── cost/limiter.py
 │   │   └── llm/__init__.py
+│   ├── middleware/inflight.py
 │   ├── middleware/request_id.py
 │   ├── prompts/
 │   │   ├── unit_a_v1.txt
@@ -293,6 +294,7 @@ dodeal-ai/
 
 | File | Purpose |
 | --- | --- |
+| `inflight.py` | Load shedding. Counts the requests inside the app and refuses the one that meets `DODEAL_MAX_INFLIGHT` immediately with **503 `load_shed`**, through the same `{detail, reason, request_id}` body every enumerated error uses. Installed **inside** the request-id middleware and before everything else, so a refused caller still gets an id to quote while the refusal costs a counter comparison and nothing more — no token verification, no tenant resolution, no body read. The `WARNING` line carries the id and the count and never a tenant (the gates have not run, so the only tenant available would be the caller's own unverified claim) or a body (it was never read). The slot is released in a `finally`, so a route that raises cannot leak one. `/health` and `/ready` are exempt: an orchestrator that cannot reach them under load kills the pod, which is the outage this prevents arriving by another route. |
 | `request_id.py` | Reads an inbound `X-Request-ID` header if it is present **and** well-formed (`[A-Za-z0-9._-]{1,128}`), or generates a new uuid4, and sets it on `request.state.request_id` for every existing consumer to read. The header is caller-controlled and reaches every audit line and the response, so a value that fails the check is discarded exactly as if absent — and never logged, echoed, or reported back. Also stores a `RequestObservability` object for the fuller identifier set (trace id today, prompt version, model version, and workflow version reserved for later) and echoes the id back on the response. Runs inside Starlette's own outermost error-handling middleware but before the gate chain. |
 
 ### `src/dodeal_ai/prompts/`
@@ -338,6 +340,15 @@ Root contracts owned by the backend, kept inside the package for the same reason
 | --- | --- |
 | `runner.py` | The arq worker entrypoint (Decision 2): `WorkerSettings` with Redis derived from `redis_queue_url` and an empty `functions` list. Importing it opens no connection. Step 14 adds the lanes and the real tasks. |
 
+### `tests/` (repo-wide guards)
+
+Two tests that read the tree itself rather than running it:
+
+| File | Purpose |
+| --- | --- |
+| `test_assumption_markers.py` | Marker reconciliation: every `ASSUMPTION[Qn]` is load-bearing in `src/`, promised in this README, and carries a correction path in `ASSUMPTIONS.md`; `SEAM[STEP3]` is the same shape with `docs/STATUS.md` in place of the ledger. |
+| `test_no_sync_clients.py` | Greps every module under `src/dodeal_ai/` for a blocking call in the event loop — `import requests`, `requests.`, `httpx.Client(`, `redis.Redis(`, `redis.StrictRedis(`, `time.sleep(`, `urllib.request` — and fails naming the file and line. This service is one loop: a blocking call does not slow the request that made it, it stops every request in the process, `/health` included. The async spelling of each already exists, so a hit is a habit rather than a necessity. |
+
 ### `tests/helpers/`
 
 | File | Purpose |
@@ -380,6 +391,7 @@ Tests for the gate chain and everything that enforces it, run over HTTP with `Te
 | `test_assembled_prompt.py` | `AssembledPrompt`: `.text` byte-identical to the pre-structure output, untrusted text never in `.stable`, tail rendered after the data, `.variable` excluded from repr. |
 | `test_llm_seam.py` | The LLM seam: frozen `LLMResponse` with repr-safe text, enumerated `LLMProviderError` messages, `DODEAL_LLM_*` settings and fail-closed provider validation, the factory's configuration errors, the runtime-checkable Protocol, and the prompt-type pass-through contract. |
 | `test_logging_config.py` | The structured logging setup: an allow line actually reaching standard output under the real configuration, a deny line at warning level, the cost-bypass warning reaching the same stream, third-party loggers staying quiet, and the configuration being called from the application lifespan. |
+| `test_inflight.py` | Load shedding: a request below the cap passes and the counter returns to zero, a route that raises still gives its slot back, the request at the cap gets `503 load_shed` with the id echoed in the body and the header, the `WARNING` line carries the id and the count and no tenant, a refused request's body reaches no log line, `/health` and `/ready` bypass the cap without taking a slot, and — the one that matters — twenty concurrent requests against a stub slow route through an ASGI transport are admitted **exactly** to the cap and refused exactly beyond it, which is what distinguishes a correct counter from one that merely sheds something. |
 | `test_health.py` | `/health` and `/ready`: config missing returns 503, Redis down returns 200 with a degraded body, and Redis up returns 200 with an ok body. |
 | `test_startup.py` | The application lifespan logs `backend_keys_missing` at `ERROR` when `DODEAL_DD_API_KEYS` is empty, and does not when it holds at least one tenant. Never refuses to start either way — the gate chain and `/ready` must work before a key is provisioned. |
 
@@ -420,6 +432,7 @@ All configuration is read through `Settings` in `core/config.py`. Every variable
 | `DODEAL_COST_PER_TENANT_LIMIT` | `10000` | The per-tenant request cap per window. |
 | `DODEAL_COST_PER_USER_LIMIT` | `1000` | The per-user request cap per window. |
 | `DODEAL_COST_WINDOW_SECONDS` | `86400` | The cost counter window, in seconds. |
+| `DODEAL_MAX_INFLIGHT` | `32` | How many requests may be inside the app at once. The next one is refused immediately with **503 `load_shed`** rather than queued behind work the event loop cannot get to. Must be positive; `0` is refused at startup. **Provisional** — a placeholder chosen to be obviously a placeholder, not a measurement. The load lane sets the real number, so treat a `load_shed` line today as "this number is wrong" rather than as capacity. |
 | `DODEAL_LOG_LEVEL` | `INFO` | The effective level for the `dodeal_ai` logger tree. Third-party libraries are unaffected. |
 
 `scripts/real_fetch_check.py` (a manual tool, not part of the test suite) also reads `DODEAL_CHECK_TENANT`, a plain environment variable rather than a `Settings` field, as an alternative to passing the tenant subdomain as a command-line argument.
@@ -459,6 +472,8 @@ All configuration is read through `Settings` in `core/config.py`. Every variable
 
 Checks 1-4 are the same ones run locally by the stopping chain and by the pre-commit hooks. Check 5 exists because the 92% gate is an average and can hide one security module rotting; check 6 is the only one that tests the artifact a deploy receives rather than the source tree.
 
+The repo-wide guards are not separate jobs — they are ordinary pytest tests and so run inside check 4. `tests/test_no_sync_clients.py` fails the build if a blocking client or a `time.sleep` appears anywhere under `src/dodeal_ai/`, and `tests/test_assumption_markers.py` fails it if a provisional-answer marker stops appearing in the code, this README and `ASSUMPTIONS.md` together.
+
 ## Unit A — Project 1 (note judgement)
 
 > **No real provider before step 3 lands.** `get_llm_client()` still raises, and the factory has **no test switch** — one was forbidden for the whole build and remains forbidden. `FakeLLM` is injected through `app.dependency_overrides` and is the only model any of this has run against. The `SEAM[STEP3]` marker sits at the token pre-flight point in `units/structured_intelligence/pipeline.py` and in `core/cost/limiter.py`: it is a **no-op stub today**, and step 3 is what replaces it. Nothing in this unit is marked `[V]` — see `ASSUMPTIONS.md` §8.11.
@@ -496,7 +511,7 @@ Both carry `versions`: `rubric_version`, `prompt_version`, `model_version` as th
 
 **Hitting the clarification rate limit is not a `429`.** It returns `200` with `prompt_withheld: "rate_limited"`: the judgement was still produced and is still worth returning, and a `429` would tell the CRM the request failed when it did not.
 
-Error bodies are a fixed `{detail, reason, request_id}`: `invalid_request` 422 · `note_not_found` 404 · `lead_not_found` 404 · `duplicate_request` 409 · `idempotency_unavailable` 503 · `backend_unavailable` 503 · `model_unavailable` 503 · `malformed_output` 503.
+Error bodies are a fixed `{detail, reason, request_id}`: `invalid_request` 422 · `note_not_found` 404 · `lead_not_found` 404 · `duplicate_request` 409 · `idempotency_unavailable` 503 · `backend_unavailable` 503 · `model_unavailable` 503 · `malformed_output` 503 · `load_shed` 503.
 
 ### `X-Idempotency-Key` — not required
 
