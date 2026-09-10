@@ -23,9 +23,10 @@ packages = ["src/dodeal_ai"]
 [tool.pytest.ini_options]
   pythonpath = ["."]
   asyncio_mode = "auto"
-  addopts = "--cov=src/dodeal_ai --cov-report=term-missing --cov-report=json -m \"not integration\""
+  addopts = "--cov=src/dodeal_ai --cov-report=term-missing --cov-report=json -m \"not integration and not redis_real\""
   markers = [
     "integration: starts a local ASGI-backed fake HTTP server; excluded from the default run (pytest -m integration to run it).",
+    "redis_real: needs a REAL Redis server on the configured URL; excluded from the default run (pytest -m redis_real to run it). The hermetic lane is fakeredis[lua] -- see tests/unit/test_cost_lua.py. Nothing carries this marker yet; it is registered so the first test that needs a live server does not have to change the default run to add it.",
     "eval: runs the whole vendored note corpus through the pipeline against FakeLLM. STRUCTURAL only -- it asserts every note yields a Judgement or a Suppressed state and never an exception, not that any judgement is good. Included in the default run: it is hermetic and fast, and a corpus note that crashes the pipeline should break CI. The real-model quality eval is tests/eval/test_quality_eval.py and is skipped unless DODEAL_EVAL_REAL=1.",
   ]
 
@@ -61,6 +62,7 @@ plugins = ["pydantic.mypy"]
 # The ONE dev list. `uv sync` installs from here; a second copy under
 # [project.optional-dependencies] was never installed from and drifted.
 dev = [
+    "fakeredis[lua]>=2.38.0",
     # Starlette's TestClient prefers httpx2 over httpx. Remove only when
     # tools/httpx_transport.py migrates to httpx2 as well (planned: step 4,
     # with the transport rewrite).

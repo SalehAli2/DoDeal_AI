@@ -7,7 +7,7 @@ not duplicate it. This file is about the *build*; ASSUMPTIONS is about the *cont
 Update rule: every commit that changes a row here updates this file in the same commit. If a row's status
 and the tree disagree, the tree is right and this file is wrong — fix the file.
 
-**Last updated:** 10 Sep 2026, after Unit A Project 1 phases A–J, Piece K, Piece L and Piece M — the judgement pipeline is built end to end against `FakeLLM` and the vendored fake CRM (head of `scaffold/core-governance-homes`, CI green). **Nothing in Unit A has been verified against a real model or a real backend; nothing is marked `[V]`** (ASSUMPTIONS §8.11).
+**Last updated:** 10 Sep 2026, after Unit A Project 1 phases A–J, Piece K, Piece L, Piece M and Piece N.1 — the judgement pipeline is built end to end against `FakeLLM` and the vendored fake CRM (head of `scaffold/core-governance-homes`, CI green). **Nothing in Unit A has been verified against a real model or a real backend; nothing is marked `[V]`** (ASSUMPTIONS §8.11).
 
 Status vocabulary: `DONE` (committed, CI green) · `PLANNED` (prompt written, not run) · `NEXT` (the next step
 in the sequence) · `BLOCKED <on>` · `PROPOSED` (decision written, not accepted) · `OPEN` (question asked, no
@@ -73,6 +73,14 @@ item, not a first instalment.
 | # | Item | What landed | Commit |
 | --- | --- | --- | --- |
 | 77 | Model profiles on the LLM seam | `profile: str` is a required keyword on `LLMClient.complete`; the factory stays parameterless so `dependency_overrides[get_llm_client]` keeps working. `core/llm/profiles.py` holds the three Unit A names, `KNOWN_PROFILES`, and `resolve_profile(settings, name)`. `ModelProfile` (provider, model, temperature 0–1, optional ceiling) and `llm_profiles` read from `DODEAL_LLM_PROFILES` as JSON, all validated at settings construction. **Fallback:** an unconfigured name resolves to the `llm_provider`/`llm_model` pair at temperature 0; neither is `LLMConfigurationError`. **Ceiling:** a profile may lower a task's ceiling (64 / 1024 / 256), never raise it. The three call sites pass their own constant; a grep test holds them to `KNOWN_PROFILES`. Item 76's adapter is what consumes `resolve_profile`. | `b263c8b` |
+
+### Register items advanced in Piece N.1
+
+| # | Item | What landed | Commit |
+| --- | --- | --- | --- |
+| 3 (step 3, first sub-commit) | Redis timeouts and bounded pools; `/ready` reports db2; the fakeredis lane | Four `DODEAL_REDIS_*` budget settings, all `gt=0` so a non-positive value is a `ConfigError` at construction. `core/redis.py` builds a bounded `BlockingConnectionPool` per named connection from those four and holds **no numeric literal at all** — a parse-the-module test fails the build if one returns. `/ready` gains `operational` (db2) beside `redis` (db1), same `PING` probe under the same socket timeout, same `200`-with-`degraded`; missing config is still `503`. `fakeredis[lua]` is a dev dependency and `tests/unit/test_cost_lua.py` executes the real Lua script. A `redis_real` marker is registered and excluded from the default run; nothing carries it yet. | sha pending |
+
+**The item numbered 25 could not be found.** No tracked file in this repo has a register item 25 — not this file, not `CAMPAIGN_REPORT.md`, not `README.md`. Piece N.1 was asked to mark items 3 and 25 done; item 3 is above (partly — see the step 3 row), and 25 is recorded here as unlocated rather than guessed at. See "For the lead" in `CAMPAIGN_REPORT.md`, Piece N.1.
 
 **Not in this piece:** register item 9 (gather the lead and notes fetches). `gather_or_cancel` is written so item 9 uses it unchanged — its two-argument form is generic and that is the shape item 9 needs.
 
@@ -151,7 +159,7 @@ Severity from the 26 Aug audit. "Landed in" is the commit or the step that carri
 | F2 | One global DD-API-KEY with placeholder default | DONE | fix 2 |
 | H1 | Validation failures leaked field values into the ERROR log via the chained pydantic error | DONE | fix 5 |
 | H2 | Watchdog retried 401/403/404/422 and collapsed them into one error | PLANNED | step 4, first sub-commit |
-| H3 | Redis outage costs 2.0s per request in the threadpool; `/ready` ping exceeds k8s default probe timeout | PLANNED | step 3, first sub-commit |
+| H3 | Redis outage costs 2.0s per request in the threadpool; `/ready` ping exceeds k8s default probe timeout | **PARTLY DONE** (sha pending) — the four hardcoded `2.0`s are gone: `DODEAL_REDIS_CONNECT_TIMEOUT_SECONDS` `0.25`, `DODEAL_REDIS_SOCKET_TIMEOUT_SECONDS` `1.0`, and a bounded `BlockingConnectionPool` (`DODEAL_REDIS_MAX_CONNECTIONS` `20`, `DODEAL_REDIS_POOL_ACQUIRE_TIMEOUT_SECONDS` `1.0`) on both clients. The `/ready` ping now runs under the 1.0s socket timeout. **The breaker is NOT built** and is still owed. | N.1 (sha pending) + step 3 |
 | H4 | Gate 2 case-sensitive on Host; base domain unchecked | DONE | fix 3 |
 | H5 | No JWT clock-skew leeway; skew indistinguishable from forgery | DONE | fix 4 |
 | H6 | Tenant claim unvalidated and interpolated into the outbound URL | DONE | fix 3 |
@@ -159,8 +167,8 @@ Severity from the 26 Aug audit. "Landed in" is the commit or the step that carri
 | M1 | New `AsyncClient` per call; hardcoded transport timeout | PLANNED | step 4 |
 | M2 | All-or-nothing page validation; `bookedAmount: float` for an unusable field | PLANNED | step 4 |
 | M3 | `get_leads()` silently returns page 1 only | PLANNED | step 4 (rename `get_leads_page`) |
-| M4 | Lua sets EXPIRE only on create; pre-existing key without TTL never expires | PLANNED | step 3 |
-| M5 | Lua never executed by the suite | PLANNED (`fakeredis[lua]`) | step 3 |
+| M4 | Lua sets EXPIRE only on create; pre-existing key without TTL never expires | PLANNED — the behaviour is now **pinned by an executing test** (`tests/unit/test_cost_lua.py`), so the fix has to change that test deliberately | step 3 |
+| M5 | Lua never executed by the suite | **DONE** (sha pending) — `fakeredis[lua]` is a dev dependency and `tests/unit/test_cost_lua.py` runs the imported script: atomic pair increment, TTL on create and not on refresh, counts matching stored values, and the deny at the cap through `enforce_cost` | N.1 (sha pending) |
 | M6 | Inbound `X-Request-ID` trusted verbatim | DONE | fix 6a |
 | M7 | Sync Redis client will block the event loop from async unit code | DONE | D2 part 1 |
 | M8 | No Dockerfile / `.env.example`; compose without api | DONE | fix 1 |
@@ -290,7 +298,7 @@ writes.
 
 | Step | Contents | Carries from the audit / practices | Gate |
 | --- | --- | --- | --- |
-| 3 | `enforce_token_cost` beside `enforce_cost` (own namespace, own limits, window `None` → `cost_window_seconds`); fail-open pre-flight read; the key test (token charge leaves request counters untouched and vice versa) | H3 breaker + timeouts to `Settings`; M4 TTL fix; M5 `fakeredis[lua]`; M7 client type (DONE — D2 part 1); policy-per-caller for fail-closed workers | D2 accepted (`9dca80d`) |
+| 3 | `enforce_token_cost` beside `enforce_cost` (own namespace, own limits, window `None` → `cost_window_seconds`); fail-open pre-flight read; the key test (token charge leaves request counters untouched and vice versa). **First sub-commit DONE (sha pending, Piece N.1):** H3 timeouts to `Settings` + bounded pools, `/ready` reporting db2, M5 `fakeredis[lua]`. **Still owed:** `enforce_token_cost` itself, the fail-open pre-flight body behind `SEAM[STEP3]`, the H3 breaker, the M4 TTL fix, policy-per-caller for fail-closed workers | H3 timeouts (DONE — N.1); H3 breaker; M4 TTL fix; M5 `fakeredis[lua]` (DONE — N.1); M7 client type (DONE — D2 part 1); policy-per-caller for fail-closed workers | D2 accepted (`9dca80d`) |
 | 4 | `tools/leads.py`: `page`/`per_page`/`since`/filters as kwargs; paging on `current_page == last_page`; `since` always with explicit offset | H2 typed backend errors + `retry_on`; M1 lifespan-owned `AsyncClient`; M2 per-item validation + `bookedAmount: Any`; M3 `get_leads_page`; backoff with jitter; `User-Agent` | — |
 | 5 | `units/structured_intelligence/` schemas (`NoteType`, `NoteAnalysis`, `NoteScore`), version stamps, suppressed-state | `TenantConfig` seam decision | — |
 | 6 | Route skeletons behind the gates, dependency override proven | D1 answer (Q1/Q2); metrics/tracing; error taxonomy | Q1 answered |

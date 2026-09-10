@@ -3172,3 +3172,173 @@ non-constant and is named explicitly in the test rather than tolerated by a loos
 
 **Nothing in this piece has been verified against a real model or a real provider.** Nothing is marked
 `[V]` (ASSUMPTIONS §8.11). The profile table has never resolved to anything but a test fixture.
+
+---
+
+## Piece N: step 3   STATUS: IN PROGRESS
+
+Step 3 is `enforce_token_cost` and the fail-open pre-flight read. This piece is the ground it stands
+on: the Redis connection has to be bounded and configurable before a second counter starts using it,
+and the Lua script has to actually run before anyone edits it.
+
+### N.1 — Redis timeouts and bounded pools; `/ready` reports db2; the fakeredis lane   STATUS: DONE `sha pending`
+
+**Suite:** 934 → **969 passing**, 1 skipped, 7 deselected. Coverage **99.40 %** (unchanged). All 13 per-file
+floors met, no new floors. `limiter.py` stays at 100 % and is now covered by tests that execute its Lua
+rather than mock past it.
+
+---
+
+### What `core/redis.py` hardcoded, and what replaced it
+
+Four literals, in two copies of the same call: `socket_connect_timeout=2.0` and `socket_timeout=2.0`
+in `get_cost_client`, and the same pair in `get_operational_client`. No pool was constructed at all,
+so pool size and acquire behaviour were redis-py's defaults — effectively unbounded, and no wait.
+`get_operational_client`'s docstring said so out loud and named this step as the place it would be
+fixed "for both clients at once". It is, and the docstring saying it is hardcoded is gone with it.
+
+The replacement is one private `_build_pool(url)` and two factories that differ only in which URL
+they pass. Four settings, one pool per named connection, and **no numeric literal left anywhere in
+the module** — which is the property `test_no_number_is_hardcoded_in_the_redis_module` enforces.
+
+**Why the module is PARSED rather than grepped.** The prompt asked for a grep. A regex over the raw
+text is wrong here, and not marginally: the module docstring says `db1` and `db2`, so any pattern
+loose enough to catch `2.0` catches those too, and any pattern tight enough to miss them can be
+walked around by writing `20.0` or `2e0`. Parsing the module with `ast` and rejecting every
+int/float `Constant` has neither failure: comments and docstrings are not in the tree, and a numeric
+literal cannot be spelled in a way that hides from it. It is the same test, made exact.
+
+**Why `BlockingConnectionPool` and not `ConnectionPool`.** At the cap the plain pool raises
+immediately. That converts a two-second burst into a wave of errors on a service that was otherwise
+fine. The blocking pool waits up to `redis_pool_acquire_timeout_seconds` and only then refuses, so a
+burst queues and a genuine stall still fails fast. A bound with no acquire timeout would be worse
+than no bound: "blocks forever at the cap" is an outage the unbounded pool does not have.
+
+**Why connect (0.25s) is so much shorter than read (1.0s).** Reaching a listening socket on the same
+network is sub-millisecond. A connect that takes a quarter of a second is not a busy server, it is a
+missing one, and waiting the full read budget to learn that is the H3 cost paid twice.
+
+**Both connections share the four settings, deliberately.** They are separate so a flush or an
+outage cannot cross between them, not so they can be tuned apart. Splitting the budget per
+connection is a new decision and nothing has asked for one; the two factories stay separate and
+stay `lru_cache`d, so there is still exactly one pool per connection per process.
+
+---
+
+### The pools were closed on shutdown. They stopped being, and that is why `main.py` changed
+
+The prompt said to close the pools in the lifespan **if they are not already, and to change nothing
+if they are**. They were: the lifespan already awaited `aclose()` on both clients. That is no longer
+sufficient, and the reason is a redis-py detail worth writing down rather than rediscovering.
+
+`Redis.aclose(close_connection_pool=None)` closes the pool only when `auto_close_connection_pool` is
+true, and redis-py sets that flag **false for a caller-supplied pool** — the client did not create
+it, so it does not assume the right to destroy it. Every client built by `from_url` owns its pool and
+closes it; every client built as `Redis(connection_pool=pool)` does not. So the exact change that
+bounds the pools is also the change that stops the existing shutdown from releasing them: a bare
+`aclose()` would return the one checked-out connection and leak the other nineteen.
+
+The lifespan therefore passes `close_connection_pool=True` explicitly. This is not an addition the
+prompt's condition excluded — it is what keeps the condition true.
+
+---
+
+### `/ready` now reports two connections
+
+`operational` joins `redis` in the body. Same probe (`PING`, under the same configured socket
+timeout), same fail-soft handling, same `200` with `degraded`; missing configuration is still `503`
+and the body is otherwise unchanged.
+
+The reason for a second field rather than one combined flag: db1 fails **open** and db2 fails
+**closed**. "Redis is fine" is not a fact about this service. A healthy cost store and a dead
+idempotency store is a real state in which requests are still served but duplicate-work protection
+is gone, and a single flag reports that as either a false alarm or — worse — as `ok`.
+
+Neither probe can raise past the endpoint: `_ping` catches `redis.RedisError` and returns `False`,
+and the readiness test fakes the **clients**, not the probes, so the real error path runs. The four
+combinations of (db1 up/down × db2 up/down) are all asserted, because two independent fields whose
+independence is untested are one field with extra typing.
+
+---
+
+### `tests/unit/test_cost_lua.py` — audit M5 closed
+
+`fakeredis[lua]` executes real Lua against a real server implementation in-process. The script is
+**imported** from `limiter.py` (`_INCR_BOTH_SCRIPT`), never retyped — a copy would keep passing on
+the day the original changed, which is the single failure this test exists to prevent. The lane is
+hermetic and needs no marker; `redis_real` is registered and excluded from the default run for the
+first test that genuinely needs a server, and nothing carries it yet.
+
+The TTL assertion distinguishes **creation** from **refresh** by using a different window on the
+second call — 60 first, then 6000. If the script were refreshing rather than creating, the TTL would
+jump; it does not move. A third test sets a key with no TTL at all and shows it never gains one,
+which is audit M4 pinned exactly as it behaves today, so the step-3 fix has to change that test on
+purpose rather than by accident.
+
+**One assertion in the prompt does not match the code, and I did not change the code to make it
+match.** The prompt asked for "the call at the limit returns the deny result and does not
+increment". The Lua script contains no cap, no limit and no deny path — it counts, and
+`enforce_cost` compares the returned counts against `cost_per_tenant_limit` and
+`cost_per_user_limit` in Python **after** the increment has already been committed. So the request
+at the cap is refused *and counted*: a check-then-increment script would be a different script, and
+N.1 was told not to touch `limiter.py` beyond reading it.
+
+What the test does instead is assert the deny decision where it actually lives, end to end on real
+Lua — at the cap `enforce_cost` raises `CostLimitError("tenant_quota_exceeded")` and the counters
+read 4 where the limit is 3 — plus a guard test that the script makes no limit decision at all, so
+moving the cap into Lua later has to change a test deliberately. See "For the lead", item 1.
+
+---
+
+### What changed
+
+| File | Change |
+| --- | --- |
+| `core/config.py` | Four settings: `redis_connect_timeout_seconds` `0.25`, `redis_socket_timeout_seconds` `1.0`, `redis_max_connections` `20`, `redis_pool_acquire_timeout_seconds` `1.0`. All `Field(gt=0)`, so a non-positive value is a `ValidationError` at construction and a `ConfigError` through `_build_settings` — the same fail-closed path as a missing signing key. |
+| `core/redis.py` | `_build_pool` + both factories on `BlockingConnectionPool`; `_ping` shared by two named probes; `check_operational_redis_ready` added. No numeric literal remains. Both factories still separate, still cached. |
+| `main.py` | `/ready` reports `operational` beside `redis`; lifespan closes both pools with `close_connection_pool=True`. |
+| `pyproject.toml` | `fakeredis[lua]>=2.38.0` in the one dev list; `redis_real` marker registered and excluded from the default run alongside `integration`. |
+| `uv.lock` | `fakeredis 2.38.0`, `lupa 2.8`. |
+| `tests/unit/test_cost_lua.py` | **New.** Eight tests, the real script on fakeredis. |
+| `tests/unit/test_redis.py` | Rewritten around pools: sizing from `Settings` for **both** clients, separate pools, cached factories, the parse-the-module literal guard, and both probes including their independence. |
+| `tests/unit/test_config.py` | The four settings round-trip from the environment and reject `0` and `-1`. |
+| `tests/unit/test_health.py` | `/ready`'s four up/down combinations, with the clients faked so the real probes run. |
+| `README.md` | Four configuration rows; `/ready`, `redis.py` and `main.py` descriptions; two test-table rows; the `redis_real` marker note. |
+| `docs/STATUS.md` | H3 partly done (timeouts, not the breaker), M5 done, M4 pinned, step 3's first sub-commit recorded. |
+
+---
+
+### For the lead
+
+1. **The prompt's deny assertion describes a script this repo does not have.** "The call at the limit
+   returns the deny result and does not increment" is check-then-increment; `_INCR_BOTH_SCRIPT` is
+   increment-then-check, with the check in Python. The request at the cap **is** counted. That is
+   either a bug (a denied request is charged, and a tenant hammering a closed door inflates its own
+   counter) or the intended fail-open shape — but it is a `limiter.py` change either way, which N.1
+   was forbidden. The behaviour is now pinned by an executing test, so whoever changes it will see
+   it. **Decide at step 3.**
+2. **Register item 25 could not be located.** No tracked file has one — not `docs/STATUS.md`, not
+   this report, not `README.md`. Item 3 is the step-3 row and is marked partly done (this piece is
+   its first sub-commit, not the whole step). Item 25 is recorded as unlocated rather than guessed
+   at. If it lives in a register outside the repo, it still needs marking by hand.
+3. **`.env.example` was not touched** — the prompt forbade it. It is now four rows behind
+   `Settings`, and the README says that file "documents every `DODEAL_*` setting… audited
+   field-by-field against `Settings`, in the same order". That claim is false as of this commit.
+   It was already modified-unstaged and untouched for the whole campaign (§ "Open items carried out
+   of Unit A Project 1"), so this compounds a known problem rather than creating one.
+4. **All four numbers are provisional and none is measured.** `0.25` / `1.0` / `20` / `1.0` are sized
+   against a same-network Redis by reasoning, not against a real deployment. `20` in particular is a
+   guess about concurrency that should be read next to `max_inflight = 32`: at the cap, thirty-two
+   in-flight requests contend for twenty connections, and the twelve that lose wait up to a second
+   before the pool refuses. Whether that is right depends on how many Redis round-trips one judgement
+   makes — today one, after step 3 more. **The load lane owns both numbers, and they should be set
+   together.**
+5. **The H3 breaker is not built.** N.1 bounds what an outage costs per call; it does not stop the
+   calls. A Redis that is down still costs every request its connect timeout, and `/ready` still
+   probes it every scrape. The breaker is the other half of H3 and is still owed at step 3.
+6. **`redis_real` is registered and unused.** A marker nothing carries is a promise, not a lane. The
+   first test that needs a real server should carry it and CI should decide whether it ever runs one.
+
+**Nothing in this piece has been verified against a real Redis.** The pools have never opened a
+socket; every assertion is on a constructed pool's attributes or against `fakeredis`. Nothing is
+marked `[V]` (ASSUMPTIONS §8.11).

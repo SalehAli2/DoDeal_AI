@@ -66,3 +66,53 @@ def test_dd_api_keys_parses_json_map_of_secrets(monkeypatch):
     assert "k1" not in str(s)
     assert "k2" not in repr(s)
     assert "k2" not in str(s)
+
+
+# --- Redis connection budget (audit H3) -------------------------------------
+
+_REDIS_BUDGET: tuple[tuple[str, str, object], ...] = (
+    ("DODEAL_REDIS_CONNECT_TIMEOUT_SECONDS", "redis_connect_timeout_seconds", 0.25),
+    ("DODEAL_REDIS_SOCKET_TIMEOUT_SECONDS", "redis_socket_timeout_seconds", 1.0),
+    ("DODEAL_REDIS_MAX_CONNECTIONS", "redis_max_connections", 20),
+    (
+        "DODEAL_REDIS_POOL_ACQUIRE_TIMEOUT_SECONDS",
+        "redis_pool_acquire_timeout_seconds",
+        1.0,
+    ),
+)
+
+
+@pytest.mark.parametrize(("env_name", "field", "default"), _REDIS_BUDGET)
+def test_the_redis_budget_defaults_are_the_recorded_values(env_name, field, default):
+    """The four provisional numbers a deployment inherits if it sets nothing."""
+    from dodeal_ai.core.config import Settings
+
+    assert getattr(Settings(_env_file=None, jwt_signing_key="k"), field) == default
+
+
+@pytest.mark.parametrize(("env_name", "field", "default"), _REDIS_BUDGET)
+def test_the_redis_budget_round_trips_through_the_environment(
+    monkeypatch, env_name, field, default
+):
+    """Sizing Redis must be a deployment change, not a code change."""
+    monkeypatch.setenv("DODEAL_JWT_SIGNING_KEY", "test-key-abc")
+    monkeypatch.setenv(env_name, "5")
+    get_settings.cache_clear()
+
+    assert getattr(get_settings(), field) == type(default)(5)
+
+
+@pytest.mark.parametrize(("env_name", "field", "default"), _REDIS_BUDGET)
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_a_non_positive_redis_budget_is_refused_at_construction(
+    monkeypatch, env_name, field, default, value
+):
+    """Zero is not "no limit": a zero timeout can never succeed and a zero pool
+    can never hand out a connection, so both read as an outage while being a
+    typo. They fail closed at settings load, like a missing signing key."""
+    from dodeal_ai.core.config import _build_settings
+
+    monkeypatch.setenv("DODEAL_JWT_SIGNING_KEY", "test-key-abc")
+    monkeypatch.setenv(env_name, value)
+    with pytest.raises(ConfigError):
+        _build_settings(_env_file=None)

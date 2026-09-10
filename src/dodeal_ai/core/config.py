@@ -148,6 +148,29 @@ class Settings(BaseSettings):
     # counters (idempotency fails CLOSED, the cost cap fails open), and sharing
     # a DB would make a flush aimed at one of them hit the other.
     redis_operational_url: str = "redis://localhost:6379/2"
+    # --- Redis connection budget (core/redis.py; audit H3) ------------------
+    # PROVISIONAL, all four. They exist because a Redis outage used to cost
+    # 2.0s of hardcoded socket timeout per request and a /ready ping longer
+    # than a k8s probe deadline; sizing them is now a config change.
+    #
+    # gt=0 on every one: a zero or negative timeout is a typo that reads as an
+    # outage (nothing can connect) or as an unbounded wait, so it fails closed
+    # at settings construction rather than at the first command.
+    #
+    # Connect is deliberately far shorter than read: reaching a listening
+    # socket on the same network is a sub-millisecond operation, so a slow
+    # connect means the host is gone, not busy.
+    redis_connect_timeout_seconds: float = Field(default=0.25, gt=0)
+    redis_socket_timeout_seconds: float = Field(default=1.0, gt=0)
+    # The pool is BOUNDED (BlockingConnectionPool). An unbounded pool answers a
+    # Redis stall by opening more sockets, which turns one slow dependency into
+    # file-descriptor exhaustion; a bounded one makes the caller wait instead.
+    redis_max_connections: int = Field(default=20, gt=0)
+    # How long a caller waits for a free connection before the pool refuses.
+    # Without it, "bounded" would mean "blocks forever at the cap", which is a
+    # worse outage than the one the bound prevents.
+    redis_pool_acquire_timeout_seconds: float = Field(default=1.0, gt=0)
+
     # Cost/quota caps (placeholder values; tune to real budgets later).
     # Counters reset each window. A request over either cap is denied (429).
     cost_per_tenant_limit: int = 10000

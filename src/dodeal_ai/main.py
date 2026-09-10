@@ -10,6 +10,7 @@ from dodeal_ai.core.errors import register_error_handlers
 from dodeal_ai.core.logging_config import configure_logging
 from dodeal_ai.core.redis import (
     check_cost_redis_ready,
+    check_operational_redis_ready,
     get_cost_client,
     get_operational_client,
 )
@@ -34,12 +35,17 @@ async def lifespan(app: FastAPI):
         # file was the one least likely to be seen.
         logging.getLogger("dodeal_ai.startup").error("backend_keys_missing count=0")
     yield
-    # Release the connection pools on shutdown. from_url opens no socket, so
-    # constructing a client here only to close it costs nothing, and closing
-    # unconditionally keeps shutdown symmetrical whether or not the app ever
-    # used it. The queue connection is arq's, closed by arq.
-    await get_cost_client().aclose()
-    await get_operational_client().aclose()
+    # Release the connection pools on shutdown. Building a client opens no
+    # socket, so constructing one here only to close it costs nothing, and
+    # closing unconditionally keeps shutdown symmetrical whether or not the app
+    # ever used it. The queue connection is arq's, closed by arq.
+    #
+    # close_connection_pool=True is REQUIRED now that core/redis.py hands each
+    # client a pool of its own: redis-py sets auto_close_connection_pool False
+    # for a caller-supplied pool, so a bare aclose() would return the one
+    # checked-out connection and leak the other nineteen.
+    await get_cost_client().aclose(close_connection_pool=True)
+    await get_operational_client().aclose(close_connection_pool=True)
 
 
 app = FastAPI(title="DODEAL AI Intelligence Layer", lifespan=lifespan)
@@ -83,6 +89,13 @@ async def ready():
     # serves requests correctly without it. Report the degraded state in the
     # body so it's observable, but keep 200 so an orchestrator doesn't pull a
     # functioning pod over a non-critical dependency.
-    if await check_cost_redis_ready():
-        return {"status": "ready", "redis": "ok"}
-    return {"status": "ready", "redis": "degraded"}
+    #
+    # Both connections are probed and reported separately: a healthy cost store
+    # and a dead idempotency store is a real state, and one flag would hide it.
+    # Neither probe raises (core/redis.py swallows RedisError into False), so a
+    # dependency being down cannot turn this endpoint into a 500.
+    return {
+        "status": "ready",
+        "redis": "ok" if await check_cost_redis_ready() else "degraded",
+        "operational": "ok" if await check_operational_redis_ready() else "degraded",
+    }
