@@ -34,12 +34,16 @@ WHY 8 IS "classify, THEN the other two" (register item 14). Classification must
 finish first: the vague template is chosen by type and the applicable components
 are chosen by type, so neither of the other two prompts can even be ASSEMBLED
 until the answer is in. Vague detection and scoring, on the other hand, do not
-depend on each other at all -- so they are issued together with asyncio.gather
-and the happy path costs two round-trips, not three, while the happy-path call
-count stays three. `return_exceptions=False`: the first failure propagates
-through the release-on-error path below and the key is released exactly once --
-and because each pass owns its own reprompt, a reprompt on one of the two
-re-issues that one alone.
+depend on each other at all -- so they are issued together with
+`gather_or_cancel` (core/resilience.py) and the happy path costs two
+round-trips, not three, while the happy-path call count stays three. The first
+failure propagates through the release-on-error path below and the key is
+released exactly once -- and because each pass owns its own reprompt, a
+reprompt on one of the two re-issues that one alone. The helper rather than
+`asyncio.gather` because gather leaves the SIBLING running when one pass
+raises: the request has already failed, and an abandoned pass whose answer
+comes back malformed would spend a reprompt on a judgement nobody will ever
+receive (register item 63).
 
 WHY THE COUNTERS MOVE LAST, AND ONLY SOMETIMES. Step 10 runs after the
 judgement exists and outside the release-on-error block, because by then the
@@ -69,7 +73,6 @@ get 409 for a judgement that never happened.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from dataclasses import dataclass
 
@@ -83,7 +86,7 @@ from dodeal_ai.core.errors import (
     NoteNotFoundError,
 )
 from dodeal_ai.core.llm import LLMClient, LLMResponse
-from dodeal_ai.core.resilience import ExternalCallError
+from dodeal_ai.core.resilience import ExternalCallError, gather_or_cancel
 from dodeal_ai.schemas.lead import Lead, LeadNote
 from dodeal_ai.tools.keys import BackendKeyError
 from dodeal_ai.tools.leads import LeadsClient
@@ -523,7 +526,7 @@ async def _judge(
             assert isinstance(note_type, NoteType)
 
             # --- vague + score: issued together, awaited together ------------
-            vague_result, score_result = await asyncio.gather(
+            vague_result, score_result = await gather_or_cancel(
                 detect_vagueness(
                     deps.llm,
                     note,

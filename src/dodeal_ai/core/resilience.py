@@ -14,13 +14,18 @@ blind retry could double-execute; there is no write path today
 that may already have completed (LLM: retry=False). Callers wrapping such a
 call must pass retry=False, or apply an idempotency key per FUTURE_PATTERNS.md
 item 1 before enabling retry. See ASSUMPTIONS.md.
+
+CONCURRENCY LIVES HERE TOO, for the same reason: `gather_or_cancel` is the one
+place that says what happens to the OTHER call when one of a pair fails. A
+call site that wrote its own would be writing a leak.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
+from typing import Any, overload
 
 from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.log_safety import safe_error_fields
@@ -90,3 +95,111 @@ async def call_with_watchdog[T](
 
     # All attempts exhausted -> fail closed.
     raise ExternalCallError(label, last_exc)  # type: ignore[arg-type]
+
+
+# --- concurrency: one failure must not leave its sibling running -----------
+
+
+def _first_exception(tasks: Sequence[asyncio.Task[Any]]) -> BaseException | None:
+    """The failure to re-raise, chosen in ARGUMENT order.
+
+    `FIRST_EXCEPTION` returns as soon as one task raises, so in practice exactly
+    one task is finished-with-an-exception when this is called. It is not
+    guaranteed: two tasks can complete in the same loop iteration, and then
+    "first" has to mean something. Argument order is the only choice a caller
+    can predict from the call site, so that is the one taken.
+
+    A task that was CANCELLED is skipped rather than reported: `.exception()`
+    would raise on it, and a cancellation is not this pair's failure to report.
+    Nothing here cancels a task before this runs, so reaching that case means
+    somebody outside did -- and `.result()` on the success path will then raise
+    the CancelledError, which is the truthful outcome.
+    """
+    for task in tasks:
+        if task.done() and not task.cancelled():
+            exc = task.exception()
+            if exc is not None:
+                return exc
+    return None
+
+
+async def _cancel_and_drain(tasks: Sequence[asyncio.Task[Any]]) -> None:
+    """Cancel every unfinished task and WAIT for each one to actually stop.
+
+    The await is the point. `task.cancel()` only schedules a CancelledError
+    into the coroutine; it does not stop it, and without the await this
+    function would return while the sibling was still inside an HTTP call --
+    which is a leak that shows up as a paid model call for a request that
+    already 503'd.
+
+    `return_exceptions=True` because every task here is expected to end in a
+    CancelledError and that is not news. Nothing else can be hiding in it: a
+    task that had already failed is `done()` and is not in this list.
+
+    Returns without awaiting anything at all when nothing is pending, so the
+    success path gains no suspension point it did not have before.
+    """
+    pending = [task for task in tasks if not task.done()]
+    if not pending:
+        return
+    for task in pending:
+        task.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
+
+
+@overload
+async def gather_or_cancel[T1, T2](
+    first: Awaitable[T1], second: Awaitable[T2], /
+) -> tuple[T1, T2]: ...
+
+
+@overload
+async def gather_or_cancel(*coros: Awaitable[Any]) -> tuple[Any, ...]: ...
+
+
+async def gather_or_cancel(*coros: Awaitable[Any]) -> tuple[Any, ...]:
+    """Run `coros` concurrently. If one fails, CANCEL the others and re-raise.
+
+    `asyncio.gather(..., return_exceptions=False)` propagates the first
+    exception and LEAVES ITS SIBLINGS RUNNING. For two model calls that is a
+    call nobody is waiting for any more: the request has already failed, and the
+    abandoned pass carries on -- including, if its answer comes back malformed,
+    into a reprompt that spends a second call on a judgement that will never be
+    returned. This does what gather does on the happy path and closes that door
+    on the failure path (register item 63).
+
+    THE THREE PROMISES, in the order they matter:
+
+      1. Nothing is left running. Every unfinished task is cancelled AND
+         awaited, in a `finally`, so it holds on the failure path, on the
+         caller-cancellation path, and on any path a future edit invents.
+      2. The first exception is re-raised UNCHANGED -- the same object, not a
+         wrapper. `ModelUnavailableError` must still arrive at the pipeline's
+         release-on-error block as itself, or a 503 becomes a 500.
+      3. A CancelledError aimed at the CALLER is never swallowed. The siblings
+         are cancelled and drained on the way out and the CancelledError
+         continues, so a cancelled request cancels the work it started rather
+         than detaching from it.
+
+    On success the results come back in ARGUMENT order, exactly as gather's do,
+    so this is a drop-in replacement at a call site that unpacks them.
+
+    Generic in the two-argument form because that is what both callers need --
+    vague + score here, and the lead + notes fetches when register item 9 lands.
+    The variadic overload keeps a third caller from being a signature change,
+    at the cost of `Any` results it will have to narrow itself.
+    """
+    if not coros:
+        # asyncio.wait raises ValueError on an empty set. Nothing to gather is
+        # not an error at a call site that built its list from a condition.
+        return ()
+
+    tasks = [asyncio.ensure_future(coro) for coro in coros]
+    try:
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+        failure = _first_exception(tasks)
+        if failure is not None:
+            raise failure
+        return tuple(task.result() for task in tasks)
+    finally:
+        await _cancel_and_drain(tasks)
