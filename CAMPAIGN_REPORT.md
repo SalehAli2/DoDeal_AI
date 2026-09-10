@@ -3000,7 +3000,7 @@ under twenty concurrent in-process requests and not *sized* against anything.
 
 ---
 
-## Piece M: model profiles on the LLM seam   STATUS: DONE PIECE_M_SHA
+## Piece M: model profiles on the LLM seam   STATUS: DONE b263c8b
 
 Not a campaign phase. Register item 77, one commit plus this backfill. The seam has always been able
 to say *what* to send; it could not say *which model* should read it. This is that, and it is
