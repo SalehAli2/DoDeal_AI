@@ -16,6 +16,15 @@ Every test below drives a real failure whose data contains SENTINEL, formats the
 resulting record with the REAL JsonFormatter, and asserts the sentinel is absent
 from the captured text while the safe structured fields are present. They fail
 if raw content ever reaches a log line again. See ASSUMPTIONS §3.3.
+
+THE DIRECT ROUTE (Piece K, DECISION[DIRECT_ROUTE]) adds a channel this file did
+not have to cover before: note text now arrives in a REQUEST BODY on one route,
+so it is in scope for the request logger, the validation handler and the
+catch-all as well as for the pipeline. The last section drives a sentinel note
+through that route on every outcome a request can have -- 200, two different
+422s, a 503 and a 500 -- with the handler attached to the ROOT logger at DEBUG,
+so "no log line at any level" means every logger in the process and not just
+ours.
 """
 
 from __future__ import annotations
@@ -25,20 +34,34 @@ import json
 import logging
 
 import pytest
+from fastapi.testclient import TestClient
 from starlette.requests import Request
 
 from dodeal_ai.core.audit.logger import audit
-from dodeal_ai.core.config import get_settings
+from dodeal_ai.core.auth.dependencies import get_verifier
+from dodeal_ai.core.auth.verify import JwtVerifier
+from dodeal_ai.core.config import Settings, get_settings
 from dodeal_ai.core.cost import limiter
 from dodeal_ai.core.errors import unhandled_exception_handler
+from dodeal_ai.core.llm import LLMErrorReason, LLMProviderError, get_llm_client
 from dodeal_ai.core.logging_config import JsonFormatter
 from dodeal_ai.core.resilience import ExternalCallError, call_with_watchdog
 from dodeal_ai.core.validation import OutputValidationError, validate_output
+from dodeal_ai.main import app
 from dodeal_ai.schemas.lead import Lead, LeadNotesResponse
 from dodeal_ai.units.structured_intelligence import state
-from dodeal_ai.units.structured_intelligence.classify import classify
+from dodeal_ai.units.structured_intelligence.classify import (
+    CLASSIFY_TEMPLATE,
+    classify,
+)
 from dodeal_ai.units.structured_intelligence.llm_call import parse_output
-from dodeal_ai.units.structured_intelligence.schemas import ClassificationOutput
+from dodeal_ai.units.structured_intelligence.schemas import (
+    ClassificationOutput,
+    NoteType,
+)
+from dodeal_ai.units.structured_intelligence.scoring import SCORE_TEMPLATE
+from dodeal_ai.units.structured_intelligence.vague import template_for
+from tests.helpers import tokens
 from tests.helpers.fake_leads import note
 from tests.helpers.fake_llm import FakeLLM, json_response, response
 from tests.helpers.fake_operational_redis import FakeOperationalRedis
@@ -392,3 +415,295 @@ async def test_the_rejected_answer_is_not_carried_into_the_second_prompt(
     assert SENTINEL not in second
     assert "0501234567" not in second
     _assert_sentinel_absent(log_capture)
+
+
+# --- the direct route: note text in a request body (DECISION[DIRECT_ROUTE]) --
+#
+# Five outcomes, one sentinel. The route accepts the saved note in the body, so
+# every path a request can take out of it is a path the text could leak on: the
+# 200 (the pipeline logs an outcome line), the two 422s (the validation handler
+# sees the body), the 503 (the model failed with the text in flight) and the 500
+# (an unexpected exception, whose traceback is formatted and logged).
+
+
+DIRECT = "/api/v1/notes/judgements/direct"
+
+SENTINEL_PROJECT = "SENTINEL-PROJECT-Marassi-Plot-0501234567"
+
+
+def _raise_boom(*args: object, **kwargs: object):
+    """Raise from a frame whose SOURCE contains no sentinel.
+
+    Same reason as _raise_foreign above: a traceback quotes the source text of
+    every frame it lists, so the forced failure has to be raised somewhere the
+    sentinel is not written down.
+    """
+    raise RuntimeError("boom")
+
+
+class _DirectCostRedis:
+    async def eval(self, script, numkeys, *keys_and_args):
+        keys = keys_and_args[:numkeys]
+        amount = int(keys_and_args[numkeys])
+        return [amount for _ in keys]
+
+
+@pytest.fixture
+def root_log_capture():
+    """The real JsonFormatter on the ROOT logger at DEBUG.
+
+    Broader than `log_capture` in two ways, both deliberate: DEBUG rather than
+    INFO, so "at any level" is literal, and the root logger rather than the
+    `dodeal_ai` tree, so a line written by starlette, httpx or anything else in
+    the process is captured too. The claim being tested is that the note text is
+    in NO log line, not that it is in none of ours.
+    """
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(JsonFormatter())
+    root = logging.getLogger()
+    original_level = root.level
+    root.addHandler(handler)
+    root.setLevel(logging.DEBUG)
+    try:
+        yield stream
+    finally:
+        root.removeHandler(handler)
+        root.setLevel(original_level)
+
+
+@pytest.fixture
+def direct_client(monkeypatch):
+    """The direct route behind the real gate chain, with every seam faked."""
+    monkeypatch.setenv("DODEAL_JWT_SIGNING_KEY", tokens.TEST_SECRET)
+    get_settings.cache_clear()
+    test_settings = Settings(
+        _env_file=None,
+        jwt_signing_key=tokens.TEST_SECRET,
+        jwt_algorithm=tokens.TEST_ALG,
+    )
+    llm = FakeLLM()
+    llm.script_for(CLASSIFY_TEMPLATE, json_response({"note_type": "discovery"}))
+    llm.script_for(
+        template_for(NoteType.DISCOVERY),
+        json_response(
+            {
+                "is_vague": True,
+                "missing_components": ["next_step_with_date"],
+                "clarification_prompt": "When are you following up?",
+                "reasoning": "No date was given.",
+            }
+        ),
+    )
+    llm.script_for(
+        SCORE_TEMPLATE,
+        json_response(
+            {
+                "marks": {
+                    "what_happened": 20,
+                    "client_said": 15,
+                    "next_step_date": 15,
+                    "clarity": 5,
+                }
+            }
+        ),
+    )
+
+    monkeypatch.setattr(limiter, "get_cost_client", lambda: _DirectCostRedis())
+    monkeypatch.setattr(state, "get_operational_client", lambda: FakeOperationalRedis())
+    monkeypatch.setattr(limiter, "_TOKEN_PREFLIGHT_LOGGED", False)
+
+    app.dependency_overrides[get_verifier] = lambda: JwtVerifier(test_settings)
+    app.dependency_overrides[get_llm_client] = lambda: llm
+
+    # raise_server_exceptions=False so the 500 path returns the shaped body the
+    # catch-all built, rather than re-raising into the test.
+    yield TestClient(app, raise_server_exceptions=False)
+
+    app.dependency_overrides.clear()
+    get_settings.cache_clear()
+
+
+def _fail_the_model() -> None:
+    """Swap in a client whose FIRST call raises a provider failure.
+
+    A fresh FakeLLM with a POSITIONAL script rather than a re-script of the
+    fixture's: `script_for` appends to a template's queue, so queueing a failure
+    behind the good answer would let the good answer serve the call and the
+    request would come back 200.
+    """
+    app.dependency_overrides[get_llm_client] = lambda: FakeLLM(
+        LLMProviderError(LLMErrorReason.UNAVAILABLE, transient=True)
+    )
+
+
+def _direct_headers() -> dict:
+    return {
+        "Authorization": f"Bearer {tokens.mint_token(subdomain='tenant-a', sub=42)}",
+        "Host": "tenant-a.dodealcrm.com",
+    }
+
+
+def _direct_body(text: str = SENTINEL, project: str | None = None) -> dict:
+    return {
+        "lead_id": 1656,
+        "note_id": 10,
+        "author_id": 27,
+        "note_text": text,
+        "lead": {"leadType": "buyer", "enquiryType": "sale", "project": project},
+    }
+
+
+def _assert_project_sentinel_absent(stream: io.StringIO) -> None:
+    text = stream.getvalue()
+    assert "SENTINEL-PROJECT" not in text
+    assert "Marassi" not in text
+
+
+# --- the note itself, on all five outcomes ----------------------------------
+
+
+def test_direct_happy_path_logs_no_note_text(direct_client, root_log_capture):
+    # The note is judged and an outcome line is written. That line is the one
+    # most likely to leak a body, because it is the line that always happens.
+    body = _direct_body(SENTINEL + " Following up Tuesday at 3pm.")
+    r = direct_client.post(DIRECT, json=body, headers=_direct_headers())
+
+    assert r.status_code == 200
+    assert r.json()["suppressed"] is None
+    _assert_sentinel_absent(root_log_capture)
+    assert SENTINEL not in r.text
+
+
+def test_direct_extra_field_422_logs_no_note_text(direct_client, root_log_capture):
+    # The validation handler's own case, on the route that carries text: it
+    # drops every value, so the body reaches neither the response nor the line.
+    body = {**_direct_body(), "note": SENTINEL}
+    r = direct_client.post(DIRECT, json=body, headers=_direct_headers())
+
+    assert r.status_code == 422
+    assert r.json()["reason"] == "invalid_request"
+    _assert_sentinel_absent(root_log_capture)
+    assert SENTINEL not in r.text
+
+    line = next(
+        x
+        for x in _lines(root_log_capture)
+        if x.get("message") == "request_validation_failed"
+    )
+    assert line["error_types"] == "extra_forbidden"
+
+
+def test_direct_over_length_422_logs_no_note_text(direct_client, root_log_capture):
+    # The hard ceiling. pydantic's string_too_long error carries the offending
+    # string as `input`; the handler drops it, and this is the path where that
+    # value is a whole note.
+    over = SENTINEL + "x" * 4000
+    r = direct_client.post(DIRECT, json=_direct_body(over), headers=_direct_headers())
+
+    assert r.status_code == 422
+    _assert_sentinel_absent(root_log_capture)
+    assert SENTINEL not in r.text
+
+    line = next(
+        x
+        for x in _lines(root_log_capture)
+        if x.get("message") == "request_validation_failed"
+    )
+    assert line["error_types"] == "string_too_long"
+
+
+def test_direct_model_failure_503_logs_no_note_text(direct_client, root_log_capture):
+    # The model failed with the note in flight. The provider error is ours, so
+    # its fixed-vocabulary message is kept -- and the note is not in it.
+    _fail_the_model()
+    r = direct_client.post(
+        DIRECT,
+        json=_direct_body(SENTINEL + " Following up Tuesday."),
+        headers=_direct_headers(),
+    )
+
+    assert r.status_code == 503
+    assert r.json()["reason"] == "model_unavailable"
+    _assert_sentinel_absent(root_log_capture)
+    assert SENTINEL not in r.text
+
+
+def test_direct_unexpected_error_500_logs_no_note_text(
+    direct_client, root_log_capture, monkeypatch
+):
+    # The catch-all, with the note in the request body. The traceback is
+    # formatted and logged frames-only, and the frames run through the pipeline
+    # while it is holding the note -- so this is the path where a `%r` of a
+    # local, or a chained message, would take the whole body with it.
+    monkeypatch.setattr(state, "read_rate_limit", _raise_boom)
+
+    r = direct_client.post(
+        DIRECT,
+        json=_direct_body(SENTINEL + " Following up Tuesday."),
+        headers=_direct_headers(),
+    )
+
+    assert r.status_code == 500
+    _assert_sentinel_absent(root_log_capture)
+    assert SENTINEL not in r.text
+
+    line = next(
+        x for x in _lines(root_log_capture) if x.get("message") == "unhandled_exception"
+    )
+    assert line["error_type"] == "RuntimeError"
+    assert "error" not in line  # a foreign exception's message IS the data
+
+
+# --- the lead context, on the same paths ------------------------------------
+#
+# `lead.project` is caller-supplied text on the same body and it reaches the
+# classifier's prompt, so it is note-shaped data by any other name: a project
+# name is a customer's purchase, and it must not reach a log line either.
+
+
+def test_direct_happy_path_logs_no_lead_project(direct_client, root_log_capture):
+    r = direct_client.post(
+        DIRECT,
+        json=_direct_body("Called the client, discussed the plot.", SENTINEL_PROJECT),
+        headers=_direct_headers(),
+    )
+
+    assert r.status_code == 200
+    _assert_project_sentinel_absent(root_log_capture)
+
+
+def test_direct_extra_field_422_logs_no_lead_project(direct_client, root_log_capture):
+    body = {**_direct_body("Called the client.", SENTINEL_PROJECT), "note": "x"}
+    r = direct_client.post(DIRECT, json=body, headers=_direct_headers())
+
+    assert r.status_code == 422
+    _assert_project_sentinel_absent(root_log_capture)
+    assert "SENTINEL-PROJECT" not in r.text
+
+
+def test_direct_model_failure_503_logs_no_lead_project(direct_client, root_log_capture):
+    _fail_the_model()
+    r = direct_client.post(
+        DIRECT,
+        json=_direct_body("Called the client, discussed the plot.", SENTINEL_PROJECT),
+        headers=_direct_headers(),
+    )
+
+    assert r.status_code == 503
+    _assert_project_sentinel_absent(root_log_capture)
+
+
+def test_direct_unexpected_error_500_logs_no_lead_project(
+    direct_client, root_log_capture, monkeypatch
+):
+    monkeypatch.setattr(state, "read_rate_limit", _raise_boom)
+
+    r = direct_client.post(
+        DIRECT,
+        json=_direct_body("Called the client, discussed the plot.", SENTINEL_PROJECT),
+        headers=_direct_headers(),
+    )
+
+    assert r.status_code == 500
+    _assert_project_sentinel_absent(root_log_capture)

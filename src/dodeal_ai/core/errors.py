@@ -179,8 +179,12 @@ async def request_validation_handler(request: Request, exc: Exception) -> JSONRe
     code, and the field-level detail stays server-side.
 
     JudgementRequest is extra="forbid", so posting note text is a 422 rather
-    than a silently ignored field -- and this is why that 422 does not then
-    quote the note back.
+    than a silently ignored field ON THE PRIMARY ROUTE -- and this is why that
+    422 does not then quote the note back. The direct route
+    (DECISION[DIRECT_ROUTE]) accepts note text by design and caps it in the
+    schema, so its over-length 422 comes through here carrying a whole note as
+    the rejected `input`: the same drop, on the one path where the dropped
+    value is certain to be a note body.
     """
     assert isinstance(exc, RequestValidationError)  # registered for this type only
     request_id = _request_id(request)

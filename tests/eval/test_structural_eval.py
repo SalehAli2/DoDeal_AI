@@ -34,6 +34,7 @@ from dodeal_ai.units.structured_intelligence.pipeline import JudgementDeps, judg
 from dodeal_ai.units.structured_intelligence.schemas import (
     JudgementRequest,
     NoteType,
+    SuppressedDetail,
     SuppressedReason,
 )
 from dodeal_ai.units.structured_intelligence.scoring import SCORE_TEMPLATE
@@ -59,6 +60,13 @@ TIMELINE_COUNT = 27
 # from the fixture, not predicted. If a regenerated corpus changes it, this
 # fails and says by how much -- which is the point of pinning it.
 NOTE_TOO_SHORT_COUNT = 9
+# max_note_chars 2000, the other end of the same gate (Piece K). Three corpus
+# notes are over 5,000 characters and every other note is under 400, so this
+# count is not sensitive to where between 400 and 5,000 the limit is set -- it
+# would take a real change in the corpus to move it, which is what makes it
+# worth pinning. UNCHANGED at 9 above: none of the three is also thin.
+NOTE_TOO_LONG_COUNT = 3
+SCORED_COUNT = NOTE_COUNT - NOTE_TOO_SHORT_COUNT - NOTE_TOO_LONG_COUNT
 
 VAGUE_ANSWER = {
     "is_vague": True,
@@ -124,6 +132,7 @@ async def test_every_corpus_note_yields_a_judgement_or_a_suppression(operational
 
     scored = 0
     suppressed_short = 0
+    suppressed_long = 0
     for lead_id, note in every_note:
         judgement = await judge_note(
             _scope(),
@@ -143,7 +152,16 @@ async def test_every_corpus_note_yields_a_judgement_or_a_suppression(operational
             assert judgement.score is None, note.id
             assert judgement.decision is None, note.id
             if judgement.suppressed.reason is SuppressedReason.INSUFFICIENT_EVIDENCE:
+                assert (
+                    judgement.suppressed.detail_code is SuppressedDetail.NOTE_TOO_SHORT
+                ), note.id
                 suppressed_short += 1
+            elif judgement.suppressed.detail_code is SuppressedDetail.NOTE_TOO_LONG:
+                # not_scorable, and reached before any model call -- so it is
+                # stamped with no model, exactly as a thin note is.
+                assert judgement.suppressed.reason is SuppressedReason.NOT_SCORABLE
+                assert judgement.versions.model_version == "", note.id
+                suppressed_long += 1
 
         # Present on every outcome, both shapes: a judgement nobody can trace
         # back to a rubric and a config version is not auditable.
@@ -151,8 +169,9 @@ async def test_every_corpus_note_yields_a_judgement_or_a_suppression(operational
         assert judgement.note_id == note.id
 
     assert suppressed_short == NOTE_TOO_SHORT_COUNT
-    assert scored == NOTE_COUNT - NOTE_TOO_SHORT_COUNT
-    assert scored + suppressed_short == NOTE_COUNT
+    assert suppressed_long == NOTE_TOO_LONG_COUNT
+    assert scored == SCORED_COUNT
+    assert scored + suppressed_short + suppressed_long == NOTE_COUNT
 
 
 async def test_the_thin_notes_are_suppressed_before_any_model_call(operational):
@@ -186,6 +205,42 @@ async def test_the_thin_notes_are_suppressed_before_any_model_call(operational):
 
     assert llm.call_count == 0
     assert operational.store == {}  # no idempotency key was ever reserved
+
+
+async def test_the_over_long_notes_are_suppressed_before_any_model_call(operational):
+    """The other end of the same gate, and it costs the same nothing.
+
+    Three corpus notes are over 5,000 characters -- pasted threads, not single
+    interactions. They stop where a thin note stops: before the reservation and
+    before the first paid call, so the salesperson can split the note and
+    resubmit at once instead of meeting a 409 for the next 24 hours.
+    """
+    client = _corpus_client()
+    over_long = [
+        (lid, n)
+        for lid, notes in client.notes.items()
+        for n in notes
+        if len(n.note.strip()) > CONFIG.max_note_chars
+    ]
+    assert len(over_long) == NOTE_TOO_LONG_COUNT
+
+    llm = FakeLLM()  # nothing scripted: any model call at all raises
+    deps = JudgementDeps(leads=client, llm=llm, config=CONFIG, settings=get_settings())
+
+    for lead_id, note in over_long:
+        judgement = await judge_note(
+            _scope(),
+            JudgementRequest(lead_id=lead_id, note_id=note.id),
+            resubmission=False,
+            deps=deps,
+        )
+        assert judgement.suppressed is not None
+        assert judgement.suppressed.reason is SuppressedReason.NOT_SCORABLE
+        assert judgement.suppressed.detail_code is SuppressedDetail.NOTE_TOO_LONG
+        assert judgement.score is None and judgement.decision is None
+
+    assert llm.call_count == 0
+    assert operational.store == {}
 
 
 async def test_every_timeline_event_is_suppressed_as_not_scorable(operational):

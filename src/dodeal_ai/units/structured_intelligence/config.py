@@ -152,6 +152,16 @@ class TenantConfig:
 
     min_note_chars: int
     min_note_tokens: int
+    # A structural bound, counted after strip, same place as the thin gate.
+    # The SOFT limit: over it, the note is suppressed not_scorable /
+    # note_too_long with nothing reserved and nothing spent. The schema's
+    # MAX_NOTE_TEXT_CHARS is the hard ceiling on the direct route's body and is
+    # a 422; this one is the rubric's own bound and applies to BOTH routes,
+    # because a note too long to be one interaction is too long whichever way
+    # its text reached us. No inline default: no field on this dataclass
+    # carries one, and one here would be an ordering error. The value lives in
+    # _DEFAULT_CONFIG beside min_note_chars.
+    max_note_chars: int
 
     clarification_cap: int
     rate_limit_per_hour: int
@@ -190,13 +200,14 @@ _DEFAULT_CONFIG = TenantConfig(
     deal_specifics_applicable=False,  # ASSUMPTION[Q13]
     min_note_chars=15,
     min_note_tokens=3,
+    max_note_chars=2000,  # provisional -- the real sample's longest note is 340
     clarification_cap=1,
     rate_limit_per_hour=3,
     rate_limit_window_seconds=3600,
     attempt_ttl_seconds=21600,  # 6h
     idempotency_ttl_seconds=86400,  # 24h
     enforcement_mode=EnforcementMode.ADVISORY,
-    config_version="tenant-cfg-default-1",
+    config_version="tenant-cfg-default-2",
 )
 
 

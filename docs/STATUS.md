@@ -7,7 +7,7 @@ not duplicate it. This file is about the *build*; ASSUMPTIONS is about the *cont
 Update rule: every commit that changes a row here updates this file in the same commit. If a row's status
 and the tree disagree, the tree is right and this file is wrong — fix the file.
 
-**Last updated:** 10 Sep 2026, after Unit A Project 1 phases A–J — the judgement pipeline is built end to end against `FakeLLM` and the vendored fake CRM (head of `scaffold/core-governance-homes`, CI green). **Nothing in Unit A has been verified against a real model or a real backend; nothing is marked `[V]`** (ASSUMPTIONS §8.11).
+**Last updated:** 10 Sep 2026, after Unit A Project 1 phases A–J and Piece K — the judgement pipeline is built end to end against `FakeLLM` and the vendored fake CRM (head of `scaffold/core-governance-homes`, CI green). **Nothing in Unit A has been verified against a real model or a real backend; nothing is marked `[V]`** (ASSUMPTIONS §8.11).
 
 Status vocabulary: `DONE` (committed, CI green) · `PLANNED` (prompt written, not run) · `NEXT` (the next step
 in the sequence) · `BLOCKED <on>` · `PROPOSED` (decision written, not accepted) · `OPEN` (question asked, no
@@ -42,15 +42,16 @@ answer) · `UNASKED` (question identified, not yet sent).
 | **Phase H** — decide, the clarification loop, the rate limit | DONE | `ae62103` |
 | **Phase I** — prompt hardening, adversarial suite, OWASP checkpoint, eval marker (7 pieces) | DONE | `ba44c5c` · `335abf4` · `86a0b3c` · `d0c9acf` · `f17da28` · `257da13` · `403afa7` |
 | **Phase J** — the ledger commit: README provisional answers, ASSUMPTIONS, STATUS, marker reconciliation | DONE | `d93d936` |
+| **Piece K** — the direct judgement route: `judge_note_direct`, `DirectJudgementRequest`, `note_too_long`, `max_note_chars`, `config_version` → `tenant-cfg-default-2` | DONE | sha pending |
 | Step 3 — token counters (`enforce_token_cost`, pre-flight read, breaker, TTL fix, Lua under fakeredis). **Now also: replace `SEAM[STEP3]` (the no-op pre-flight stub in `units/structured_intelligence/pipeline.py`); `/ready` to report db2; socket timeouts for the operational client.** | NEXT | — |
 | Step 4 — tool layer: query params, paging, error taxonomy, retry policy, pooled transport, per-item validation. **Now also: read-after-write bounded re-read on the note fetch (candidate — see §2 debts).** | after step 3 | — |
 | Steps 5–13 | per ed3 §15 | — |
 | Step 0 — test tenant + key + joint call | BLOCKED on backend (Waqas) | — |
 | Step 14+ | BLOCKED on step 0 | — |
 
-Suite at head: **803 tests passing, 1 skipped, 7 deselected; 99.32% coverage** (total floor 92, plus 13
-per-file floors on the deny-path and judgement modules), ruff/format/mypy clean, wheel installs and imports
-in a clean venv. The skipped test is `tests/eval/test_quality_eval.py`, which needs a real model (step 18);
+Suite at head: **841 tests passing, 1 skipped, 7 deselected; 99.34% coverage** (total floor 92, plus 13
+per-file floors on the deny-path and judgement modules — `pipeline.py` is at 100% against its floor of 95),
+ruff/format/mypy clean, wheel installs and imports in a clean venv. The skipped test is `tests/eval/test_quality_eval.py`, which needs a real model (step 18);
 the deselected 7 are the `integration` marker.
 
 ### Open items carried out of Unit A Project 1
@@ -62,7 +63,7 @@ the deselected 7 are the `integration` marker.
 | **Review finding F4 deferred:** one reprompt tail serves both form failures and content failures; a second tail selected by error class would say something more useful. | post-campaign batch |
 | **`.env.example` has been modified-unstaged in the working tree throughout the campaign** and was deliberately never touched (campaign §0.8 forbids it). Someone should look at what that change is and either commit or discard it. | whoever made it |
 | **The vendored corpus is 127 notes carrying only 57 distinct texts.** Harmless for the structural eval; misleading for any quality number computed over it. | before step 18 |
-| **`DECISION[DIRECT_ROUTE]` — accepted 10 September, to be built in Piece K. Not built.** It is **the one exception to "no note text in a request body"**: every route that exists today takes two integers and fetches the note by id (Design A), and this decision admits a route that does not. Nothing in the tree implements it yet, and §7 of the campaign prompt still forbids it — so the prohibition and the decision co-exist until K lands and the prohibition is amended in the same commit. Whoever builds K must state, in the same commit, what stops the direct route becoming the default path. | us, Piece K |
+| **`DECISION[DIRECT_ROUTE]` — accepted 10 September. BUILT in Piece K.** `POST /api/v1/notes/judgements/direct` and its `/resubmission` variant accept the saved note's text in the body — **the one exception to "no note text in a request body"**, granted because the CRM's read surface has been unavailable for six weeks. The fetch route is unchanged and remains the contract. The prohibition is amended in K's own commit; the decision, its three points and its correction paths are `ASSUMPTIONS.md` §3.7. **What stops it becoming the default path:** the fetch route is the documented contract; the direct body is `extra="forbid"` with no score-shaped field, so it can carry a note and never an answer; and both routes run the same `_judge`, so choosing the direct one buys no different behaviour. It exists while the read surface is down. | done, Piece K |
 | **`tenant-c.json` is not vendored.** Only `tests/fixtures/fake_crm/tenant-a.json` exists. Any test that needs a second tenant's corpus — cross-tenant isolation over real-shaped data, or a per-tenant config that actually differs — has nothing to read. Fixture tenants are `tenant-a` / `tenant-b` by convention, so a second corpus would be `tenant-b.json`; `tenant-c.json` is named here because that is how it was raised. | us, unscheduled |
 
 ---

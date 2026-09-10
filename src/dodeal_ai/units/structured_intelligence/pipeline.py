@@ -1,11 +1,20 @@
 """judge_note — the Unit A pipeline, in the one order it may run in.
 
+TWO ENTRY POINTS, ONE PIPELINE. `judge_note` FETCHES the note by id (Design A,
+the contract route). `judge_note_direct` is handed the note in the request body
+by the CRM, which has just saved it (DECISION[DIRECT_ROUTE]). They differ in
+steps 1 and 2 and in nothing else: both join `_judge` at step 3 and every step
+from there down is one shared function, so the two routes cannot drift into
+judging the same text differently.
+
 The order is not incidental; each step is placed where it is because of what
 the step after it costs:
 
   1. fetch the lead                      404 lead_not_found     (see H2 below)
   2. fetch page one of its notes, match  404 note_not_found
-  3. thin evidence?                      -> suppressed, STOP. No reservation,
+     (the direct route skips 1 and 2: the CRM sent the note, and no
+      LeadsClient call is made at all)
+  3. too thin, or too long?              -> suppressed, STOP. No reservation,
                                             no model call, nothing spent.
   4. reserve idempotency                 409 duplicate / 503 unavailable
   5. read the rate limit                 (fail open)
@@ -43,7 +52,8 @@ questions they never received.
 
 WHY THIS ORDER, at the two places it matters:
 
-  Thin evidence BEFORE the reservation. A three-word note is refused without
+  The length gate BEFORE the reservation. A three-word note -- or one longer
+  than a tenant will score as a single interaction -- is refused without
   reserving anything, so the salesperson can fix it and resubmit immediately
   rather than being told 409 for the next 24 hours.
 
@@ -87,6 +97,7 @@ from dodeal_ai.units.structured_intelligence.config import TenantConfig
 from dodeal_ai.units.structured_intelligence.decide import decide
 from dodeal_ai.units.structured_intelligence.schemas import (
     Decision,
+    DirectJudgementRequest,
     Judgement,
     JudgementRequest,
     NoteAnalysis,
@@ -137,12 +148,24 @@ class JudgementDeps:
     call, because llm_timeout_seconds is a per-call argument and a test that
     wants a different one should set it on the deps it already builds, not reach
     into a cache the whole process shares.
+
+    `leads` is None on the DIRECT route (DECISION[DIRECT_ROUTE]), which is
+    handed the note and fetches nothing. None rather than a stand-in client:
+    "there is no client here" is the true statement, and only `_fetch_note`
+    reads the field -- which the direct entry point never reaches.
     """
 
-    leads: LeadsClient
+    leads: LeadsClient | None
     llm: LLMClient
     config: TenantConfig
     settings: Settings
+
+
+# Either request shape. Both carry lead_id and note_id, which is all the shared
+# pipeline reads off a request -- the direct body's three extra fields are
+# unpacked into a Lead and a LeadNote by judge_note_direct before the shared
+# function is entered, so nothing below this line knows which route it is on.
+_JudgementInput = JudgementRequest | DirectJudgementRequest
 
 
 def _versions(config: TenantConfig, model_version: str = NO_MODEL) -> Versions:
@@ -156,7 +179,7 @@ def _versions(config: TenantConfig, model_version: str = NO_MODEL) -> Versions:
 
 def _suppressed(
     scope: TenantScope,
-    request: JudgementRequest,
+    request: _JudgementInput,
     *,
     author_id: int,
     reason: SuppressedReason,
@@ -190,19 +213,38 @@ def _suppressed(
     )
 
 
-def _is_thin(note: LeadNote, config: TenantConfig) -> bool:
-    """Too little to judge: below the character floor or the token floor.
+def _length_gate(
+    note: LeadNote, config: TenantConfig
+) -> tuple[SuppressedReason, SuppressedDetail] | None:
+    """The structural bounds on the note itself: too little, or too much.
 
-    Both, not either: "ok" fails on length, and a long string of one repeated
-    word fails on tokens. Whitespace-split is deliberately crude -- it is a
-    floor for "is there anything here at all", not a linguistic measure, and it
-    behaves the same for Arabic, English and mixed text (one prompt set, no
-    language branch).
+    Returns the (reason, detail) pair to suppress with, or None to carry on.
+    ONE function and ONE call site, because both bounds are the same kind of
+    check -- counted on the stripped text, decided before any reservation and
+    before anything is spent -- and a second gate somewhere else is how the two
+    ends of the range start disagreeing about what "the text" is.
+
+    TOO LITTLE -> insufficient_evidence / note_too_short. Below the character
+    floor OR the token floor: "ok" fails on length, and a long string of one
+    repeated word fails on tokens. Whitespace-split is deliberately crude -- it
+    is a floor for "is there anything here at all", not a linguistic measure,
+    and it behaves the same for Arabic, English and mixed text (one prompt set,
+    no language branch).
+
+    TOO MUCH -> not_scorable / note_too_long. Above config.max_note_chars. Not
+    insufficient_evidence: the trouble is not that there is too little to judge
+    but that there is too much to judge as ONE interaction, which is the grain
+    the rubric scores at. It applies to BOTH routes -- a note too long to be one
+    interaction is too long whichever way its text reached us -- and it is a
+    suppressed 200 rather than a 422, because the note IS saved in the CRM and
+    refusing to score it is an answer about the note, not about the request.
     """
     text = note.note.strip()
-    return (
-        len(text) < config.min_note_chars or len(text.split()) < config.min_note_tokens
-    )
+    if len(text) < config.min_note_chars or len(text.split()) < config.min_note_tokens:
+        return (SuppressedReason.INSUFFICIENT_EVIDENCE, SuppressedDetail.NOTE_TOO_SHORT)
+    if len(text) > config.max_note_chars:
+        return (SuppressedReason.NOT_SCORABLE, SuppressedDetail.NOTE_TOO_LONG)
+    return None
 
 
 async def _fetch_note(
@@ -233,6 +275,10 @@ async def _fetch_note(
     as a missing lead. Typed backend errors are step 4 (audit H2); when they
     land, the 404 branch goes here and nothing else moves.
     """
+    # Only judge_note reaches this function, and only the fetch route reaches
+    # judge_note -- so a None client here would mean the direct entry point had
+    # grown a fetch, which is the one thing this route may not do.
+    assert deps.leads is not None
     try:
         lead = await deps.leads.get_lead(scope, request.lead_id)
         notes = await deps.leads.get_lead_notes(scope, request.lead_id)
@@ -265,7 +311,12 @@ async def judge_note(
     resubmission: bool,
     deps: JudgementDeps,
 ) -> Judgement:
-    """Judge one already-saved note. See the module docstring for the order.
+    """Judge one already-saved note, FETCHED by id. The contract route.
+
+    See the module docstring for the order. This entry point owns steps 1 and 2
+    -- the lead and the note come from the backend -- and then hands over to
+    `_judge`, which is every step from the length gate down and is shared with
+    judge_note_direct.
 
     ASSUMPTION[Q1]: the route this runs behind depends on gate4_cost, i.e. the
     CRM forwards the END USER's JWT and we run Gate 1 (auth) -> Gate 2
@@ -284,21 +335,126 @@ async def judge_note(
     route. An edited note is a new fingerprint and so a new judgement; an
     unedited one is a duplicate whichever route it arrives on.
     """
-    config = deps.config
     lead, note = await _fetch_note(scope, request, deps)
-    author_id = note.author_id
+    return await _judge(
+        scope,
+        request,
+        lead,
+        note,
+        author_id=note.author_id,
+        resubmission=resubmission,
+        deps=deps,
+    )
 
-    # --- thin evidence: before any reservation, before any spend ------------
-    if _is_thin(note, config):
+
+async def judge_note_direct(
+    scope: TenantScope,
+    request: DirectJudgementRequest,
+    *,
+    resubmission: bool,
+    deps: JudgementDeps,
+) -> Judgement:
+    """Judge a note the CRM SENT US, having just saved it. DECISION[DIRECT_ROUTE].
+
+    The one exception to "note text is never accepted in a request body",
+    admitted for this entry point only, because the CRM's read surface has been
+    unavailable for six weeks and it can send the saved note server-side after
+    the save. The fetch route above is still the contract and is unchanged.
+
+    THE ONLY DIFFERENCE IS WHERE THE TEXT CAME FROM. There is no fetch, so
+    steps 1 and 2 do not run and no LeadsClient call is made; everything from
+    the length gate down is the same function, in the same order, with the same
+    reservation, the same counters and the same logging. A judgement made here
+    and one made by judge_note over the same text are identical but for the
+    request id.
+
+    CREDENTIAL: the CRM forwards the note author's own user JWT, so this route
+    sits behind exactly the gate chain the fetch route does, and the per-user
+    cost cap and the clarification rate limit key on `sub` as built.
+    `request.author_id` is the CRM's STORED author and is trusted as that; it is
+    NOT checked against `sub`, and a difference never rejects the request -- it
+    is ASSUMPTION[Q7]'s two id spaces, and refusing on it would refuse every
+    judgement the moment the CRM's ids and the token's ids stop coinciding. The
+    difference is recorded on the outcome line (ids only, never text) so that
+    "the CRM is sending someone else's JWT" is visible rather than inferred.
+    """
+    lead = Lead(
+        id=request.lead_id,
+        leadType=request.lead.leadType,
+        enquiryType=request.lead.enquiryType,
+        project=request.lead.project,
+        status=request.lead.status,
+    )
+    note = LeadNote(
+        id=request.note_id,
+        note=request.note_text,
+        author=None,
+        author_id=request.author_id,
+        # Nothing reads createdAt today -- not the prompts, not the scoring, not
+        # the counters -- and the CRM is not asked for it, because a timestamp
+        # we do not use is a field that can be wrong for free. Register item 32
+        # (aware datetime parsing) MUST guard this empty string: the day
+        # createdAt becomes a parsed datetime, a note that arrived on this route
+        # has no value to parse, and a parser that assumes one will raise on the
+        # direct route only.
+        createdAt="",
+    )
+    return await _judge(
+        scope,
+        request,
+        lead,
+        note,
+        author_id=request.author_id,
+        resubmission=resubmission,
+        deps=deps,
+        author_differs_from_subject=str(request.author_id) != scope.subject,
+    )
+
+
+async def _judge(
+    scope: TenantScope,
+    request: _JudgementInput,
+    lead: Lead,
+    note: LeadNote,
+    *,
+    author_id: int,
+    resubmission: bool,
+    deps: JudgementDeps,
+    author_differs_from_subject: bool | None = None,
+) -> Judgement:
+    """Every step from the length gate down, for both entry points.
+
+    ONE body, not two. The two routes differ only in how the Lead and the
+    LeadNote were obtained; everything that costs money, everything that
+    reserves, everything that decides and everything that is logged is here, so
+    the two routes cannot drift into judging the same text differently.
+
+    `author_differs_from_subject` is None on the fetch route -- there is no
+    claimed author to compare, the backend's is the only one -- and a bool on
+    the direct route, where the body carries one. It reaches the outcome line
+    and nothing else: it is not a gate, not a rejection and not an input to any
+    decision.
+    """
+    config = deps.config
+
+    # --- length: before any reservation, before any spend -------------------
+    gated = _length_gate(note, config)
+    if gated is not None:
+        gate_reason, gate_detail = gated
         judgement = _suppressed(
             scope,
             request,
             author_id=author_id,
-            reason=SuppressedReason.INSUFFICIENT_EVIDENCE,
-            detail=SuppressedDetail.NOTE_TOO_SHORT,
+            reason=gate_reason,
+            detail=gate_detail,
             config=config,
         )
-        _log_outcome(scope, judgement, model_passes=0)
+        _log_outcome(
+            scope,
+            judgement,
+            model_passes=0,
+            author_differs_from_subject=author_differs_from_subject,
+        )
         return judgement
 
     # --- reserve: the only thing between a double-submit and paying twice ---
@@ -490,7 +646,12 @@ async def judge_note(
             request_id=scope.request_id,
         )
 
-    _log_outcome(scope, judgement, model_passes=model_passes)
+    _log_outcome(
+        scope,
+        judgement,
+        model_passes=model_passes,
+        author_differs_from_subject=author_differs_from_subject,
+    )
     return judgement
 
 
@@ -528,6 +689,7 @@ def _log_outcome(
     judgement: Judgement,
     *,
     model_passes: int,
+    author_differs_from_subject: bool | None = None,
 ) -> None:
     """One structured line per judgement.
 
@@ -555,7 +717,24 @@ def _log_outcome(
     having is on a WITHHELD reason appearing far more often than expected --
     a rate limit set too low reads, in the response alone, as a service that
     simply asks fewer questions.
+
+    `author_differs_from_subject` appears on DIRECT-ROUTE lines only, where the
+    body carries a claimed author to compare with the token's subject; it is
+    omitted entirely on the fetch route, which has nothing to compare. A bool,
+    never the two ids and never anything derived from the note -- it answers
+    "is the CRM sending us someone else's JWT, or are these simply two id
+    spaces (ASSUMPTION[Q7])?", which is a question about a deployment and not
+    about a note. It is recorded, never enforced: no request is refused for it.
     """
+    # Present only when there is something to say: the fetch route passes None
+    # and the key never reaches the line at all, so a collector filtering on it
+    # sees direct-route judgements and nothing else.
+    author_field = (
+        {}
+        if author_differs_from_subject is None
+        else {"author_differs_from_subject": author_differs_from_subject}
+    )
+
     if judgement.suppressed is not None:
         _logger.info(
             "judgement_suppressed",
@@ -566,6 +745,7 @@ def _log_outcome(
                 "suppressed_reason": judgement.suppressed.reason.value,
                 "suppressed_detail": judgement.suppressed.detail_code.value,
                 "model_passes": model_passes,
+                **author_field,
             },
         )
         return
@@ -585,5 +765,6 @@ def _log_outcome(
             "prompt_withheld": withheld.value if withheld is not None else None,
             "attempt": judgement.decision.attempt,
             "model_passes": model_passes,
+            **author_field,
         },
     )

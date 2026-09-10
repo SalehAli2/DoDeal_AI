@@ -346,6 +346,62 @@ disagrees.
 | B7 — access is audited | Access to recordings and transcripts is audited: **who read what, and when**. A call recording is the most sensitive content this service will hold — a client's voice, saying whatever they said to a salesperson — and "who can read it" is a weaker control than "who has read it", because the second one is the only one that survives a permission being granted for a good reason and never revoked. **A precondition for any pilot recording**, not a hardening step afterwards: an audit trail that starts after the first recording cannot answer questions about the recordings that came before it. |
 | B2 — the summary is English | The call summary is written in **English**, regardless of the language the call was conducted in (§3.6 "Summary" above). An **Arabic summary is a later ask and is not in scope**: it is a second output to evaluate, a second quality bar to hold, and it doubles the review burden on whoever signs the summaries off. Recorded here so that "the summaries are in English" reads as a decision rather than as an oversight — and so that asking for Arabic later is understood as new scope, not a fix. |
 | B13 Q2 — storage country unknown | **The storage country for audio and transcripts is not known.** Where a recording physically rests, and under whose jurisdiction, has not been established for any candidate provider or bucket. **This is the same residency answer as Q20** (data residency and a DPA for note text sent to a model provider — `docs/STATUS.md` §6, currently unowned): one question, two kinds of customer content, and answering it for note text without answering it for audio would leave the more sensitive half uncovered. Ask them together, of the same owner. |
+
+## 3.7 DECISION[DIRECT_ROUTE] — the CRM sends the saved note
+
+**Status: DECIDED, and BUILT in Piece K.** The lead's decision, recorded here; not ours to argue.
+
+**The decision.** A new route accepts the note's TEXT in the request body:
+`POST /api/v1/notes/judgements/direct` and `POST /api/v1/notes/judgements/direct/resubmission`. This is the
+**one exception** to the campaign's never-list item "accept note text in a request body", and it is granted
+for these two routes only. **The fetch route stays the contract and is unchanged.**
+
+**The reason.** The CRM's read surface has been unavailable for six weeks, so `GET /leads/{id}/notes` cannot
+be relied on to return the note we are asked to judge. The CRM will send the saved note **server-side, after
+the save** — so the text we judge is the text that was stored, and the judgement still happens outside the
+write path (Design A is untouched: a scoring outage cannot block a note save).
+
+### The three points
+
+**1. Credential.** The CRM forwards **the note author's own user JWT** on the direct call, so the route sits
+behind the same gates as the fetch route — Gate 1 (auth) → Gate 2 (tenancy) → Gate 4 (cost), one
+`Depends(gate4_cost)`, exactly as before. `author_id` in the body is **trusted as the CRM's stored author**
+and is **not checked against `sub`**. When they differ, the outcome log line carries
+`author_differs_from_subject: true` (**ids only, never text**); **the request is never rejected for it.** The
+per-user cost cap and the clarification rate limit **key on `sub`**, as built.
+
+**2. Length limits.** Two, at different layers:
+
+| Limit | Where | Value | Outcome |
+| --- | --- | --- | --- |
+| Hard ceiling | `DirectJudgementRequest.note_text` (`schemas.py`) | **4,000 characters** | **422** `invalid_request`, before the pipeline is entered |
+| Soft limit | `TenantConfig.max_note_chars`, beside `min_note_chars` | **2,000 characters** | **200** suppressed, `not_scorable` / **`note_too_long`** |
+
+The soft limit is checked **in the same place as the thin gate** — on the stripped text, before any
+reservation and before anything is spent — and applies to **both routes**. **No third `SuppressedReason`:**
+`note_too_long` is a new `SuppressedDetail` under the existing `not_scorable`.
+
+**3. Both numbers are provisional.** The real sample's longest note is **340 characters**, so both limits are
+an order of magnitude of headroom above anything observed. They are chosen to be obviously safe, not measured.
+
+### Correction paths
+
+| If | Then |
+| --- | --- |
+| **The CRM calls with its own credential** (a service principal rather than a forwarded user JWT) | D1's service principal is **built as its own piece**, behind `TokenVerifier`. **This route does not change** — it already takes a `TenantScope`, so only what builds the scope moves. |
+| **The CRM forwards another user's JWT** | The **rate-limit key builder in `state.py` switches to `author_id` for this route**, so the limit follows the person being asked about rather than whoever's token was borrowed. |
+| **The limits turn out wrong** | Both are one-line changes: `MAX_NOTE_TEXT_CHARS` in `schemas.py` (a 422 bound) and `max_note_chars` in `config.py` (a suppression bound). Changing the second **bumps `config_version`**; past judgements are never rescored. |
+
+**Seams:** `units/structured_intelligence/pipeline.py` (`judge_note_direct`, joining the shared `_judge` at the
+length gate), `api/routes/judgements.py` (the two routes; `get_leads_client` is deliberately not in their
+dependency chain), `schemas.py` (`DirectJudgementRequest`, `LeadContext`, `MAX_NOTE_TEXT_CHARS`),
+`config.py` (`max_note_chars`, `config_version` → `tenant-cfg-default-2`).
+
+**What stops it becoming the default path:** the fetch route is the documented contract and is unchanged; the
+direct body is `extra="forbid"` with no score-shaped field, so it can only ever carry a note and never an
+answer; and both routes run the same `_judge`, so there is no behaviour to gain by choosing the direct one.
+It exists because the read surface is down, and it is the read surface's return that removes the reason for it.
+
 ---
 
 # 4. PENDING — awaiting a backend answer

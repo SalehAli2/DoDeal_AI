@@ -20,12 +20,14 @@ Three groups live here, and the boundary between them is the point:
   RESPONSE      NoteAnalysis / ScoreComponent / NoteScore / Suppressed /
                 Decision / Versions / Judgement. What the CRM receives.
 
-THE RULE THIS FILE ENFORCES STRUCTURALLY: no model-output schema has a `band`
-or a `total` field. The model supplies marks and a classification; the total,
-the denominator, the band and the decision are computed in code from
-TenantConfig. A model cannot hand us a score. A test asserts this by
-introspecting model_fields, so adding such a field to an output schema fails
-the suite rather than silently moving the arithmetic into the prompt.
+THE RULE THIS FILE ENFORCES STRUCTURALLY: no REQUEST and no model-output schema
+has a `band` or a `total` field. The model supplies marks and a classification;
+the total, the denominator, the band and the decision are computed in code from
+TenantConfig. Neither a model nor a caller can hand us a score. A test asserts
+this by introspecting model_fields, so adding such a field to either kind of
+schema fails the suite rather than silently moving the arithmetic into the
+prompt -- or into the CRM's payload, which is why the direct route's body is
+covered by the same test as the three output schemas.
 """
 
 from __future__ import annotations
@@ -153,10 +155,16 @@ class SuppressedReason(StrEnum):
 class SuppressedDetail(StrEnum):
     """The specific cause under a SuppressedReason.
 
-    NOTE_TOO_SHORT pairs with INSUFFICIENT_EVIDENCE. The other two pair with
-    NOT_SCORABLE, and BOTH come from the classifier: a machine timeline entry
-    (SYSTEM_EVENT, ASSUMPTION[Q6]) and a note it could not place at all
-    (UNCLASSIFIABLE).
+    NOTE_TOO_SHORT pairs with INSUFFICIENT_EVIDENCE. The other three pair with
+    NOT_SCORABLE: SYSTEM_EVENT and UNCLASSIFIABLE come from the classifier -- a
+    machine timeline entry (ASSUMPTION[Q6]) and a note it could not place at
+    all -- and NOTE_TOO_LONG comes from the length gate, before any model call.
+
+    NOTE_TOO_LONG is NOT_SCORABLE rather than INSUFFICIENT_EVIDENCE because the
+    problem is not that there is too little to judge: there is too much to judge
+    as ONE note, and the rubric scores a single interaction. It takes no third
+    SuppressedReason -- "we will not score this" is what NOT_SCORABLE already
+    means, whoever decided it.
 
     There is no member for "the pipeline has not been built yet". A fourth,
     NOT_IMPLEMENTED, existed between phases F and H and was set when a note had
@@ -170,6 +178,7 @@ class SuppressedDetail(StrEnum):
     NOTE_TOO_SHORT = "note_too_short"
     SYSTEM_EVENT = "system_event"
     UNCLASSIFIABLE = "unclassifiable"
+    NOTE_TOO_LONG = "note_too_long"
 
 
 # ---------------------------------------------------------------------------
@@ -178,19 +187,84 @@ class SuppressedDetail(StrEnum):
 
 
 class JudgementRequest(BaseModel):
-    """The only body this unit accepts: two integers.
+    """The primary route's body: two integers.
 
     extra="forbid" is load-bearing. The note is ALREADY SAVED in the CRM and is
-    fetched by id (Design A); note text is never accepted in a body. Forbidding
-    extras means a caller that tries to post `note` or `text` gets a 422 naming
-    the field rather than having it silently ignored -- which would leave the
-    caller believing we judged the text they sent.
+    fetched by id (Design A); note text is never accepted in THIS body.
+    Forbidding extras means a caller that tries to post `note` or `text` gets a
+    422 naming the field rather than having it silently ignored -- which would
+    leave the caller believing we judged the text they sent.
+
+    The direct route (DECISION[DIRECT_ROUTE], below) is the one exception, and
+    it is a SEPARATE model on a separate path: nothing a caller posts here
+    starts being read as note text.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     lead_id: int
     note_id: int
+
+
+# The hard ceiling on note text in a request body. A REQUEST-SIZE bound, not a
+# rubric one: it is here, in the schema, so an oversized body is a 422 that
+# never reaches the pipeline, is never fingerprinted and is never held in a
+# judgement. The tenant's own soft limit (TenantConfig.max_note_chars, 2000
+# today) is the rubric bound and suppresses with a reason instead.
+#
+# PROVISIONAL. The real sample's longest note is 340 characters, so both
+# numbers are an order of magnitude of headroom above anything observed --
+# chosen to be obviously safe rather than measured. See DECISION[DIRECT_ROUTE].
+MAX_NOTE_TEXT_CHARS = 4000
+
+
+class LeadContext(BaseModel):
+    """The four lead fields the classifier's context section reads.
+
+    Exactly the four, and nothing else. The fetch route gets a whole `Lead`
+    from the backend and uses these four; the direct route is sent these four
+    and nothing more, so the CRM cannot widen what reaches a prompt by adding
+    fields to its payload. All four are optional because every lead field
+    except `id` is nullable in the backend contract (schemas/lead.py).
+
+    extra="forbid": a fifth field is a 422, not a silently ignored one.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    leadType: str | None = None
+    enquiryType: str | None = None
+    project: str | None = None
+    status: str | None = None
+
+
+class DirectJudgementRequest(BaseModel):
+    """The direct route's body: the saved note, sent by the CRM after the save.
+
+    DECISION[DIRECT_ROUTE] -- the ONE exception to "note text is never accepted
+    in a request body", admitted for this route only because the CRM's read
+    surface has been unavailable for six weeks. The fetch route is still the
+    contract; see ASSUMPTIONS.md.
+
+    `author_id` is the CRM's STORED author for the note, trusted as such and
+    never checked against the token's `sub` -- they are different id spaces
+    (ASSUMPTION[Q7]) and the request is never rejected for a difference. The
+    outcome line records that they differed; nothing else changes.
+
+    NO SCORE-SHAPED FIELD, and there never may be one. This is a request body
+    the CRM controls, so a `band`, a `total`, a `score` or a `mark` here would
+    be a caller handing us the answer -- the same rule the model-output schemas
+    are held to, for the same reason, and asserted by the same introspection
+    test.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    lead_id: int
+    note_id: int
+    author_id: int
+    note_text: str = Field(max_length=MAX_NOTE_TEXT_CHARS)
+    lead: LeadContext
 
 
 # ---------------------------------------------------------------------------

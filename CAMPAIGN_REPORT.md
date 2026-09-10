@@ -2651,6 +2651,97 @@ stand (I.5).
 
 ---
 
+## Piece K: direct judgement route   STATUS: DONE <sha>
+
+Not a campaign phase. One commit adding the route the lead decided on, plus the second commit that
+backfills this sha. **The campaign's never-list item "accept note text in a request body" is amended
+here, for these two routes only**, on the lead's decision.
+
+**What changed:**
+
+| File | What |
+| --- | --- |
+| `src/dodeal_ai/units/structured_intelligence/schemas.py` | `NOTE_TOO_LONG` added to `SuppressedDetail` (pairing docstring rewritten: `note_too_short` → `insufficient_evidence`; `system_event`, `unclassifiable`, `note_too_long` → `not_scorable`). `LeadContext` (four nullable lead fields, `extra="forbid"`) and `DirectJudgementRequest` (`lead_id`, `note_id`, `author_id`, `note_text` capped at `MAX_NOTE_TEXT_CHARS = 4000`, `lead`, `extra="forbid"`). No band, no total, no score field of any kind. |
+| `src/dodeal_ai/units/structured_intelligence/config.py` | `max_note_chars` beside `min_note_chars` (2000 in `_DEFAULT_CONFIG`); `config_version` → `tenant-cfg-default-2`. |
+| `src/dodeal_ai/units/structured_intelligence/pipeline.py` | `_is_thin` → `_length_gate`, returning the `(reason, detail)` pair or `None` and now covering both ends. `judge_note` keeps steps 1–2 and hands to the new `_judge`; `judge_note_direct` builds a `Lead` + `LeadNote` from the body and enters `_judge` at the length gate. `_judge` is everything from there down, unchanged. `JudgementDeps.leads` is `LeadsClient | None`. `_log_outcome` gains `author_differs_from_subject`, present on direct-route lines only. |
+| `src/dodeal_ai/api/routes/judgements.py` | `POST /api/v1/notes/judgements/direct` and `.../direct/resubmission`, both behind `Depends(gate4_cost)` exactly like the existing routes. `get_leads_client` is not in either dependency tree. |
+| `src/dodeal_ai/core/errors.py` | Validation-handler docstring qualified "on the primary route", and says what the direct route's over-length 422 carries. |
+| `README.md` | Direct-route paragraph under the route contract; the never-accepted claim qualified; a security bullet added for it. |
+| `docs/security/owasp-llm-unit-a.md` | LLM07: one paragraph — on the direct route the note arrives in the body, is validated by the schema, and is delimited by `build_prompt` exactly as fetched text is. |
+| `ASSUMPTIONS.md` | New §3.7 `DECISION[DIRECT_ROUTE]` — decision, reason, the three points, the correction paths. |
+| `docs/STATUS.md` | Piece K row (sha pending), the `DECISION[DIRECT_ROUTE]` open item marked built, suite numbers. |
+| `tests/unit/test_direct_routes.py` | New, 21 tests. |
+| `tests/security/test_log_safety.py` | New direct-route section: five outcomes for the note, four for `lead.project`, root logger at DEBUG. |
+| `tests/eval/test_structural_eval.py` | `NOTE_TOO_LONG_COUNT = 3` pinned; `NOTE_TOO_SHORT_COUNT` unchanged at 9; a test that the over-long notes cost nothing. |
+| `tests/unit/test_unit_a_schemas.py`, `test_unit_a_config.py`, `test_judgement_routes.py` | The introspection test extended to the request models; the four-member detail vocabulary; the `config_version` pin moved to `tenant-cfg-default-2` in three places. |
+
+**The lead's decisions, recorded not argued.** The route accepts note text because the CRM read surface has
+been unavailable for six weeks and the CRM sends the saved note server-side after the save. The credential is
+the note author's forwarded user JWT, so the gates and both counters are unchanged and key on `sub`.
+`author_id` is trusted as the CRM's stored author, never checked against `sub`, never a rejection — the
+difference is logged as `author_differs_from_subject`, ids only. Two length limits: 4,000 hard (422) and 2,000
+soft (`not_scorable` / `note_too_long`, both routes). Both provisional; the sample's longest note is 340.
+
+**Decisions taken here, and their cost:**
+
+1. **`_length_gate` returns a pair, not a bool.** The alternative was a second gate function for the upper
+   bound. **Cost of the alternative:** two functions counting "the text" separately, one call site each, and
+   the first quiet disagreement about whether the count is before or after `strip` becomes a scoring
+   difference nobody sees. One function, one call site, both bounds.
+2. **`JudgementDeps.leads` is `LeadsClient | None`, and `_fetch_note` asserts it.** The alternative was a
+   stand-in client whose methods raise, passed on the direct routes. **Cost of the alternative:** a
+   `# type: ignore` on a concrete class, and a reader who sees a leads client on a route that must never
+   fetch. `None` is the true statement; the assert is one line on a path that always has a client.
+3. **`note_too_long` is `not_scorable`, not a third `SuppressedReason`.** As the lead specified. The reason
+   vocabulary answers "why is there no score", and "we will not score this" already exists — the trouble with
+   a 5,000-character note is not that there is too little evidence but that it is not one interaction.
+4. **The soft limit applies to both routes.** The lead's instruction, and the pipeline makes it free: the gate
+   is in `_judge`, which both entry points run. Three corpus notes move from scored to suppressed as a result.
+
+**Tree disagreements — three, all mechanical, all resolved toward the prompt's intent:**
+
+1. **`max_note_chars: int = 2000` cannot carry an inline default where the prompt places it.** `TenantConfig`
+   is a frozen `slots` dataclass and **no field on it has a default**; a defaulted field beside
+   `min_note_chars` is followed by nine fields without defaults, which is a `TypeError` at class creation.
+   **Resolved:** declared beside `min_note_chars` with no inline default, in the style of every other field,
+   and the value `2000` set in `_DEFAULT_CONFIG` beside `min_note_chars=15`. Placement and value are as
+   instructed; only the inline-default spelling could not be.
+2. **README has no security bullet reading "posting note text is a 422".** That phrase is in
+   `core/errors.py:181` — which the prompt separately (and correctly) names. The README claim that needed the
+   qualifier was the route-contract sentence "note text is never accepted in a request body".
+   **Resolved:** that sentence now ends "on this route", and a **new** security bullet was added carrying the
+   "on the primary route" qualifier the prompt asked for, so the bullet the prompt describes now exists.
+3. **`lead.project` on five paths, not four.** The prompt asks for the note sentinel on five outcomes and the
+   `LeadContext.project` sentinel on "the same four paths". The over-4,000 case is specific to `note_text`,
+   so `project` is covered on the other four: 200, 422 (extra field), 503, 500. Read as four, built as four.
+
+**Tests:** 38 added (803 → **841 passing**, 1 skipped, 7 deselected). Coverage **99.34 %** (was 99.32).
+All 13 per-file floors met, no new floors: `pipeline.py` **100 %** against its floor of 95; `decide.py` and
+`llm_call.py` **100 %**. `uv build` + `scripts/verify_wheel.py` OK in a clean venv.
+
+**For the lead:**
+
+- **The rate limit still keys on `sub`, and on this route that is a decision with a shape.** If the CRM ever
+  forwards a supervisor's JWT for a note a salesperson wrote, the supervisor's bucket is the one that fills.
+  The correction path is recorded (`state.py`'s key builder switches to `author_id` for this route) and the
+  evidence for taking it is now collectable: `author_differs_from_subject` on the outcome line. **Nothing
+  reads that field yet** — someone has to actually look at it, or the correction path has no trigger.
+- **Three corpus notes changed outcome.** The fixture's three notes over 5,000 characters were scored before
+  this piece and are suppressed `note_too_long` now. The eval pins 3; the pin is safe because every other
+  corpus note is under 400 characters, so nothing between 400 and 5,000 exists to make the count sensitive to
+  where the limit sits. **A real corpus will not have that gap.**
+- **`config_version` moved to `tenant-cfg-default-2`.** Nothing is rescored, by design. Any judgement stored
+  under `-1` is still readable and still comparable only with other `-1` judgements. If the CRM has stored
+  judgements from testing, they now carry the older stamp — which is correct, and worth knowing.
+- **The direct route has no read-after-write problem, and the fetch route's candidate debt is unchanged.**
+  Step 4's bounded re-read (STATUS §2) exists because a replica may not have the note yet. The direct route
+  cannot hit that — the CRM sends the text — which is a real argument for the route beyond the outage, and an
+  argument against removing it the moment the read surface returns. **Not a decision I am taking**; recorded
+  because the piece surfaced it.
+- **Nothing here is verified against a real model or a real backend.** Unchanged, and still ASSUMPTIONS §8.11.
+
+---
+
 ## Final summary
 
 Pending — written when Phase J is `DONE`.

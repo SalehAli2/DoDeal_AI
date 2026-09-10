@@ -11,13 +11,16 @@ import pytest
 from pydantic import ValidationError
 
 from dodeal_ai.units.structured_intelligence.schemas import (
+    MAX_NOTE_TEXT_CHARS,
     UNCLASSIFIABLE,
     Band,
     ClassificationOutput,
     ComponentName,
     Decision,
     DecisionAction,
+    DirectJudgementRequest,
     JudgementRequest,
+    LeadContext,
     MissingComponent,
     NoteAnalysis,
     NoteType,
@@ -32,6 +35,12 @@ from dodeal_ai.units.structured_intelligence.schemas import (
 # The three schemas that describe UNTRUSTED model output. Kept as a tuple so a
 # new output schema added without a band/total guard fails the loop below.
 _OUTPUT_SCHEMAS = (ClassificationOutput, VagueOutput, ScoreOutput)
+
+# The schemas a CALLER fills in. The direct route's body is here for the same
+# reason the model's answers are: it is written by something outside this
+# service, so it may not carry the answer either. LeadContext is included
+# because it is the half of that body the classifier's prompt reads.
+_REQUEST_SCHEMAS = (JudgementRequest, DirectJudgementRequest, LeadContext)
 
 _SRC = Path(__file__).resolve().parents[2] / "src" / "dodeal_ai"
 
@@ -97,13 +106,15 @@ def test_remaining_vocabularies_are_closed_sets() -> None:
         "insufficient_evidence",
         "not_scorable",
     ]
-    # Three, not four: `not_implemented` was deleted in Phase H with the gap it
-    # named. The vocabulary says why a NOTE cannot be scored, never why we have
-    # not finished building.
+    # Four, and `not_implemented` is not one of them: it was deleted in Phase H
+    # with the gap it named. The vocabulary says why a NOTE cannot be scored,
+    # never why we have not finished building. `note_too_long` is the fourth,
+    # added with the direct route and applying to both routes.
     assert [d.value for d in SuppressedDetail] == [
         "note_too_short",
         "system_event",
         "unclassifiable",
+        "note_too_long",
     ]
 
 
@@ -162,6 +173,95 @@ def test_no_output_schema_carries_a_band_or_a_total() -> None:
         assert "band" not in fields, schema.__name__
         assert "total" not in fields, schema.__name__
         assert "denominator" not in fields, schema.__name__
+
+
+def test_no_request_schema_carries_a_band_or_a_total_either() -> None:
+    """The same guarantee, on the bodies a CALLER writes.
+
+    DECISION[DIRECT_ROUTE] admits note TEXT into a request body. It admits
+    nothing else: a `score`, a `band`, a `total` or a `mark` on the direct
+    body would be the CRM handing us the answer, which is the same failure as
+    a model handing it to us and is refused in the same way -- by there being
+    no field to put it in.
+    """
+    for schema in _REQUEST_SCHEMAS:
+        fields = set(schema.model_fields)
+        assert "band" not in fields, schema.__name__
+        assert "total" not in fields, schema.__name__
+        assert "denominator" not in fields, schema.__name__
+        assert "score" not in fields, schema.__name__
+        assert "marks" not in fields, schema.__name__
+
+
+def test_every_request_schema_forbids_extra_fields() -> None:
+    # Including the direct body: the exception is note text on one route, not
+    # "whatever the CRM feels like sending".
+    for schema in _REQUEST_SCHEMAS:
+        assert schema.model_config.get("extra") == "forbid", schema.__name__
+
+
+# --- the direct route's body (DECISION[DIRECT_ROUTE]) ----------------------
+
+
+def _direct_body(**overrides: object) -> dict:
+    body: dict = {
+        "lead_id": 1656,
+        "note_id": 10,
+        "author_id": 27,
+        "note_text": "Called the client, discussed the New Cairo 3BR.",
+        "lead": {"leadType": "buyer", "enquiryType": "sale"},
+    }
+    body.update(overrides)
+    return body
+
+
+def test_the_direct_body_takes_the_note_and_the_four_lead_fields() -> None:
+    request = DirectJudgementRequest(**_direct_body())
+    assert request.note_text.startswith("Called the client")
+    assert request.author_id == 27
+    assert request.lead.leadType == "buyer"
+    # Not sent, and not required: every lead field is nullable in the backend
+    # contract, so an absent one is None rather than a validation failure.
+    assert request.lead.project is None
+    assert request.lead.status is None
+
+
+def test_the_direct_body_forbids_an_extra_field() -> None:
+    with pytest.raises(ValidationError) as exc:
+        DirectJudgementRequest(**_direct_body(note="a second copy of the text"))
+
+    errors = exc.value.errors(include_url=False, include_input=False)
+    assert [e["type"] for e in errors] == ["extra_forbidden"]
+
+
+def test_the_lead_context_forbids_an_extra_field() -> None:
+    # The CRM cannot widen what reaches a prompt by adding fields to `lead`.
+    with pytest.raises(ValidationError) as exc:
+        LeadContext(leadType="buyer", name="Jane Doe")
+
+    errors = exc.value.errors(include_url=False, include_input=False)
+    assert [e["type"] for e in errors] == ["extra_forbidden"]
+
+
+def test_the_direct_body_caps_note_text_at_the_hard_ceiling() -> None:
+    # The hard ceiling is a REQUEST bound: over it, nothing is fingerprinted,
+    # nothing is reserved and the pipeline is never entered.
+    assert MAX_NOTE_TEXT_CHARS == 4000
+    at_the_limit = DirectJudgementRequest(**_direct_body(note_text="x" * 4000))
+    assert len(at_the_limit.note_text) == 4000
+
+    with pytest.raises(ValidationError) as exc:
+        DirectJudgementRequest(**_direct_body(note_text="x" * 4001))
+
+    errors = exc.value.errors(include_url=False, include_input=False)
+    assert [e["type"] for e in errors] == ["string_too_long"]
+
+
+def test_the_direct_body_still_requires_both_ids_and_an_author() -> None:
+    with pytest.raises(ValidationError):
+        DirectJudgementRequest(
+            lead_id=1, note_id=2, note_text="A note long enough.", lead=LeadContext()
+        )
 
 
 def test_every_output_schema_forbids_extra_fields() -> None:

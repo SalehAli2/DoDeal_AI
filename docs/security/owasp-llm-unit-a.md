@@ -93,11 +93,18 @@ resolved per tenant by `tools/keys.py`, so a model answer cannot reach another t
 because it never reaches the fetch at all. Every outbound call runs under `core/resilience`'s
 watchdog with an explicit timeout, and `retry=False` on paid model calls.
 
+On the **direct route** (`DECISION[DIRECT_ROUTE]`) the note arrives in the request body instead of
+from the tool layer; it is validated by the schema (`DirectJudgementRequest`, `extra="forbid"`, a
+4,000-character ceiling, no score-shaped field) and is then delimited by `build_prompt` exactly as
+fetched text is — the tool layer is narrower still on that path, since the route does not depend on
+`get_leads_client` and makes no backend call at all.
+
 **Proved by** `tests/security/test_tenancy.py` and `tests/unit/test_tenant_scope.py` (the scope
 that reaches the tool layer is the one the gates verified), `tests/unit/test_leads_client.py`
-(three methods, no write path), and
-`tests/unit/test_judgement_pipeline.py` (the fetch precedes every model call; a backend failure is
-a 503 `backend_unavailable` before anything is spent).
+(three methods, no write path), `tests/unit/test_judgement_pipeline.py` (the fetch precedes every
+model call; a backend failure is a 503 `backend_unavailable` before anything is spent), and
+`tests/unit/test_direct_routes.py` (the direct route never calls the leads client, and judges the
+same text to the same judgement as the fetch route).
 
 ## LLM10 — Unbounded consumption / model theft
 

@@ -9,11 +9,19 @@ divergent copy of the order.
 The route hands the pipeline a TenantScope, never the RequestContext (design
 note 0001, D1). Nothing below re-reads a tenant from anywhere.
 
-NOTE TEXT IS NEVER ACCEPTED IN A BODY. JudgementRequest is two integers and
-extra="forbid": the note is already saved in the CRM and is fetched by id
-(Design A). A caller posting `note` gets 422 invalid_request -- and, because
-core/errors.py replaces FastAPI's stock validation handler, that 422 does not
-quote their text back at them.
+NOTE TEXT IS NEVER ACCEPTED IN A BODY -- ON THE PRIMARY ROUTE. JudgementRequest
+is two integers and extra="forbid": the note is already saved in the CRM and is
+fetched by id (Design A). A caller posting `note` gets 422 invalid_request --
+and, because core/errors.py replaces FastAPI's stock validation handler, that
+422 does not quote their text back at them.
+
+THE TWO DIRECT ROUTES ARE THE ONE EXCEPTION (DECISION[DIRECT_ROUTE]). They take
+DirectJudgementRequest, which carries the saved note's text, because the CRM's
+read surface has been unavailable for six weeks and the CRM can send the note
+server-side after the save. They sit behind the SAME gate chain, and
+`get_leads_client` is deliberately NOT in their dependency chain: there is
+nothing to fetch, so no backend key is resolved and no tool call can be made.
+The fetch routes remain the contract; see ASSUMPTIONS.md, DECISION[DIRECT_ROUTE].
 """
 
 from __future__ import annotations
@@ -33,8 +41,10 @@ from dodeal_ai.units.structured_intelligence.pipeline import (
     RUBRIC_VERSION,
     JudgementDeps,
     judge_note,
+    judge_note_direct,
 )
 from dodeal_ai.units.structured_intelligence.schemas import (
+    DirectJudgementRequest,
     Judgement,
     JudgementRequest,
     Versions,
@@ -44,8 +54,17 @@ router = APIRouter(prefix="/api/v1", tags=["unit-a"])
 
 
 def _deps(
-    context: RequestContext, leads: LeadsClient, llm: LLMClient, settings: Settings
+    context: RequestContext,
+    leads: LeadsClient | None,
+    llm: LLMClient,
+    settings: Settings,
 ) -> JudgementDeps:
+    """The pipeline's four seams for this request.
+
+    `leads` is None on the direct routes: they do not fetch, so there is no
+    client to hand them and saying so is more honest than passing one they must
+    not call. See JudgementDeps.
+    """
     return JudgementDeps(
         leads=leads,
         llm=llm,
@@ -94,6 +113,54 @@ async def create_resubmission_judgement(
         request,
         resubmission=True,
         deps=_deps(context, leads, llm, settings),
+    )
+
+
+@router.post("/notes/judgements/direct")
+async def create_direct_judgement(
+    request: DirectJudgementRequest,
+    context: Annotated[RequestContext, Depends(gate4_cost)],
+    llm: Annotated[LLMClient, Depends(get_llm_client)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> Judgement:
+    """Judge a note the CRM has just saved and sent us. DECISION[DIRECT_ROUTE].
+
+    Same gates, same response, and the same pipeline from the length check
+    down. The body carries the saved note's text, its three ids and the four
+    lead fields the classifier reads; nothing else is accepted (extra="forbid"),
+    and note_text over 4,000 characters is a 422 before the pipeline is entered.
+
+    No LeadsClient in the signature, deliberately -- there is nothing to fetch.
+    """
+    return await judge_note_direct(
+        context.scope(),
+        request,
+        resubmission=False,
+        deps=_deps(context, None, llm, settings),
+    )
+
+
+@router.post("/notes/judgements/direct/resubmission")
+async def create_direct_resubmission_judgement(
+    request: DirectJudgementRequest,
+    context: Annotated[RequestContext, Depends(gate4_cost)],
+    llm: Annotated[LLMClient, Depends(get_llm_client)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> Judgement:
+    """The direct route's resubmission variant.
+
+    `resubmission` means here exactly what it means on the fetch route: no
+    clarification prompt is ever sent, attempts are read and never incremented,
+    and `decision.original_note_fingerprint` carries the note we first prompted
+    on. An edited note is a new fingerprint and so a new judgement, not a 409 --
+    which on this route is the ordinary case, because the CRM sends the edited
+    text itself.
+    """
+    return await judge_note_direct(
+        context.scope(),
+        request,
+        resubmission=True,
+        deps=_deps(context, None, llm, settings),
     )
 
 
