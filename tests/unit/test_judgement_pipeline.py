@@ -21,6 +21,7 @@ import asyncio
 import io
 import json
 import logging
+import time
 
 import pytest
 
@@ -39,6 +40,8 @@ from dodeal_ai.core.llm import LLMErrorReason, LLMProviderError
 from dodeal_ai.core.logging_config import JsonFormatter
 from dodeal_ai.core.prompting import AssembledPrompt, build_prompt
 from dodeal_ai.core.resilience import ExternalCallError
+from dodeal_ai.middleware import inflight
+from dodeal_ai.middleware.inflight import InflightCounter
 from dodeal_ai.tools.keys import BackendKeyError
 from dodeal_ai.units.structured_intelligence import state
 from dodeal_ai.units.structured_intelligence.classify import CLASSIFY_TEMPLATE
@@ -667,3 +670,196 @@ async def test_the_happy_path_still_returns_both_results_in_order(deps, operatio
     assert judgement.suppressed is None
     assert judgement.analysis.is_vague is True  # from the VAGUE result
     assert judgement.score is not None and judgement.score.denominator == 80
+
+
+# --- elapsed time and in-flight count on the outcome lines (item 72) --------
+#
+# What is asserted is SHAPE, not duration. A hermetic suite against a fake model
+# runs these passes in microseconds, so any threshold would be a test of the
+# machine it ran on: "at least a non-negative integer, on every line, on both
+# routes, with null where the pass did not run" is the whole claim, and it is
+# the claim that catches a field that stopped being emitted or started being
+# emitted as a float, a string or a negative.
+#
+# The three pass fields deliberately are NOT asserted to sum to elapsed_ms.
+# Vague detection and scoring overlap -- that is why they are gathered -- so
+# their sum can exceed the window they ran inside.
+
+TIMING_FIELDS = ("elapsed_ms", "classify_ms", "vague_ms", "score_ms")
+
+
+def _outcome(json_capture, message: str = "judgement_completed") -> dict:
+    return next(x for x in json_capture() if x["message"] == message)
+
+
+def _assert_duration(line: dict, field: str) -> None:
+    value = line[field]
+    # bool is an int in Python and would pass an isinstance check, so it is
+    # excluded explicitly: a duration field that started carrying True would be
+    # a real bug that a looser assertion would wave through.
+    assert isinstance(value, int) and not isinstance(value, bool), (
+        f"{field} is {value!r}"
+    )
+    assert value >= 0, f"{field} is negative: {value}"
+
+
+async def test_a_scored_judgement_carries_all_five_numbers(
+    deps, operational, json_capture
+):
+    await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+
+    line = _outcome(json_capture)
+    for field in TIMING_FIELDS:
+        _assert_duration(line, field)
+    _assert_duration(line, "inflight")
+
+
+async def test_a_suppressed_judgement_carries_elapsed_with_the_passes_null(
+    leads, operational, json_capture
+):
+    # The length gate: nothing ran, so nothing has a duration. Null and not
+    # zero -- this note did not take no time to classify, it was never
+    # classified, and a zero would average into a latency panel as a fast pass.
+    llm = FakeLLM()
+    deps = JudgementDeps(
+        leads=FakeLeadsClient(
+            leads={LEAD_ID: lead(LEAD_ID)}, notes={LEAD_ID: [note(NOTE_ID, "too thin")]}
+        ),
+        llm=llm,
+        config=get_tenant_config("tenant-a"),
+        settings=get_settings(),
+    )
+
+    judgement = await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+    assert judgement.suppressed is not None
+
+    line = _outcome(json_capture, "judgement_suppressed")
+    _assert_duration(line, "elapsed_ms")
+    assert line["classify_ms"] is None
+    assert line["vague_ms"] is None
+    assert line["score_ms"] is None
+    _assert_duration(line, "inflight")
+
+
+async def test_a_classification_suppression_times_the_pass_that_ran(
+    leads, operational, json_capture
+):
+    # One pass ran and two did not, so exactly one of the three is a number.
+    # This is the case that would be wrong if the fields were filled in as a
+    # block at the end rather than as each pass completed.
+    llm = FakeLLM(_classified("system_event"))
+    deps = JudgementDeps(
+        leads=leads,
+        llm=llm,
+        config=get_tenant_config("tenant-a"),
+        settings=get_settings(),
+    )
+
+    await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+
+    line = _outcome(json_capture, "judgement_suppressed")
+    _assert_duration(line, "elapsed_ms")
+    _assert_duration(line, "classify_ms")
+    assert line["vague_ms"] is None
+    assert line["score_ms"] is None
+
+
+async def test_the_numbers_are_the_only_thing_added_to_the_line(
+    deps, operational, json_capture
+):
+    # "Numbers only, nothing else changes on the lines." Everything the line
+    # carried before item 72 is still there and unchanged in meaning.
+    await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+
+    line = _outcome(json_capture)
+    assert line["tenant"] == "tenant-a"
+    assert line["request_id"] == "req-1"
+    assert line["note_type"] == "discovery"
+    assert line["model_passes"] == 3
+    assert line["band"] and line["action"]
+
+
+async def test_elapsed_covers_more_than_any_single_pass(
+    leads, operational, json_capture, monkeypatch
+):
+    """The clock starts at the ENTRY point, not at the first model call.
+
+    Injecting a measurable delay into the note fetch -- which happens before
+    `_judge` is even called -- and asserting `elapsed_ms` reflects it is what
+    distinguishes a whole-judgement measurement from one that quietly began
+    after the slowest thing the fetch route does.
+    """
+    real_get_lead = leads.get_lead
+
+    async def _slow_get_lead(*args, **kwargs):
+        await asyncio.sleep(0.02)
+        return await real_get_lead(*args, **kwargs)
+
+    monkeypatch.setattr(leads, "get_lead", _slow_get_lead)
+    deps = JudgementDeps(
+        leads=leads,
+        llm=FakeLLM(*_happy_path()),
+        config=get_tenant_config("tenant-a"),
+        settings=get_settings(),
+    )
+
+    await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+
+    line = _outcome(json_capture)
+    assert line["elapsed_ms"] >= 20  # the fetch is inside the measurement
+    # ...and the passes themselves are not: they ran against a fake and took
+    # essentially no time, so the delay cannot have leaked into them.
+    assert line["classify_ms"] < 20
+
+
+async def test_the_in_flight_count_is_read_at_outcome_time(
+    deps, operational, json_capture, monkeypatch
+):
+    # Read from the middleware's counter, not invented here: a judgement run
+    # outside a request (as these are) sees whatever the process is actually
+    # holding, which is zero.
+    counter = InflightCounter()
+    monkeypatch.setattr(inflight, "_counter", counter)
+    counter.acquire(10)
+    counter.acquire(10)
+
+    await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+
+    assert _outcome(json_capture)["inflight"] == 2
+
+
+async def test_no_timing_field_is_a_wall_clock_timestamp(
+    deps, operational, json_capture
+):
+    # These say how LONG, never when. A field that had picked up a wall-clock
+    # reading instead of a duration would be a number in the billions, and it
+    # would also be a timestamp on a line that is not supposed to carry one.
+    await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+
+    line = _outcome(json_capture)
+    for field in TIMING_FIELDS:
+        assert line[field] < 60_000, f"{field} looks like a clock, not a duration"
+
+
+async def test_the_pipeline_uses_the_monotonic_clock(monkeypatch, deps, operational):
+    """The clock itself, pinned.
+
+    `datetime.now()` can go BACKWARDS across an NTP correction, and a negative
+    duration in a latency panel is not a small error -- it is a number nobody
+    can interpret. Counting the reads proves the module took them from
+    `time.monotonic` rather than from a wall clock that happened to agree with
+    it on the day the test ran.
+    """
+    reads = {"n": 0}
+    real = time.monotonic
+
+    def _counting():
+        reads["n"] += 1
+        return real()
+
+    monkeypatch.setattr(pipeline_module.time, "monotonic", _counting)
+
+    await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+
+    # entry, then a start+end for each of the three passes, then the outcome.
+    assert reads["n"] >= 8

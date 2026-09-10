@@ -74,6 +74,8 @@ get 409 for a judgement that never happened.
 from __future__ import annotations
 
 import logging
+import time
+from collections.abc import Awaitable
 from dataclasses import dataclass
 
 from dodeal_ai.core.config import Settings
@@ -87,6 +89,7 @@ from dodeal_ai.core.errors import (
 )
 from dodeal_ai.core.llm import LLMClient, LLMResponse
 from dodeal_ai.core.resilience import ExternalCallError, gather_or_cancel
+from dodeal_ai.middleware.inflight import current_inflight
 from dodeal_ai.schemas.lead import Lead, LeadNote
 from dodeal_ai.tools.keys import BackendKeyError
 from dodeal_ai.tools.leads import LeadsClient
@@ -169,6 +172,76 @@ class JudgementDeps:
 # unpacked into a Lead and a LeadNote by judge_note_direct before the shared
 # function is entered, so nothing below this line knows which route it is on.
 _JudgementInput = JudgementRequest | DirectJudgementRequest
+
+
+@dataclass(frozen=True, slots=True)
+class _Timings:
+    """The four durations on an outcome line, in milliseconds (register item 72).
+
+    THE MONOTONIC CLOCK, never the wall clock. `datetime.now()` can go
+    BACKWARDS -- an NTP correction mid-request produces a negative duration, and
+    a negative duration in a latency dashboard is not a small error, it is a
+    number nobody can interpret. `time.monotonic()` is the one clock that only
+    counts forwards, and it is deliberately unrelated to any timestamp: these
+    fields say how LONG, never when.
+
+    `elapsed_ms` is the whole judgement, from the entry point to the outcome
+    line -- so on the fetch route it includes the two backend calls, which is
+    the point: those are most of what a slow judgement on that route is.
+
+    The three pass fields are None when the pass DID NOT RUN, and null is the
+    honest answer there: a suppressed note that never reached scoring did not
+    take zero milliseconds to score, it did not score. Zero would average into
+    a latency panel as a fast pass and quietly drag the number down.
+
+    THEY DO NOT ADD UP, and are not meant to. Vague detection and scoring
+    OVERLAP -- that is the whole reason they are gathered -- so their sum can
+    exceed the elapsed time they ran inside. Anything reading these as a
+    breakdown of `elapsed_ms` is reading them wrong.
+    """
+
+    elapsed_ms: int
+    classify_ms: int | None = None
+    vague_ms: int | None = None
+    score_ms: int | None = None
+
+    def fields(self) -> dict[str, int | None]:
+        """The four, plus the in-flight count read AT OUTCOME TIME.
+
+        `inflight` is read here rather than passed in because the question it
+        answers is "what else was this pod doing when this judgement finished" --
+        which is a fact about the moment the line is written, not about the
+        moment the request started. Numbers only, all five: nothing here is
+        derived from a note, and nothing here can be.
+        """
+        return {
+            "elapsed_ms": self.elapsed_ms,
+            "classify_ms": self.classify_ms,
+            "vague_ms": self.vague_ms,
+            "score_ms": self.score_ms,
+            "inflight": current_inflight(),
+        }
+
+
+def _ms_since(started: float) -> int:
+    """Whole milliseconds since a `time.monotonic()` reading.
+
+    Truncated, not rounded, so a sub-millisecond pass reads 0 rather than 1 --
+    and monotonic never runs backwards, so the result is never negative.
+    """
+    return int((time.monotonic() - started) * 1000)
+
+
+async def _timed[T](coro: Awaitable[T]) -> tuple[T, int]:
+    """Await `coro` and report how long it took.
+
+    The two gathered passes need a clock each, because they run at the same
+    time: one pair of readings around the gather would measure the slower of
+    them twice and say nothing about the other.
+    """
+    started = time.monotonic()
+    result = await coro
+    return result, _ms_since(started)
 
 
 def _versions(config: TenantConfig, model_version: str = NO_MODEL) -> Versions:
@@ -338,6 +411,11 @@ async def judge_note(
     route. An edited note is a new fingerprint and so a new judgement; an
     unedited one is a duplicate whichever route it arrives on.
     """
+    # The clock starts HERE, not in _judge: the two backend calls below are
+    # part of what this route costs a salesperson waiting on an answer, and an
+    # elapsed_ms that began after them would be silent about the slowest thing
+    # the fetch route does. time.monotonic, never a wall clock -- see _Timings.
+    started = time.monotonic()
     lead, note = await _fetch_note(scope, request, deps)
     return await _judge(
         scope,
@@ -347,6 +425,7 @@ async def judge_note(
         author_id=note.author_id,
         resubmission=resubmission,
         deps=deps,
+        started=started,
     )
 
 
@@ -381,6 +460,11 @@ async def judge_note_direct(
     difference is recorded on the outcome line (ids only, never text) so that
     "the CRM is sending someone else's JWT" is visible rather than inferred.
     """
+    # As on the fetch route, the first statement in the function -- so the two
+    # routes' elapsed_ms mean the same thing, minus the fetch this one does not
+    # do. Comparing them is how "is the CRM's read surface the slow part?" gets
+    # answered when it comes back.
+    started = time.monotonic()
     lead = Lead(
         id=request.lead_id,
         leadType=request.lead.leadType,
@@ -410,6 +494,7 @@ async def judge_note_direct(
         author_id=request.author_id,
         resubmission=resubmission,
         deps=deps,
+        started=started,
         author_differs_from_subject=str(request.author_id) != scope.subject,
     )
 
@@ -423,6 +508,7 @@ async def _judge(
     author_id: int,
     resubmission: bool,
     deps: JudgementDeps,
+    started: float,
     author_differs_from_subject: bool | None = None,
 ) -> Judgement:
     """Every step from the length gate down, for both entry points.
@@ -437,6 +523,11 @@ async def _judge(
     the direct route, where the body carries one. It reaches the outcome line
     and nothing else: it is not a gate, not a rejection and not an input to any
     decision.
+
+    `started` is the entry point's `time.monotonic()` reading, taken there and
+    not here so that the fetch route's two backend calls are inside its
+    `elapsed_ms`. It is a DURATION baseline and never a timestamp: nothing
+    compares it to a clock, and it is not on any line.
     """
     config = deps.config
 
@@ -456,6 +547,9 @@ async def _judge(
             scope,
             judgement,
             model_passes=0,
+            # No pass ran, so all three are null. Not zero: this note did not
+            # take no time to classify, it was never classified.
+            timings=_Timings(elapsed_ms=_ms_since(started)),
             author_differs_from_subject=author_differs_from_subject,
         )
         return judgement
@@ -476,6 +570,11 @@ async def _judge(
         raise DuplicateRequestError()
 
     decision: Decision | None = None
+    # None until the pass that fills each one actually runs, so a judgement that
+    # stopped early carries null rather than a made-up zero.
+    classify_ms: int | None = None
+    vague_ms: int | None = None
+    score_ms: int | None = None
     try:
         # ASSUMPTION[Q7]: the rate limit is keyed on scope.subject -- who is
         # ASKING -- not on note.author_id, who WROTE the note. The limit exists
@@ -501,8 +600,8 @@ async def _judge(
         await token_preflight(scope)
 
         # --- classify: the first thing that costs money ---------------------
-        classification, classify_response = await classify(
-            deps.llm, note, lead, settings=deps.settings
+        (classification, classify_response), classify_ms = await _timed(
+            classify(deps.llm, note, lead, settings=deps.settings)
         )
         model_passes = 1
 
@@ -526,20 +625,29 @@ async def _judge(
             assert isinstance(note_type, NoteType)
 
             # --- vague + score: issued together, awaited together ------------
-            vague_result, score_result = await gather_or_cancel(
-                detect_vagueness(
-                    deps.llm,
-                    note,
-                    note_type,
-                    config=config,
-                    settings=deps.settings,
+            # A clock EACH, because these two run at the same time: one pair
+            # of readings around the gather would measure the slower of them
+            # twice and say nothing about the other. Their sum can therefore
+            # exceed the elapsed time they ran inside, which is what
+            # overlapping means and is not a bug in the numbers.
+            (vague_result, vague_ms), (score_result, score_ms) = await gather_or_cancel(
+                _timed(
+                    detect_vagueness(
+                        deps.llm,
+                        note,
+                        note_type,
+                        config=config,
+                        settings=deps.settings,
+                    )
                 ),
-                score_note(
-                    deps.llm,
-                    note,
-                    note_type,
-                    config=config,
-                    settings=deps.settings,
+                _timed(
+                    score_note(
+                        deps.llm,
+                        note,
+                        note_type,
+                        config=config,
+                        settings=deps.settings,
+                    )
                 ),
             )
             model_passes = 3
@@ -653,6 +761,14 @@ async def _judge(
         scope,
         judgement,
         model_passes=model_passes,
+        # Read LAST, after the counters: elapsed_ms is what the caller waited
+        # for, and the caller was still waiting through step 10.
+        timings=_Timings(
+            elapsed_ms=_ms_since(started),
+            classify_ms=classify_ms,
+            vague_ms=vague_ms,
+            score_ms=score_ms,
+        ),
         author_differs_from_subject=author_differs_from_subject,
     )
     return judgement
@@ -692,6 +808,7 @@ def _log_outcome(
     judgement: Judgement,
     *,
     model_passes: int,
+    timings: _Timings,
     author_differs_from_subject: bool | None = None,
 ) -> None:
     """One structured line per judgement.
@@ -721,6 +838,15 @@ def _log_outcome(
     a rate limit set too low reads, in the response alone, as a service that
     simply asks fewer questions.
 
+    THE FIVE NUMBERS (register item 72) are on BOTH outcome events and on both
+    routes, because the question they answer -- "why is this slow, and was the
+    pod busy at the time?" -- is asked of the judgements that were suppressed
+    exactly as often as of the ones that were scored. They are numbers and
+    nothing else: four durations on the monotonic clock and a count of requests
+    in flight, none of them derived from a note and none of them capable of
+    being. See `_Timings` for why null is the right value for a pass that did
+    not run, and for why the three do not add up to `elapsed_ms`.
+
     `author_differs_from_subject` appears on DIRECT-ROUTE lines only, where the
     body carries a claimed author to compare with the token's subject; it is
     omitted entirely on the fetch route, which has nothing to compare. A bool,
@@ -748,6 +874,7 @@ def _log_outcome(
                 "suppressed_reason": judgement.suppressed.reason.value,
                 "suppressed_detail": judgement.suppressed.detail_code.value,
                 "model_passes": model_passes,
+                **timings.fields(),
                 **author_field,
             },
         )
@@ -768,6 +895,7 @@ def _log_outcome(
             "prompt_withheld": withheld.value if withheld is not None else None,
             "attempt": judgement.decision.attempt,
             "model_passes": model_passes,
+            **timings.fields(),
             **author_field,
         },
     )

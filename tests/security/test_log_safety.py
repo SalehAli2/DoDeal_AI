@@ -26,6 +26,12 @@ through that route on every outcome a request can have -- 200, two different
 so "no log line at any level" means every logger in the process and not just
 ours.
 
+Piece L (register item 72) put five NUMBERS on both outcome lines -- four
+durations and a count of requests in flight. They are covered by the sweep above
+rather than by a rule of their own, which is the right place for them: they are
+on the same line the sentinel would have to appear on, and the happy-path test
+asserts they are there so that the sweep cannot quietly stop covering them.
+
 THE REFUSED REQUEST (Piece L, register item 73) is the sixth outcome and a
 different shape from the other five: load shedding answers before the gate chain
 and before anything reads the body, so the note is provably somewhere the
@@ -580,6 +586,16 @@ def test_direct_happy_path_logs_no_note_text(direct_client, root_log_capture):
     assert r.json()["suppressed"] is None
     _assert_sentinel_absent(root_log_capture)
     assert SENTINEL not in r.text
+
+    # Register item 72's five numbers are ON the line the sweep above just
+    # cleared, which is what puts them inside "no note text on any line" rather
+    # than beside it. Asserted rather than assumed: a field that stopped being
+    # emitted would leave the sweep passing over a line it no longer covers.
+    line = next(
+        x for x in _lines(root_log_capture) if x.get("message") == "judgement_completed"
+    )
+    for field in ("elapsed_ms", "classify_ms", "vague_ms", "score_ms", "inflight"):
+        assert isinstance(line[field], int)
 
 
 def test_direct_extra_field_422_logs_no_note_text(direct_client, root_log_capture):

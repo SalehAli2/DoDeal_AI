@@ -626,3 +626,66 @@ def test_a_cross_tenant_host_is_403_on_the_direct_route(client, llm):
     )
     assert r.status_code == 403
     assert llm.call_count == 0
+
+
+# --- the five numbers, on this route too (register item 72) -----------------
+#
+# Both routes join `_judge`, and `_log_outcome` is inside it, so these fields
+# cannot in principle be present on one route and absent on the other. They are
+# asserted here anyway for the same reason the two routes' judgements are
+# compared field for field at the top of this file: "it is the same code" is a
+# claim about the tree, and the tree changes.
+
+_TIMING_FIELDS = ("elapsed_ms", "classify_ms", "vague_ms", "score_ms", "inflight")
+
+
+def _assert_numbers(line: dict, *, passes_ran: bool) -> None:
+    for field in _TIMING_FIELDS:
+        value = line[field]
+        if value is None:
+            assert not passes_ran, f"{field} is null on a scored judgement"
+            continue
+        assert isinstance(value, int) and not isinstance(value, bool)
+        assert value >= 0
+
+
+def test_a_direct_judgement_carries_the_five_numbers(client, llm, json_log):
+    _script(llm)
+    r = client.post(DIRECT, json=_direct_body(), headers=_headers())
+    assert r.status_code == 200
+
+    line = next(x for x in _lines(json_log) if x["message"] == "judgement_completed")
+    _assert_numbers(line, passes_ran=True)
+
+
+def test_a_suppressed_direct_judgement_carries_them_too(client, json_log):
+    # The length gate, on this route: nothing ran, so the three pass fields are
+    # null while elapsed_ms and inflight are still numbers.
+    r = client.post(DIRECT, json=_direct_body("ok"), headers=_headers())
+    assert r.status_code == 200
+
+    line = next(x for x in _lines(json_log) if x["message"] == "judgement_suppressed")
+    _assert_numbers(line, passes_ran=False)
+    assert line["classify_ms"] is None
+    assert line["vague_ms"] is None
+    assert line["score_ms"] is None
+
+
+def test_the_fetch_route_carries_the_same_five(fetch_client, llm, json_log):
+    _script(llm)
+    fetch_client.post(JUDGE, json=_fetch_body(), headers=_headers())
+
+    line = next(x for x in _lines(json_log) if x["message"] == "judgement_completed")
+    _assert_numbers(line, passes_ran=True)
+
+
+def test_a_request_through_http_is_counted_as_in_flight(client, llm, json_log):
+    # Through the real middleware stack this time, so `inflight` is the count of
+    # a request that genuinely is one: itself. Called directly (as the pipeline
+    # unit tests do) the same field reads 0, and both are correct -- which is
+    # what makes it worth asserting here and not only there.
+    _script(llm)
+    client.post(DIRECT, json=_direct_body(), headers=_headers())
+
+    line = next(x for x in _lines(json_log) if x["message"] == "judgement_completed")
+    assert line["inflight"] == 1
