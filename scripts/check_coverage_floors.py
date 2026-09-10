@@ -50,6 +50,10 @@ _FLOORS: dict[str, float] = {
     "src/dodeal_ai/core/auth/**": 95,
     "src/dodeal_ai/core/tenancy.py": 100,
     "src/dodeal_ai/core/cost/**": 95,
+    # The two counters, the two scripts, and the only place a judgement is
+    # refused for money. Every branch here is a spend decision or a fail-open
+    # path, and both are cheap to reach against a faked store.
+    "src/dodeal_ai/core/cost/limiter.py": 100,
     "src/dodeal_ai/core/errors.py": 95,
     "src/dodeal_ai/core/validation.py": 100,
     "src/dodeal_ai/core/log_safety.py": 100,

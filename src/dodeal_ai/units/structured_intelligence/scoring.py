@@ -34,6 +34,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 
 from dodeal_ai.core.config import Settings
+from dodeal_ai.core.context import TenantScope
 from dodeal_ai.core.llm import LLMClient, LLMResponse
 from dodeal_ai.core.llm.profiles import PROFILE_UNIT_A_SCORE
 from dodeal_ai.core.prompting import AssembledPrompt, build_prompt
@@ -249,6 +250,7 @@ async def score_note(
     note: LeadNote,
     note_type: NoteType,
     *,
+    scope: TenantScope,
     config: TenantConfig,
     settings: Settings,
 ) -> tuple[ScoreOutput, LLMResponse]:
@@ -261,6 +263,7 @@ async def score_note(
         build_score_prompt(note, note_type, config),
         ScoreOutput,
         SCORE_LABEL,
+        scope=scope,
         settings=settings,
         profile=PROFILE_UNIT_A_SCORE,
         max_output_tokens=SCORE_MAX_OUTPUT_TOKENS,

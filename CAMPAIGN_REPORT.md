@@ -3342,3 +3342,171 @@ moving the cap into Lua later has to change a test deliberately. See "For the le
 **Nothing in this piece has been verified against a real Redis.** The pools have never opened a
 socket; every assertion is on a constructed pool's attributes or against `fakeredis`. Nothing is
 marked `[V]` (ASSUMPTIONS §8.11).
+---
+
+### N.2 — token counters; the pre-flight replaces the step-3 seam   STATUS: DONE `__N2_SHA__`
+
+**Suite:** 969 → **998 passing**, 1 skipped, 7 deselected. Coverage **99.42 %**. **14** per-file floors
+(one new: `core/cost/limiter.py` at 100, beside `llm_call.py`'s existing 100). Both are at 100 %.
+
+---
+
+### The two counters, and the line between reading and writing
+
+`tokens:tenant:{t}` and `tokens:user:{t}:{s}`, on the same window as the request caps and on keys that
+share nothing with them. The division of labour is the design, and it is not symmetrical:
+
+- **`token_preflight(scope)` READS.** One MGET, no write, ever. It raises `TokenBudgetExceeded` (429
+  `token_budget_exceeded`) when either total is **at or above** its limit. At or above, not over: the
+  counters are charged after the fact, so a total that has *reached* the cap has already spent it, and
+  `>` would grant one more whole judgement past a limit that was already hit.
+- **`enforce_token_cost(scope, …)` WRITES.** One EVAL, and it never denies. The call it is charging for
+  has already been paid to the provider; refusing there would throw the answer away and be billed for it
+  anyway. It is a meter, and the gate is upstream of it.
+
+Both fail **open** on `redis.RedisError`, matching `enforce_cost`. The charge logs `token_charge_bypassed`
+every time (a hole in the meter is per-call information); the pre-flight logs `token_preflight_bypassed`
+**once per process**, keeping N.1's latch, because a store that is down is down for every request.
+
+**Cap semantics follow ruling R18 exactly.** The script counts and returns; Python compares the returned
+values; nothing in Lua knows what a limit is. `test_the_token_script_makes_no_limit_decision` pins that,
+so moving either the cap or the ratio into Lua has to change a test on purpose.
+
+---
+
+### Why a second script and not the same constant
+
+`_ADD_TOKENS_SCRIPT` is the same shape as `_INCR_BOTH_SCRIPT` and is deliberately a separate constant.
+Sharing one would mean the M4 TTL repair — still owed on the **request** counters — silently changing the
+**token** counters the day someone makes it. The duplication is the isolation, and it is asserted from the
+outside rather than by reading the two sources: `FakeCostRedis` records `(script, keys)` per EVAL, and
+`test_token_and_request_counters_never_touch` compares the key sets that were actually sent. A script that
+started writing the other pair's keys would still match its own source text; that test would not pass.
+
+The Lua lane grew the same four properties for the new script (atomic add to both, totals returned, TTL on
+creation only, no TTL refresh) plus one that only exists because there are two:
+`test_the_two_scripts_touch_disjoint_keys` runs one EVAL of each and asserts four keys and no crossover.
+
+---
+
+### The charge is in `complete_once`, and that is why `scope` moved
+
+**The requirement decided the placement.** "A reprompt charges its own response's usage and nothing more"
+is only satisfiable where every paid call passes exactly once — and `call_model` **discards** a reprompted
+pass's first response, so charging from `pipeline.py` would count three responses on a judgement that
+bought four. `complete_once` is the one place a response is first in hand.
+
+`complete_once` had no `TenantScope`, so one was threaded: `complete_once` → `call_model` → `classify` /
+`detect_vagueness` / `score_note` → the three pipeline call sites. **A contextvar was considered and
+rejected.** An ambient billing identity is exactly the thing that charges the wrong tenant when a task
+fails to inherit context, and this repo passes `TenantScope` explicitly everywhere else (design note 0001,
+Decision 1). The cost is 51 mechanical test call sites and one new helper, `tests/helpers/scopes.py`;
+the alternative's cost is a wrong bill nobody can reconstruct.
+
+Charge counts, asserted through the route rather than by calling the limiter: **three** for a scored
+judgement, **four** when one pass reprompted, **zero** for a suppressed note. A response reporting no usage
+charges nothing and logs nothing — zero tokens is an *unmeasured* call, not a free one, and a zero-token
+line would read as the second.
+
+---
+
+### The warning, and what it deliberately does not do
+
+`token_budget_warning` fires the first time a running total crosses `limit × cost_token_warning_ratio`
+inside its window. **Once per crossing, with no extra state:** the pre-call total is the returned total
+minus what this call added, so "was under, is now at or over" is answerable from the one number the script
+already returned. No second key, no in-process flag, and nothing to get wrong when two workers charge at
+once. The next call is already over and stays silent; the window expiring lets the crossing happen once
+more.
+
+It changes **nothing** about what is served. Degradation at the ratio is item 61's second half and belongs
+to A9; this piece is the design half only, and the ratio is `gt=0, lt=1` so neither degenerate value can be
+configured.
+
+---
+
+### The step-3 seam is gone, and the marker test was inverted
+
+The stub, its two comments in `pipeline.py`, its docstring in `limiter.py`, the README callout, the
+`docs/STATUS.md` rows and the two route tests that asserted the no-op's bypass line have all been replaced
+with a sentence saying the pre-flight is real. `tests/test_assumption_markers.py` no longer checks the
+marker's three-way presence — it asserts the marker appears in **no tracked file**, so a leftover fails the
+build. The constant is assembled from two halves rather than spelled, because a file that wrote it out
+whole would be the first to fail its own test; the first run of the inverted test caught exactly that, plus
+a docstring line I had left behind.
+
+---
+
+### Six test fakes had to be wired, and that is a finding
+
+Before this commit `token_preflight` touched no Redis, so three modules drove `judge_note` with **no cost
+client patched at all** (`test_judgement_pipeline.py`, `test_structural_eval.py`,
+`test_unit_a_injection.py`) and three more had a `_FakeCostRedis` implementing `eval` and nothing else. A
+real pre-flight would have made the first three open a socket to `localhost:6379` and the second three
+raise `AttributeError` on `mget`. `tests/helpers/fake_cost_redis.py` is now the one fake, and the three
+near-duplicate private copies are gone. Worth recording because the suite's hermetic claim survived only
+because the seam was a no-op.
+
+---
+
+### What changed
+
+| File | Change |
+| --- | --- |
+| `core/config.py` | `cost_tokens_per_tenant_limit` `5_000_000`, `cost_tokens_per_user_limit` `500_000` (both `gt=0`), `cost_token_warning_ratio` `0.9` (`gt=0, lt=1`). All three validated at construction. N.1's Redis comment block trimmed to at most three lines per field. |
+| `core/cost/limiter.py` | `_ADD_TOKENS_SCRIPT`, `_token_keys`, `_add_tokens_with_window`, `_warn_on_crossing`, `enforce_token_cost`, and a real `token_preflight`. Module docstring rewritten around the read/write split. |
+| `core/errors.py` | `TokenBudgetExceeded` → 429 `token_budget_exceeded`, standard `{detail, reason, request_id}` body. |
+| `units/.../llm_call.py` | The charge, once per response with usage, in `complete_once`. `scope` threaded through it and `call_model`. |
+| `units/.../classify.py`, `vague.py`, `scoring.py` | `scope` as a required keyword, passed to `call_model`. No other change. |
+| `units/.../pipeline.py` | Step 7 is a real pre-flight; the marker and the no-op comment are gone; `scope` passed to the three passes. The release-on-error path already covered the 429 and is untouched. |
+| `main.py` | The two `/ready` probes under `asyncio.gather` (N.1 review). |
+| `core/redis.py` | The `redis.asyncio` import alias renamed to `redis_async` (N.1 review). |
+| `.env.example` | The four N.1 Redis rows and the three N.2 token rows, in the file's own style. |
+| `scripts/check_coverage_floors.py` | `core/cost/limiter.py` at 100. |
+| `tests/helpers/fake_cost_redis.py` | **New.** The one db1 fake; records `(script, keys)` per EVAL. |
+| `tests/helpers/scopes.py` | **New.** One `TenantScope` for tests that need an identity and assert nothing about it. |
+| `tests/unit/test_token_cost.py` | **New.** 18 tests: the counters-never-touch test, the pre-flight's cases, the charge counts, the bypasses and the warning. |
+| `tests/unit/test_cost_lua.py` | Six more tests: the token script on real Lua, plus the disjointness of the two. |
+| `tests/unit/test_health.py` | `/ready` with both probes slow finishes in about one probe's time. |
+| `tests/security/test_log_safety.py` | The three new events inside the sentinel sweep, with `tokens_charged`'s whole field set pinned. |
+| `README.md`, `docs/STATUS.md` | The three settings, the events, the pre-flight in the lifecycle, the probe-timeout sentence, the 429 in the error list, the retired marker. |
+
+---
+
+### For the lead
+
+1. **`token_preflight`'s `reason_code` changed, deliberately.** It was `token_preflight_bypassed` (the
+   stub's, meaning "this build has no pre-flight"). It is now `token_store_unavailable`, matching
+   `cost_cap_bypassed`'s `cost_store_unavailable`, because the line now means something else entirely. The
+   message name is unchanged, and no test asserted the old code. **Flagging it because a collector could
+   have been filtering on it.**
+2. **The charge catches `redis.RedisError` only, not `Exception`.** The brief said `enforce_token_cost`
+   "never raises to the caller". A blanket catch would also swallow a bug in our own code — silently, on
+   the money path — so the narrow catch matches `enforce_cost` and the docstring says what it promises.
+   The exposure is small (the only I/O is the EVAL) but it is not zero: **if you want the absolute
+   guarantee, say so and it becomes `except Exception` with an ERROR line.**
+3. **`limiter.py` still spells the async import the old way.** The rename was scoped to `core/redis.py`,
+   and I did not widen it. Two files in the same package now spell the same import differently. One line,
+   whenever you want it.
+4. **Register items 24 and 61 could not be located** — the same gap N.1 reported for item 25. No tracked
+   file carries either number. Both rows in `docs/STATUS.md` are written from this brief's description of
+   them, not from a register entry read in the tree. **If the register is outside the repo it still needs
+   marking by hand.**
+5. **All three numbers are provisional and none is measured.** 5,000,000 / 500,000 / 0.9 are placeholders,
+   and the ratio in particular is a guess about a distribution nobody has seen. They also interact with a
+   number nobody has set: a judgement is roughly 400–1,500 tokens on today's ceilings, so the per-user cap
+   is somewhere between 300 and 1,200 judgements per window — which may be far too generous or far too
+   tight depending on `max_note_chars`. **The load lane should set these together with `max_inflight` and
+   `redis_max_connections`, not separately.**
+6. **A judgement now costs four Redis round-trips where it cost one.** One MGET for the pre-flight plus one
+   EVAL per model response, on top of Gate 4's EVAL. That is a real change to the number N.1's "For the
+   lead" item 4 asked to be read next to `redis_max_connections = 20`, and it makes the H3 breaker more
+   urgent, not less: a dead Redis now costs a judgement four connect timeouts instead of one.
+7. **Nothing degrades at the warning ratio.** By design (A9), but worth saying plainly: a tenant at 95 % of
+   its budget is served exactly as one at 5 %, and the only difference is a log line. The cliff at 100 % is
+   a hard 429 with no ramp.
+
+**Nothing in this piece has been verified against a real Redis or a real provider.** Every token number in
+every test comes from `FakeLLM`'s round defaults; no provider has ever reported usage to this code. Nothing
+is marked `[V]` (ASSUMPTIONS §8.11).
+

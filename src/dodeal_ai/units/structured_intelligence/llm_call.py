@@ -56,6 +56,8 @@ from collections.abc import Callable
 from pydantic import BaseModel
 
 from dodeal_ai.core.config import Settings
+from dodeal_ai.core.context import TenantScope
+from dodeal_ai.core.cost.limiter import enforce_token_cost
 from dodeal_ai.core.errors import MalformedOutputError, ModelUnavailableError
 from dodeal_ai.core.llm import FinishReason, LLMClient, LLMResponse
 from dodeal_ai.core.log_safety import safe_error_fields
@@ -103,6 +105,7 @@ async def complete_once(
     prompt: AssembledPrompt,
     label: str,
     *,
+    scope: TenantScope,
     settings: Settings,
     profile: str,
     max_output_tokens: int,
@@ -133,6 +136,18 @@ async def complete_once(
     does not degrade an Arabic note, it spends a reprompt on it and then 503s
     it. `Settings.llm_max_output_tokens` carries the same note and the same
     headroom; these are the per-task numbers it says tasks override it with.
+
+    THIS IS WHERE TOKENS ARE CHARGED, and it is the only place they are. Every
+    paid call in the unit passes through here exactly once -- including the
+    reprompt, whose FIRST response `call_model` then discards -- so charging
+    here counts what the provider billed rather than what the judgement kept. A
+    charge that fails is logged and swallowed (`enforce_token_cost` never
+    raises): the call is already paid for, and losing the answer over a Redis
+    outage would waste the money instead of merely failing to count it.
+
+    `scope` is here for that charge and for nothing else. It is passed rather
+    than read from ambient state deliberately: a billing identity that a task
+    can silently fail to inherit is a bill charged to the wrong tenant.
     """
 
     async def _send() -> LLMResponse:
@@ -141,7 +156,7 @@ async def complete_once(
         )
 
     try:
-        return await call_with_watchdog(
+        response = await call_with_watchdog(
             _send,
             label=label,
             timeout=settings.llm_timeout_seconds,
@@ -160,6 +175,17 @@ async def complete_once(
             },
         )
         raise ModelUnavailableError() from None
+
+    # No usage reported means nothing to charge and nothing to say about it: a
+    # zero-token line would read as a free call rather than an unmeasured one.
+    if response.total_tokens:
+        await enforce_token_cost(
+            scope,
+            input_tokens=response.input_tokens,
+            output_tokens=response.output_tokens,
+            profile=profile,
+        )
+    return response
 
 
 def parse_output[M: BaseModel](
@@ -216,6 +242,7 @@ async def call_model[M: BaseModel](
     schema: type[M],
     label: str,
     *,
+    scope: TenantScope,
     settings: Settings,
     profile: str,
     max_output_tokens: int,
@@ -249,11 +276,16 @@ async def call_model[M: BaseModel](
     BOTH attempts carry the SAME `profile`. The second call is the same task
     said more strictly, not a different one, so switching models between them
     would make the reprompt a second variable.
+
+    AND BOTH ARE CHARGED, separately, inside `complete_once`. A reprompted pass
+    costs two responses' tokens because it cost two calls; the discarded first
+    answer was still paid for.
     """
     response = await complete_once(
         client,
         prompt,
         label,
+        scope=scope,
         settings=settings,
         profile=profile,
         max_output_tokens=max_output_tokens,
@@ -273,6 +305,7 @@ async def call_model[M: BaseModel](
         client,
         with_tail(prompt, REPROMPT_TAIL_TEMPLATE),
         label,
+        scope=scope,
         settings=settings,
         profile=profile,
         max_output_tokens=max_output_tokens,

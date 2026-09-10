@@ -1,3 +1,5 @@
+import asyncio
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -79,3 +81,45 @@ def test_ready_reports_each_connection_independently(
         "operational": expected_operational,
     }
     get_settings.cache_clear()
+
+
+def test_ready_probes_both_connections_concurrently(monkeypatch):
+    """Two slow probes cost ONE probe's time, not two.
+
+    The number that matters operationally: an orchestrator's readiness
+    `timeoutSeconds` is sized against a probe, and a sequential /ready would
+    make a Redis outage cost twice what that deadline was set for -- killing a
+    pod that is serving correctly, which is the exact outage the fail-open
+    policy exists to prevent. Both PINGs are patched to sleep, and the assertion
+    is that the endpoint finishes in well under their sum.
+    """
+    monkeypatch.setenv("DODEAL_JWT_SIGNING_KEY", "test-key")
+    get_settings.cache_clear()
+
+    delay = 0.2
+
+    def _slow_client():
+        fake = MagicMock()
+
+        async def _ping():
+            await asyncio.sleep(delay)
+            return True
+
+        fake.ping = _ping
+        return fake
+
+    with (
+        patch.object(redis_module, "get_cost_client", side_effect=_slow_client),
+        patch.object(redis_module, "get_operational_client", side_effect=_slow_client),
+    ):
+        started = time.monotonic()
+        response = client.get("/ready")
+        elapsed = time.monotonic() - started
+
+    assert response.status_code == 200
+    assert response.json()["redis"] == "ok"
+    assert response.json()["operational"] == "ok"
+    # Generously below the 0.4s a sequential pair would take, and generously
+    # above the 0.2s a concurrent one does: this asserts the SHAPE, not a
+    # latency budget, so a slow CI runner cannot make it flaky.
+    assert elapsed < delay * 1.8

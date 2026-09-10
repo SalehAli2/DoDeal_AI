@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -94,8 +95,16 @@ async def ready():
     # and a dead idempotency store is a real state, and one flag would hide it.
     # Neither probe raises (core/redis.py swallows RedisError into False), so a
     # dependency being down cannot turn this endpoint into a 500.
+    #
+    # CONCURRENTLY, so two dead connections cost ONE connect timeout and not
+    # two. Sequentially, the worst case is the sum of both probes, and a
+    # readiness deadline sized against one of them kills a pod that is only
+    # reporting on a dependency it already tolerates.
+    cost_ready, operational_ready = await asyncio.gather(
+        check_cost_redis_ready(), check_operational_redis_ready()
+    )
     return {
         "status": "ready",
-        "redis": "ok" if await check_cost_redis_ready() else "degraded",
-        "operational": "ok" if await check_operational_redis_ready() else "degraded",
+        "redis": "ok" if cost_ready else "degraded",
+        "operational": "ok" if operational_ready else "degraded",
     }

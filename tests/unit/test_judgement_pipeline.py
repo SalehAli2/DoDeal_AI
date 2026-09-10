@@ -28,6 +28,7 @@ import pytest
 import dodeal_ai.units.structured_intelligence.pipeline as pipeline_module
 from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.context import RequestContext
+from dodeal_ai.core.cost import limiter
 from dodeal_ai.core.errors import (
     BackendUnavailableError,
     DuplicateRequestError,
@@ -68,6 +69,7 @@ from dodeal_ai.units.structured_intelligence.vague import (
     VAGUE_MAX_OUTPUT_TOKENS,
     template_for,
 )
+from tests.helpers.fake_cost_redis import FakeCostRedis
 from tests.helpers.fake_leads import FakeLeadsClient, lead, note
 from tests.helpers.fake_llm import FakeLLM, json_response, response
 from tests.helpers.fake_operational_redis import FakeOperationalRedis
@@ -148,6 +150,19 @@ def leads() -> FakeLeadsClient:
         leads={LEAD_ID: lead(LEAD_ID)},
         notes={LEAD_ID: [note(NOTE_ID, GOOD_NOTE)]},
     )
+
+
+@pytest.fixture(autouse=True)
+def cost(monkeypatch) -> FakeCostRedis:
+    """db1, faked for every test in this file.
+
+    Autouse because the token pre-flight reads it on EVERY judgement and the
+    charge writes it on every model response: without this, a test whose
+    subject is the reprompt would open a socket to a Redis that is not there.
+    """
+    client = FakeCostRedis()
+    monkeypatch.setattr(limiter, "get_cost_client", lambda: client)
+    return client
 
 
 @pytest.fixture

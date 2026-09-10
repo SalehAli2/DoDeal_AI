@@ -75,9 +75,11 @@ from dodeal_ai.units.structured_intelligence.schemas import (
 from dodeal_ai.units.structured_intelligence.scoring import SCORE_TEMPLATE
 from dodeal_ai.units.structured_intelligence.vague import template_for
 from tests.helpers import tokens
+from tests.helpers.fake_cost_redis import FakeCostRedis
 from tests.helpers.fake_leads import note
 from tests.helpers.fake_llm import FakeLLM, json_response, response
 from tests.helpers.fake_operational_redis import FakeOperationalRedis
+from tests.helpers.scopes import TEST_SCOPE
 
 # Shaped like the content this service actually handles: a phone number and a
 # budget inside a note body. If any of these tests can find it in a log line,
@@ -400,7 +402,13 @@ async def test_a_reprompt_logs_the_label_and_never_the_rejected_answer(
         response(f"I would say this note is about {SENTINEL}"),
         json_response({"note_type": "discovery"}),
     )
-    await classify(client, note(10, "A note."), Lead(id=1), settings=get_settings())
+    await classify(
+        client,
+        note(10, "A note."),
+        Lead(id=1),
+        scope=TEST_SCOPE,
+        settings=get_settings(),
+    )
 
     assert client.call_count == 2
     _assert_sentinel_absent(log_capture)
@@ -422,7 +430,13 @@ async def test_the_rejected_answer_is_not_carried_into_the_second_prompt(
         response(f"the note said {SENTINEL}"),
         json_response({"note_type": "discovery"}),
     )
-    await classify(client, note(10, "A note."), Lead(id=1), settings=get_settings())
+    await classify(
+        client,
+        note(10, "A note."),
+        Lead(id=1),
+        scope=TEST_SCOPE,
+        settings=get_settings(),
+    )
 
     second = client.prompts[1].text
     assert SENTINEL not in second
@@ -454,13 +468,6 @@ def _raise_boom(*args: object, **kwargs: object):
     raise RuntimeError("boom")
 
 
-class _DirectCostRedis:
-    async def eval(self, script, numkeys, *keys_and_args):
-        keys = keys_and_args[:numkeys]
-        amount = int(keys_and_args[numkeys])
-        return [amount for _ in keys]
-
-
 @pytest.fixture
 def root_log_capture():
     """The real JsonFormatter on the ROOT logger at DEBUG.
@@ -486,7 +493,12 @@ def root_log_capture():
 
 
 @pytest.fixture
-def direct_client(monkeypatch):
+def cost() -> FakeCostRedis:
+    return FakeCostRedis()
+
+
+@pytest.fixture
+def direct_client(monkeypatch, cost):
     """The direct route behind the real gate chain, with every seam faked."""
     monkeypatch.setenv("DODEAL_JWT_SIGNING_KEY", tokens.TEST_SECRET)
     get_settings.cache_clear()
@@ -522,7 +534,7 @@ def direct_client(monkeypatch):
         ),
     )
 
-    monkeypatch.setattr(limiter, "get_cost_client", lambda: _DirectCostRedis())
+    monkeypatch.setattr(limiter, "get_cost_client", lambda: cost)
     monkeypatch.setattr(state, "get_operational_client", lambda: FakeOperationalRedis())
     monkeypatch.setattr(limiter, "_TOKEN_PREFLIGHT_LOGGED", False)
 
@@ -596,6 +608,75 @@ def test_direct_happy_path_logs_no_note_text(direct_client, root_log_capture):
     )
     for field in ("elapsed_ms", "classify_ms", "vague_ms", "score_ms", "inflight"):
         assert isinstance(line[field], int)
+
+
+def test_the_token_events_carry_no_note_text(
+    direct_client, root_log_capture, monkeypatch
+):
+    """The cost lines are ON the swept path, and carry only numbers and ids.
+
+    `tokens_charged` fires three times per judgement with the note in flight,
+    and `token_budget_warning` fires beside it -- so both are inside the sweep
+    above rather than beside it. Asserted rather than assumed: an event that
+    stopped being emitted would leave the sweep passing over a line it no
+    longer covers, and a field that started carrying a prompt would not.
+    """
+    # A user limit low enough that the first charge crosses the ratio, so
+    # `token_budget_warning` is on this request too and inside the sweep.
+    monkeypatch.setenv("DODEAL_COST_TOKENS_PER_USER_LIMIT", "120")
+    get_settings.cache_clear()
+    body = _direct_body(SENTINEL + " Following up Tuesday at 3pm.")
+    r = direct_client.post(DIRECT, json=body, headers=_direct_headers())
+    assert r.status_code == 200
+
+    _assert_sentinel_absent(root_log_capture)
+    charged = [
+        x for x in _lines(root_log_capture) if x.get("message") == "tokens_charged"
+    ]
+    assert len(charged) == 3
+    # The whole field set, so a new field carrying content has to be added here
+    # deliberately rather than sliding past the sweep.
+    assert set(charged[0]) >= {
+        "tenant",
+        "subject",
+        "request_id",
+        "profile",
+        "input_tokens",
+        "output_tokens",
+        "tenant_total",
+        "user_total",
+    }
+    assert charged[0]["profile"].startswith("unit_a.")
+    for field in ("input_tokens", "output_tokens", "tenant_total", "user_total"):
+        assert isinstance(charged[0][field], int)
+
+    warned = next(
+        x
+        for x in _lines(root_log_capture)
+        if x.get("message") == "token_budget_warning"
+    )
+    assert warned["level"] == "WARNING"
+    assert warned["key"] == "tokens:user:tenant-a:42"
+    assert isinstance(warned["warning_ratio"], float)
+
+
+def test_the_token_bypass_lines_carry_no_note_text(
+    direct_client, root_log_capture, cost
+):
+    """db1 down with the note in flight: two WARNING lines, neither of them
+    carrying the body that was being judged when the store went away."""
+    cost.fail = True
+    body = _direct_body(SENTINEL + " Following up Tuesday at 3pm.")
+
+    r = direct_client.post(DIRECT, json=body, headers=_direct_headers())
+    assert r.status_code == 200
+
+    _assert_sentinel_absent(root_log_capture)
+    lines = _lines(root_log_capture)
+    bypassed = next(x for x in lines if x.get("message") == "token_charge_bypassed")
+    assert bypassed["level"] == "WARNING"
+    assert bypassed["reason_code"] == "token_store_unavailable"
+    assert bypassed["tenant"] == "tenant-a"
 
 
 def test_direct_extra_field_422_logs_no_note_text(direct_client, root_log_capture):

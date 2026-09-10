@@ -7,7 +7,7 @@ not duplicate it. This file is about the *build*; ASSUMPTIONS is about the *cont
 Update rule: every commit that changes a row here updates this file in the same commit. If a row's status
 and the tree disagree, the tree is right and this file is wrong — fix the file.
 
-**Last updated:** 10 Sep 2026, after Unit A Project 1 phases A–J, Piece K, Piece L, Piece M and Piece N.1 — the judgement pipeline is built end to end against `FakeLLM` and the vendored fake CRM (head of `scaffold/core-governance-homes`, CI green). **Nothing in Unit A has been verified against a real model or a real backend; nothing is marked `[V]`** (ASSUMPTIONS §8.11).
+**Last updated:** 10 Sep 2026, after Unit A Project 1 phases A–J, Piece K, Piece L, Piece M and Piece N (N.1, N.2) — the judgement pipeline is built end to end against `FakeLLM` and the vendored fake CRM (head of `scaffold/core-governance-homes`, CI green). **Nothing in Unit A has been verified against a real model or a real backend; nothing is marked `[V]`** (ASSUMPTIONS §8.11).
 
 Status vocabulary: `DONE` (committed, CI green) · `PLANNED` (prompt written, not run) · `NEXT` (the next step
 in the sequence) · `BLOCKED <on>` · `PROPOSED` (decision written, not accepted) · `OPEN` (question asked, no
@@ -34,7 +34,7 @@ answer) · `UNASKED` (question identified, not yet sent).
 | Async migration (D2, commits a–c) — cost path on `redis.asyncio`; gates, probe and `/health` `async def`; Celery deleted, arq skeleton in | DONE | `d37945b` + `87cab6f` + D2 part 3 |
 | **Unit A Project 1 — phase A** — unit schemas + the `TenantConfig` seam | DONE | `df4689b` |
 | **Phase B** — db2 operational client; idempotency, rate limit, attempt counter | DONE | `42cd11c` |
-| **Phase C** — judgement routes, `TenantScope`, `DodealError`, `SEAM[STEP3]` stub | DONE | `317619f` |
+| **Phase C** — judgement routes, `TenantScope`, `DodealError`, the token pre-flight stub (real since Piece N.2) | DONE | `317619f` |
 | **Phase D** — classification against FakeLLM, `system_event` short-circuit | DONE | `8874958` |
 | **Phase E** — vague detection: per-type prompts, fixed missing-components vocabulary | DONE | `b432af1` |
 | **Phase F** — scoring: marks from the model, arithmetic in code, Q13 suppression | DONE | `2f2dbfb` |
@@ -45,14 +45,15 @@ answer) · `UNASKED` (question identified, not yet sent).
 | **Piece K** — the direct judgement route: `judge_note_direct`, `DirectJudgementRequest`, `note_too_long`, `max_note_chars`, `config_version` → `tenant-cfg-default-2` | DONE | `d9e0486` |
 | **Piece L** — the hardening trio: `gather_or_cancel` (register item 63), load shedding + the sync-client guard (73, 75), elapsed ms and in-flight count on the outcome lines (72) | DONE | `a6eca66` · `85aa3e0` · `fc346bc` |
 | **Piece M** — model profiles on the LLM seam: `profile` as a required keyword on `LLMClient.complete`, `core/llm/profiles.py` (the three Unit A names, `KNOWN_PROFILES`, `resolve_profile`, the fallback rule and the ceiling rule), `ModelProfile` + `DODEAL_LLM_PROFILES` validated at settings construction (register item 77) | DONE | `b263c8b` |
-| Step 3 — token counters (`enforce_token_cost`, pre-flight read, breaker, TTL fix, Lua under fakeredis). **Now also: replace `SEAM[STEP3]` (the no-op pre-flight stub in `units/structured_intelligence/pipeline.py`); `/ready` to report db2; socket timeouts for the operational client.** | NEXT | — |
+| Step 3 — token counters. **N.1 (`dffeb80`)**: Redis timeouts, bounded pools, `/ready` reports db2, the fakeredis lane. **N.2 (`__N2_SHA__`)**: `enforce_token_cost`, the real fail-open `token_preflight` (the no-op stub and its grep marker are gone), `TokenBudgetExceeded` 429, the warning ratio. **Still owed:** the H3 breaker, the M4 TTL fix, policy-per-caller for fail-closed workers, and degradation behaviour at the warning ratio (A9). | PARTIAL | `dffeb80` · `__N2_SHA__` |
 | Step 4 — tool layer: query params, paging, error taxonomy, retry policy, pooled transport, per-item validation. **Now also: read-after-write bounded re-read on the note fetch (candidate — see §2 debts).** | after step 3 | — |
 | Steps 5–13 | per ed3 §15 | — |
 | Step 0 — test tenant + key + joint call | BLOCKED on backend (Waqas) | — |
 | Step 14+ | BLOCKED on step 0 | — |
 
-Suite at head: **904 tests passing, 1 skipped, 7 deselected; 99.38% coverage** (total floor 92, plus 13
-per-file floors on the deny-path and judgement modules — `pipeline.py` is at 100% against its floor of 95),
+Suite at head: **998 tests passing, 1 skipped, 7 deselected; 99.42% coverage** (total floor 92, plus 14
+per-file floors on the deny-path and judgement modules — `limiter.py` gained a floor of its own at 100 in
+N.2, and `pipeline.py` is at 100% against its floor of 95),
 ruff/format/mypy clean, wheel installs and imports in a clean venv. The skipped test is `tests/eval/test_quality_eval.py`, which needs a real model (step 18);
 the deselected 7 are the `integration` marker.
 
@@ -79,6 +80,15 @@ item, not a first instalment.
 | # | Item | What landed | Commit |
 | --- | --- | --- | --- |
 | 3 (step 3, first sub-commit) | Redis timeouts and bounded pools; `/ready` reports db2; the fakeredis lane | Four `DODEAL_REDIS_*` budget settings, all `gt=0` so a non-positive value is a `ConfigError` at construction. `core/redis.py` builds a bounded `BlockingConnectionPool` per named connection from those four and holds **no numeric literal at all** — a parse-the-module test fails the build if one returns. `/ready` gains `operational` (db2) beside `redis` (db1), same `PING` probe under the same socket timeout, same `200`-with-`degraded`; missing config is still `503`. `fakeredis[lua]` is a dev dependency and `tests/unit/test_cost_lua.py` executes the real Lua script. A `redis_real` marker is registered and excluded from the default run; nothing carries it yet. | `dffeb80` |
+
+### Register items advanced in Piece N.2
+
+| # | Item | What landed | Commit |
+| --- | --- | --- | --- |
+| 24 | Token counters and the real pre-flight | `tokens:tenant:{t}` and `tokens:user:{t}:{s}`, moved by a SECOND Lua script that shares no key with the request script. `enforce_token_cost(scope, input_tokens, output_tokens, profile)` charges once per model response that reports usage, from `llm_call.complete_once` — the one point every paid call passes through, so a reprompt's discarded first answer is charged too. It logs `tokens_charged` (INFO) per call and `token_charge_bypassed` (WARNING) on a Redis outage, and it never denies: the call it charges for is already paid. `token_preflight` is a real MGET of both keys, raising `TokenBudgetExceeded` (**429 `token_budget_exceeded`**) at or above either limit and failing open with a once-per-process `token_preflight_bypassed`. The stub and every `SEAM` marker naming it are gone, and `tests/test_assumption_markers.py` now asserts the marker's **absence**. | `__N2_SHA__` |
+| 61 (design half) | The token-budget warning ratio | `cost_token_warning_ratio` (0.9, `gt=0` `lt=1`) and one `token_budget_warning` WARNING the first time a running total crosses `limit × ratio` within its window — fired once per crossing by comparing the pre-call and post-call totals, with no second key and no in-process flag. **The design half only.** Nothing degrades at the ratio; what should happen there is A9's decision and is deliberately not made here. | `__N2_SHA__` |
+
+**Items 24 and 61 could not be located in this repo either** — the same gap N.1 reported for item 25. No tracked file carries a register numbered 24 or 61; both rows above are written from the Piece N.2 brief's description of them rather than from a register entry read in the tree. If the register lives outside the repo it still needs marking by hand.
 
 **The item numbered 25 could not be found.** No tracked file in this repo has a register item 25 — not this file, not `CAMPAIGN_REPORT.md`, not `README.md`. Piece N.1 was asked to mark items 3 and 25 done; item 3 is above (partly — see the step 3 row), and 25 is recorded here as unlocated rather than guessed at. See "For the lead" in `CAMPAIGN_REPORT.md`, Piece N.1.
 
@@ -298,7 +308,7 @@ writes.
 
 | Step | Contents | Carries from the audit / practices | Gate |
 | --- | --- | --- | --- |
-| 3 | `enforce_token_cost` beside `enforce_cost` (own namespace, own limits, window `None` → `cost_window_seconds`); fail-open pre-flight read; the key test (token charge leaves request counters untouched and vice versa). **First sub-commit DONE (`dffeb80`, Piece N.1):** H3 timeouts to `Settings` + bounded pools, `/ready` reporting db2, M5 `fakeredis[lua]`. **Still owed:** `enforce_token_cost` itself, the fail-open pre-flight body behind `SEAM[STEP3]`, the H3 breaker, the M4 TTL fix, policy-per-caller for fail-closed workers | H3 timeouts (DONE — N.1); H3 breaker; M4 TTL fix; M5 `fakeredis[lua]` (DONE — N.1); M7 client type (DONE — D2 part 1); policy-per-caller for fail-closed workers | D2 accepted (`9dca80d`) |
+| 3 | `enforce_token_cost` beside `enforce_cost` (own namespace, own limits, the shared `cost_window_seconds`); fail-open pre-flight read; the key test (token charge leaves request counters untouched and vice versa). **N.1 DONE (`dffeb80`):** H3 timeouts to `Settings` + bounded pools, `/ready` reporting db2, M5 `fakeredis[lua]`. **N.2 DONE (`__N2_SHA__`):** `enforce_token_cost` and its second Lua script, the real `token_preflight` (stub and marker retired), `TokenBudgetExceeded` 429, the warning ratio, `test_token_and_request_counters_never_touch`. **Still owed:** the H3 breaker, the M4 TTL fix, policy-per-caller for fail-closed workers | H3 timeouts (DONE — N.1); H3 breaker; M4 TTL fix; M5 `fakeredis[lua]` (DONE — N.1); M7 client type (DONE — D2 part 1); policy-per-caller for fail-closed workers | D2 accepted (`9dca80d`) |
 | 4 | `tools/leads.py`: `page`/`per_page`/`since`/filters as kwargs; paging on `current_page == last_page`; `since` always with explicit offset | H2 typed backend errors + `retry_on`; M1 lifespan-owned `AsyncClient`; M2 per-item validation + `bookedAmount: Any`; M3 `get_leads_page`; backoff with jitter; `User-Agent` | — |
 | 5 | `units/structured_intelligence/` schemas (`NoteType`, `NoteAnalysis`, `NoteScore`), version stamps, suppressed-state | `TenantConfig` seam decision | — |
 | 6 | Route skeletons behind the gates, dependency override proven | D1 answer (Q1/Q2); metrics/tracing; error taxonomy | Q1 answered |

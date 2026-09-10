@@ -40,6 +40,7 @@ from dodeal_ai.units.structured_intelligence.schemas import NoteType
 from dodeal_ai.units.structured_intelligence.scoring import SCORE_TEMPLATE
 from dodeal_ai.units.structured_intelligence.vague import template_for
 from tests.helpers import tokens
+from tests.helpers.fake_cost_redis import FakeCostRedis
 from tests.helpers.fake_leads import FakeLeadsClient, lead, note
 from tests.helpers.fake_llm import FakeLLM, json_response
 from tests.helpers.fake_operational_redis import FakeOperationalRedis
@@ -101,23 +102,6 @@ def _script(llm: FakeLLM, judgements: int = 1) -> None:
     llm.script_for(SCORE_TEMPLATE, *[json_response(SCORE_ANSWER)] * judgements)
 
 
-class _FakeCostRedis:
-    """Gate 4's store. The cost gate runs on the direct routes exactly as it
-    runs on the fetch routes, and must not be the thing that fails."""
-
-    def __init__(self):
-        self.store: dict[str, int] = {}
-
-    async def eval(self, script, numkeys, *keys_and_args):
-        keys = keys_and_args[:numkeys]
-        amount = int(keys_and_args[numkeys])
-        counts = []
-        for key in keys:
-            self.store[key] = self.store.get(key, 0) + amount
-            counts.append(self.store[key])
-        return counts
-
-
 class _ExplodingLeadsClient:
     """A leads client that raises on ANY call.
 
@@ -148,12 +132,19 @@ def operational() -> FakeOperationalRedis:
 
 
 @pytest.fixture
+def cost() -> FakeCostRedis:
+    """db1, shared by both clients in this file: the pre-flight reads it and
+    the charge writes it on every judgement either route produces."""
+    return FakeCostRedis()
+
+
+@pytest.fixture
 def leads() -> _ExplodingLeadsClient:
     return _ExplodingLeadsClient()
 
 
 @pytest.fixture
-def client(monkeypatch, leads, llm, operational):
+def client(monkeypatch, leads, llm, operational, cost):
     """The gate chain plus the three seams, with a leads client that raises."""
     monkeypatch.setenv("DODEAL_JWT_SIGNING_KEY", tokens.TEST_SECRET)
     get_settings.cache_clear()
@@ -163,7 +154,7 @@ def client(monkeypatch, leads, llm, operational):
         jwt_algorithm=tokens.TEST_ALG,
     )
 
-    monkeypatch.setattr(cost_limiter, "get_cost_client", lambda: _FakeCostRedis())
+    monkeypatch.setattr(cost_limiter, "get_cost_client", lambda: cost)
     monkeypatch.setattr(state, "get_operational_client", lambda: operational)
     monkeypatch.setattr(cost_limiter, "_TOKEN_PREFLIGHT_LOGGED", False)
 
@@ -178,7 +169,7 @@ def client(monkeypatch, leads, llm, operational):
 
 
 @pytest.fixture
-def fetch_client(monkeypatch, llm, operational):
+def fetch_client(monkeypatch, llm, operational, cost):
     """The SAME wiring with a real fake CRM behind it, for the comparison tests.
 
     A second fixture rather than a flag on the first: the two comparison tests
@@ -198,7 +189,7 @@ def fetch_client(monkeypatch, llm, operational):
         notes={LEAD_ID: [note(NOTE_ID, GOOD_NOTE, author_id=AUTHOR_ID)]},
     )
 
-    monkeypatch.setattr(cost_limiter, "get_cost_client", lambda: _FakeCostRedis())
+    monkeypatch.setattr(cost_limiter, "get_cost_client", lambda: cost)
     monkeypatch.setattr(state, "get_operational_client", lambda: operational)
     monkeypatch.setattr(cost_limiter, "_TOKEN_PREFLIGHT_LOGGED", False)
 

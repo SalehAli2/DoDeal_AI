@@ -19,7 +19,7 @@ the step after it costs:
   4. reserve idempotency                 409 duplicate / 503 unavailable
   5. read the rate limit                 (fail open)
   6. read the attempt count              (fail open)
-  7. SEAM[STEP3] token pre-flight        (no-op today)
+  7. token pre-flight                    429 token_budget_exceeded
   8. classify, THEN vague + score        three passes, two round-trips
   9. compute, decide                     in code, never from the model
  10. increment counters ONLY if a prompt was actually sent
@@ -595,13 +595,14 @@ async def _judge(
             request_id=scope.request_id,
         )
 
-        # SEAM[STEP3]: the token budget pre-flight. A no-op that logs once per
-        # process; step 3 replaces the body, not this call site.
+        # The token budget, read before the first thing that costs money. Over
+        # budget is 429 token_budget_exceeded and releases the reservation
+        # below like any other non-200 after reserving.
         await token_preflight(scope)
 
         # --- classify: the first thing that costs money ---------------------
         (classification, classify_response), classify_ms = await _timed(
-            classify(deps.llm, note, lead, settings=deps.settings)
+            classify(deps.llm, note, lead, scope=scope, settings=deps.settings)
         )
         model_passes = 1
 
@@ -636,6 +637,7 @@ async def _judge(
                         deps.llm,
                         note,
                         note_type,
+                        scope=scope,
                         config=config,
                         settings=deps.settings,
                     )
@@ -645,6 +647,7 @@ async def _judge(
                         deps.llm,
                         note,
                         note_type,
+                        scope=scope,
                         config=config,
                         settings=deps.settings,
                     )

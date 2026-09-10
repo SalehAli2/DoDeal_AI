@@ -39,12 +39,15 @@ from __future__ import annotations
 from functools import lru_cache
 
 import redis
-from redis import asyncio as aioredis
+
+# Aliased for readability. NOT the separate, archived PyPI package whose
+# name this used to borrow -- this is redis-py's own asyncio namespace.
+from redis import asyncio as redis_async
 
 from dodeal_ai.core.config import get_settings
 
 
-def _build_pool(url: str) -> aioredis.BlockingConnectionPool:
+def _build_pool(url: str) -> redis_async.BlockingConnectionPool:
     """A bounded pool for `url`, sized entirely from Settings.
 
     BlockingConnectionPool, not ConnectionPool: at the cap the plain pool RAISES
@@ -56,7 +59,7 @@ def _build_pool(url: str) -> aioredis.BlockingConnectionPool:
     depth and in tests with no Redis running.
     """
     settings = get_settings()
-    return aioredis.BlockingConnectionPool.from_url(
+    return redis_async.BlockingConnectionPool.from_url(
         url,
         decode_responses=True,
         max_connections=settings.redis_max_connections,
@@ -67,14 +70,14 @@ def _build_pool(url: str) -> aioredis.BlockingConnectionPool:
 
 
 @lru_cache
-def get_cost_client() -> aioredis.Redis:
+def get_cost_client() -> redis_async.Redis:
     """The cost/quota connection (db1). Cached so one client -- and so one pool
     -- is reused; a per-call pool would make the bound meaningless."""
-    return aioredis.Redis(connection_pool=_build_pool(get_settings().redis_cost_url))
+    return redis_async.Redis(connection_pool=_build_pool(get_settings().redis_cost_url))
 
 
 @lru_cache
-def get_operational_client() -> aioredis.Redis:
+def get_operational_client() -> redis_async.Redis:
     """The operational connection (db2): idempotency reservations, rate limits,
     attempt counters. Cached so one client is reused.
 
@@ -83,12 +86,12 @@ def get_operational_client() -> aioredis.Redis:
     them, not so they can be tuned apart. A per-connection budget would be a new
     decision, and nothing has asked for one.
     """
-    return aioredis.Redis(
+    return redis_async.Redis(
         connection_pool=_build_pool(get_settings().redis_operational_url)
     )
 
 
-async def _ping(client: aioredis.Redis) -> bool:
+async def _ping(client: redis_async.Redis) -> bool:
     """True if `client` answers PING within the configured socket timeout. A
     connection error is False, never an exception: readiness is the CALLER's
     decision, and a probe that raised would take /ready down with the

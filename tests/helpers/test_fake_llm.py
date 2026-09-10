@@ -35,6 +35,7 @@ from tests.helpers.fake_llm import (
     response,
     truncated,
 )
+from tests.helpers.scopes import TEST_SCOPE
 
 PROMPT = AssembledPrompt(stable="S", variable="V")
 # These tests are about the SCRIPT, not about which profile was named --
@@ -137,8 +138,12 @@ async def test_template_answers_land_on_the_right_pass_in_either_gather_order(
     fake.script_for(SCORE_TEMPLATE, json_response(SCORE_ANSWER))
     settings = get_settings()
 
-    vague = detect_vagueness(fake, NOTE, NOTE_TYPE, config=CONFIG, settings=settings)
-    score = score_note(fake, NOTE, NOTE_TYPE, config=CONFIG, settings=settings)
+    vague = detect_vagueness(
+        fake, NOTE, NOTE_TYPE, config=CONFIG, scope=TEST_SCOPE, settings=settings
+    )
+    score = score_note(
+        fake, NOTE, NOTE_TYPE, config=CONFIG, scope=TEST_SCOPE, settings=settings
+    )
     # Reversing the ARGUMENTS to gather is what reverses arrival order; the
     # coroutines above have not started yet.
     if score_first:
@@ -156,7 +161,7 @@ async def test_template_queue_drains_in_order_across_a_reprompt() -> None:
     fake.script_for(SCORE_TEMPLATE, response("not json"), json_response(SCORE_ANSWER))
 
     out, _ = await score_note(
-        fake, NOTE, NOTE_TYPE, config=CONFIG, settings=get_settings()
+        fake, NOTE, NOTE_TYPE, config=CONFIG, scope=TEST_SCOPE, settings=get_settings()
     )
 
     assert out.marks[ComponentName.WHAT_HAPPENED] == 20

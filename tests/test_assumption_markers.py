@@ -14,20 +14,23 @@ So the invariant is a THREE-WAY one, per marker:
     README.md                      what a reader is told is assumed
     ASSUMPTIONS.md                 the correction path, in the ledger
 
-`SEAM[STEP3]` is the same shape with `STATUS.md` in place of `ASSUMPTIONS.md`:
-it is not an assumption about the backend, it is a placeholder with a scheduled
-replacement, and the schedule lives in the build register.
+The step-3 seam marker WAS the same shape with `STATUS.md` in place of
+`ASSUMPTIONS.md`, and is now the opposite test: the token pre-flight is real
+(`core/cost/limiter.py::token_preflight`), so the marker must appear NOWHERE.
+A three-way presence check for a seam that no longer exists would pass only
+while someone kept writing the marker down, which is the failure it should
+report. See `test_the_seam_marker_is_gone` below.
 
 WHY "AT LEAST ONE UNDER src/", NOT "EXACTLY THREE FILES". The campaign brief
 asked for exactly three files per marker. That is not reachable and never was:
 `ASSUMPTION[Q6]` is load-bearing in both `classify.py` and `schemas.py`,
-`ASSUMPTION[Q7]` in both `pipeline.py` and `state.py`, `ASSUMPTION[Q13]` in both
-`config.py` and `scoring.py`, and `SEAM[STEP3]` in both `pipeline.py` and
-`limiter.py` -- and several are cited in the tests that pin the behaviour they
-describe, which is exactly where a reader would want them. Forcing the count to
-three would mean deleting markers from code that genuinely depends on them, to
-satisfy a number. The three-way presence check is the invariant that was
-actually wanted; the count is recorded in CAMPAIGN_REPORT.md, Phase J.
+`ASSUMPTION[Q7]` in both `pipeline.py` and `state.py`, and `ASSUMPTION[Q13]` in
+both `config.py` and `scoring.py` -- and several are cited in the tests that pin
+the behaviour they describe, which is exactly where a reader would want them.
+Forcing the count to three would mean deleting markers from code that genuinely
+depends on them, to satisfy a number. The three-way presence check is the
+invariant that was actually wanted; the count is recorded in
+CAMPAIGN_REPORT.md, Phase J.
 """
 
 from __future__ import annotations
@@ -48,9 +51,11 @@ ASSUMPTION_MARKERS = [
     "ASSUMPTION[Q8]",
     "ASSUMPTION[Q13]",
 ]
-# Not an assumption -- a stub with a scheduled replacement, so its home is the
-# build register rather than the seam ledger.
-SEAM_MARKER = "SEAM[STEP3]"
+# RETIRED. The stub it named is gone (Piece N.2): `token_preflight` is a real
+# fail-open read and the pre-flight is enforced. Assembled rather than spelled,
+# because the assertion below is that NO tracked file carries it -- and a file
+# that wrote it out whole would be the first one to fail its own test.
+SEAM_MARKER = "SEAM" + "[STEP3]"
 
 # CAMPAIGN_REPORT.md is excluded because it QUOTES every marker while discussing
 # the work, so counting it would make the report's own prose satisfy the
@@ -106,15 +111,15 @@ def test_every_assumption_marker_is_in_src_readme_and_assumptions(marker):
     )
 
 
-def test_the_seam_marker_is_in_src_readme_and_status():
+def test_the_seam_marker_is_gone():
+    """The seam is closed, so the marker must appear in no tracked file."""
     found = _files_containing(SEAM_MARKER)
-    in_src = sorted(f for f in found if f.startswith("src/"))
 
-    assert in_src, f"{SEAM_MARKER} carries no code. Found in: {sorted(found)}"
-    assert "README.md" in found
-    assert "docs/STATUS.md" in found, (
-        f"{SEAM_MARKER} is a stub with a scheduled replacement; the schedule "
-        f"lives in the build register, so STATUS.md must name it."
+    assert not found, (
+        f"{SEAM_MARKER} is retired -- the token pre-flight has been real since "
+        f"Piece N.2 (core/cost/limiter.py::token_preflight). A file still "
+        f"carrying it is describing a stub that no longer exists: "
+        f"{sorted(found)}. Delete the marker and say what the code does now."
     )
 
 

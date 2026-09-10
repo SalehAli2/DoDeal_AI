@@ -45,6 +45,7 @@ from tests.helpers.fake_llm import (
     response,
     truncated,
 )
+from tests.helpers.scopes import TEST_SCOPE
 
 LEAD_ID = 1656
 NOTE_ID = 10
@@ -73,7 +74,7 @@ async def _classify(scripted):
     """
     client = FakeLLM(scripted, scripted)
     output, llm_response = await classify(
-        client, _note(), _lead(), settings=get_settings()
+        client, _note(), _lead(), scope=TEST_SCOPE, settings=get_settings()
     )
     return output, llm_response, client
 
@@ -131,7 +132,9 @@ async def test_a_code_fence_is_malformed_not_stripped():
 async def test_a_truncated_response_is_malformed():
     client = FakeLLM(*([truncated('{"note_type": "disc')] * 2))
     with pytest.raises(MalformedOutputError):
-        await classify(client, _note(), _lead(), settings=get_settings())
+        await classify(
+            client, _note(), _lead(), scope=TEST_SCOPE, settings=get_settings()
+        )
     assert client.call_count == 2
 
 
@@ -141,7 +144,9 @@ async def test_malformed_output_costs_exactly_two_calls():
     # attempt is paid for by someone waiting on a note.
     client = FakeLLM(response("not json at all"), response("still not json"))
     with pytest.raises(MalformedOutputError):
-        await classify(client, _note(), _lead(), settings=get_settings())
+        await classify(
+            client, _note(), _lead(), scope=TEST_SCOPE, settings=get_settings()
+        )
     assert client.call_count == 2
 
 
@@ -155,7 +160,9 @@ async def test_the_rejected_output_is_not_carried_on_the_error():
     secret = "SENTINEL-0501234567 villa budget 4.2M"
     client = FakeLLM(response(secret), response(secret))
     with pytest.raises(MalformedOutputError) as raised:
-        await classify(client, _note(), _lead(), settings=get_settings())
+        await classify(
+            client, _note(), _lead(), scope=TEST_SCOPE, settings=get_settings()
+        )
 
     assert secret not in str(raised.value)
     assert raised.value.__cause__ is None  # unchained: nothing to print
@@ -167,7 +174,9 @@ async def test_the_rejected_output_is_not_carried_on_the_error():
 async def test_a_provider_failure_is_model_unavailable():
     client = FakeLLM(LLMProviderError(LLMErrorReason.UNAVAILABLE, transient=True))
     with pytest.raises(ModelUnavailableError) as raised:
-        await classify(client, _note(), _lead(), settings=get_settings())
+        await classify(
+            client, _note(), _lead(), scope=TEST_SCOPE, settings=get_settings()
+        )
 
     assert raised.value.http_status == 503
     assert raised.value.reason_code == "model_unavailable"
@@ -181,7 +190,9 @@ async def test_a_provider_failure_is_not_retried():
         json_response({"note_type": "discovery"}),
     )
     with pytest.raises(ModelUnavailableError):
-        await classify(client, _note(), _lead(), settings=get_settings())
+        await classify(
+            client, _note(), _lead(), scope=TEST_SCOPE, settings=get_settings()
+        )
 
     assert client.call_count == 1
 
@@ -189,7 +200,9 @@ async def test_a_provider_failure_is_not_retried():
 async def test_a_provider_failure_leaks_no_provider_text(caplog):
     client = FakeLLM(LLMProviderError(LLMErrorReason.AUTH, transient=False))
     with pytest.raises(ModelUnavailableError):
-        await classify(client, _note(), _lead(), settings=get_settings())
+        await classify(
+            client, _note(), _lead(), scope=TEST_SCOPE, settings=get_settings()
+        )
 
     assert NOTE_TEXT not in caplog.text
 

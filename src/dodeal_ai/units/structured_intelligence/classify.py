@@ -36,6 +36,7 @@ would be answering a question we did not ask.
 from __future__ import annotations
 
 from dodeal_ai.core.config import Settings
+from dodeal_ai.core.context import TenantScope
 from dodeal_ai.core.llm import LLMClient, LLMResponse
 from dodeal_ai.core.llm.profiles import PROFILE_UNIT_A_CLASSIFY
 from dodeal_ai.core.prompting import AssembledPrompt, build_prompt
@@ -103,7 +104,12 @@ def build_classification_prompt(note: LeadNote, lead: Lead) -> AssembledPrompt:
 
 
 async def classify(
-    client: LLMClient, note: LeadNote, lead: Lead, *, settings: Settings
+    client: LLMClient,
+    note: LeadNote,
+    lead: Lead,
+    *,
+    scope: TenantScope,
+    settings: Settings,
 ) -> tuple[ClassificationOutput, LLMResponse]:
     """One model call, or two if the first answer is malformed. Returns the
     validated answer and the raw response, whose `model` is stamped on the
@@ -113,6 +119,7 @@ async def classify(
         build_classification_prompt(note, lead),
         ClassificationOutput,
         CLASSIFY_LABEL,
+        scope=scope,
         settings=settings,
         profile=PROFILE_UNIT_A_CLASSIFY,
         max_output_tokens=CLASSIFY_MAX_OUTPUT_TOKENS,

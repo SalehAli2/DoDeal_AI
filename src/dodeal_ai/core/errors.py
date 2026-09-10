@@ -102,6 +102,19 @@ class MalformedOutputError(DodealError):
         super().__init__("malformed_output", 503)
 
 
+class TokenBudgetExceeded(DodealError):
+    """The tenant or the user is at their TOKEN budget for the window.
+
+    429, like Gate 4's request cap and for the same reason: this is the
+    caller's own quota, not the service's capacity (which is LoadShed's 503).
+    One code for both keys -- which cap was hit is an operational fact for the
+    log, not something a CRM should branch on.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("token_budget_exceeded", 429)
+
+
 class LoadShed(DodealError):
     """Refused at the door: `max_inflight` are already inside the app.
 

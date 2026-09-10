@@ -50,6 +50,7 @@ from dodeal_ai.units.structured_intelligence.vague import (
 )
 from tests.helpers.fake_leads import note
 from tests.helpers.fake_llm import FakeLLM, json_response, response, truncated
+from tests.helpers.scopes import TEST_SCOPE
 
 CONFIG = get_tenant_config("tenant-a")
 NOTE_TEXT = "Called the client about the New Cairo 3BR; calling back Tuesday."
@@ -82,7 +83,7 @@ def _lead() -> Lead:
 async def _classify(*script):
     client = FakeLLM(*script)
     output, llm_response = await classify(
-        client, _note(), _lead(), settings=get_settings()
+        client, _note(), _lead(), scope=TEST_SCOPE, settings=get_settings()
     )
     return output, llm_response, client
 
@@ -114,7 +115,9 @@ async def test_two_bad_answers_end_in_malformed_output():
         json_response(GOOD_CLASSIFICATION),
     )
     with pytest.raises(MalformedOutputError) as raised:
-        await classify(client, _note(), _lead(), settings=get_settings())
+        await classify(
+            client, _note(), _lead(), scope=TEST_SCOPE, settings=get_settings()
+        )
 
     # Two, not three: the third scripted answer is a valid one the model never
     # gets to give, so a loop would show up here as a pass.
@@ -141,7 +144,9 @@ async def test_a_provider_failure_on_the_reprompt_is_model_unavailable():
         json_response(GOOD_CLASSIFICATION),
     )
     with pytest.raises(ModelUnavailableError) as raised:
-        await classify(client, _note(), _lead(), settings=get_settings())
+        await classify(
+            client, _note(), _lead(), scope=TEST_SCOPE, settings=get_settings()
+        )
 
     assert client.call_count == 2
     assert raised.value.reason_code == "model_unavailable"
@@ -260,7 +265,9 @@ async def test_a_truncated_answer_twice_is_malformed_output():
     cut_off = truncated('{"note_type": "disc')
     client = FakeLLM(cut_off, cut_off)
     with pytest.raises(MalformedOutputError):
-        await classify(client, _note(), _lead(), settings=get_settings())
+        await classify(
+            client, _note(), _lead(), scope=TEST_SCOPE, settings=get_settings()
+        )
     assert client.call_count == 2
 
 
@@ -299,7 +306,12 @@ async def test_a_good_answer_logs_no_reprompt(caplog):
 async def test_vague_detection_reprompts_on_a_malformed_answer():
     client = FakeLLM(response("The note looks thin."), json_response(GOOD_VAGUE))
     output, _ = await detect_vagueness(
-        client, _note(), NoteType.DISCOVERY, config=CONFIG, settings=get_settings()
+        client,
+        _note(),
+        NoteType.DISCOVERY,
+        config=CONFIG,
+        scope=TEST_SCOPE,
+        settings=get_settings(),
     )
     assert client.call_count == 2
     assert output.is_vague is True
@@ -327,7 +339,12 @@ async def test_a_rule_the_schema_cannot_hold_earns_the_reprompt_too():
     )
     client = FakeLLM(disallowed, allowed)
     output, _ = await detect_vagueness(
-        client, _note(), NoteType.NO_CONTACT, config=CONFIG, settings=get_settings()
+        client,
+        _note(),
+        NoteType.NO_CONTACT,
+        config=CONFIG,
+        scope=TEST_SCOPE,
+        settings=get_settings(),
     )
     assert client.call_count == 2
     assert [c.value for c in output.missing_components] == ["next_step_with_date"]
@@ -339,7 +356,12 @@ async def test_a_mark_above_its_weight_earns_the_reprompt():
         json_response(GOOD_MARKS),
     )
     output, _ = await score_note(
-        client, _note(), NoteType.DISCOVERY, config=CONFIG, settings=get_settings()
+        client,
+        _note(),
+        NoteType.DISCOVERY,
+        config=CONFIG,
+        scope=TEST_SCOPE,
+        settings=get_settings(),
     )
     assert client.call_count == 2
     assert [mark for mark in output.marks.values()] == [20, 15, 20, 8]
@@ -358,6 +380,7 @@ async def test_each_pass_states_its_own_ceiling():
         _note(),
         NoteType.DISCOVERY,
         config=CONFIG,
+        scope=TEST_SCOPE,
         settings=get_settings(),
     )
     assert vague_client.calls[0].max_output_tokens == VAGUE_MAX_OUTPUT_TOKENS
@@ -368,6 +391,7 @@ async def test_each_pass_states_its_own_ceiling():
         _note(),
         NoteType.DISCOVERY,
         config=CONFIG,
+        scope=TEST_SCOPE,
         settings=get_settings(),
     )
     assert score_client.calls[0].max_output_tokens == SCORE_MAX_OUTPUT_TOKENS

@@ -32,6 +32,7 @@ import pytest
 
 from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.context import RequestContext
+from dodeal_ai.core.cost import limiter
 from dodeal_ai.core.errors import MalformedOutputError
 from dodeal_ai.core.logging_config import JsonFormatter
 from dodeal_ai.core.prompting import (
@@ -62,6 +63,7 @@ from dodeal_ai.units.structured_intelligence.vague import (
     build_vague_prompt,
     template_for,
 )
+from tests.helpers.fake_cost_redis import FakeCostRedis
 from tests.helpers.fake_leads import FakeLeadsClient, lead, load_fixture_client, note
 from tests.helpers.fake_llm import FakeLLM, json_response, response
 from tests.helpers.fake_operational_redis import FakeOperationalRedis
@@ -103,6 +105,15 @@ def _scope(tenant: str = "tenant-a"):
         permissions=frozenset(),
         request_id="req-adversarial",
     ).scope()
+
+
+@pytest.fixture(autouse=True)
+def cost(monkeypatch) -> FakeCostRedis:
+    """db1, faked for every case here: the token pre-flight reads it on every
+    judgement, and an adversarial note must not be answered by a real store."""
+    client = FakeCostRedis()
+    monkeypatch.setattr(limiter, "get_cost_client", lambda: client)
+    return client
 
 
 @pytest.fixture

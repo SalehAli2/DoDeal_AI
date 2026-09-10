@@ -40,6 +40,7 @@ from dodeal_ai.units.structured_intelligence.scoring import (
 )
 from tests.helpers.fake_leads import note
 from tests.helpers.fake_llm import FAKE_MODEL, FakeLLM, json_response, response
+from tests.helpers.scopes import TEST_SCOPE
 
 NOTE_ID = 10
 NOTE_TEXT = "Called the client, discussed the New Cairo 3BR, following up Tuesday."
@@ -563,7 +564,12 @@ async def _score(payload_or_response, note_type=NoteType.DISCOVERY, config=CONFI
     )
     client = FakeLLM(scripted, scripted)
     output, llm_response = await score_note(
-        client, _note(), note_type, config=config, settings=get_settings()
+        client,
+        _note(),
+        note_type,
+        config=config,
+        scope=TEST_SCOPE,
+        settings=get_settings(),
     )
     return output, llm_response, client
 
@@ -648,7 +654,12 @@ async def test_a_rejected_answer_costs_exactly_two_calls():
     )
     with pytest.raises(MalformedOutputError):
         await score_note(
-            client, _note(), NoteType.DISCOVERY, config=CONFIG, settings=get_settings()
+            client,
+            _note(),
+            NoteType.DISCOVERY,
+            config=CONFIG,
+            scope=TEST_SCOPE,
+            settings=get_settings(),
         )
     assert client.call_count == 2
 

@@ -27,6 +27,7 @@ import pytest
 
 from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.context import RequestContext
+from dodeal_ai.core.cost import limiter
 from dodeal_ai.units.structured_intelligence import state
 from dodeal_ai.units.structured_intelligence.classify import CLASSIFY_TEMPLATE
 from dodeal_ai.units.structured_intelligence.config import get_tenant_config
@@ -39,6 +40,7 @@ from dodeal_ai.units.structured_intelligence.schemas import (
 )
 from dodeal_ai.units.structured_intelligence.scoring import SCORE_TEMPLATE
 from dodeal_ai.units.structured_intelligence.vague import template_for
+from tests.helpers.fake_cost_redis import FakeCostRedis
 from tests.helpers.fake_leads import (
     FakeLeadsClient,
     load_fixture_client,
@@ -97,6 +99,15 @@ def _scope():
         permissions=frozenset(),
         request_id="req-eval",
     ).scope()
+
+
+@pytest.fixture(autouse=True)
+def cost(monkeypatch) -> FakeCostRedis:
+    """db1, faked for the whole corpus run: the token pre-flight reads it once
+    per note, and 127 notes must not become 127 socket attempts."""
+    client = FakeCostRedis()
+    monkeypatch.setattr(limiter, "get_cost_client", lambda: client)
+    return client
 
 
 @pytest.fixture

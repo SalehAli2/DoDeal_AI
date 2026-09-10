@@ -149,26 +149,21 @@ class Settings(BaseSettings):
     # a DB would make a flush aimed at one of them hit the other.
     redis_operational_url: str = "redis://localhost:6379/2"
     # --- Redis connection budget (core/redis.py; audit H3) ------------------
-    # PROVISIONAL, all four. They exist because a Redis outage used to cost
-    # 2.0s of hardcoded socket timeout per request and a /ready ping longer
-    # than a k8s probe deadline; sizing them is now a config change.
+    # PROVISIONAL, all four; gt=0 on every one, so a non-positive value fails
+    # closed at construction rather than at the first command.
     #
-    # gt=0 on every one: a zero or negative timeout is a typo that reads as an
-    # outage (nothing can connect) or as an unbounded wait, so it fails closed
-    # at settings construction rather than at the first command.
-    #
-    # Connect is deliberately far shorter than read: reaching a listening
-    # socket on the same network is a sub-millisecond operation, so a slow
-    # connect means the host is gone, not busy.
+    # Far shorter than the read timeout: reaching a listening socket on the
+    # same network is sub-millisecond, so a slow connect means the host is
+    # gone, not busy.
     redis_connect_timeout_seconds: float = Field(default=0.25, gt=0)
+    # What one Redis command may take. This is what a Redis outage costs a
+    # request before the cost gate fails open.
     redis_socket_timeout_seconds: float = Field(default=1.0, gt=0)
-    # The pool is BOUNDED (BlockingConnectionPool). An unbounded pool answers a
-    # Redis stall by opening more sockets, which turns one slow dependency into
-    # file-descriptor exhaustion; a bounded one makes the caller wait instead.
+    # BOUNDED pool. An unbounded one answers a Redis stall by opening more
+    # sockets, turning one slow dependency into fd exhaustion.
     redis_max_connections: int = Field(default=20, gt=0)
     # How long a caller waits for a free connection before the pool refuses.
-    # Without it, "bounded" would mean "blocks forever at the cap", which is a
-    # worse outage than the one the bound prevents.
+    # Without it, "bounded" would mean "blocks forever at the cap".
     redis_pool_acquire_timeout_seconds: float = Field(default=1.0, gt=0)
 
     # Cost/quota caps (placeholder values; tune to real budgets later).
@@ -176,6 +171,17 @@ class Settings(BaseSettings):
     cost_per_tenant_limit: int = 10000
     cost_per_user_limit: int = 1000
     cost_window_seconds: int = 86400  # 24h
+
+    # Token budget (core/cost/limiter.py), on the SAME window as the request
+    # caps above but on its own keys: "requests made" and "tokens spent" are
+    # different quantities and one must never stand in for the other.
+    # PROVISIONAL -- no real provider has run, so these are placeholders.
+    cost_tokens_per_tenant_limit: int = Field(default=5_000_000, gt=0)
+    cost_tokens_per_user_limit: int = Field(default=500_000, gt=0)
+    # The fraction of a limit at which a running total earns one WARNING.
+    # STRICTLY between 0 and 1: 0 warns on the first token, 1 warns only once
+    # the budget is already spent, and neither is a warning.
+    cost_token_warning_ratio: float = Field(default=0.9, gt=0.0, lt=1.0)
 
     # --- Load shedding (middleware/inflight.py) -----------------------------
     # The number of requests allowed INSIDE the app at once. The next one is

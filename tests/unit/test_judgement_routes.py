@@ -34,6 +34,7 @@ from dodeal_ai.units.structured_intelligence.classify import (
 from dodeal_ai.units.structured_intelligence.scoring import SCORE_MAX_OUTPUT_TOKENS
 from dodeal_ai.units.structured_intelligence.vague import VAGUE_MAX_OUTPUT_TOKENS
 from tests.helpers import tokens
+from tests.helpers.fake_cost_redis import FakeCostRedis
 from tests.helpers.fake_leads import FakeLeadsClient, lead, note
 from tests.helpers.fake_llm import (
     FAKE_MODEL,
@@ -107,23 +108,6 @@ def _happy_path(note_type: str = "discovery"):
     return [_classified(note_type), _vague_answer(), _score_answer()]
 
 
-class _FakeCostRedis:
-    """Gate 4's store. Copied from tests/security/test_chain.py -- the cost gate
-    runs on every one of these routes and must not be the thing that fails."""
-
-    def __init__(self):
-        self.store: dict[str, int] = {}
-
-    async def eval(self, script, numkeys, *keys_and_args):
-        keys = keys_and_args[:numkeys]
-        amount = int(keys_and_args[numkeys])
-        counts = []
-        for key in keys:
-            self.store[key] = self.store.get(key, 0) + amount
-            counts.append(self.store[key])
-        return counts
-
-
 @pytest.fixture
 def leads() -> FakeLeadsClient:
     return FakeLeadsClient(
@@ -149,7 +133,14 @@ def operational() -> FakeOperationalRedis:
 
 
 @pytest.fixture
-def client(monkeypatch, leads, llm, operational):
+def cost() -> FakeCostRedis:
+    """db1. Returned rather than built inline so a test can read back which
+    keys the pre-flight and the charge actually touched."""
+    return FakeCostRedis()
+
+
+@pytest.fixture
+def client(monkeypatch, leads, llm, operational, cost):
     """The route fixture: the gate-chain wiring from test_chain.py:38-52, plus
     the three seams this unit reaches the world through.
 
@@ -164,7 +155,7 @@ def client(monkeypatch, leads, llm, operational):
         jwt_algorithm=tokens.TEST_ALG,
     )
 
-    monkeypatch.setattr(cost_limiter, "get_cost_client", lambda: _FakeCostRedis())
+    monkeypatch.setattr(cost_limiter, "get_cost_client", lambda: cost)
     monkeypatch.setattr(state, "get_operational_client", lambda: operational)
     # The once-per-process flag, reset so each test sees a clean process.
     monkeypatch.setattr(cost_limiter, "_TOKEN_PREFLIGHT_LOGGED", False)
@@ -555,29 +546,22 @@ def test_a_judgement_is_logged_without_note_text(client, json_log):
     assert "Which Tuesday" not in json_log.getvalue()
 
 
-# --- the SEAM[STEP3] stub ---------------------------------------------------
+# --- the token pre-flight, through the route --------------------------------
 
 
-def test_token_preflight_logs_once_across_two_requests(client, leads, json_log):
+def test_the_preflight_reads_the_token_keys_on_every_judgement(client, cost):
+    """The pre-flight is a real read now, and it is the token keys it reads."""
     client.post(JUDGE, json=_body(), headers=_headers())
-    leads.notes[LEAD_ID] = [note(NOTE_ID, GOOD_NOTE + " Second distinct note text.")]
-    client.post(JUDGE, json=_body(), headers=_headers())
 
-    bypasses = [
-        x for x in _lines(json_log) if x["message"] == "token_preflight_bypassed"
-    ]
-    assert len(bypasses) == 1
-    assert bypasses[0]["level"] == "WARNING"
-    assert bypasses[0]["tenant"] == "tenant-a"
+    assert cost.mgets == [("tokens:tenant:tenant-a", "tokens:user:tenant-a:42")]
 
 
-def test_token_preflight_is_not_reached_when_the_note_is_thin(client, leads, json_log):
+def test_the_preflight_is_not_reached_when_the_note_is_thin(client, leads, cost):
+    """A note too thin to judge costs no reservation and no pre-flight read."""
     leads.notes[LEAD_ID] = [note(NOTE_ID, "ok")]
     client.post(JUDGE, json=_body(), headers=_headers())
 
-    assert not [
-        x for x in _lines(json_log) if x["message"] == "token_preflight_bypassed"
-    ]
+    assert cost.mgets == []
 
 
 # --- /meta/versions ---------------------------------------------------------

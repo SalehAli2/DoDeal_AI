@@ -34,6 +34,21 @@ and user identity from the request context.
 get_usage() is a separate, read-only path (MGET, no increment) for reporting
 current usage without affecting it.
 
+THE TOKEN COUNTERS ARE A SECOND, DISJOINT PAIR. `tokens:tenant:{t}` and
+`tokens:user:{t}:{s}` are moved by their own Lua script, share no key with the
+`cost:*` counters above, and answer a different question: what was SPENT, not
+how many requests were made. Two functions divide the work, and the division is
+the design --
+
+  token_preflight()     READS both, before a model call. Denies (429
+                        token_budget_exceeded) at or above either limit, and
+                        never writes.
+  enforce_token_cost()  WRITES both, after a response is in hand. Counts, warns
+                        at the ratio, and never denies -- the call it charges
+                        for has already been paid to the provider.
+
+Both fail OPEN on a Redis error, for the same reason enforce_cost does.
+
 This is a real cap only against real Redis; counters must persist across
 requests and workers, which in-memory storage cannot do.
 """
@@ -47,6 +62,7 @@ from redis import asyncio as aioredis
 
 from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.context import TenantScope
+from dodeal_ai.core.errors import TokenBudgetExceeded
 from dodeal_ai.core.redis import get_cost_client
 
 _logger = logging.getLogger("dodeal_ai.cost")
@@ -137,6 +153,160 @@ async def enforce_cost(tenant: str, subject: str, amount: int = 1) -> None:
         raise CostLimitError("user_quota_exceeded")
 
 
+# --- the token counters ----------------------------------------------------
+#
+# A SECOND script, deliberately a separate constant with the same shape rather
+# than the request script reused: the two count different quantities on
+# disjoint keys, and an edit aimed at one (the M4 TTL repair is still owed on
+# the request counters) must not silently change the other.
+_ADD_TOKENS_SCRIPT = """
+local tenant_existed = redis.call('EXISTS', KEYS[1])
+local tenant_total = redis.call('INCRBY', KEYS[1], ARGV[1])
+if tenant_existed == 0 then
+  redis.call('EXPIRE', KEYS[1], ARGV[2])
+end
+
+local user_existed = redis.call('EXISTS', KEYS[2])
+local user_total = redis.call('INCRBY', KEYS[2], ARGV[1])
+if user_existed == 0 then
+  redis.call('EXPIRE', KEYS[2], ARGV[2])
+end
+
+return {tenant_total, user_total}
+"""
+
+
+def _token_keys(tenant: str, subject: str) -> tuple[str, str]:
+    """The two token keys. Their own namespace, sharing nothing with `cost:*`:
+    "requests made" must never be able to stand in for "tokens spent"."""
+    return f"tokens:tenant:{tenant}", f"tokens:user:{tenant}:{subject}"
+
+
+async def _add_tokens_with_window(
+    client: aioredis.Redis,
+    tenant_key: str,
+    user_key: str,
+    total: int,
+    window: int,
+) -> tuple[int, int]:
+    """Atomically add `total` to both token counters in one Lua script
+    execution (see _ADD_TOKENS_SCRIPT). Returns (tenant_total, user_total)."""
+    tenant_total, user_total = await client.eval(
+        _ADD_TOKENS_SCRIPT, 2, tenant_key, user_key, total, window
+    )
+    return int(tenant_total), int(user_total)
+
+
+def _warn_on_crossing(
+    key: str,
+    *,
+    before: int,
+    after: int,
+    limit: int,
+    ratio: float,
+    scope: TenantScope,
+) -> None:
+    """One WARNING the first time a running total crosses limit * ratio.
+
+    ONCE PER CROSSING, WITH NO EXTRA STATE. The pre-call total is `after` minus
+    what this call added, so "was under, is now at or over" is answerable from
+    the one number the script already returned -- no second key, no in-process
+    flag, and nothing to get wrong when two workers charge at once. The next
+    call is already over the threshold and so does not warn again; the window
+    expiring resets the counter and the crossing can happen once more.
+    """
+    threshold = limit * ratio
+    if before >= threshold or after < threshold:
+        return
+    _logger.warning(
+        "token_budget_warning",
+        extra={
+            "reason_code": "token_budget_warning",
+            "key": key,
+            "warning_ratio": ratio,
+            "total": after,
+            "limit": limit,
+            "tenant": scope.tenant,
+            "request_id": scope.request_id,
+        },
+    )
+
+
+async def enforce_token_cost(
+    scope: TenantScope,
+    *,
+    input_tokens: int,
+    output_tokens: int,
+    profile: str,
+) -> None:
+    """Charge one model response's tokens to the tenant and the user.
+
+    A METER, NOT A GATE. It counts and it never denies: the call it is charging
+    for has ALREADY been paid to the provider, so refusing here would throw the
+    answer away and bill for it anyway. `token_preflight` is the gate, and it
+    runs before anything is spent. Nothing this function does reaches the
+    caller as an exception -- a Redis outage is logged and allowed, exactly as
+    enforce_cost's is, because a money guard is not a security guard.
+
+    Both counters move together in one atomic script execution, so a failure
+    leaves NEITHER moved rather than a tenant charged and a user not.
+    """
+    settings = get_settings()
+    client = get_cost_client()
+    total = input_tokens + output_tokens
+    tenant_key, user_key = _token_keys(scope.tenant, scope.subject)
+
+    try:
+        tenant_total, user_total = await _add_tokens_with_window(
+            client, tenant_key, user_key, total, settings.cost_window_seconds
+        )
+    except redis.RedisError:
+        # Fail open and say so. The tokens were spent whether or not we counted
+        # them, so an uncounted charge is a hole in the meter, not in the bill.
+        _logger.warning(
+            "token_charge_bypassed",
+            extra={
+                "reason_code": "token_store_unavailable",
+                "tenant": scope.tenant,
+                "request_id": scope.request_id,
+            },
+        )
+        return
+
+    # Numbers, ids and a profile NAME -- never a prompt, never a completion.
+    _logger.info(
+        "tokens_charged",
+        extra={
+            "tenant": scope.tenant,
+            "subject": scope.subject,
+            "request_id": scope.request_id,
+            "profile": profile,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "tenant_total": tenant_total,
+            "user_total": user_total,
+        },
+    )
+
+    ratio = settings.cost_token_warning_ratio
+    _warn_on_crossing(
+        tenant_key,
+        before=tenant_total - total,
+        after=tenant_total,
+        limit=settings.cost_tokens_per_tenant_limit,
+        ratio=ratio,
+        scope=scope,
+    )
+    _warn_on_crossing(
+        user_key,
+        before=user_total - total,
+        after=user_total,
+        limit=settings.cost_tokens_per_user_limit,
+        ratio=ratio,
+        scope=scope,
+    )
+
+
 # Module-level, not an lru_cache: tests reset it with
 # monkeypatch.setattr(limiter, "_TOKEN_PREFLIGHT_LOGGED", False), and a cache
 # would also key on the arguments, which would make "once per process" mean
@@ -145,43 +315,47 @@ _TOKEN_PREFLIGHT_LOGGED = False
 
 
 async def token_preflight(scope: TenantScope) -> None:
-    """SEAM[STEP3] -- the pre-flight token-budget read, not implemented yet.
+    """Refuse a judgement whose tenant or user is already at its token budget,
+    BEFORE the first model call is placed.
 
-    A NO-OP today. It exists so the pipeline calls it in the right place now,
-    and step 3 fills in the body without moving a call site or changing a
-    signature.
+    READ-ONLY, always: MGET of the two token keys and nothing else. The charge
+    is enforce_token_cost's, after a response is in hand; a pre-flight that
+    wrote would charge a judgement that has not happened yet.
 
-    WHAT STEP 3 PUTS HERE: a fail-OPEN read of the tenant's remaining token
-    budget before a model call is made, so a tenant that is already over budget
-    is refused before we spend, not after. Fail open for the same reason
-    enforce_cost does -- a cost cap is a money guard, not a security guard.
+    AT OR ABOVE the limit, not over it. The counters are charged after the
+    fact, so by the time a total reaches the cap the budget is already gone --
+    ">" would grant one more whole judgement past a limit that was reached.
 
-    WHY NOT get_usage(): that reads the per-REQUEST counters Gate 4 increments.
-    A token budget is a different quantity on a different key with a different
-    window, and reusing get_usage would silently make "requests made" stand in
-    for "tokens spent" -- a number that looks right and is not. Step 3 adds
-    enforce_token_cost and its own counters; this seam calls those.
-
-    Async now, though nothing awaits inside: the real body is a redis.asyncio
-    read (Decision 2 -- one execution model), and making it sync today would
-    force every call site to change when step 3 lands.
-
-    Logs once per process, at WARNING, so that a deployment running with no
-    token pre-flight at all is visible in the logs rather than being a fact you
-    have to know. Once, not per request: this is a static property of the build,
-    and one line per judgement would be noise that trains people to ignore it.
+    FAIL OPEN, like every other cost decision: an unreachable store allows the
+    judgement and logs `token_preflight_bypassed` ONCE PER PROCESS. Once,
+    because a store that is down is down for every request, and one line per
+    judgement would be noise that trains people to ignore it.
     """
-    global _TOKEN_PREFLIGHT_LOGGED
-    if not _TOKEN_PREFLIGHT_LOGGED:
-        _TOKEN_PREFLIGHT_LOGGED = True
-        _logger.warning(
-            "token_preflight_bypassed",
-            extra={
-                "reason_code": "token_preflight_bypassed",
-                "tenant": scope.tenant,
-                "request_id": scope.request_id,
-            },
-        )
+    settings = get_settings()
+    client = get_cost_client()
+    tenant_key, user_key = _token_keys(scope.tenant, scope.subject)
+
+    try:
+        tenant_raw, user_raw = await client.mget(tenant_key, user_key)
+    except redis.RedisError:
+        global _TOKEN_PREFLIGHT_LOGGED
+        if not _TOKEN_PREFLIGHT_LOGGED:
+            _TOKEN_PREFLIGHT_LOGGED = True
+            _logger.warning(
+                "token_preflight_bypassed",
+                extra={
+                    "reason_code": "token_store_unavailable",
+                    "tenant": scope.tenant,
+                    "request_id": scope.request_id,
+                },
+            )
+        return
+
+    # A key that has never been charged, or whose window expired, reads None.
+    if int(tenant_raw or 0) >= settings.cost_tokens_per_tenant_limit:
+        raise TokenBudgetExceeded()
+    if int(user_raw or 0) >= settings.cost_tokens_per_user_limit:
+        raise TokenBudgetExceeded()
 
 
 async def get_usage(tenant: str, subject: str) -> tuple[int, int]:

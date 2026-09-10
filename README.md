@@ -281,7 +281,7 @@ dodeal-ai/
 
 | File | Purpose |
 | --- | --- |
-| `limiter.py` | Gate 4. Enforces per-tenant and per-user request quotas in Redis. Both counters increment together inside a single atomic Lua script, so a Redis failure can never leave one counter updated and the other not. Fails open and logs a warning if Redis is unreachable, since this is a spend guard rather than a security boundary. Also exposes a read-only `get_usage` function for future reporting. |
+| `limiter.py` | Gate 4 **and** the token budget, on the same connection and on disjoint keys. Gate 4 counts requests (`cost:*`); the token budget counts what was spent (`tokens:*`). Each pair is moved by its own atomic Lua script, so a Redis failure can never leave one counter of a pair updated and the other not, and an edit to one script cannot reach the other. `token_preflight` **reads** both token keys before a model call and raises `TokenBudgetExceeded` (429) at or above either limit; `enforce_token_cost` **writes** both after a response is in hand, logs `tokens_charged`, and never denies — the call it charges for is already paid. Everything here fails open and logs the bypass if Redis is unreachable, since this is a spend guard rather than a security boundary. Also exposes a read-only `get_usage` for the request counters. |
 
 ### `src/dodeal_ai/core/llm/`
 
@@ -347,7 +347,7 @@ Two tests that read the tree itself rather than running it:
 
 | File | Purpose |
 | --- | --- |
-| `test_assumption_markers.py` | Marker reconciliation: every `ASSUMPTION[Qn]` is load-bearing in `src/`, promised in this README, and carries a correction path in `ASSUMPTIONS.md`; `SEAM[STEP3]` is the same shape with `docs/STATUS.md` in place of the ledger. |
+| `test_assumption_markers.py` | Marker reconciliation: every `ASSUMPTION[Qn]` is load-bearing in `src/`, promised in this README, and carries a correction path in `ASSUMPTIONS.md`. The retired step-3 seam marker is asserted **absent** from every tracked file — the token pre-flight has been real since Piece N.2, so a file still carrying the marker is describing a stub that no longer exists. |
 | `test_no_sync_clients.py` | Greps every module under `src/dodeal_ai/` for a blocking call in the event loop — `import requests`, `requests.`, `httpx.Client(`, `redis.Redis(`, `redis.StrictRedis(`, `time.sleep(`, `urllib.request` — and fails naming the file and line. This service is one loop: a blocking call does not slow the request that made it, it stops every request in the process, `/health` included. The async spelling of each already exists, so a hit is a habit rather than a necessity. |
 
 ### `tests/helpers/`
@@ -383,7 +383,8 @@ Tests for the gate chain and everything that enforces it, run over HTTP with `Te
 | `test_tenant_label_properties.py` | Hypothesis property tests for the one tenant-label rule at both boundaries: any valid label survives any host decoration (case, trailing dot, port) and comes back lowercased; `tenant_from_host` and `normalise_tenant_label` return either `None` or something matching `TENANT_LABEL_RE` for arbitrary text; and `extract_identity` lowercases any valid label. |
 | `test_cost.py` | The cost gate: under and over both caps, tenants counted separately, atomic failure leaving neither counter touched, the `amount` parameter, and the read-only usage function. Uses an in-memory fake Redis. |
 | `test_redis.py` | The named Redis client accessors: each reads its own URL, each builds its own bounded `BlockingConnectionPool` sized from `Settings` (asserted on the pool's own attributes, with no live Redis), both factories stay separate and cached, both readiness probes report their own connection independently, and — the one that keeps the settings honest — the module is parsed and the build fails if any numeric literal has crept back into it. |
-| `test_cost_lua.py` | The cost gate's Lua script **actually executed**, against `fakeredis[lua]` in-process (audit M5: the script was previously never run by the suite). Both counters move in one `EVAL`; the returned counts are the stored values; the window is set when a counter is created and is **not** refreshed by later increments; a pre-existing key with no TTL never gains one (audit M4, pinned as it behaves today); and at the cap `enforce_cost` denies — after the counter has already moved, because the script increments before Python compares. The script is imported from `limiter.py`, never retyped. |
+| `test_cost_lua.py` | **Both** Lua scripts actually executed, against `fakeredis[lua]` in-process (audit M5: neither was previously run by the suite). Per script: both counters move in one `EVAL`; the returned counts are the stored values; the window is set when a counter is created and is **not** refreshed by later additions; a pre-existing key with no TTL never gains one (audit M4, pinned as it behaves today); and at the cap `enforce_cost` denies — after the counter has already moved, because the script increments before Python compares. Both scripts are imported from `limiter.py`, never retyped. |
+| `test_token_cost.py` | The token budget. The counters-never-touch test (one scored judgement through the route moves `cost:*` by one and `tokens:*` by the summed usage, and the two scripts' key sets are disjoint); the pre-flight at the limit as a 429 with the exact body and **zero** model calls, one under allowing, and a dead Redis allowing with the bypass logged once per process; a charge that fails leaving the judgement complete; the charge count per outcome (three scored, four reprompted, zero suppressed); and the warning firing exactly once on the crossing and not on the call after it. |
 | `test_resilience.py` | The watchdog: success on the first attempt, success on retry, failing closed after retry, honoring `retry=False`, and respecting the timeout. |
 | `test_lead_schema.py` | The lead and note response schemas: parsing the `data`-wrapped shape, the single-lead and notes envelopes, and failing closed on a malformed one. |
 | `test_validation.py` | `validate_output`'s failure path: `OutputValidationError` carries only (dotted location, pydantic error type) pairs, the pydantic error is not chained, and no attribute holds the rejected input. |
@@ -439,7 +440,10 @@ All configuration is read through `Settings` in `core/config.py`. Every variable
 | `DODEAL_REDIS_POOL_ACQUIRE_TIMEOUT_SECONDS` | `1.0` | How long a caller waits for a free connection once the pool is at its cap, before the pool refuses. Without it, "bounded" would mean "blocks forever at the cap", which is a worse outage than the one the bound prevents. **Provisional.** Must be positive. |
 | `DODEAL_COST_PER_TENANT_LIMIT` | `10000` | The per-tenant request cap per window. |
 | `DODEAL_COST_PER_USER_LIMIT` | `1000` | The per-user request cap per window. |
-| `DODEAL_COST_WINDOW_SECONDS` | `86400` | The cost counter window, in seconds. |
+| `DODEAL_COST_WINDOW_SECONDS` | `86400` | The cost counter window, in seconds. Shared by the request counters and the token counters. |
+| `DODEAL_COST_TOKENS_PER_TENANT_LIMIT` | `5000000` | The per-tenant **token** budget per window, on its own `tokens:*` keys. A judgement whose tenant is at or above it is refused before the first model call with **429 `token_budget_exceeded`**. **Provisional** — no real provider has run, so this is a placeholder, not a measurement. Must be positive. |
+| `DODEAL_COST_TOKENS_PER_USER_LIMIT` | `500000` | The per-user token budget per window, keyed on the verified `sub`. Same refusal, same code. **Provisional.** Must be positive. |
+| `DODEAL_COST_TOKEN_WARNING_RATIO` | `0.9` | The fraction of either limit at which a running total earns one `token_budget_warning` line — once per crossing, not once per call. Strictly between `0` and `1`: `0` would warn on the first token and `1` only once the budget was already spent. It changes **nothing** about what is served; degradation at the ratio is a separate, unmade decision. |
 | `DODEAL_MAX_INFLIGHT` | `32` | How many requests may be inside the app at once. The next one is refused immediately with **503 `load_shed`** rather than queued behind work the event loop cannot get to. Must be positive; `0` is refused at startup. **Provisional** — a placeholder chosen to be obviously a placeholder, not a measurement. The load lane sets the real number, so treat a `load_shed` line today as "this number is wrong" rather than as capacity. |
 | `DODEAL_LOG_LEVEL` | `INFO` | The effective level for the `dodeal_ai` logger tree. Third-party libraries are unaffected. |
 
@@ -486,7 +490,7 @@ The repo-wide guards are not separate jobs — they are ordinary pytest tests an
 
 ## Unit A — Project 1 (note judgement)
 
-> **No real provider before step 3 lands.** `get_llm_client()` still raises, and the factory has **no test switch** — one was forbidden for the whole build and remains forbidden. `FakeLLM` is injected through `app.dependency_overrides` and is the only model any of this has run against. The `SEAM[STEP3]` marker sits at the token pre-flight point in `units/structured_intelligence/pipeline.py` and in `core/cost/limiter.py`: it is a **no-op stub today**, and step 3 is what replaces it. Nothing in this unit is marked `[V]` — see `ASSUMPTIONS.md` §8.11.
+> **No real provider yet.** `get_llm_client()` still raises, and the factory has **no test switch** — one was forbidden for the whole build and remains forbidden. `FakeLLM` is injected through `app.dependency_overrides` and is the only model any of this has run against. **The token pre-flight is real as of Piece N.2**: `core/cost/limiter.py::token_preflight` reads the token counters before the first model call and the pipeline enforces the answer, so the step-3 stub and its grep marker are gone. Nothing in this unit is marked `[V]` — see `ASSUMPTIONS.md` §8.11.
 
 ### Provisional answers
 
@@ -521,7 +525,25 @@ Both carry `versions`: `rubric_version`, `prompt_version`, `model_version` as th
 
 **Hitting the clarification rate limit is not a `429`.** It returns `200` with `prompt_withheld: "rate_limited"`: the judgement was still produced and is still worth returning, and a `429` would tell the CRM the request failed when it did not.
 
-Error bodies are a fixed `{detail, reason, request_id}`: `invalid_request` 422 · `note_not_found` 404 · `lead_not_found` 404 · `duplicate_request` 409 · `idempotency_unavailable` 503 · `backend_unavailable` 503 · `model_unavailable` 503 · `malformed_output` 503 · `load_shed` 503.
+Error bodies are a fixed `{detail, reason, request_id}`: `invalid_request` 422 · `note_not_found` 404 · `lead_not_found` 404 · `duplicate_request` 409 · `token_budget_exceeded` 429 · `idempotency_unavailable` 503 · `backend_unavailable` 503 · `model_unavailable` 503 · `malformed_output` 503 · `load_shed` 503.
+
+### The token budget
+
+Two counters on the cost connection, in their own `tokens:*` namespace, sharing no key with Gate 4's per-request `cost:*` counters: `tokens:tenant:{tenant}` and `tokens:user:{tenant}:{sub}`, both on `DODEAL_COST_WINDOW_SECONDS`. "Requests made" and "tokens spent" are different quantities, and neither is allowed to stand in for the other.
+
+**In the request lifecycle, the pre-flight sits between the reservation and the first model call.** The idempotency key is claimed first (it is the only thing between a double-submit and paying twice), then `token_preflight` reads both token keys, and only then is a prompt sent. A tenant or user **at or above** either limit is refused with **429 `token_budget_exceeded`** in the standard `{detail, reason, request_id}` body, and the reservation is released like every other non-200 after reserving, so the caller can retry once their window rolls. At or above, not over: the counters are charged after the fact, so by the time a total reaches the cap the budget is already gone.
+
+**The charge happens once per model response that reports usage**, inside `llm_call.complete_once` — which every paid call passes through exactly once, **including a reprompt's discarded first answer**. So a scored judgement charges three times, a judgement that reprompted one pass charges four, and a suppressed note charges nothing because no model ran. A response reporting no usage charges nothing and logs nothing.
+
+Three events, all on the `dodeal_ai.cost` logger, all structured fields and never a prompt or a completion:
+
+| Event | Level | When |
+| --- | --- | --- |
+| `tokens_charged` | `INFO` | Once per charged response. Carries `tenant`, `subject`, `request_id`, the `profile` **name**, `input_tokens`, `output_tokens`, and both running totals. Numbers, ids and a profile name — nothing derived from a note. |
+| `token_budget_warning` | `WARNING` | The first time a running total crosses `limit × DODEAL_COST_TOKEN_WARNING_RATIO` within its window. Names which key crossed, the ratio, the total and the limit. Once per crossing, decided by comparing the pre-call and post-call totals — no second key and no in-process flag. It is a **warning only**: nothing degrades, and what should happen at the ratio is an open decision. |
+| `token_charge_bypassed` | `WARNING` | Redis was unreachable when a charge was attempted. The tokens were spent whether or not we counted them, so this is a hole in the meter, not in the bill. |
+
+A fourth, `token_preflight_bypassed` (`WARNING`), is logged **once per process** when the pre-flight itself cannot reach Redis. Once, not per request: a store that is down is down for every request, and one line per judgement is noise that trains people to ignore it. Everything here fails **open** — a money guard is not a security guard.
 
 ### `X-Idempotency-Key` — not required
 
@@ -532,7 +554,7 @@ This is the safer default: a caller that forgets the header, or reuses one, cann
 ## Security model
 
 - **Fail-closed authentication and tenancy.** Any failure in Gate 1 or Gate 2 denies the request. A client only ever sees a generic 401 or 403; the specific reason is written only to the audit log.
-- **Fail-open cost enforcement.** A Redis outage does not deny requests through Gate 4; it allows them and logs the bypass loudly, since a bounded, observable, recoverable spend risk is preferable to an outage over a non-critical dependency. `/ready` reflects this policy: a Redis outage returns `200` with a degraded body rather than `503`, so the pod is not pulled out of rotation over a dependency the request path already tolerates. The two connections are reported in two fields (`redis` for db1, `operational` for db2) because their failure policies differ — one flag would let a dead idempotency store read as "Redis ok".
+- **Fail-open cost enforcement.** A Redis outage does not deny requests through Gate 4; it allows them and logs the bypass loudly, since a bounded, observable, recoverable spend risk is preferable to an outage over a non-critical dependency. `/ready` reflects this policy: a Redis outage returns `200` with a degraded body rather than `503`, so the pod is not pulled out of rotation over a dependency the request path already tolerates. The two connections are reported in two fields (`redis` for db1, `operational` for db2) because their failure policies differ — one flag would let a dead idempotency store read as "Redis ok". Both are probed concurrently, so two dead connections cost one probe's time rather than two. **An orchestrator's readiness `timeoutSeconds` must still exceed `DODEAL_REDIS_CONNECT_TIMEOUT_SECONDS` plus `DODEAL_REDIS_SOCKET_TIMEOUT_SECONDS`** (0.25 + 1.0 = 1.25s by default): below that, a Redis outage times the probe out and kills a pod that is serving correctly — which is the exact outage the fail-open policy exists to prevent.
 - **Generic client responses, detailed internal logs.** No exception message, claim value, or stack trace ever reaches a response body. The real reason lives only in the structured audit log or the internal error log.
 - **Structured, single-line JSON logging.** Every `dodeal_ai` logger writes one JSON object per line to standard output, ready for a log collector. Deny lines are never dropped or sampled.
 - **Server-side prompt assembly.** Caller-supplied data is always treated as data, never as an instruction, and is placed in a clearly delimited section that cannot be escaped by forging the delimiter. This includes the note text the direct route accepts in its body: it is delimited by `build_prompt` exactly as fetched text is, and nothing about being sent rather than fetched changes how it is handled.

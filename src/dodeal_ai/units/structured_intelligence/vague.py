@@ -35,6 +35,7 @@ from collections.abc import Callable, Mapping
 from types import MappingProxyType
 
 from dodeal_ai.core.config import Settings
+from dodeal_ai.core.context import TenantScope
 from dodeal_ai.core.llm import LLMClient, LLMResponse
 from dodeal_ai.core.llm.profiles import PROFILE_UNIT_A_VAGUE
 from dodeal_ai.core.prompting import AssembledPrompt, PromptError, build_prompt
@@ -152,6 +153,7 @@ async def detect_vagueness(
     note: LeadNote,
     note_type: NoteType,
     *,
+    scope: TenantScope,
     config: TenantConfig,
     settings: Settings,
 ) -> tuple[VagueOutput, LLMResponse]:
@@ -163,6 +165,7 @@ async def detect_vagueness(
         build_vague_prompt(note, note_type),
         VagueOutput,
         VAGUE_LABEL,
+        scope=scope,
         settings=settings,
         profile=PROFILE_UNIT_A_VAGUE,
         max_output_tokens=VAGUE_MAX_OUTPUT_TOKENS,

@@ -22,8 +22,10 @@ from fakeredis import aioredis as fake_aioredis
 from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.cost import limiter
 from dodeal_ai.core.cost.limiter import (
+    _ADD_TOKENS_SCRIPT,
     _INCR_BOTH_SCRIPT,
     CostLimitError,
+    _add_tokens_with_window,
     _incr_both_with_window,
     enforce_cost,
     get_usage,
@@ -31,6 +33,8 @@ from dodeal_ai.core.cost.limiter import (
 
 _TENANT_KEY = "cost:tenant:tenant-a"
 _USER_KEY = "cost:user:tenant-a:user-1"
+_TOKEN_TENANT_KEY = "tokens:tenant:tenant-a"
+_TOKEN_USER_KEY = "tokens:user:tenant-a:user-1"
 _WINDOW = 60
 
 
@@ -138,3 +142,86 @@ async def test_the_call_at_the_limit_denies_after_the_counter_moved(
     assert denied.value.reason_code == "tenant_quota_exceeded"
     # Increment-then-check: the fourth request is refused and counted.
     assert await get_usage("tenant-a", "user-1") == (4, 4)
+
+
+# --- the token script, the same four properties ------------------------------
+#
+# A SECOND script, so a second set of executing tests. The two are separate
+# constants on purpose (an edit aimed at one must not reach the other), and two
+# copies of a test is what "separate" costs.
+
+
+async def test_the_token_script_adds_to_both_counters(client):
+    """Both token keys move in a single EVAL, which is what makes the pair
+    atomic."""
+    tenant_total, user_total = await _add_tokens_with_window(
+        client, _TOKEN_TENANT_KEY, _TOKEN_USER_KEY, 120, _WINDOW
+    )
+
+    assert (tenant_total, user_total) == (120, 120)
+    assert await client.get(_TOKEN_TENANT_KEY) == "120"
+    assert await client.get(_TOKEN_USER_KEY) == "120"
+
+
+async def test_the_returned_token_totals_are_the_stored_values(client):
+    """The warning ratio is decided on the returned numbers, so they must be
+    the stored ones."""
+    await _add_tokens_with_window(
+        client, _TOKEN_TENANT_KEY, _TOKEN_USER_KEY, 120, _WINDOW
+    )
+    tenant_total, user_total = await _add_tokens_with_window(
+        client, _TOKEN_TENANT_KEY, _TOKEN_USER_KEY, 240, _WINDOW
+    )
+
+    assert (tenant_total, user_total) == (360, 360)
+    assert int(await client.get(_TOKEN_TENANT_KEY)) == tenant_total
+    assert int(await client.get(_TOKEN_USER_KEY)) == user_total
+
+
+async def test_the_token_window_is_set_when_a_counter_is_created(client):
+    """A created token counter gets the window, or a budget would never reset."""
+    await _add_tokens_with_window(
+        client, _TOKEN_TENANT_KEY, _TOKEN_USER_KEY, 120, _WINDOW
+    )
+
+    assert await client.ttl(_TOKEN_TENANT_KEY) == _WINDOW
+    assert await client.ttl(_TOKEN_USER_KEY) == _WINDOW
+
+
+async def test_a_later_token_charge_does_not_refresh_the_window(client):
+    """The window is fixed at creation: a busy tenant must not push its own
+    reset out of reach one charge at a time."""
+    await _add_tokens_with_window(
+        client, _TOKEN_TENANT_KEY, _TOKEN_USER_KEY, 120, _WINDOW
+    )
+    # A much larger window on the second call: a refreshing script would jump.
+    await _add_tokens_with_window(
+        client, _TOKEN_TENANT_KEY, _TOKEN_USER_KEY, 120, _WINDOW * 100
+    )
+
+    assert await client.ttl(_TOKEN_TENANT_KEY) <= _WINDOW
+    assert await client.ttl(_TOKEN_USER_KEY) <= _WINDOW
+
+
+def test_the_token_script_makes_no_limit_decision():
+    """The script counts; `enforce_token_cost` warns and `token_preflight`
+    denies. Pinned so moving either into Lua has to change this test."""
+    assert "INCRBY" in _ADD_TOKENS_SCRIPT
+    assert "EXPIRE" in _ADD_TOKENS_SCRIPT
+    for absent in ("cost_tokens_per_tenant_limit", "warning", "deny"):
+        assert absent not in _ADD_TOKENS_SCRIPT
+
+
+async def test_the_two_scripts_touch_disjoint_keys(client):
+    """The whole point of two scripts: one EVAL of each leaves four keys, and
+    neither pair moved the other."""
+    await _incr_both_with_window(client, _TENANT_KEY, _USER_KEY, 1, _WINDOW)
+    await _add_tokens_with_window(
+        client, _TOKEN_TENANT_KEY, _TOKEN_USER_KEY, 120, _WINDOW
+    )
+
+    assert sorted(await client.keys("*")) == sorted(
+        [_TENANT_KEY, _USER_KEY, _TOKEN_TENANT_KEY, _TOKEN_USER_KEY]
+    )
+    assert await client.get(_TENANT_KEY) == "1"
+    assert await client.get(_TOKEN_TENANT_KEY) == "120"
