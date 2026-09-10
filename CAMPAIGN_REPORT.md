@@ -3181,7 +3181,7 @@ Step 3 is `enforce_token_cost` and the fail-open pre-flight read. This piece is 
 on: the Redis connection has to be bounded and configurable before a second counter starts using it,
 and the Lua script has to actually run before anyone edits it.
 
-### N.1 — Redis timeouts and bounded pools; `/ready` reports db2; the fakeredis lane   STATUS: DONE `sha pending`
+### N.1 — Redis timeouts and bounded pools; `/ready` reports db2; the fakeredis lane   STATUS: DONE `dffeb80`
 
 **Suite:** 934 → **969 passing**, 1 skipped, 7 deselected. Coverage **99.40 %** (unchanged). All 13 per-file
 floors met, no new floors. `limiter.py` stays at 100 % and is now covered by tests that execute its Lua
