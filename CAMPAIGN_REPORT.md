@@ -2651,7 +2651,7 @@ stand (I.5).
 
 ---
 
-## Piece K: direct judgement route   STATUS: DONE <sha>
+## Piece K: direct judgement route   STATUS: DONE d9e0486
 
 Not a campaign phase. One commit adding the route the lead decided on, plus the second commit that
 backfills this sha. **The campaign's never-list item "accept note text in a request body" is amended
@@ -2669,7 +2669,7 @@ here, for these two routes only**, on the lead's decision.
 | `README.md` | Direct-route paragraph under the route contract; the never-accepted claim qualified; a security bullet added for it. |
 | `docs/security/owasp-llm-unit-a.md` | LLM07: one paragraph — on the direct route the note arrives in the body, is validated by the schema, and is delimited by `build_prompt` exactly as fetched text is. |
 | `ASSUMPTIONS.md` | New §3.7 `DECISION[DIRECT_ROUTE]` — decision, reason, the three points, the correction paths. |
-| `docs/STATUS.md` | Piece K row (sha pending), the `DECISION[DIRECT_ROUTE]` open item marked built, suite numbers. |
+| `docs/STATUS.md` | Piece K row, the `DECISION[DIRECT_ROUTE]` open item marked built, suite numbers. |
 | `tests/unit/test_direct_routes.py` | New, 21 tests. |
 | `tests/security/test_log_safety.py` | New direct-route section: five outcomes for the note, four for `lead.project`, root logger at DEBUG. |
 | `tests/eval/test_structural_eval.py` | `NOTE_TOO_LONG_COUNT = 3` pinned; `NOTE_TOO_SHORT_COUNT` unchanged at 9; a test that the over-long notes cost nothing. |
