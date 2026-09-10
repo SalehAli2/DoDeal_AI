@@ -3175,7 +3175,7 @@ non-constant and is named explicitly in the test rather than tolerated by a loos
 
 ---
 
-## Piece N: step 3   STATUS: IN PROGRESS
+## Piece N: step 3   STATUS: IN PROGRESS (N.1 and N.2 done; the H3 breaker and the M4 TTL fix still owed)
 
 Step 3 is `enforce_token_cost` and the fail-open pre-flight read. This piece is the ground it stands
 on: the Redis connection has to be bounded and configurable before a second counter starts using it,
@@ -3344,7 +3344,7 @@ socket; every assertion is on a constructed pool's attributes or against `fakere
 marked `[V]` (ASSUMPTIONS §8.11).
 ---
 
-### N.2 — token counters; the pre-flight replaces the step-3 seam   STATUS: DONE `__N2_SHA__`
+### N.2 — token counters; the pre-flight replaces the step-3 seam   STATUS: DONE `77df41d`
 
 **Suite:** 969 → **998 passing**, 1 skipped, 7 deselected. Coverage **99.42 %**. **14** per-file floors
 (one new: `core/cost/limiter.py` at 100, beside `llm_call.py`'s existing 100). Both are at 100 %.
