@@ -216,6 +216,12 @@ class Settings(BaseSettings):
     # (ConfigError) instead.
     max_inflight: int = Field(default=32, gt=0)
 
+    # --- Judgement deadline (units/structured_intelligence/pipeline.py) -----
+    # One end-to-end budget per judgement, fetch included; past it, 503.
+    # PROVISIONAL until Q16: at or below the CRM's own timeout, set with max_inflight.
+    # Above the CRM's timeout, the CRM abandons requests we go on to finish.
+    judgement_deadline_seconds: float = Field(default=25.0, gt=0)
+
     # --- Logging (core/logging_config.py) ------------------------------
     # Effective level for the "dodeal_ai" logger tree (audit, error, cost,
     # resilience, validation, ...). Third-party libraries are unaffected --

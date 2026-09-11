@@ -34,9 +34,11 @@ from dodeal_ai.core.errors import (
     BackendUnavailableError,
     DuplicateRequestError,
     IdempotencyUnavailableResponse,
+    JudgementDeadlineExceeded,
     MalformedOutputError,
     ModelUnavailableError,
     NoteNotFoundError,
+    dodeal_error_response,
 )
 from dodeal_ai.core.llm import LLMErrorReason, LLMProviderError
 from dodeal_ai.core.llm.profiles import (
@@ -56,9 +58,15 @@ from dodeal_ai.units.structured_intelligence.classify import (
     CLASSIFY_TEMPLATE,
 )
 from dodeal_ai.units.structured_intelligence.config import get_tenant_config
-from dodeal_ai.units.structured_intelligence.pipeline import JudgementDeps, judge_note
+from dodeal_ai.units.structured_intelligence.pipeline import (
+    JudgementDeps,
+    judge_note,
+    judge_note_direct,
+)
 from dodeal_ai.units.structured_intelligence.schemas import (
+    DirectJudgementRequest,
     JudgementRequest,
+    LeadContext,
     NoteType,
     SuppressedDetail,
 )
@@ -936,6 +944,195 @@ async def test_the_pipeline_uses_the_monotonic_clock(monkeypatch, deps, operatio
 
     # entry, then a start+end for each of the three passes, then the outcome.
     assert reads["n"] >= 8
+
+
+# --- one deadline per judgement (register item 83) --------------------------
+
+DEADLINE = 0.05
+# How long a test waits for the deadline before calling it missing. Generous, so
+# a loaded machine cannot fail a correct pipeline -- and finite, so taking the
+# deadline out fails the test on its status instead of hanging the suite.
+SAFETY_SECONDS = 5.0
+
+
+class _Unanswered:
+    """A model that takes every call and never answers: a provider that has
+    stopped responding without closing anything.
+
+    The waiting is FakeLLM's own -- held from the first call on an Event nobody
+    sets -- and this wrapper only records whether that wait was CANCELLED, which
+    is the difference between a request that stopped and one that let go of the
+    provider call and left it running.
+    """
+
+    def __init__(self) -> None:
+        self.inner = FakeLLM(hold_after=0)
+        self.cancelled = 0
+
+    @property
+    def call_count(self) -> int:
+        return self.inner.call_count
+
+    async def complete(
+        self,
+        prompt: AssembledPrompt,
+        *,
+        profile: str,
+        max_output_tokens: int | None = None,
+    ):
+        try:
+            return await self.inner.complete(
+                prompt, profile=profile, max_output_tokens=max_output_tokens
+            )
+        except asyncio.CancelledError:
+            self.cancelled += 1
+            raise
+
+
+def _with_deadline(llm, leads: FakeLeadsClient | None, seconds: float) -> JudgementDeps:
+    """Deps whose settings carry `seconds` as the deadline -- through the deps,
+    the way the route builds them, not through the process-wide cache."""
+    return JudgementDeps(
+        leads=leads,
+        llm=llm,
+        config=get_tenant_config("tenant-a"),
+        settings=get_settings().model_copy(
+            update={"judgement_deadline_seconds": seconds}
+        ),
+    )
+
+
+def _direct_request() -> DirectJudgementRequest:
+    return DirectJudgementRequest(
+        lead_id=LEAD_ID,
+        note_id=NOTE_ID,
+        author_id=42,
+        note_text=GOOD_NOTE,
+        lead=LeadContext(leadType="buyer"),
+    )
+
+
+def _assert_the_deadline_503(exc: JudgementDeadlineExceeded, json_capture) -> None:
+    """The error as the CRM receives it, and the one line that says why."""
+    rendered = dodeal_error_response(exc, "req-1")
+    assert rendered.status_code == 503
+    assert json.loads(rendered.body) == {
+        "detail": "Service Unavailable",
+        "reason": "judgement_deadline_exceeded",
+        "request_id": "req-1",
+    }
+
+    line = next(
+        x for x in json_capture() if x["message"] == "judgement_deadline_exceeded"
+    )
+    assert line["level"] == "WARNING"
+    assert line["reason_code"] == "judgement_deadline_exceeded"
+    assert (line["tenant"], line["request_id"]) == ("tenant-a", "req-1")
+    _assert_duration(line, "elapsed_ms")
+    _assert_duration(line, "inflight")
+
+
+async def test_a_model_that_never_answers_is_stopped_at_the_deadline(
+    leads, operational, json_capture
+):
+    """The fetch route. Without the deadline this judgement waits out every
+    per-call budget in turn while the CRM waits inline on it."""
+    llm = _Unanswered()
+
+    with pytest.raises(JudgementDeadlineExceeded) as caught:
+        await asyncio.wait_for(
+            judge_note(
+                _scope(),
+                _request(),
+                resubmission=False,
+                deps=_with_deadline(llm, leads, DEADLINE),
+            ),
+            SAFETY_SECONDS,
+        )
+
+    _assert_the_deadline_503(caught.value, json_capture)
+    # The classify call was the one in flight, and it was cancelled -- not
+    # abandoned to run on after the 503 had gone out.
+    assert (llm.call_count, llm.cancelled) == (1, 1)
+
+
+async def test_the_direct_route_is_stopped_at_the_same_deadline(
+    operational, json_capture
+):
+    """The direct route, which fetches nothing, gets the same deadline, the
+    same 503 and the same line."""
+    llm = _Unanswered()
+
+    with pytest.raises(JudgementDeadlineExceeded) as caught:
+        await asyncio.wait_for(
+            judge_note_direct(
+                _scope(),
+                _direct_request(),
+                resubmission=False,
+                deps=_with_deadline(llm, None, DEADLINE),
+            ),
+            SAFETY_SECONDS,
+        )
+
+    _assert_the_deadline_503(caught.value, json_capture)
+    assert (llm.call_count, llm.cancelled) == (1, 1)
+
+
+async def test_the_fetch_spends_the_same_deadline(
+    leads, operational, json_capture, monkeypatch
+):
+    """The deadline is armed at the entry point, OUTSIDE _judge, so a backend
+    read that never returns is stopped by it too -- and no model is called."""
+    never = asyncio.Event()
+
+    async def _hung_get_lead(*args, **kwargs):
+        await never.wait()
+
+    monkeypatch.setattr(leads, "get_lead", _hung_get_lead)
+    llm = FakeLLM(*_happy_path())
+
+    with pytest.raises(JudgementDeadlineExceeded) as caught:
+        await asyncio.wait_for(
+            judge_note(
+                _scope(),
+                _request(),
+                resubmission=False,
+                deps=_with_deadline(llm, leads, DEADLINE),
+            ),
+            SAFETY_SECONDS,
+        )
+
+    _assert_the_deadline_503(caught.value, json_capture)
+    assert llm.call_count == 0
+
+
+@pytest.mark.parametrize("route", ["fetch", "direct"])
+async def test_a_judgement_inside_its_deadline_is_unaffected(
+    route, leads, operational, json_capture
+):
+    """A deadline that is armed and not reached changes nothing: the same
+    judgement, the same outcome line, and no deadline line."""
+    llm = FakeLLM(*_happy_path())
+    if route == "fetch":
+        judgement = await judge_note(
+            _scope(),
+            _request(),
+            resubmission=False,
+            deps=_with_deadline(llm, leads, SAFETY_SECONDS),
+        )
+    else:
+        judgement = await judge_note_direct(
+            _scope(),
+            _direct_request(),
+            resubmission=False,
+            deps=_with_deadline(llm, None, SAFETY_SECONDS),
+        )
+
+    assert judgement.score is not None and judgement.decision is not None
+    assert llm.call_count == 3
+    messages = _messages(json_capture)
+    assert "judgement_completed" in messages
+    assert "judgement_deadline_exceeded" not in messages
 
 
 # --- each pass names its own profile (Piece M, report R17) ------------------

@@ -115,6 +115,20 @@ class TokenBudgetExceeded(DodealError):
         super().__init__("token_budget_exceeded", 429)
 
 
+class JudgementDeadlineExceeded(DodealError):
+    """The judgement did not finish inside `judgement_deadline_seconds`.
+
+    503, not 504. The CRM treats every 5xx alike, so the only thing the number
+    can say is which family this belongs to, and it is model_unavailable's and
+    backend_unavailable's: we could not produce an answer in time, try again.
+    504 would say a gateway timed out on an upstream, and this service is the
+    upstream.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("judgement_deadline_exceeded", 503)
+
+
 class LoadShed(DodealError):
     """Refused at the door: `max_inflight` are already inside the app.
 

@@ -127,3 +127,30 @@ def test_a_non_positive_redis_budget_is_refused_at_construction(
     monkeypatch.setenv(env_name, value)
     with pytest.raises(ConfigError):
         _build_settings(_env_file=None)
+
+
+# --- the judgement deadline (register item 83) ------------------------------
+
+
+def test_the_judgement_deadline_is_the_recorded_provisional_value(monkeypatch):
+    """25 s until Q16 says what the CRM itself waits, and settable without code."""
+    from dodeal_ai.core.config import Settings
+
+    assert (
+        Settings(_env_file=None, jwt_signing_key="k").judgement_deadline_seconds == 25.0
+    )
+
+    monkeypatch.setenv("DODEAL_JUDGEMENT_DEADLINE_SECONDS", "12.5")
+    get_settings.cache_clear()
+    assert get_settings().judgement_deadline_seconds == 12.5
+
+
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_a_non_positive_judgement_deadline_is_refused(monkeypatch, value):
+    """A zero deadline would 503 every judgement before its first await: an
+    outage that is really a typo, so it fails at settings load instead."""
+    from dodeal_ai.core.config import _build_settings
+
+    monkeypatch.setenv("DODEAL_JUDGEMENT_DEADLINE_SECONDS", value)
+    with pytest.raises(ConfigError):
+        _build_settings(_env_file=None)

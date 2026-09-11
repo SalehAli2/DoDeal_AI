@@ -14,6 +14,7 @@ from dodeal_ai.core.errors import (
     DuplicateRequestError,
     IdempotencyUnavailableResponse,
     InvalidRequestError,
+    JudgementDeadlineExceeded,
     LeadNotFoundError,
     LoadShed,
     MalformedOutputError,
@@ -33,6 +34,8 @@ _CODES = [
     (BackendUnavailableError, "backend_unavailable", 503),
     (ModelUnavailableError, "model_unavailable", 503),
     (MalformedOutputError, "malformed_output", 503),
+    # 503 and not 504: the model_unavailable family (register item 83).
+    (JudgementDeadlineExceeded, "judgement_deadline_exceeded", 503),
     # Raised by nothing -- middleware/inflight.py cannot raise it (the handlers
     # live inside the middleware stack) and builds the response directly
     # instead. It is in the taxonomy so that the code, the status and the body

@@ -505,6 +505,30 @@ Ordered by what they release. Items 4.1–4.3 are the critical path.
   429 branch in its error taxonomy at step 4. Worth asking *before* the fan-out
   arithmetic in §6.2 is put to them, since a rate limit changes that number.
 
+### 4.7 The CRM's timeout on its call to us, and whether it retries (Q16)
+- **The question** is Q16 in `docs/STATUS.md` §6, owed by Waqas: how long does
+  the CRM wait on its call to us, and does it retry synchronously when we are
+  slow?
+- **Why it matters:** a judgement is not a sub-second route. Its per-call
+  budgets add up to about 280 s: two backend reads, three model passes (each
+  allowed one reprompt), and Redis round trips in between. The CRM waits inline
+  through all of it.
+- **Assumed, and built (Piece N.3b, register item 83):** one deadline for the
+  whole judgement, `DODEAL_JUDGEMENT_DEADLINE_SECONDS`, default **25 s**. It is
+  measured from the entry point, so the fetch route's backend reads are inside
+  it. Past it the request answers **503 `judgement_deadline_exceeded`**, and the
+  call it was waiting on is cancelled rather than left running. The per-call
+  timeouts are unchanged.
+- **Provisional.** 25 s is chosen, not measured. It must be **at or below** the
+  CRM's own timeout. Above it, the CRM gives up on requests we go on to finish:
+  every paid call is spent, and nobody receives the answer.
+- **If wrong / when answered:** set `DODEAL_JUDGEMENT_DEADLINE_SECONDS`. No code
+  change. The load lane sets it together with `DODEAL_MAX_INFLIGHT`, because the
+  deadline is also how long one judgement can hold an in-flight slot.
+- **Seam:** `core/config.py` (`judgement_deadline_seconds`),
+  `units/structured_intelligence/pipeline.py` (`judge_note`,
+  `judge_note_direct`).
+
 ---
 
 # 5. PENDING — awaiting a business or product answer

@@ -74,10 +74,19 @@ RELEASE ON EVERY NON-200 AFTER RESERVING. If we reserved and then failed for a
 reason of OURS -- the backend went down, the model went down, output would not
 validate -- the caller must be able to retry. Without the release they would
 get 409 for a judgement that never happened.
+
+ONE DEADLINE PER JUDGEMENT (register item 83). The CRM waits inline (Q16), and
+the per-call budgets alone sum to minutes: two backend reads, three model
+passes, a reprompt each, Redis between. So each entry point runs everything
+after its clock starts -- the fetch included -- under one
+`judgement_deadline_seconds`, and past it answers 503
+judgement_deadline_exceeded. The per-call timeouts are unchanged; the deadline
+is the bound on their sum, not a replacement for any of them.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections.abc import Awaitable
@@ -90,6 +99,7 @@ from dodeal_ai.core.errors import (
     BackendUnavailableError,
     DuplicateRequestError,
     IdempotencyUnavailableResponse,
+    JudgementDeadlineExceeded,
     NoteNotFoundError,
 )
 from dodeal_ai.core.llm import LLMClient, LLMResponse
@@ -422,17 +432,22 @@ async def judge_note(
     # elapsed_ms that began after them would be silent about the slowest thing
     # the fetch route does. time.monotonic, never a wall clock -- see _Timings.
     started = time.monotonic()
-    lead, note = await _fetch_note(scope, request, deps)
-    return await _judge(
-        scope,
-        request,
-        lead,
-        note,
-        author_id=note.author_id,
-        resubmission=resubmission,
-        deps=deps,
-        started=started,
-    )
+    # The deadline starts with the clock, so the two backend reads spend it too.
+    try:
+        async with asyncio.timeout(deps.settings.judgement_deadline_seconds):
+            lead, note = await _fetch_note(scope, request, deps)
+            return await _judge(
+                scope,
+                request,
+                lead,
+                note,
+                author_id=note.author_id,
+                resubmission=resubmission,
+                deps=deps,
+                started=started,
+            )
+    except TimeoutError:
+        raise _deadline_exceeded(scope, started) from None
 
 
 async def judge_note_direct(
@@ -471,38 +486,66 @@ async def judge_note_direct(
     # do. Comparing them is how "is the CRM's read surface the slow part?" gets
     # answered when it comes back.
     started = time.monotonic()
-    lead = Lead(
-        id=request.lead_id,
-        leadType=request.lead.leadType,
-        enquiryType=request.lead.enquiryType,
-        project=request.lead.project,
-        status=request.lead.status,
+    # The same deadline as the fetch route, from the same point, so the two
+    # routes' 503s mean the same thing.
+    try:
+        async with asyncio.timeout(deps.settings.judgement_deadline_seconds):
+            lead = Lead(
+                id=request.lead_id,
+                leadType=request.lead.leadType,
+                enquiryType=request.lead.enquiryType,
+                project=request.lead.project,
+                status=request.lead.status,
+            )
+            note = LeadNote(
+                id=request.note_id,
+                note=request.note_text,
+                author=None,
+                author_id=request.author_id,
+                # Nothing reads createdAt today -- not the prompts, not the
+                # scoring, not the counters -- and the CRM is not asked for it,
+                # because a timestamp we do not use is a field that can be wrong
+                # for free. Register item 32 (aware datetime parsing) MUST guard
+                # this empty string: the day createdAt becomes a parsed
+                # datetime, a note that arrived on this route has no value to
+                # parse, and a parser that assumes one will raise on the direct
+                # route only.
+                createdAt="",
+            )
+            return await _judge(
+                scope,
+                request,
+                lead,
+                note,
+                author_id=request.author_id,
+                resubmission=resubmission,
+                deps=deps,
+                started=started,
+                author_differs_from_subject=str(request.author_id) != scope.subject,
+            )
+    except TimeoutError:
+        raise _deadline_exceeded(scope, started) from None
+
+
+def _deadline_exceeded(scope: TenantScope, started: float) -> JudgementDeadlineExceeded:
+    """Log the judgement that ran out of time, and hand back the error to raise.
+
+    One line, one shape, for both entry points: ids and two numbers, nothing
+    from the note. `elapsed_ms` says how far past the deadline the cancellation
+    actually landed, and `inflight` says what else the pod was doing -- the
+    two things worth knowing about a request that did not finish.
+    """
+    _logger.warning(
+        "judgement_deadline_exceeded",
+        extra={
+            "reason_code": "judgement_deadline_exceeded",
+            "tenant": scope.tenant,
+            "request_id": scope.request_id,
+            "elapsed_ms": _ms_since(started),
+            "inflight": current_inflight(),
+        },
     )
-    note = LeadNote(
-        id=request.note_id,
-        note=request.note_text,
-        author=None,
-        author_id=request.author_id,
-        # Nothing reads createdAt today -- not the prompts, not the scoring, not
-        # the counters -- and the CRM is not asked for it, because a timestamp
-        # we do not use is a field that can be wrong for free. Register item 32
-        # (aware datetime parsing) MUST guard this empty string: the day
-        # createdAt becomes a parsed datetime, a note that arrived on this route
-        # has no value to parse, and a parser that assumes one will raise on the
-        # direct route only.
-        createdAt="",
-    )
-    return await _judge(
-        scope,
-        request,
-        lead,
-        note,
-        author_id=request.author_id,
-        resubmission=resubmission,
-        deps=deps,
-        started=started,
-        author_differs_from_subject=str(request.author_id) != scope.subject,
-    )
+    return JudgementDeadlineExceeded()
 
 
 async def _judge(
