@@ -3915,7 +3915,7 @@ shield has only ever protected a fake `DEL`. Nothing is marked `[V]`.
 
 ---
 
-### N.4 — the real-Redis lane   STATUS: DONE `sha pending`
+### N.4 — the real-Redis lane   STATUS: DONE `44e9071`
 
 Register item 3, closed, and the lane half of item 29. Tests and docs only: no line of `src/` changed.
 
