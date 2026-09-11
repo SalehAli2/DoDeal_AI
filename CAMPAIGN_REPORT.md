@@ -4120,7 +4120,7 @@ has.** Not a real provider, not a real CRM, not a Redis under load or behind a n
 
 ---
 
-## Piece 103: the default run is hermetic, Redis running or not   STATUS: DONE `sha pending`
+## Piece 103: the default run is hermetic, Redis running or not   STATUS: DONE `170ddbf`
 
 Register item 103, new with this brief, from N.4's finding 1. Tests and docs only: no line of `src/` changed.
 
