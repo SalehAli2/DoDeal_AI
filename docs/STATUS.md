@@ -7,7 +7,7 @@ not duplicate it. This file is about the *build*; ASSUMPTIONS is about the *cont
 Update rule: every commit that changes a row here updates this file in the same commit. If a row's status
 and the tree disagree, the tree is right and this file is wrong — fix the file.
 
-**Last updated:** 11 Sep 2026, after Unit A Project 1 phases A–J, Piece K, Piece L, Piece M and Piece N (N.1, N.2, N.3, N.3b, N.4) — the judgement pipeline is built end to end against `FakeLLM` and the vendored fake CRM (head of `scaffold/core-governance-homes`, CI green). **Nothing in Unit A has been verified against a real model or a real backend; nothing is marked `[V]`** (ASSUMPTIONS §8.11). Redis is the one dependency that has met a real server: the `redis_real` lane (N.4), by hand, against Redis 7.4.10.
+**Last updated:** 11 Sep 2026, after Unit A Project 1 phases A–J, Piece K, Piece L, Piece M, Piece N (N.1, N.2, N.3, N.3b, N.4) and Piece 103 — the judgement pipeline is built end to end against `FakeLLM` and the vendored fake CRM (head of `scaffold/core-governance-homes`, CI green). **Nothing in Unit A has been verified against a real model or a real backend; nothing is marked `[V]`** (ASSUMPTIONS §8.11). Redis is the one dependency that has met a real server: the `redis_real` lane (N.4), by hand, against Redis 7.4.10.
 
 Status vocabulary: `DONE` (committed, CI green) · `PLANNED` (prompt written, not run) · `NEXT` (the next step
 in the sequence) · `BLOCKED <on>` · `PROPOSED` (decision written, not accepted) · `OPEN` (question asked, no
@@ -48,12 +48,13 @@ answer) · `UNASKED` (question identified, not yet sent).
 | Step 3 — token counters. **N.1 (`dffeb80`)**: Redis timeouts, bounded pools, `/ready` reports db2, the fakeredis lane. **N.2 (`77df41d`)**: `enforce_token_cost`, the real fail-open `token_preflight` (the no-op stub and its grep marker are gone), `TokenBudgetExceeded` 429, the warning ratio. **N.4 (`44e9071`)**: the real-Redis lane. **Still owed:** the M4 TTL fix, policy-per-caller for fail-closed workers, and degradation behaviour at the warning ratio (A9). The H3 breaker, listed here as owed until now, landed in N.3 (`3199e3d`). | PARTIAL | `dffeb80` · `77df41d` |
 | **Piece N.3b** — hardening after N.3, one commit per register item, in this order: a breaker cannot wedge in HALF_OPEN (80); pool exhaustion is not a store failure and the pool is sized from `max_inflight` (81); one deadline per judgement, 503 `judgement_deadline_exceeded` (83); the reservation is released on any exit, short while in flight and long once judged (82) | DONE | `73cf893` · `7a8c48c` · `83bc11b` · `8ba3024` |
 | **Piece N.4** — the real-Redis lane (register item 3, closed; the lane half of item 29): `tests/redis_real/` runs the three Lua scripts, the reservation's `SET NX`/`XX` and `DEL`, the pool's refusal and the breaker's reaction to a dead host against a real server, marked `redis_real`, skipped without `DODEAL_REDIS_REAL_URL`, excluded from the default run. Tests and docs only, no `src/` change | DONE | `44e9071` |
+| **Piece 103** — the default run is hermetic, Redis running or not (register item 103, from N.4's finding). The root `tests/conftest.py` hands every test a fresh `FakeCostRedis` and `FakeOperationalRedis` through every name the service's code calls (`limiter`, `state`, `main`), with both breakers reset. It points both service URLs at a closed loopback port for the session, and fails the run if any test outside `tests/unit/test_redis.py` builds a real pool. Tests and docs only, no `src/` change | DONE | sha pending |
 | Step 4 — tool layer: query params, paging, error taxonomy, retry policy, pooled transport, per-item validation. **Now also: read-after-write bounded re-read on the note fetch (candidate — see §2 debts).** | after step 3 | — |
 | Steps 5–13 | per ed3 §15 | — |
 | Step 0 — test tenant + key + joint call | BLOCKED on backend (Waqas) | — |
 | Step 14+ | BLOCKED on step 0 | — |
 
-Suite at head: **1070 tests passing, 1 skipped, 28 deselected; 99.47% coverage** (total floor 92, plus 15
+Suite at head: **1073 tests passing, 1 skipped, 28 deselected; 99.47% coverage**, identical with the compose Redis running or stopped (Piece 103). Total floor 92, plus 15
 per-file floors on the deny-path and judgement modules — `limiter.py` and `core/breaker.py` at 100 against
 floors of 100, and `pipeline.py` and `state.py` at 100% against floors of 95),
 ruff/format/mypy clean, wheel installs and imports in a clean venv. The skipped test is `tests/eval/test_quality_eval.py`, which needs a real model (step 18);
@@ -127,6 +128,14 @@ item, not a first instalment.
 | 29 (lane half) | A real-Redis test lane | The lane itself and its documented hand run. The CI half is not here: no workflow runs it (see `CAMPAIGN_REPORT.md`, Piece N.4, "For the lead"). | `44e9071` |
 
 **Items 3 and 29 as the N.4 brief numbers them.** Item 29 could not be located in this repo, the same gap as 20, 24, 25, 27, 61 and 80–83. Item 3 is the N.1 row above. This file previously listed the M4 TTL fix and policy-per-caller under item 3. Neither is in N.4, and both remain owed on the step 3 row.
+
+### Register item closed in Piece 103
+
+| # | Item | What landed | Commit |
+| --- | --- | --- | --- |
+| 103 | The default run is hermetic, Redis running or not | N.4 found that the default suite reached a real `redis.asyncio` client, and so passed only with no Redis listening. Eight modules reach it. Six do so through the token charge in `complete_once` (`test_vague`, `test_reprompt`, `test_classification`, `test_scoring`, `test_fake_llm`, `test_log_safety`), and two through the app lifespan's `aclose()` (`test_logging_config`, `test_startup`). With the compose Redis up, 42 tests failed with `Event loop is closed` and the charge wrote to `tokens:*` in db1. The root `tests/conftest.py` now does three things. **(1)** `redis_fakes`, autouse, gives every test a fresh `FakeCostRedis` and `FakeOperationalRedis` through `limiter.get_cost_client`, `state.get_operational_client` and both names on `main`. It clears both factory caches and resets both breakers, and a module's own patch still wins. **(2)** `_closed_redis_urls`, session-scoped, points `DODEAL_REDIS_COST_URL` and `DODEAL_REDIS_OPERATIONAL_URL` at `127.0.0.1:1`. **(3)** `_real_pool_builds` wraps `core/redis.py`'s `_build_pool`, and `pytest_sessionfinish` fails the run if any test outside `tests/unit/test_redis.py` built a real pool. `tests/test_hermetic_fakes.py` gains three tests: every src module that imports a factory by name is replaced; the service URLs point at the closed port, and the lane reads its own variable; and a module's patch wins. The two helper fakes gain `aclose()`. The `redis_real` lane gets no fakes. Tests and docs only, no `src/` change. The run numbers, `DBSIZE` and the sabotage record are in `CAMPAIGN_REPORT.md`, Piece 103. | sha pending |
+
+**Item 103 is new with this brief** and has no register entry in any tracked or untracked file, the same gap as 20, 24, 25, 27, 29, 61 and 80–83.
 
 ### Open items carried out of Unit A Project 1
 
@@ -277,6 +286,7 @@ floors being the real gate; commit this STATUS file; apply the ledger correction
 | Log retention (90+ days) and encryption — BRD non-functional requirements | business + DevOps | no owner |
 | Wheel-install check in CI | fix 1 | DONE |
 | Root conftest — no `.env` or test-order dependence | hotfix | DONE |
+| Hermetic default run — no test opens a socket to any Redis, with or without one listening: the root conftest injects the shared fakes, points the service URLs at a closed port and counts real pool builds. The `redis_real` lane is the exception, and the only one that needs a live server | Piece 103 | DONE |
 
 ---
 

@@ -4117,3 +4117,155 @@ ever concurrent, and no test anywhere had tried M4 on the token script.
 **What has now met a real server:** the three scripts, the reservation's commands, the pool's refusal and the
 breaker's reaction to a dead host, all by hand, against Redis 7.4.10 on one Windows machine. **Nothing else
 has.** Not a real provider, not a real CRM, not a Redis under load or behind a network. Nothing is marked `[V]`.
+
+---
+
+## Piece 103: the default run is hermetic, Redis running or not   STATUS: DONE `sha pending`
+
+Register item 103, new with this brief, from N.4's finding 1. Tests and docs only: no line of `src/` changed.
+
+**Before, at `427ed3e`, with the compose Redis running.** 84 lines of the output carry `Event loop is closed`.
+
+```
+42 failed, 1028 passed, 1 skipped, 28 deselected, 1 warning in 30.39s
+```
+
+**After: the stopping chain with the compose Redis running** (`docker compose ps`: `running`; `PING`: `PONG`).
+
+```
+========= 1073 passed, 1 skipped, 28 deselected, 1 warning in 13.25s ==========
+```
+
+**After: the stopping chain with the compose Redis stopped** (`docker compose stop redis`; the container was `Exited (0)` for the whole run; started again afterwards, `PONG`).
+
+```
+========= 1073 passed, 1 skipped, 28 deselected, 1 warning in 13.13s ==========
+```
+
+Both runs were the whole chain, and every step was green.
+
+- Coverage: 99.47 %, unchanged.
+- `ruff check`: all checks passed.
+- `ruff format --check`: 138 files already formatted.
+- `mypy`: no issues in 65 source files.
+- `scripts/check_coverage_floors.py`: all 15 floors met, `limiter.py` still at 100 %.
+- The known flake did not fire.
+- Tests selected by default: 1074, which is `427ed3e`'s 1071 plus this piece's three. Deselected: 28, unchanged.
+
+**db1 and db2 around the Redis-up run** (`docker compose exec redis redis-cli -n N DBSIZE`):
+
+| | before | after |
+| --- | --- | --- |
+| db1 | 2 | 2 |
+| db2 | 0 | 0 |
+
+`DBSIZE` cannot see an increment to a key that already exists, and db1 holds the two keys N.4 left. So both values were read as well: `tokens:tenant:tenant-a` and `tokens:user:tenant-a:42` were each **21960 before the run and 21960 after**. They were 8280 when this piece started. The sabotage stages below raised them.
+
+---
+
+### The eight modules
+
+Measured at `427ed3e`, not copied from N.4's list. A scratch plugin outside the tree wrapped `core/redis.py`'s `_build_pool`. It cleared both factory caches before each test and pointed both URLs at a closed port, so nothing reached the live server. `tests/unit/test_redis.py` is left out, because it builds the real pools on purpose.
+
+| Module | Connection | Path to the real client | Red at `427ed3e`, Redis up |
+| --- | --- | --- | --- |
+| `tests/unit/test_vague.py` | db1 | a pass → `llm_call.complete_once` → `limiter.enforce_token_cost` → `limiter.get_cost_client()` | 16 |
+| `tests/unit/test_reprompt.py` | db1 | the same | 10 |
+| `tests/unit/test_classification.py` | db1 | the same | 9 |
+| `tests/unit/test_scoring.py` | db1 | the same | 4 |
+| `tests/helpers/test_fake_llm.py` | db1 | the same | 1 |
+| `tests/security/test_log_safety.py` | db1 | the same | 1 |
+| `tests/unit/test_logging_config.py` | db1, db2 | `TestClient(app)` → the lifespan's `aclose()` on `main.get_cost_client()` and `main.get_operational_client()` | 1 |
+| `tests/unit/test_startup.py` | db1, db2 | the same | 0 |
+
+41 of the 42 failures are inside `enforce_token_cost`'s `EVAL`, and the 42nd is at `main.py:48`. The client is `lru_cache`'d, so it outlives the event loop of the test that opened its connection. The next test to use it fails with `RuntimeError: Event loop is closed`. With no Redis listening, the connect failed instead, the charge failed open and the test passed, which is why CI never saw it.
+
+**Why `test_hermetic_fakes.py` could not see it.** It checks what each existing `setattr` of a factory hands over. A module that never patches a factory has no call to check.
+
+---
+
+### How the fix is built
+
+- **`redis_fakes`** (`tests/conftest.py`, autouse, function-scoped).
+  - It builds a fresh `FakeCostRedis` and `FakeOperationalRedis` for every test.
+  - It patches `get_cost_client` on `limiter` and `main`, and `get_operational_client` on `state` and `main`. Those are the three src modules that import a factory by name.
+  - It clears both real factories' caches on the way in and on the way out.
+  - It resets both breakers, which absorbs the old `_closed_breakers` fixture.
+  - It yields the two fakes, so a test can ask for them by name.
+
+  `core/redis.py` itself is not patched. Its own tests inspect the real pool, and its `/ready` probes are patched by the tests that call them.
+- **A module's patch wins.** A root autouse fixture is set up before any fixture a module defines, whatever order the test lists them in. Both patch through the same `monkeypatch`, so the module's patch lands second. `test_a_module_patch_wins_over_the_default_fakes` lists its own fixture first and proves it.
+- **The `redis_real` lane gets no fakes.** The lane builds its clients from `DODEAL_REDIS_REAL_URL`. A lane test that reached a factory should fail on the closed port, not pass on a fake. Lane tests still get the breaker reset and the cache clears. The lane, run by hand against db 9 after the change, gave `21 passed, 1081 deselected in 2.55s`. Db 9 held 0 keys before and 0 after.
+- **`_closed_redis_urls`** (autouse, session-scoped) sets `DODEAL_REDIS_COST_URL=redis://127.0.0.1:1/1` and `DODEAL_REDIS_OPERATIONAL_URL=redis://127.0.0.1:1/2`. The db numbers are kept because `test_redis.py` asserts the two URLs differ and that the operational one ends in `/2`. A test that needs another URL still sets its own.
+- **`_real_pool_builds`** (autouse, session-scoped) **and `pytest_sessionfinish`.** `_build_pool` is wrapped for the session, and each call is recorded with `PYTEST_CURRENT_TEST`. At session end, any call made outside `tests/unit/test_redis.py` sets the exit status to 1. The hook prints `N test(s) reached a real Redis client factory` and then each test's id. It counts rather than raising, because a raise inside a fail-open path would be caught.
+- **`aclose()` on both helper fakes.** `main.py`'s lifespan closes both clients on shutdown, and those clients are now fakes. Without `aclose()`, `test_logging_config.py` and `test_startup.py` fail at shutdown.
+- **Three tests in `tests/test_hermetic_fakes.py`.** The two existing guards are unchanged.
+  - `test_no_test_reaches_a_real_redis_client_factory` parses `src/` for every module that imports a factory by name. It requires at least the three known today and asserts that each bound name returns this test's fake. A new src importer fails it, with a message naming `_COST_CLIENT_HOLDERS` / `_OPERATIONAL_CLIENT_HOLDERS`. It also asserts that `core/redis.py`'s factories are still the cached originals and that `_build_pool` carries the session wrapper.
+  - `test_the_service_urls_point_at_a_closed_port_and_the_lane_keeps_its_own` checks both URLs, in the environment and in `Settings`, against `127.0.0.1:1`. It also checks that nothing under `tests/redis_real/` names either variable or either `Settings` field, while the lane names `DODEAL_REDIS_REAL_URL`.
+  - `test_a_module_patch_wins_over_the_default_fakes`, as described above.
+
+---
+
+### Sabotage record
+
+All stages ran with the compose Redis running. Each one edited `tests/conftest.py` inside a script whose `finally` copied the saved file back. The restored file's SHA-256 (`B839F94C…0300711A`) is identical to the one saved before S1.
+
+| Stage | What was switched off | Result |
+| --- | --- | --- |
+| S1 | `redis_fakes` made non-autouse, which turns off the fakes, the cache clears and the breaker reset. The closed port and the counter stay on. | **Red**, exit 1, `127 failed, 946 passed`. **0** `Event loop is closed` lines, and db1's two values stayed at 8280: the closed port alone kept the run off the live server. The hook printed `5 test(s) reached a real Redis client factory` (`test_fake_llm`, `test_classification`, `test_logging_config`, `test_reprompt`, `test_startup`). Most of the 127 are a breaker cascade: the output carries 66 breaker-open log mentions, 18 `BreakerOpen` and 9 `IdempotencyUnavailableError`, in modules that install their own fakes (`test_judgement_routes` 40, `test_judgement_pipeline` 36, `test_unit_a_state` 26, `test_token_cost` 14, `test_cost` 8). |
+| S2 | S1, plus `_closed_redis_urls` made non-autouse | **Red**, `140 failed, 933 passed`. 50 `Event loop is closed` lines. db1's values went 8280 → 13680, a live write that `DBSIZE` (still 2) does not show. The hook named 4 tests. Still mixed with the cascade (56 breaker-open mentions), and `test_vague` did not fail at all. |
+| **S3: the brief's sabotage** | `427ed3e`'s conditions: no fake injection, no cache clears and no closed port, with breakers still reset per test. The counter stays on. | **Red**, `45 failed, 1028 passed, 1 skipped, 28 deselected`. **84** `Event loop is closed` lines, as at `427ed3e`. Per-module failures are **identical to the baseline** (vague 16, reprompt 10, classification 9, scoring 4, `test_fake_llm` 1, `test_log_safety` 1, `test_logging_config` 1), plus the three new tests. The hook printed `3 test(s) reached a real Redis client factory`. db1's values went 13680 → 21960. |
+| (e) private fake | `tests/unit/test_probe_private_fake.py`, which patches `limiter.get_cost_client` with a local class. Only the guard was run. | **Red**, naming the file and line: `tests/unit/test_probe_private_fake.py:12 get_cost_client <- monkeypatch.setattr(limiter, 'get_cost_client', lambda: _Pri`. The probe was deleted and never staged. |
+
+S1 is not what the brief predicted. Removing the autouse fixture alone does not bring `Event loop is closed` back. The second line of defence keeps the suite off the server, and the counter is what turns the run red. S3 is the stage that matches the brief's expectation.
+
+---
+
+### What changed
+
+| File | Change |
+| --- | --- |
+| `tests/conftest.py` | Adds `redis_fakes` (which replaces `_closed_breakers`), `_closed_redis_urls`, `_real_pool_builds` and `pytest_sessionfinish`. `_isolated_settings`' "the ONLY env var" sentence is narrowed to settings a test can depend on. |
+| `tests/test_hermetic_fakes.py` | The three tests above and their imports. The module docstring names item 103. |
+| `tests/helpers/fake_cost_redis.py`, `tests/helpers/fake_operational_redis.py` | `aclose()` and a `closed` flag. |
+| `CONTRIBUTING.md` | One sentence in the hermetic bullet: the default run is hermetic with or without a Redis listening, there is no need to stop the compose Redis, and only the lane needs one. |
+| `README.md` | The same sentence, in the Testing section. |
+| `docs/STATUS.md` | A Piece 103 row, a "Register item closed in Piece 103" section, a "Hermetic default run" row in §5, the suite line and "Last updated". |
+
+---
+
+### Disagreements between the brief and the tree
+
+1. **N.4's eighth module was the wrong one.** N.4 named `test_judgement_pipeline.py`. That module fakes db1 with an autouse fixture and never reached a factory when measured. Its one failure in N.4 was most likely the known flake, `test_elapsed_covers_more_than_any_single_pass`, which lives there. This piece's baseline had 42 failures and none in that module. The real eighth is `test_startup.py`: it reaches both factories through the lifespan, but stayed green at `427ed3e`.
+2. **`main`'s factories could not be handed the helper fakes as they were.** The lifespan calls `aclose(close_connection_pool=True)`, and neither fake had it. Both fakes gained a recording `aclose()`, in two files outside the brief's list. The alternative was leaving `main`'s names on the real factories, which would leave those factories reachable from `test_logging_config` and `test_startup`.
+3. **The pool counter cannot be zero across the whole suite.** `tests/unit/test_redis.py` builds real pools on purpose: it is the factory's own test, and building a pool opens no socket. The hook exempts that one module, the same exemption the existing guard already gives `core/redis.py`'s own patches. Everywhere else the count is zero.
+4. **The sabotage as briefed does not reproduce the failures** (S1 above). The exact set came back in S3.
+5. **The breaker reset moved.** The brief gives it to the new fixture, and the old `_closed_breakers` did the same job. It was folded in rather than kept twice, with the same reset on the way in and out. This is also why S1 and S2 cascade.
+6. **Collected tests.** 1071 were selected at `427ed3e` and 1074 are now; the difference is this piece's three tests. Deselected stays at 28, and no existing test's selection changed.
+7. **"One test", and more to assert.** The brief asked for one test for the guard and one for the module patch, and also for the lane's independence to be asserted in the guard. Those have different subjects, so they are three tests.
+8. **CONTRIBUTING never told anyone to stop Redis.** Its steps are "Start Redis" (4) and "Run tests" (6), and N.4's point was that following them went red. There was nothing to replace, so the statement was added to the hermetic bullet.
+9. **`docs/STATUS.md` had no "Hermetic" row** to correct. One was added under §5, beside the root-conftest row.
+10. **Docker Desktop stopped during the session**, not through anything this session ran: no Docker process, nothing on 6379. The lead restarted it. One chain run overlapped the restart. It was green, but its Redis state cannot be stated, so it is reported as neither run.
+11. **A listener on `::1:6379` was still present** a moment after `docker compose stop redis`, with the container `Exited (0)`. With Docker Desktop fully stopped earlier in the session, nothing listened on 6379. So the listener is Docker Desktop's port forwarding, not a second Redis. The default run no longer dials `localhost:6379` in any case.
+12. **Item 103 has no register entry** in any tracked or untracked file, the same gap as 20, 24, 25, 27, 29, 61 and 80–83.
+
+---
+
+### For the lead
+
+1. **What the fix does not cover.**
+   - `DODEAL_REDIS_QUEUE_URL` (db0) is not pointed at the closed port, as briefed. Nothing in the default run connects to it today. A test that opened arq's connection would reach a live db0, and the pool counter would not see it, because arq builds its own pool.
+   - `/ready`'s probes call `core/redis.py`'s own factories, which stay real. Every `/ready` test patches them today. One that did not would land on the closed port and the counter, not on a fake.
+   - The hook names every offending test only while `redis_fakes` clears the caches. Without that, the cached client is built once and only the first test per cache is named (S1 named 5 tests, S3 named 3). The run still goes red.
+2. **The eight modules, and redundancy.** The eight are `test_vague`, `test_reprompt`, `test_classification`, `test_scoring`, `test_fake_llm`, `test_log_safety`, `test_logging_config` and `test_startup`. None of them carried a factory patch, so none is now redundant, and none was edited. Elsewhere, three patches now duplicate the default:
+   - `tests/security/test_chain.py:24` (`lambda: FakeCostRedis()`)
+   - `tests/security/test_exit_demo.py:20` (`lambda: FakeCostRedis()`)
+   - `tests/security/test_log_safety.py:530` (`lambda: FakeOperationalRedis()`)
+
+   They are not identical to the default: a fresh fake per call forgets everything between calls, while the default keeps one store per test. Left as they were, as briefed.
+3. **No test's meaning changed.** None of the eight asserts on Redis. Before, with no Redis, their token charge took the fail-open branch and logged `token_charge_bypassed`. Now it lands on the fake and logs `tokens_charged`. Their assertions hold either way, and the bypass branch keeps its own tests in `test_token_cost.py` (`limiter.py` is still at 100 %). The two lifespan tests now close fakes instead of real clients that were never used. No assertion was touched.
+4. **db1 on this machine** still holds the two keys N.4 reported, now at 21960 each after sabotage stages S2 and S3. The hand delete still applies: `docker compose exec redis redis-cli -n 1 del tokens:tenant:tenant-a tokens:user:tenant-a:42`.
+5. **README's `tests/` file-reference table** still describes `test_hermetic_fakes.py` as the AST guard alone and has no `conftest.py` row. The brief allowed one sentence in the Testing section.
+6. **Item 104** (the CI job with a Redis service) can now keep its default job beside a live Redis container: the default run was green here with one listening.
+
+**Nothing in this piece has met a real provider or a real CRM.** The only real server was the compose Redis, used to show that the default run leaves it alone. Nothing is marked `[V]`.

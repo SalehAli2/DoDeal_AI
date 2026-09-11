@@ -33,6 +33,7 @@ class FakeCostRedis:
         self.fail = fail
         self.evals: list[tuple[str, tuple[str, ...]]] = []
         self.mgets: list[tuple[str, ...]] = []
+        self.closed = False
 
     def keys_for(self, script: str) -> set[str]:
         """Every key `script` was EVAL'd against, across all calls."""
@@ -57,3 +58,8 @@ class FakeCostRedis:
             raise redis.RedisError("down")
         self.mgets.append(tuple(keys))
         return [self.store.get(key) for key in keys]
+
+    async def aclose(self, close_connection_pool: bool | None = None) -> None:
+        """Not a command: main.py's lifespan closes both clients on shutdown, and
+        the root conftest hands this fake to main.py as well."""
+        self.closed = True

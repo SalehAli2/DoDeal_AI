@@ -1,14 +1,35 @@
 """Every Redis client a test injects is a shared fake from tests/helpers/ or fakeredis
-(the N.2 finding)."""
+(the N.2 finding), and no test reaches a real one (register item 103, the N.4
+finding)."""
 
 from __future__ import annotations
 
 import ast
+import importlib
+import os
 import pathlib
+from urllib.parse import urlsplit
+
+import pytest
+
+from dodeal_ai import main
+from dodeal_ai.core import redis as redis_module
+from dodeal_ai.core.config import get_settings
+from dodeal_ai.core.cost import limiter
+from tests.helpers.fake_cost_redis import FakeCostRedis
 
 # Allowed: a shared fake from tests/helpers/, a fakeredis client (real Lua, no
 # socket), or a name bound to either. core/redis.py's own factory tests are skipped.
 _TESTS = pathlib.Path("tests")
+_SRC = pathlib.Path("src")
+_LANE = _TESTS / "redis_real"
+# The importers known today. The scan must find at least these, or it is looking
+# in the wrong place and would pass for the wrong reason.
+_KNOWN_HOLDERS = {
+    "dodeal_ai.core.cost.limiter",
+    "dodeal_ai.units.structured_intelligence.state",
+    "dodeal_ai.main",
+}
 _PATCHED_NAMES = {"get_cost_client", "get_operational_client"}
 # The module whose own tests legitimately hand these factories something else.
 _FACTORY_MODULE = "dodeal_ai.core.redis"
@@ -110,3 +131,111 @@ def test_every_patched_redis_client_is_a_shared_fake() -> None:
         "client's semantics, and six of them is how the last one was found:\n"
         + "\n".join(offenders)
     )
+
+
+# --- no test reaches a real client (register item 103) ---------------------
+
+
+def _factory_bindings() -> list[tuple[str, str, str]]:
+    """(module, factory, local name) for every src module that imports a factory by
+    name. Each holds its own reference, which no patch on core/redis.py reaches."""
+    bindings = []
+    for path in sorted((_SRC / "dodeal_ai").rglob("*.py")):
+        parts = path.relative_to(_SRC).with_suffix("").parts
+        module = ".".join(parts[:-1] if parts[-1] == "__init__" else parts)
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.ImportFrom) and node.module == _FACTORY_MODULE:
+                bindings += [
+                    (module, alias.name, alias.asname or alias.name)
+                    for alias in node.names
+                    if alias.name in _PATCHED_NAMES
+                ]
+    return bindings
+
+
+def test_no_test_reaches_a_real_redis_client_factory(redis_fakes) -> None:
+    """The default run cannot reach a real Redis client, whether or not one is
+    listening.
+
+    Inside a test, every name a src module binds to a factory is the root
+    conftest's fake, and core/redis.py keeps the real factories for its own
+    tests. Every real pool build is counted, and the root conftest's
+    pytest_sessionfinish fails the run if a test outside tests/unit/test_redis.py
+    made one. No test can see that count at the end of the session, so this one
+    proves the counter is in place.
+    """
+    bindings = _factory_bindings()
+    assert {module for module, _, _ in bindings} >= _KNOWN_HOLDERS, (
+        "the scan found fewer factory importers than are known to exist"
+    )
+
+    fake_for = {
+        "get_cost_client": redis_fakes.cost,
+        "get_operational_client": redis_fakes.operational,
+    }
+    unreplaced = []
+    for module_name, factory, local in bindings:
+        bound = getattr(importlib.import_module(module_name), local)
+        # Identity first: calling the real factory would build a real pool.
+        if bound is getattr(redis_module, factory) or bound() is not fake_for[factory]:
+            unreplaced.append(f"{module_name}.{local}")
+    assert not unreplaced, (
+        "a src module imports a Redis factory by name and the root conftest does "
+        "not replace it; add the module to _COST_CLIENT_HOLDERS or "
+        "_OPERATIONAL_CLIENT_HOLDERS in tests/conftest.py:\n" + "\n".join(unreplaced)
+    )
+
+    assert hasattr(redis_module.get_cost_client, "cache_clear")
+    assert hasattr(redis_module.get_operational_client, "cache_clear")
+    assert hasattr(redis_module._build_pool, "__wrapped__"), (
+        "core/redis.py's _build_pool is not wrapped by the session's counter"
+    )
+
+
+def test_the_service_urls_point_at_a_closed_port_and_the_lane_keeps_its_own() -> None:
+    """The second line of defence. A client that bypassed the fakes would connect to
+    a closed loopback port, never to a Redis someone has running.
+
+    The redis_real lane is unaffected by construction: it reads
+    DODEAL_REDIS_REAL_URL and names neither service URL, as a variable or as a
+    Settings field.
+    """
+    settings = get_settings()
+    for variable, url in (
+        ("DODEAL_REDIS_COST_URL", settings.redis_cost_url),
+        ("DODEAL_REDIS_OPERATIONAL_URL", settings.redis_operational_url),
+    ):
+        assert os.environ[variable] == url
+        parts = urlsplit(url)
+        assert (parts.hostname, parts.port) == ("127.0.0.1", 1), variable
+
+    lane = "\n".join(p.read_text(encoding="utf-8") for p in sorted(_LANE.rglob("*.py")))
+    assert "DODEAL_REDIS_REAL_URL" in lane
+    for service_name in (
+        "DODEAL_REDIS_COST_URL",
+        "DODEAL_REDIS_OPERATIONAL_URL",
+        "redis_cost_url",
+        "redis_operational_url",
+    ):
+        assert service_name not in lane, service_name
+
+
+@pytest.fixture
+def own_cost(monkeypatch) -> FakeCostRedis:
+    """A module's own db1 fake, installed the way the pipeline modules install theirs."""
+    client = FakeCostRedis()
+    monkeypatch.setattr(limiter, "get_cost_client", lambda: client)
+    return client
+
+
+def test_a_module_patch_wins_over_the_default_fakes(own_cost, redis_fakes) -> None:
+    """The root conftest's fakes are a default, not an override.
+
+    Its autouse fixture is set up before any fixture a module defines, even one a
+    test lists first, as this test does. Both patch through one monkeypatch, so
+    the module's patch lands second. A name the module did not patch keeps the
+    default.
+    """
+    assert limiter.get_cost_client() is own_cost
+    assert own_cost is not redis_fakes.cost
+    assert main.get_cost_client() is redis_fakes.cost

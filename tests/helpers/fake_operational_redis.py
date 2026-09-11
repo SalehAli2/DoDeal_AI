@@ -22,6 +22,9 @@ entry directly. Both are what `store` and `ttls` being public is for.
 
 `raise_on` holds command NAMES; any listed command raises RedisError instead of
 running, which is how each of the three failure policies gets exercised.
+
+`aclose` is not a command and is not among the seven: main.py's lifespan closes
+both clients on shutdown, and the root conftest hands this fake to main.py too.
 """
 
 from __future__ import annotations
@@ -49,6 +52,7 @@ class FakeOperationalRedis:
         # (script, key, allowed) per EVAL -- the rate limit's whole decision,
         # recorded on what was actually sent rather than inferred from state.
         self.evals: list[tuple[str, str, bool]] = []
+        self.closed = False
 
     def _guard(self, command: str, key: str) -> None:
         self.commands.append((command, key))
@@ -128,3 +132,6 @@ class FakeOperationalRedis:
                 removed += 1
             self.ttls.pop(name, None)
         return removed
+
+    async def aclose(self, close_connection_pool: bool | None = None) -> None:
+        self.closed = True

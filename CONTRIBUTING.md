@@ -71,6 +71,9 @@ matching `.claude/*.local.*`) and which Claude Code merges over the shared file.
   `fakeredis[lua]` for a test that needs Redis to execute something, and
   `tests/redis_real/` (marker `redis_real`, excluded from the default run, run by
   hand; see README, "The real-Redis lane") for one that needs a genuine server.
+  The default run is hermetic with or without a Redis listening: the root
+  `tests/conftest.py` hands every test the shared fakes, so there is no need to
+  stop the compose Redis first, and only the `redis_real` lane needs one.
   Any other real infrastructure doesn't belong here.
 - Model calls go through `core/llm/` only. No provider SDK is imported
   anywhere else, and the `LLMClient` Protocol stays one method — routing,
