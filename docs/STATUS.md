@@ -105,6 +105,12 @@ item, not a first instalment.
 
 **Items 20 and 27 could not be located in this repo either**, the same gap N.1 and N.2 reported. No tracked file carries a register numbered 20 or 27. Both rows above are written from the Piece N.3 brief.
 
+### Register items closed in Piece N.3b
+
+| # | Item | What landed | Commit |
+| --- | --- | --- | --- |
+| 80 | A breaker cannot wedge in HALF_OPEN (CRITICAL) | `CircuitBreaker.call` counted only `redis.RedisError`. A probe that was cancelled, or that raised anything else, left the breaker HALF_OPEN with nothing to move it, and every later call was `BreakerOpen` until restart. On db2 that is 503 `idempotency_unavailable` on every judgement. Two guards now. **(1)** An `except BaseException` branch re-arms the window when it ends a probe. It logs `breaker_probe_abandoned` and then `breaker_opened`, and re-raises unchanged. In CLOSED such an exception neither counts nor clears. **(2)** `_admit` stamps `_probe_started` on entry to HALF_OPEN. A probe older than `open_seconds` is taken as abandoned, and the arriving call becomes the probe (`breaker_probe_abandoned`). This covers a probe task that is never resumed at all. | sha pending |
+
 ### Open items carried out of Unit A Project 1
 
 | Item | Who / when |

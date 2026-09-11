@@ -109,17 +109,30 @@ async def test_a_success_resets_the_count(breaker) -> None:
     assert breaker.state is BreakerState.CLOSED
 
 
+async def _boom() -> None:
+    raise ValueError("ours, not theirs")
+
+
 async def test_a_non_redis_error_is_not_counted(breaker) -> None:
     """A bug in our own code is not evidence about the store."""
-
-    async def _boom() -> None:
-        raise ValueError("ours, not theirs")
-
     for _ in range(THRESHOLD * 2):
         with pytest.raises(ValueError):
             await breaker.call(_boom)
 
     assert breaker.state is BreakerState.CLOSED
+
+
+async def test_a_non_redis_error_neither_counts_nor_clears_the_count(breaker) -> None:
+    """Item 80 (d): in CLOSED our own error leaves the consecutive count exactly
+    where it was -- one more store failure still opens it, and no fewer would."""
+    await _fail(breaker, _Store(fail=True), THRESHOLD - 1)
+
+    with pytest.raises(ValueError):
+        await breaker.call(_boom)
+    assert breaker.state is BreakerState.CLOSED  # not counted...
+
+    await _fail(breaker, _Store(fail=True))
+    assert breaker.state is BreakerState.OPEN  # ...and not cleared either
 
 
 # --- open -------------------------------------------------------------------
@@ -211,6 +224,127 @@ async def test_a_failed_probe_reopens_it_for_a_full_window(breaker, clock) -> No
     clock.advance(OPEN_SECONDS - 0.001)
     with pytest.raises(BreakerOpen):
         await breaker.call(_Store())
+
+
+# --- a probe that does not answer (register item 80) ------------------------
+
+
+async def _open_past_the_window(breaker: CircuitBreaker, clock: _Clock) -> None:
+    """Open it with real failures, then let the window run out: the next call is
+    the probe."""
+    await _fail(breaker, _Store(fail=True), THRESHOLD)
+    clock.advance(OPEN_SECONDS)
+
+
+async def _assert_re_armed_for_a_full_window(
+    breaker: CircuitBreaker, clock: _Clock
+) -> None:
+    """OPEN again, refusing for a whole window measured from NOW -- so the
+    opening was re-stamped rather than left at the first one, which is long past
+    -- and then admitting a probe whose success closes it."""
+    assert breaker.state is BreakerState.OPEN
+    clock.advance(OPEN_SECONDS - 0.001)
+    refused = _Store()
+    with pytest.raises(BreakerOpen):
+        await breaker.call(refused)
+    assert refused.calls == 0
+
+    clock.advance(0.001)
+    probe = _Store()
+    assert await breaker.call(probe) == "answered"
+    assert (probe.calls, breaker.state) == (1, BreakerState.CLOSED)
+
+
+async def test_a_probe_that_raises_our_own_error_re_arms_the_window(
+    breaker, clock, caplog
+) -> None:
+    """Item 80 (a). A probe that failed in our code said nothing about the store,
+    and HALF_OPEN with no probe out would refuse every call from here on."""
+    await _open_past_the_window(breaker, clock)
+    caplog.clear()  # the opening itself is not this test's line
+
+    with (
+        caplog.at_level(logging.WARNING, logger="dodeal_ai.breaker"),
+        pytest.raises(ValueError),
+    ):
+        await breaker.call(_boom)
+
+    assert [r.getMessage() for r in caplog.records] == [
+        "breaker_probe_abandoned",
+        "breaker_opened",
+    ]
+    await _assert_re_armed_for_a_full_window(breaker, clock)
+
+
+async def test_a_cancelled_probe_re_arms_the_window(breaker, clock, caplog) -> None:
+    """Item 80 (b). The deadline, a disconnect and a shutdown all arrive as a
+    CancelledError -- a BaseException, which a RedisError branch never sees."""
+    await _open_past_the_window(breaker, clock)
+    entered = asyncio.Event()
+    never = asyncio.Event()
+
+    async def _hung() -> None:
+        entered.set()
+        await never.wait()
+
+    probe = asyncio.create_task(breaker.call(_hung))
+    await entered.wait()
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="dodeal_ai.breaker"):
+        probe.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await probe
+
+    assert [r.getMessage() for r in caplog.records] == [
+        "breaker_probe_abandoned",
+        "breaker_opened",
+    ]
+    assert {r.breaker for r in caplog.records} == {"test"}
+    await _assert_re_armed_for_a_full_window(breaker, clock)
+
+
+async def test_a_probe_that_never_returns_is_taken_over_after_a_window(
+    breaker, clock, caplog
+) -> None:
+    """Item 80 (c). A probe task that is never resumed raises nothing, so only
+    its age can free the breaker: once it is a window old, the next call is the
+    probe, and that probe's success closes it."""
+    await _open_past_the_window(breaker, clock)
+    entered = asyncio.Event()
+    never = asyncio.Event()
+
+    async def _hung() -> None:
+        entered.set()
+        await never.wait()
+
+    hung = asyncio.create_task(breaker.call(_hung))
+    await entered.wait()
+
+    # Still inside the hung probe's own window: everyone else is refused.
+    clock.advance(OPEN_SECONDS - 0.001)
+    refused = _Store()
+    with pytest.raises(BreakerOpen):
+        await breaker.call(refused)
+    assert refused.calls == 0
+
+    clock.advance(0.001)
+    takeover = _Store()
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="dodeal_ai.breaker"):
+        assert await breaker.call(takeover) == "answered"
+
+    assert (takeover.calls, breaker.state) == (1, BreakerState.CLOSED)
+    assert [r.getMessage() for r in caplog.records] == [
+        "breaker_probe_abandoned",
+        "breaker_closed",
+    ]
+
+    # The abandoned task finally ends. The breaker is CLOSED by now, so its
+    # cancellation neither counts nor reopens anything.
+    hung.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await hung
+    assert breaker.state is BreakerState.CLOSED
 
 
 # --- the two log lines ------------------------------------------------------
