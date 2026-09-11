@@ -10,35 +10,7 @@ import pytest
 from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.cost import limiter
 from dodeal_ai.core.cost.limiter import CostLimitError, enforce_cost, get_usage
-
-
-class FakeRedis:
-    """Minimal in-memory stand-in for the two calls enforce_cost/get_usage
-    make (EVAL of the atomic incr-both script, and MGET for read-only usage).
-    Both are async, matching the `redis.asyncio` client the limiter now
-    awaits. Logic only: no persistence, no cross-worker sharing, no real Lua
-    interpreter -- it just reproduces what the script does against a local
-    dict."""
-
-    def __init__(self):
-        self.store: dict[str, int] = {}
-        self.raise_on_eval = False
-
-    async def eval(self, script, numkeys, *keys_and_args):
-        if self.raise_on_eval:
-            raise limiter.redis.RedisError("down")
-        keys = keys_and_args[:numkeys]
-        amount = int(keys_and_args[numkeys])
-        # window (keys_and_args[numkeys + 1]) isn't modeled -- no TTL
-        # semantics needed for these tests.
-        counts = []
-        for key in keys:
-            self.store[key] = self.store.get(key, 0) + amount
-            counts.append(self.store[key])
-        return counts
-
-    async def mget(self, *keys):
-        return [self.store.get(k) for k in keys]
+from tests.helpers.fake_cost_redis import FakeCostRedis
 
 
 @pytest.fixture
@@ -47,7 +19,7 @@ def fake(monkeypatch):
     monkeypatch.setenv("DODEAL_COST_PER_TENANT_LIMIT", "5")
     monkeypatch.setenv("DODEAL_COST_PER_USER_LIMIT", "2")
     get_settings.cache_clear()
-    r = FakeRedis()
+    r = FakeCostRedis()
     monkeypatch.setattr(limiter, "get_cost_client", lambda: r)
     yield r
     get_settings.cache_clear()
@@ -80,7 +52,7 @@ async def test_tenants_counted_separately(fake):
 
 
 async def test_redis_down_fails_open_with_warning(fake, caplog):
-    fake.raise_on_eval = True
+    fake.fail = True
     with caplog.at_level("WARNING", logger="dodeal_ai.cost"):
         await enforce_cost("tenant-a", "42")  # must NOT raise
     assert any("cost_cap_bypassed" in r.getMessage() for r in caplog.records)
@@ -91,7 +63,7 @@ async def test_bypass_warning_carries_structured_fields_not_a_message(fake, capl
     # FIELD a collector can filter, not a fragment of prose it has to parse.
     # Same shape as db2's _bypass(); the JSON formatter lifts extra= to the
     # top level.
-    fake.raise_on_eval = True
+    fake.fail = True
     with caplog.at_level("WARNING", logger="dodeal_ai.cost"):
         await enforce_cost("tenant-a", "42")
 
@@ -106,9 +78,12 @@ async def test_atomic_failure_leaves_neither_counter_touched(fake, caplog):
     # Tenant and user counters increment in one atomic script execution. If
     # Redis fails, neither counter should show any change -- not a partial
     # update where one moved and the other didn't.
-    fake.raise_on_eval = True
+    fake.fail = True
     with caplog.at_level("WARNING", logger="dodeal_ai.cost"):
         await enforce_cost("tenant-a", "42")
+    # The outage is over: a store that was down could not be read either, and
+    # what it reads back now is what the failed call did or did not write.
+    fake.fail = False
     assert await get_usage("tenant-a", "42") == (0, 0)
 
 

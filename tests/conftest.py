@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import pytest
 
+from dodeal_ai.core.breaker import reset_breakers
 from dodeal_ai.core.config import get_settings
 
 
@@ -33,3 +34,12 @@ def _isolated_settings(monkeypatch):
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _closed_breakers():
+    """Start and end every test with both Redis breakers closed, so one test's outage
+    cannot refuse the next test's calls."""
+    reset_breakers()
+    yield
+    reset_breakers()

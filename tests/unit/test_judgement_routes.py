@@ -157,8 +157,6 @@ def client(monkeypatch, leads, llm, operational, cost):
 
     monkeypatch.setattr(cost_limiter, "get_cost_client", lambda: cost)
     monkeypatch.setattr(state, "get_operational_client", lambda: operational)
-    # The once-per-process flag, reset so each test sees a clean process.
-    monkeypatch.setattr(cost_limiter, "_TOKEN_PREFLIGHT_LOGGED", False)
 
     app.dependency_overrides[get_verifier] = lambda: JwtVerifier(test_settings)
     app.dependency_overrides[get_leads_client] = lambda: leads
@@ -879,6 +877,66 @@ def test_scenario_3_a_poor_note_at_the_rate_limit_is_advised_but_not_asked(
     assert ATTEMPT_KEY not in operational.store
 
 
+def test_a_burst_of_four_sends_three_prompts_and_rate_limits_the_fourth(
+    client, leads, llm, operational
+):
+    """Four notes from one subject send three prompts, and the store records three slots
+    taken and one refused."""
+    burst = [11, 12, 13, 14]
+    leads.notes[LEAD_ID] = [note(n, f"{GOOD_NOTE} Ref {n}.") for n in burst]
+    llm.rescript(*(_happy_path() * len(burst)))
+
+    withheld = []
+    for note_id in burst:
+        body = client.post(
+            JUDGE, json=_body(note_id=note_id), headers=_headers()
+        ).json()
+        withheld.append(body["decision"]["prompt_withheld"])
+
+    assert withheld == [None, None, None, "rate_limited"]
+    assert [allowed for _, _, allowed in operational.evals] == [True, True, True, False]
+    assert {key for _, key, _ in operational.evals} == {RATE_KEY}
+    # Three prompts sent, three counted: the refused fourth left it alone.
+    assert operational.store[RATE_KEY] == "3"
+
+
+def test_an_exhausted_window_outranks_having_nothing_to_ask(client, llm, operational):
+    """With no question to ask, an exhausted window still reports rate_limited from a
+    read alone."""
+    operational.store[RATE_KEY] = "3"
+    llm.rescript(
+        _classified("discovery"),
+        _vague_answer(is_vague=False, missing=[], prompt=None),
+        _score_answer(what_happened=5, client_said=3, next_step_date=3, clarity=1),
+    )
+
+    body = client.post(JUDGE, json=_body(), headers=_headers()).json()
+
+    assert body["decision"]["prompt_withheld"] == "rate_limited"
+    # A READ, not a take: nothing may be claimed for a prompt that does not
+    # exist, so the script never runs.
+    assert operational.evals == []
+    assert operational.store[RATE_KEY] == "3"
+
+
+def test_the_conditions_before_the_rate_limit_cost_no_db2_trip(
+    client, leads, llm, operational
+):
+    """A resubmission and a note at its attempt cap are both answered without
+    asking db2 about the rate limit at all."""
+    operational.store[ATTEMPT_KEY] = "1"  # clarification_cap is 1
+
+    capped = client.post(JUDGE, json=_body(), headers=_headers()).json()
+    assert capped["decision"]["prompt_withheld"] == "attempt_cap"
+
+    leads.notes[LEAD_ID] = [note(NOTE_ID, f"{GOOD_NOTE} Edited.")]
+    resubmitted = client.post(RESUBMIT, json=_body(), headers=_headers()).json()
+    assert resubmitted["decision"]["prompt_withheld"] == "resubmission"
+
+    assert operational.evals == []
+    assert RATE_KEY not in operational.store
+
+
 def test_scenario_4_a_resubmission_is_a_new_judgement_that_asks_nothing(
     client, leads, operational
 ):
@@ -964,10 +1022,10 @@ def test_a_fair_but_not_vague_note_withholds_because_there_is_nothing_to_ask(
 def test_the_counter_store_being_down_bypasses_it_without_failing_the_request(
     client, operational, json_log
 ):
-    # Both reads AND both increments are broken. The reads fail open to 0, so
-    # the prompt is sent; the increments are dropped. A politeness guard being
-    # unavailable must not 503 a judgement that is otherwise fine.
-    operational.raise_on.update({"get", "incr"})
+    # Every command the counters use is broken (the attempt read and increment,
+    # the rate limit's script). They fail open: the prompt is sent, nothing is
+    # counted, and a politeness guard being down never 503s the judgement.
+    operational.raise_on.update({"get", "incr", "eval"})
 
     r = client.post(JUDGE, json=_body(), headers=_headers())
 

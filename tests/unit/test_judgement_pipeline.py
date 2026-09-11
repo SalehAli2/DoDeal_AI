@@ -26,6 +26,7 @@ import time
 import pytest
 
 import dodeal_ai.units.structured_intelligence.pipeline as pipeline_module
+from dodeal_ai.core.breaker import operational_breaker
 from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.context import RequestContext
 from dodeal_ai.core.cost import limiter
@@ -69,6 +70,7 @@ from dodeal_ai.units.structured_intelligence.vague import (
     VAGUE_MAX_OUTPUT_TOKENS,
     template_for,
 )
+from tests.helpers import breakers
 from tests.helpers.fake_cost_redis import FakeCostRedis
 from tests.helpers.fake_leads import FakeLeadsClient, lead, note
 from tests.helpers.fake_llm import FakeLLM, json_response, response
@@ -286,6 +288,42 @@ async def test_an_idempotency_outage_is_its_own_code(deps, operational):
     operational.raise_on.add("set")
     with pytest.raises(IdempotencyUnavailableResponse):
         await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+
+
+# --- the breaker in front of db2 --------------------------------------------
+
+
+async def test_an_open_breaker_refuses_the_reservation_at_once(
+    deps, operational, json_capture
+):
+    """An open breaker makes the reservation 503 without a SET reaching the store."""
+    await breakers.trip(operational_breaker())
+
+    with pytest.raises(IdempotencyUnavailableResponse):
+        await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+
+    assert operational.commands == []
+    line = next(x for x in json_capture() if x["message"] == "idempotency_unavailable")
+    assert line["breaker"] == "open"
+
+
+async def test_a_breaker_that_opens_mid_judgement_bypasses_the_rate_limit(
+    monkeypatch, deps, operational, json_capture
+):
+    """A breaker opened by the attempt read refuses the rate-limit trip, and the
+    judgement still asks."""
+    monkeypatch.setenv("DODEAL_BREAKER_FAILURE_THRESHOLD", "1")
+    get_settings.cache_clear()
+    operational.raise_on.add("get")
+
+    judgement = await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+
+    assert judgement.decision is not None
+    assert judgement.decision.prompt_sent is True
+    assert operational.evals == []
+    assert [c for c, _ in operational.commands] == ["set", "get"]
+    bypass = next(x for x in json_capture() if x["message"] == "rate_limit_bypassed")
+    assert bypass["breaker"] == "open"
 
 
 async def test_a_backend_key_failure_is_backend_unavailable(deps, leads, operational):

@@ -287,7 +287,7 @@ version against three endpoints."
 | **Total computed in code** | The model returns component marks; the total and band are computed by us. Models are unreliable at arithmetic. |
 | **Prompt once only** | Ask once, then store as written. A second request teaches people to write filler to escape the prompt. |
 | **Prompt must be specific** | Not "please improve this note" but "what was the reason?" or "when are you following up?". Partial improvement is accepted silently. |
-| **Rate limit** | Three prompts per person per hour, keyed on the **verified subject from the inbound token**. |
+| **Rate limit** | Three prompts per person per hour, keyed on the **verified subject from the inbound token**. Reserve-and-increment in one script (Piece N.3); the `prompt_withheld` precedence is preserved by the read-only path when there is no question. |
 | **Enforcement** | Advisory at launch. Blocking is built but shipped off — and cannot be enforced by us in any case, since we hold no write or veto path. |
 | **Language** | Arabic, English and mixed notes judged identically. No salesperson scores lower for the language they wrote in. |
 | **Never for pay** | Coaching only, never pay, commission or discipline. |

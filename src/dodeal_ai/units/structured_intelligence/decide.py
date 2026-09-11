@@ -28,8 +28,9 @@ a save, and `enforcement_mode` does not branch (see config.py). What this
 function controls is only whether WE send a question and whether the counters
 that limit our questions move.
 
-NO MODEL OUTPUT REACHES A DECISION. The inputs are a computed NoteScore, two
-integers read from db2, the tenant's config, and one boolean from the route.
+NO MODEL OUTPUT REACHES A DECISION. The inputs are a computed NoteScore, one
+integer and one flag from db2, the tenant's config, and one boolean from the
+route.
 `analysis.clarification_prompt` is consulted for PRESENCE only -- whether there
 is a question to ask -- never for its content.
 """
@@ -63,6 +64,7 @@ def _withheld(
     analysis: NoteAnalysis,
     *,
     attempts: int,
+    rate_allowed: bool,
     rate_count: int,
     config: TenantConfig,
     resubmission: bool,
@@ -77,7 +79,10 @@ def _withheld(
         return PromptWithheld.RESUBMISSION
     if attempts >= config.clarification_cap:
         return PromptWithheld.ATTEMPT_CAP
-    if rate_count >= config.rate_limit_per_hour:
+    # TWO INPUTS, ONE CONDITION, because db2 answers this question in two ways
+    # (state.py): the script REFUSED to take a slot when a prompt would be
+    # sent, or the read came back at the cap when there was nothing to ask.
+    if not rate_allowed or rate_count >= config.rate_limit_per_hour:
         return PromptWithheld.RATE_LIMITED
     if analysis.clarification_prompt is None:
         return PromptWithheld.NOTHING_TO_ASK
@@ -89,6 +94,7 @@ def decide(
     analysis: NoteAnalysis,
     *,
     attempts: int,
+    rate_allowed: bool,
     rate_count: int,
     config: TenantConfig,
     resubmission: bool,
@@ -101,6 +107,9 @@ def decide(
     CRM shows a salesperson matches the number of questions they have actually
     been asked. The increments themselves are the pipeline's, and they run only
     when `prompt_sent` is true; this function decides, it does not write.
+
+    `rate_allowed` is db2's answer from the round trip that claimed the slot:
+    this function is told what the store said and decides nothing about it.
 
     A store outage reads 0 through the fail-open policy in state.py, so an
     unreachable db2 makes us MORE willing to ask, never less. That is the
@@ -122,6 +131,7 @@ def decide(
         withheld = _withheld(
             analysis,
             attempts=attempts,
+            rate_allowed=rate_allowed,
             rate_count=rate_count,
             config=config,
             resubmission=resubmission,

@@ -62,13 +62,16 @@ def _decide(
     *,
     prompt: str | None = PROMPT,
     attempts: int = 0,
+    rate_allowed: bool = True,
     rate_count: int = 0,
     resubmission: bool = False,
 ):
+    """Build a decision with an open rate-limit window unless a case says otherwise."""
     return decide(
         _score(total),
         _analysis(prompt),
         attempts=attempts,
+        rate_allowed=rate_allowed,
         rate_count=rate_count,
         config=CONFIG,
         resubmission=resubmission,
@@ -225,6 +228,15 @@ def test_the_cap_is_reached_not_exceeded() -> None:
     # attempts < cap is the condition, so cap-1 still asks and cap does not.
     assert _decide(69, attempts=CONFIG.clarification_cap - 1).prompt_sent is True
     assert _decide(69, attempts=CONFIG.clarification_cap).prompt_sent is False
+
+
+def test_a_refused_slot_withholds_the_prompt_whatever_the_count_says() -> None:
+    """A slot the script refused withholds the prompt even when the count is under the
+    cap."""
+    decision = _decide(69, rate_allowed=False, rate_count=0)
+
+    assert decision.prompt_sent is False
+    assert decision.prompt_withheld is PromptWithheld.RATE_LIMITED
 
 
 def test_the_rate_limit_is_reached_not_exceeded() -> None:

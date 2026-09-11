@@ -16,25 +16,12 @@ from dodeal_ai.core.config import Settings, get_settings
 from dodeal_ai.core.cost.limiter import CostLimitError
 from dodeal_ai.main import app
 from tests.helpers import tokens
-
-
-class _FakeCostRedis:
-    def __init__(self):
-        self.store = {}
-
-    async def eval(self, script, numkeys, *keys_and_args):
-        keys = keys_and_args[:numkeys]
-        amount = int(keys_and_args[numkeys])
-        counts = []
-        for key in keys:
-            self.store[key] = self.store.get(key, 0) + amount
-            counts.append(self.store[key])
-        return counts
+from tests.helpers.fake_cost_redis import FakeCostRedis
 
 
 @pytest.fixture(autouse=True)
 def _fake_cost(monkeypatch):
-    monkeypatch.setattr(cost_limiter, "get_cost_client", lambda: _FakeCostRedis())
+    monkeypatch.setattr(cost_limiter, "get_cost_client", lambda: FakeCostRedis())
 
 
 @pytest.fixture

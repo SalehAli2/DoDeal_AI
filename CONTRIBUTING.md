@@ -66,7 +66,7 @@ matching `.claude/*.local.*`) and which Claude Code merges over the shared file.
   `scripts/verify_wheel.py`. Run them locally too before a push that touches
   packaging or a module with a coverage floor.
 - **Tests must stay hermetic.** No live Redis, network, or LLM calls in the
-  suite — mock/fake them (see `tests/unit/test_cost.py`'s `FakeRedis` for the
+  suite — mock/fake them (see the shared fakes in `tests/helpers/` for the
   pattern). If a test needs real infrastructure, it doesn't belong here.
 - Model calls go through `core/llm/` only. No provider SDK is imported
   anywhere else, and the `LLMClient` Protocol stays one method — routing,

@@ -166,6 +166,12 @@ class Settings(BaseSettings):
     # Without it, "bounded" would mean "blocks forever at the cap".
     redis_pool_acquire_timeout_seconds: float = Field(default=1.0, gt=0)
 
+    # --- Redis circuit breaker (core/breaker.py) ----------------------------
+    # PROVISIONAL, both: consecutive failures that open it, and how long it stays
+    # open before ONE probe. gt=0: zero would open unfailed, or probe every call.
+    breaker_failure_threshold: int = Field(default=5, gt=0)
+    breaker_open_seconds: float = Field(default=30.0, gt=0)
+
     # Cost/quota caps (placeholder values; tune to real budgets later).
     # Counters reset each window. A request over either cap is denied (429).
     cost_per_tenant_limit: int = 10000

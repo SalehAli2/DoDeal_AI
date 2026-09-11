@@ -16,13 +16,13 @@ from dodeal_ai.units.structured_intelligence import state
 from dodeal_ai.units.structured_intelligence.state import (
     IdempotencyUnavailableError,
     increment_attempts,
-    increment_rate_limit,
     note_fingerprint,
     read_attempt_fingerprint,
     read_attempts,
     read_rate_limit,
     release_idempotency,
     reserve_idempotency,
+    take_rate_limit,
     write_attempt_fingerprint,
 )
 from tests.helpers.fake_operational_redis import (
@@ -38,6 +38,9 @@ REQUEST_ID = "req-1"
 
 IDEM_TTL = 86400
 WINDOW = 3600
+# The rate limit is now checked BY taking a slot, so every call needs the cap
+# it is checked against. 3 is TenantConfig's default.
+LIMIT = 3
 ATTEMPT_TTL = 21600
 
 # Shaped like a real fingerprint: 64 hex chars. Bound to a NAME here and only
@@ -243,21 +246,49 @@ async def test_rate_limit_starts_at_zero(fake: FakeOperationalRedis) -> None:
     assert await read_rate_limit(TENANT, SUBJECT, request_id=REQUEST_ID) == 0
 
 
+async def _take(fake_limit: int = LIMIT) -> tuple[bool, int]:
+    """One slot, at the default cap unless a case needs another."""
+    return await take_rate_limit(
+        TENANT, SUBJECT, limit=fake_limit, ttl=WINDOW, request_id=REQUEST_ID
+    )
+
+
 async def test_rate_limit_counts_prompts_sent(fake: FakeOperationalRedis) -> None:
     for _ in range(3):
-        await increment_rate_limit(TENANT, SUBJECT, ttl=WINDOW, request_id=REQUEST_ID)
+        await _take()
     assert await read_rate_limit(TENANT, SUBJECT, request_id=REQUEST_ID) == 3
 
 
+async def test_taking_a_slot_returns_the_count_before_it(
+    fake: FakeOperationalRedis,
+) -> None:
+    """Each slot returns the count before this request, which is what decide() compares
+    to the cap."""
+    assert await _take() == (True, 0)
+    assert await _take() == (True, 1)
+    assert await _take() == (True, 2)
+
+
+async def test_the_slot_at_the_cap_is_refused_and_not_counted(
+    fake: FakeOperationalRedis,
+) -> None:
+    """A slot refused at the cap leaves the counter where it was."""
+    for _ in range(LIMIT):
+        await _take()
+
+    assert await _take() == (False, LIMIT)
+    assert await read_rate_limit(TENANT, SUBJECT, request_id=REQUEST_ID) == LIMIT
+
+
 async def test_rate_limit_window_is_set_on_create(fake: FakeOperationalRedis) -> None:
-    await increment_rate_limit(TENANT, SUBJECT, ttl=WINDOW, request_id=REQUEST_ID)
+    await _take()
     assert fake.ttls[f"ratelimit:{TENANT}:{SUBJECT}"] == WINDOW
 
 
 async def test_rate_limit_is_keyed_on_the_subject_and_the_tenant(
     fake: FakeOperationalRedis,
 ) -> None:
-    await increment_rate_limit(TENANT, SUBJECT, ttl=WINDOW, request_id=REQUEST_ID)
+    await _take()
     assert f"ratelimit:{TENANT}:{SUBJECT}" in fake.store
     # A different subject in the same tenant is counted separately.
     assert await read_rate_limit(TENANT, "99", request_id=REQUEST_ID) == 0
@@ -268,28 +299,34 @@ async def test_rate_limit_is_keyed_on_the_subject_and_the_tenant(
 async def test_rate_limit_does_not_reset_the_window_on_later_increments(
     fake: FakeOperationalRedis,
 ) -> None:
-    await increment_rate_limit(TENANT, SUBJECT, ttl=WINDOW, request_id=REQUEST_ID)
+    await _take()
     key = f"ratelimit:{TENANT}:{SUBJECT}"
     fake.ttls[key] = 60  # the window has been running a while
-    await increment_rate_limit(TENANT, SUBJECT, ttl=WINDOW, request_id=REQUEST_ID)
+    await _take()
     # A sliding window would let a busy user never hit the cap.
     assert fake.ttls[key] == 60
+
+
+async def test_one_slot_is_one_round_trip(fake: FakeOperationalRedis) -> None:
+    """Register item 27: the read-then-increment pair is one EVAL now."""
+    await _take()
+    assert [c for c, _ in fake.commands] == ["eval"]
 
 
 # --- the M4 edge, carried to db2 -------------------------------------------
 
 
-async def test_a_key_with_no_ttl_gets_one_on_the_next_increment(
+async def test_a_key_with_no_ttl_gets_one_on_the_next_slot(
     fake: FakeOperationalRedis,
 ) -> None:
     # Audit M4 on db2: a counter that somehow exists WITHOUT an expiry would
     # otherwise pin this user's rate limit forever, silently withholding every
-    # future clarification prompt.
+    # future clarification prompt. The script carries the guard now.
     key = f"ratelimit:{TENANT}:{SUBJECT}"
     fake.store[key] = "2"  # exists, no entry in ttls -> TTL == -1
     assert await fake.ttl(key) == TTL_NO_EXPIRY
 
-    await increment_rate_limit(TENANT, SUBJECT, ttl=WINDOW, request_id=REQUEST_ID)
+    await _take()
 
     assert fake.ttls[key] == WINDOW
 
@@ -308,7 +345,7 @@ async def test_a_new_key_does_not_pay_for_a_ttl_lookup(
 ) -> None:
     # The `or` short-circuits: count == 1 means the key is new, so EXPIRE is
     # issued without asking for the TTL first.
-    await increment_rate_limit(TENANT, SUBJECT, ttl=WINDOW, request_id=REQUEST_ID)
+    await increment_attempts(TENANT, LEAD_ID, NOTE_ID, ttl=21600, request_id=REQUEST_ID)
     assert [c for c, _ in fake.commands] == ["incr", "expire"]
 
 
@@ -490,11 +527,11 @@ async def test_read_rate_limit_fails_open_with_a_log_line(failing, json_log) -> 
     assert line["request_id"] == REQUEST_ID
 
 
-async def test_increment_rate_limit_fails_open_with_a_log_line(
-    failing, json_log
-) -> None:
-    failing("incr")
-    await increment_rate_limit(TENANT, SUBJECT, ttl=WINDOW, request_id=REQUEST_ID)
+async def test_take_rate_limit_fails_open_with_a_log_line(failing, json_log) -> None:
+    """An unreachable store costs a question too many, never a refusal: the
+    slot is granted and simply not counted."""
+    failing("eval")
+    assert await _take() == (True, 0)
 
     assert _lines(json_log)[-1]["reason_code"] == "rate_limit_bypassed"
 

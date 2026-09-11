@@ -11,6 +11,8 @@ decides what a salesperson is told about their own work:
     core/auth/**      Gate 1: who the caller is. Wrong -> everyone is anyone.
     core/tenancy.py   Gate 2: whose data. Wrong -> a cross-tenant read.
     core/cost/**      Gate 4: the spend cap. Wrong -> an unbounded bill.
+    core/breaker.py   whether a Redis store is asked at all. Wrong -> a
+                      reservation refused for a whole open window.
     core/errors.py    what a denied caller is told (and is NOT told).
     core/validation.py  the untrusted-output boundary.
     core/log_safety.py  what may reach a log line.
@@ -54,6 +56,10 @@ _FLOORS: dict[str, float] = {
     # refused for money. Every branch here is a spend decision or a fail-open
     # path, and both are cheap to reach against a faked store.
     "src/dodeal_ai/core/cost/limiter.py": 100,
+    # The Redis circuit breaker: what decides, per call, whether a store is asked
+    # at all. A small state machine on an injected clock, so every transition is
+    # reachable -- and a wrong one is a fail-closed reservation refused for 30s.
+    "src/dodeal_ai/core/breaker.py": 100,
     "src/dodeal_ai/core/errors.py": 95,
     "src/dodeal_ai/core/validation.py": 100,
     "src/dodeal_ai/core/log_safety.py": 100,

@@ -34,6 +34,7 @@ from fastapi.testclient import TestClient
 
 from dodeal_ai.core.auth.dependencies import get_verifier
 from dodeal_ai.core.auth.verify import JwtVerifier
+from dodeal_ai.core.breaker import cost_breaker
 from dodeal_ai.core.config import Settings, get_settings
 from dodeal_ai.core.cost import limiter
 from dodeal_ai.core.cost.limiter import (
@@ -52,7 +53,7 @@ from dodeal_ai.units.structured_intelligence.classify import CLASSIFY_TEMPLATE
 from dodeal_ai.units.structured_intelligence.schemas import NoteType
 from dodeal_ai.units.structured_intelligence.scoring import SCORE_TEMPLATE
 from dodeal_ai.units.structured_intelligence.vague import template_for
-from tests.helpers import tokens
+from tests.helpers import breakers, tokens
 from tests.helpers.fake_cost_redis import FakeCostRedis
 from tests.helpers.fake_leads import FakeLeadsClient, lead, note
 from tests.helpers.fake_llm import FakeLLM, json_response, response
@@ -144,7 +145,6 @@ def client(monkeypatch, leads, llm, operational, cost):
 
     monkeypatch.setattr(limiter, "get_cost_client", lambda: cost)
     monkeypatch.setattr(state, "get_operational_client", lambda: operational)
-    monkeypatch.setattr(limiter, "_TOKEN_PREFLIGHT_LOGGED", False)
 
     app.dependency_overrides[get_verifier] = lambda: JwtVerifier(test_settings)
     app.dependency_overrides[get_leads_client] = lambda: leads
@@ -302,12 +302,9 @@ def test_a_dead_store_allows_the_judgement(client, cost):
     assert response.json()["suppressed"] is None
 
 
-async def test_the_preflight_bypass_is_logged_once_per_process(
-    monkeypatch, cost, json_log
-):
-    """The latch is per process, so a second dead-store read adds no line."""
+async def test_the_preflight_bypass_is_logged_every_time(monkeypatch, cost, json_log):
+    """With the latch gone, every pre-flight bypass is logged."""
     monkeypatch.setattr(limiter, "get_cost_client", lambda: cost)
-    monkeypatch.setattr(limiter, "_TOKEN_PREFLIGHT_LOGGED", False)
     cost.fail = True
 
     for _ in range(3):
@@ -316,10 +313,49 @@ async def test_the_preflight_bypass_is_logged_once_per_process(
     bypasses = [
         x for x in _lines(json_log) if x["message"] == "token_preflight_bypassed"
     ]
-    assert len(bypasses) == 1
-    assert bypasses[0]["level"] == "WARNING"
+    assert len(bypasses) == 3
+    assert {x["level"] for x in bypasses} == {"WARNING"}
     assert bypasses[0]["tenant"] == "tenant-a"
     assert bypasses[0]["reason_code"] == "token_store_unavailable"
+    # The store was actually asked each time, so nothing claims otherwise.
+    assert "breaker" not in bypasses[0]
+
+
+# --- the breaker in front of db1 --------------------------------------------
+
+
+async def test_an_open_breaker_bypasses_the_preflight_without_a_read(
+    monkeypatch, cost, json_log
+):
+    """Open: the pre-flight allows the judgement and never touches the store."""
+    monkeypatch.setattr(limiter, "get_cost_client", lambda: cost)
+    await breakers.trip(cost_breaker())
+
+    await token_preflight(test_scope())  # must not raise
+
+    assert cost.mgets == []
+    line = next(
+        x for x in _lines(json_log) if x["message"] == "token_preflight_bypassed"
+    )
+    assert line["breaker"] == "open"
+    assert line["reason_code"] == "token_store_unavailable"
+
+
+async def test_an_open_breaker_bypasses_the_charge_without_an_eval(
+    monkeypatch, cost, json_log
+):
+    """Open: the tokens are still spent, and still not counted -- a hole in the
+    meter, never in the bill."""
+    monkeypatch.setattr(limiter, "get_cost_client", lambda: cost)
+    await breakers.trip(cost_breaker())
+
+    await enforce_token_cost(
+        TEST_SCOPE, input_tokens=100, output_tokens=20, profile="unit_a.classify"
+    )
+
+    assert cost.evals == []
+    line = next(x for x in _lines(json_log) if x["message"] == "token_charge_bypassed")
+    assert line["breaker"] == "open"
 
 
 # --- the charge -------------------------------------------------------------

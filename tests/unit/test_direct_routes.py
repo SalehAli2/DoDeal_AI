@@ -156,7 +156,6 @@ def client(monkeypatch, leads, llm, operational, cost):
 
     monkeypatch.setattr(cost_limiter, "get_cost_client", lambda: cost)
     monkeypatch.setattr(state, "get_operational_client", lambda: operational)
-    monkeypatch.setattr(cost_limiter, "_TOKEN_PREFLIGHT_LOGGED", False)
 
     app.dependency_overrides[get_verifier] = lambda: JwtVerifier(test_settings)
     app.dependency_overrides[get_leads_client] = lambda: leads
@@ -191,7 +190,6 @@ def fetch_client(monkeypatch, llm, operational, cost):
 
     monkeypatch.setattr(cost_limiter, "get_cost_client", lambda: cost)
     monkeypatch.setattr(state, "get_operational_client", lambda: operational)
-    monkeypatch.setattr(cost_limiter, "_TOKEN_PREFLIGHT_LOGGED", False)
 
     app.dependency_overrides[get_verifier] = lambda: JwtVerifier(test_settings)
     app.dependency_overrides[get_leads_client] = lambda: fake_crm

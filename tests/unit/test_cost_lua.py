@@ -11,6 +11,9 @@ carries `redis_real` and is excluded from the default run; nothing does yet.
 The script is IMPORTED, never retyped. A copied script would keep passing the
 day the real one changed, which is the one failure a test like this exists to
 prevent.
+
+The last section runs the rate limit's db2 script (register item 27) here,
+because this is the file where Lua actually runs.
 """
 
 from __future__ import annotations
@@ -30,6 +33,8 @@ from dodeal_ai.core.cost.limiter import (
     enforce_cost,
     get_usage,
 )
+from dodeal_ai.units.structured_intelligence import state
+from dodeal_ai.units.structured_intelligence.state import _TAKE_RATE_LIMIT_SCRIPT
 
 _TENANT_KEY = "cost:tenant:tenant-a"
 _USER_KEY = "cost:user:tenant-a:user-1"
@@ -225,3 +230,79 @@ async def test_the_two_scripts_touch_disjoint_keys(client):
     )
     assert await client.get(_TENANT_KEY) == "1"
     assert await client.get(_TOKEN_TENANT_KEY) == "120"
+
+
+# --- the rate limit's script (db2): check and increment in one execution ------
+
+_RATE_KEY = "ratelimit:tenant-a:42"
+_RATE_LIMIT = 3
+
+
+async def _take(client, limit: int = _RATE_LIMIT, window: int = _WINDOW):
+    """One raw execution of the imported script: [allowed, count before]."""
+    return await client.eval(_TAKE_RATE_LIMIT_SCRIPT, 1, _RATE_KEY, limit, window)
+
+
+async def test_the_rate_script_increments_only_under_the_limit(client):
+    """Three slots are taken and the fourth is refused without writing."""
+    replies = [await _take(client) for _ in range(_RATE_LIMIT + 1)]
+
+    assert [allowed for allowed, _ in replies] == [1, 1, 1, 0]
+    assert await client.get(_RATE_KEY) == str(_RATE_LIMIT)
+
+
+async def test_the_rate_script_returns_the_count_before_the_call(client):
+    """The count returned is the one before the call, whether the slot was taken or
+    refused."""
+    replies = [await _take(client) for _ in range(_RATE_LIMIT + 1)]
+
+    assert replies == [[1, 0], [1, 1], [1, 2], [0, 3]]
+
+
+async def test_the_rate_window_is_set_when_the_counter_is_created(client):
+    """A created counter gets the window, or a subject would be limited forever."""
+    await _take(client)
+
+    assert await client.ttl(_RATE_KEY) == _WINDOW
+
+
+async def test_a_later_slot_does_not_refresh_the_rate_window(client):
+    """Fixed, not sliding: a busy subject must not push its own reset away."""
+    await _take(client)
+    await _take(client, window=_WINDOW * 100)
+
+    assert await client.ttl(_RATE_KEY) <= _WINDOW
+
+
+async def test_a_rate_key_without_a_ttl_gains_one_on_the_next_slot(client):
+    """A rate-limit counter with no window gains one on the next slot (audit M4,
+    repaired for this key)."""
+    await client.set(_RATE_KEY, 1)
+    assert await client.ttl(_RATE_KEY) == -1
+
+    await _take(client)
+
+    assert await client.ttl(_RATE_KEY) == _WINDOW
+
+
+async def test_a_refused_slot_does_not_set_a_window(client):
+    """At the cap nothing is written at all -- not the count, not the TTL."""
+    await client.set(_RATE_KEY, _RATE_LIMIT)
+
+    assert await _take(client) == [0, _RATE_LIMIT]
+    assert await client.ttl(_RATE_KEY) == -1
+
+
+async def test_take_rate_limit_end_to_end_on_real_lua(client, monkeypatch):
+    """Lua's integer replies reach the pipeline through take_rate_limit as a (bool, int)
+    pair."""
+    monkeypatch.setattr(state, "get_operational_client", lambda: client)
+
+    taken = [
+        await state.take_rate_limit(
+            "tenant-a", "42", limit=_RATE_LIMIT, ttl=_WINDOW, request_id="req-1"
+        )
+        for _ in range(_RATE_LIMIT + 1)
+    ]
+
+    assert taken == [(True, 0), (True, 1), (True, 2), (False, 3)]

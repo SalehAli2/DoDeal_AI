@@ -276,21 +276,13 @@ def test_audit_fields_still_reach_the_top_level_of_the_line(log_capture):
     assert line["reason_code"] == "tenant_mismatch"
 
 
-class _DeadCostClient:
-    """A cost client whose only script execution raises — the Redis outage the
-    limiter fails OPEN on."""
-
-    async def eval(self, *args, **kwargs):
-        raise limiter.redis.RedisError("down")
-
-
 async def test_cost_bypass_keeps_the_tenant_in_a_field_not_in_the_message(
     log_capture, settings_env, monkeypatch
 ):
     # Not note content, but the same rule: an identifier belongs in a FIELD a
     # collector can filter, never interpolated into prose under "message".
     # This line is what a spend-cap alert fires on, so its shape is a contract.
-    monkeypatch.setattr(limiter, "get_cost_client", lambda: _DeadCostClient())
+    monkeypatch.setattr(limiter, "get_cost_client", lambda: FakeCostRedis(fail=True))
 
     await limiter.enforce_cost("tenant-b", "42")  # must NOT raise
 
@@ -536,7 +528,6 @@ def direct_client(monkeypatch, cost):
 
     monkeypatch.setattr(limiter, "get_cost_client", lambda: cost)
     monkeypatch.setattr(state, "get_operational_client", lambda: FakeOperationalRedis())
-    monkeypatch.setattr(limiter, "_TOKEN_PREFLIGHT_LOGGED", False)
 
     app.dependency_overrides[get_verifier] = lambda: JwtVerifier(test_settings)
     app.dependency_overrides[get_llm_client] = lambda: llm
@@ -740,7 +731,7 @@ def test_direct_unexpected_error_500_logs_no_note_text(
     # formatted and logged frames-only, and the frames run through the pipeline
     # while it is holding the note -- so this is the path where a `%r` of a
     # local, or a chained message, would take the whole body with it.
-    monkeypatch.setattr(state, "read_rate_limit", _raise_boom)
+    monkeypatch.setattr(state, "take_rate_limit", _raise_boom)
 
     r = direct_client.post(
         DIRECT,
@@ -801,7 +792,7 @@ def test_direct_model_failure_503_logs_no_lead_project(direct_client, root_log_c
 def test_direct_unexpected_error_500_logs_no_lead_project(
     direct_client, root_log_capture, monkeypatch
 ):
-    monkeypatch.setattr(state, "read_rate_limit", _raise_boom)
+    monkeypatch.setattr(state, "take_rate_limit", _raise_boom)
 
     r = direct_client.post(
         DIRECT,

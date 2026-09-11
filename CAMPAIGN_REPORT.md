@@ -3175,7 +3175,7 @@ non-constant and is named explicitly in the test rather than tolerated by a loos
 
 ---
 
-## Piece N: step 3   STATUS: IN PROGRESS (N.1 and N.2 done; the H3 breaker and the M4 TTL fix still owed)
+## Piece N: step 3   STATUS: IN PROGRESS (N.1, N.2 and N.3 done; the M4 TTL fix and policy-per-caller still owed, N.4)
 
 Step 3 is `enforce_token_cost` and the fail-open pre-flight read. This piece is the ground it stands
 on: the Redis connection has to be bounded and configurable before a second counter starts using it,
@@ -3510,3 +3510,191 @@ because the seam was a no-op.
 every test comes from `FakeLLM`'s round defaults; no provider has ever reported usage to this code. Nothing
 is marked `[V]` (ASSUMPTIONS §8.11).
 
+---
+
+### N.3 — circuit breaker on Redis; rate limit in one round trip   STATUS: DONE `sha pending`
+
+**Suite:** 998 → **1036 passing**, 1 skipped, 7 deselected. Coverage 99.42 % → **99.45 %**. **15** per-file
+floors (one new: `core/breaker.py` at 100). `decide.py` and `limiter.py` at 100, `state.py` at 100
+(unchanged), `breaker.py` at 100.
+
+---
+
+### What each judgement asked Redis before this commit
+
+In pipeline order, on db2: SET NX EX (the reservation, **fail closed**), GET the rate limit, GET the
+attempt count, and on a resubmission GET the fingerprint reference. On db1: MGET (the pre-flight), then
+one EVAL per model response. After the response was built, and only if a prompt was sent: INCR+TTL+EXPIRE
+on the rate limit, INCR+TTL+EXPIRE on the attempts, SET NX EX on the reference. Everything except the
+reservation failed open. The rate limit therefore cost a GET before the model calls and an increment after
+them. That read-then-increment pair is what item 27 removes.
+
+---
+
+### The breaker
+
+`core/breaker.py`, `CircuitBreaker(name, *, failure_threshold, open_seconds, clock=time.monotonic)`.
+**Closed** passes calls and counts consecutive `redis.RedisError`s; any other exception is not counted.
+At the threshold it goes **open**, and refuses with `BreakerOpen` without calling anything. After
+`open_seconds` the first caller moves it to **half-open** and becomes the only probe. Every other caller is
+refused while the probe is out. The probe's success closes the breaker; its failure reopens it for a full
+window. Every transition happens in synchronous code between awaits, so no lock is needed on one event
+loop.
+
+**`BreakerOpen` subclasses `redis.RedisError`, and that is the whole integration.** Every call in
+`limiter.py` and `state.py` now runs through `cost_breaker().call(...)` or `operational_breaker().call(...)`.
+No `except` clause changed its type. So while a breaker is open, the fail-open paths take their existing
+bypass branch with `breaker: open` added to the existing line (`breaker_field(exc)`), and the reservation
+still raises `IdempotencyUnavailableError` → **503**. `get_usage` still propagates.
+
+**Two breakers, one per connection.** One shared breaker would let a dead cost store refuse the
+reservation. Both are `lru_cache` accessors built from `DODEAL_BREAKER_FAILURE_THRESHOLD` (5) and
+`DODEAL_BREAKER_OPEN_SECONDS` (30.0), both `gt=0`. `reset_breakers()` clears both caches, and an autouse
+fixture in `tests/conftest.py` calls it around every test.
+
+**The once-per-process latch is removed.** `_TOKEN_PREFLIGHT_LOGGED` is gone, and `token_preflight_bypassed`
+is logged on every bypass. The latch was de-duplicating in the wrong place: it also hid a second outage
+after a recovery. `breaker_opened` and `breaker_closed` now carry that job, and each is logged once per
+transition. The five `monkeypatch.setattr(..., "_TOKEN_PREFLIGHT_LOGGED", False)` lines in the tests went
+with it.
+
+---
+
+### The rate limit in one round trip, with the precedence intact
+
+`state.take_rate_limit` runs `_TAKE_RATE_LIMIT_SCRIPT`. The script increments only while the key is under
+the limit, sets the window on creation (and on a key with no TTL, the guard `_incr_with_window` already
+had), and returns `(allowed, count before the call)` in both branches. `increment_rate_limit` is
+**deleted**, not just its call site. It had no caller left.
+
+**The pipeline asks the pure function twice rather than restating its conditions.** It first calls
+`decide()` with the window assumed open. `_rate_limit_trip` reads that provisional answer:
+
+- **A prompt would be sent:** run the script. This is the increment.
+- **`nothing_to_ask`:** one plain GET, so an exhausted window still reports `rate_limited` first.
+- **Anything else:** no call. That covers `resubmission`, `attempt_cap` and `accept_silent`.
+
+`decide()` then runs again with what the store said. The four conditions exist only in `decide.py`, so
+the pipeline's choice of trip cannot drift from the order the CRM is promised. `decide()` gains
+`rate_allowed` beside `rate_count` and nothing else. Its outputs and the withheld order are unchanged.
+
+The attempt counter and the fingerprint write are unchanged and still run after the response is built.
+The rate-limit read left step 5. Step 8 now takes the slot.
+
+---
+
+### The hermetic guard, and what it made convert
+
+`tests/test_hermetic_fakes.py` parses every test module with `ast`. It finds each patch of
+`get_cost_client` or `get_operational_client` and fails unless the value is one of these:
+
+- a shared fake from `tests/helpers/`
+- a `fakeredis` client
+- a name bound to either one in the same file, such as `client = FakeCostRedis()` or the fixture that
+  yields it
+
+Patches of `core/redis.py`'s own factories are skipped, because those tests are about the factories.
+Checked by hand: a `monkeypatch.setattr(limiter, "get_cost_client", lambda: _MyOwnFake())` in a probe file
+fails it, naming the file and line.
+
+On first run it named four offenders. All four were private copies of the shared fake:
+
+- `test_chain.py` and `test_exit_demo.py`: `_FakeCostRedis`
+- `test_log_safety.py`: `_DeadCostClient`
+- `test_cost.py`: `FakeRedis`
+
+All four now use `FakeCostRedis`. The README and CONTRIBUTING sentences that named `test_cost.py`'s
+`FakeRedis` as the pattern now point at `tests/helpers/`.
+
+---
+
+### What changed
+
+| File | Change |
+| --- | --- |
+| `core/breaker.py` | **New.** `CircuitBreaker`, `BreakerOpen`, `BreakerState`, `breaker_field`, `cost_breaker`, `operational_breaker`, `reset_breakers`. |
+| `core/config.py` | `breaker_failure_threshold` 5 and `breaker_open_seconds` 30.0, both `gt=0`. |
+| `core/cost/limiter.py` | All four cost-store calls go through `cost_breaker().call`. `breaker: open` on the two bypass lines. The latch is removed. The `aioredis` alias is renamed to `redis_async`, matching `core/redis.py`. |
+| `units/.../state.py` | Every operational call goes through `operational_breaker().call`. `_bypass` takes the exception. `_TAKE_RATE_LIMIT_SCRIPT` and `take_rate_limit` are added, `increment_rate_limit` is deleted, and the module docstring's "no Lua" paragraph is rewritten. |
+| `units/.../decide.py` | Takes `rate_allowed`, and `RATE_LIMITED` reads `not rate_allowed or rate_count >= limit`. Docstrings updated. |
+| `units/.../pipeline.py` | The rate-limit read leaves step 5. `_rate_limit_trip` and the two `decide()` calls replace the read-then-increment pair. The step list and the counters paragraph are updated. |
+| `scripts/check_coverage_floors.py` | `core/breaker.py` at 100. |
+| `tests/conftest.py` | Autouse `_closed_breakers`. |
+| `tests/helpers/fake_operational_redis.py` | `eval` for the rate-limit script, mirroring its TTL rule, and records `(script, key, allowed)` in `evals`. |
+| `tests/helpers/breakers.py` | **New.** `trip(breaker)`, which opens a real breaker with real consecutive failures. |
+| `tests/test_hermetic_fakes.py` | **New.** The guard above. |
+| `tests/unit/test_breaker.py` | **New.** 19 tests: the state machine on a fake clock, the single in-flight probe, the logs, the subclass, and the settings. |
+| `tests/unit/test_cost_lua.py` | Seven tests: the rate-limit script on real Lua, including `take_rate_limit` end to end. |
+| `tests/unit/test_unit_a_state.py` | Rate-limit tests rewritten against `take_rate_limit`: count-before, refusal without writing, one EVAL, M4. |
+| `tests/unit/test_decide.py` | The helper passes `rate_allowed`. There is one new case: a refused slot withholds whatever the count says. |
+| `tests/unit/test_token_cost.py` | The once-per-process test is inverted to every-time. There are two cost-breaker cases: no MGET, no EVAL, `breaker: open`. |
+| `tests/unit/test_judgement_pipeline.py` | Two operational-breaker cases. The reservation 503s with no SET. A breaker that opens mid-judgement bypasses the rate limit with no EVAL. |
+| `tests/unit/test_judgement_routes.py` | The four-note burst: three script calls allowed, one refused, fourth `rate_limited`. Also: exhausted-and-no-question reports `rate_limited` with no EVAL; resubmission and attempt cap make no rate-limit trip. |
+| `tests/security/test_log_safety.py`, `test_chain.py`, `test_exit_demo.py`, `tests/unit/test_cost.py`, `test_direct_routes.py` | Private fakes replaced by `FakeCostRedis`. Latch lines removed. The two 500-path tests inject at `take_rate_limit`, which the happy path now reaches instead of the read. |
+| `README.md`, `CONTRIBUTING.md`, `docs/STATUS.md`, `ASSUMPTIONS.md` | README: the two settings, the breaker events, the one-round-trip paragraph, the latch sentence, and the rows for the new files. CONTRIBUTING: the test-pattern pointer. STATUS: items 20 and 27. ASSUMPTIONS: one line on the rate-limit entry. |
+
+---
+
+### For the lead
+
+1. **BLOCKED: `.env.example`.** The permission settings deny both reading and writing it, so the two rows
+   are not in the file. Add them by hand after `DODEAL_REDIS_POOL_ACQUIRE_TIMEOUT_SECONDS=1.0`:
+   ```
+   # Circuit breaker, one per Redis connection. Consecutive failures that open it,
+   # and how long it refuses before ONE probe is let through. Both provisional,
+   # both must be positive.
+   DODEAL_BREAKER_FAILURE_THRESHOLD=5
+   DODEAL_BREAKER_OPEN_SECONDS=30.0
+   ```
+2. **Pool exhaustion counts as a store failure.** A `BlockingConnectionPool` that cannot hand out a
+   connection within `redis_pool_acquire_timeout_seconds` raises `redis.ConnectionError`, which is a
+   `RedisError`, as the brief specified. So five consecutive pool timeouts under a load spike open the
+   breaker with Redis perfectly healthy. For the next 30 s, cost caps are bypassed and **every
+   reservation is 503**. I followed the brief. The conservative alternative is to exclude acquire
+   timeouts from the count, and that is your call. Set the threshold, pool size and window together in
+   the load lane.
+3. **The fail-closed side pays the whole window.** Once `operational_breaker` opens, every judgement is
+   503 `idempotency_unavailable` for 30 s even if db2 recovered after one. That is the designed trade, and
+   30 is provisional.
+4. **`accept_silent` makes no rate-limit call.** The brief's three-way rule did not mention it. Running
+   the script there would count a prompt that is never sent, so it takes the no-call branch. It falls out
+   of the provisional `decide()`, not a special case.
+5. **The pipeline calls `decide()` twice instead of restating conditions 1 and 2.** The brief said
+   "evaluate the conditions in order" in `pipeline.py`. Duplicating them would put the precedence in two
+   files, so the provisional call reads it from the one place it lives. `decide.py` changed only by the
+   flag.
+6. **`count` is the count *before* the call, in both branches**, and `decide` keeps `rate_count >= limit`
+   beside `not rate_allowed`. The count half is load-bearing on the read path. It also keeps today's
+   behaviour on the fail-open path: `(True, 0)` against a limit of 0 still reads `rate_limited`, as it
+   did.
+7. **The slot is taken at step 8, before the response is built.** It is no longer taken after. If
+   anything raised between the script and the return, a slot would be counted for a prompt never
+   delivered. Today nothing on that stretch does I/O. This is inherent to "the check is the increment".
+8. **The new script repairs M4 for the rate-limit key, and the cost scripts still do not.** This
+   preserves the guard `_incr_with_window` already applied to that key. The request and token scripts
+   were left alone, as instructed.
+9. **Scope past the literal list, all required by the guard or by a statement this piece made false:**
+   - the four test modules' private fakes
+   - `test_cost.py`'s atomic-failure test, which now turns the shared fake's `fail` off before reading
+     back, because it fails reads too
+   - the README and CONTRIBUTING pattern pointers
+   - README rows for the three new files
+   - the rewrite of `test_unit_a_state.py`'s rate-limit tests after `increment_rate_limit` was deleted
+10. **No README lifecycle sentence mentioned the rate limit.** The one-round-trip sentence is a new
+    paragraph in the route contract, after "Hitting the clarification rate limit is not a 429".
+11. **`breaker` means two things on two events.** On a bypass line it is `open`. On `breaker_opened` and
+    `breaker_closed` it is the breaker's name (`cost`/`operational`). A filter on `breaker=open` still
+    hits only bypass lines.
+12. **Each worker process has its own breakers.** They are in-process state, so N uvicorn workers each
+    count and open independently.
+13. **A pre-existing flake, not from this piece:**
+    `test_judgement_pipeline.py::test_elapsed_covers_more_than_any_single_pass` asserts `elapsed_ms >= 20`
+    after a 20 ms sleep and fails about 1 run in 6 on this Windows machine. It was reproduced in a clean
+    worktree at `17c35d9` (5 of 6 passed). It fired once during this piece's chain runs and passed on the
+    re-run. It is untouched here. The chain's first run was also red on two ruff findings in this piece's
+    own new code: an unsorted import and a nested `if`. Both were fixed before the green run.
+14. **Register items 20 and 27 could not be located**, the same gap as 24, 25 and 61. The STATUS rows are
+    written from this brief.
+
+**Nothing in this piece has been verified against a real Redis.** The script ran on `fakeredis[lua]`
+only, and no breaker has seen a real outage. Nothing is marked `[V]`.

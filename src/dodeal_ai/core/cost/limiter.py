@@ -49,6 +49,10 @@ the design --
 
 Both fail OPEN on a Redis error, for the same reason enforce_cost does.
 
+EVERY call here runs inside `cost_breaker` (core/breaker.py), so a store that is
+down stops being asked once. Nothing above changes: BreakerOpen IS a
+redis.RedisError, so a refusal takes the same fail-open branch a timeout does.
+
 This is a real cap only against real Redis; counters must persist across
 requests and workers, which in-memory storage cannot do.
 """
@@ -58,8 +62,12 @@ from __future__ import annotations
 import logging
 
 import redis
-from redis import asyncio as aioredis
 
+# Aliased to match core/redis.py -- one spelling for redis-py's own asyncio
+# namespace, so a grep for it finds every module that touches a client.
+from redis import asyncio as redis_async
+
+from dodeal_ai.core.breaker import breaker_field, cost_breaker
 from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.context import TenantScope
 from dodeal_ai.core.errors import TokenBudgetExceeded
@@ -99,7 +107,7 @@ return {tenant_count, user_count}
 
 
 async def _incr_both_with_window(
-    client: aioredis.Redis,
+    client: redis_async.Redis,
     tenant_key: str,
     user_key: str,
     amount: int,
@@ -130,10 +138,12 @@ async def enforce_cost(tenant: str, subject: str, amount: int = 1) -> None:
     user_key = f"cost:user:{tenant}:{subject}"
 
     try:
-        tenant_count, user_count = await _incr_both_with_window(
-            client, tenant_key, user_key, amount, settings.cost_window_seconds
+        tenant_count, user_count = await cost_breaker().call(
+            lambda: _incr_both_with_window(
+                client, tenant_key, user_key, amount, settings.cost_window_seconds
+            )
         )
-    except redis.RedisError:
+    except redis.RedisError as exc:
         # Fail open (money guard, not security guard). Allow, but log loudly so
         # a bypassed cap is always observable and can be alerted on. Structured
         # fields, not an interpolated message -- the same shape as db2's
@@ -143,7 +153,11 @@ async def enforce_cost(tenant: str, subject: str, amount: int = 1) -> None:
         # never receives one.
         _logger.warning(
             "cost_cap_bypassed",
-            extra={"reason_code": "cost_store_unavailable", "tenant": tenant},
+            extra={
+                "reason_code": "cost_store_unavailable",
+                "tenant": tenant,
+                **breaker_field(exc),
+            },
         )
         return
 
@@ -183,7 +197,7 @@ def _token_keys(tenant: str, subject: str) -> tuple[str, str]:
 
 
 async def _add_tokens_with_window(
-    client: aioredis.Redis,
+    client: redis_async.Redis,
     tenant_key: str,
     user_key: str,
     total: int,
@@ -257,10 +271,12 @@ async def enforce_token_cost(
     tenant_key, user_key = _token_keys(scope.tenant, scope.subject)
 
     try:
-        tenant_total, user_total = await _add_tokens_with_window(
-            client, tenant_key, user_key, total, settings.cost_window_seconds
+        tenant_total, user_total = await cost_breaker().call(
+            lambda: _add_tokens_with_window(
+                client, tenant_key, user_key, total, settings.cost_window_seconds
+            )
         )
-    except redis.RedisError:
+    except redis.RedisError as exc:
         # Fail open and say so. The tokens were spent whether or not we counted
         # them, so an uncounted charge is a hole in the meter, not in the bill.
         _logger.warning(
@@ -269,6 +285,7 @@ async def enforce_token_cost(
                 "reason_code": "token_store_unavailable",
                 "tenant": scope.tenant,
                 "request_id": scope.request_id,
+                **breaker_field(exc),
             },
         )
         return
@@ -307,13 +324,6 @@ async def enforce_token_cost(
     )
 
 
-# Module-level, not an lru_cache: tests reset it with
-# monkeypatch.setattr(limiter, "_TOKEN_PREFLIGHT_LOGGED", False), and a cache
-# would also key on the arguments, which would make "once per process" mean
-# "once per tenant".
-_TOKEN_PREFLIGHT_LOGGED = False
-
-
 async def token_preflight(scope: TenantScope) -> None:
     """Refuse a judgement whose tenant or user is already at its token budget,
     BEFORE the first model call is placed.
@@ -327,28 +337,28 @@ async def token_preflight(scope: TenantScope) -> None:
     ">" would grant one more whole judgement past a limit that was reached.
 
     FAIL OPEN, like every other cost decision: an unreachable store allows the
-    judgement and logs `token_preflight_bypassed` ONCE PER PROCESS. Once,
-    because a store that is down is down for every request, and one line per
-    judgement would be noise that trains people to ignore it.
+    judgement and logs `token_preflight_bypassed` on EVERY bypass. The breaker's
+    transition lines are the de-duplication; the old once-per-process latch also
+    hid a second outage.
     """
     settings = get_settings()
     client = get_cost_client()
     tenant_key, user_key = _token_keys(scope.tenant, scope.subject)
 
     try:
-        tenant_raw, user_raw = await client.mget(tenant_key, user_key)
-    except redis.RedisError:
-        global _TOKEN_PREFLIGHT_LOGGED
-        if not _TOKEN_PREFLIGHT_LOGGED:
-            _TOKEN_PREFLIGHT_LOGGED = True
-            _logger.warning(
-                "token_preflight_bypassed",
-                extra={
-                    "reason_code": "token_store_unavailable",
-                    "tenant": scope.tenant,
-                    "request_id": scope.request_id,
-                },
-            )
+        tenant_raw, user_raw = await cost_breaker().call(
+            lambda: client.mget(tenant_key, user_key)
+        )
+    except redis.RedisError as exc:
+        _logger.warning(
+            "token_preflight_bypassed",
+            extra={
+                "reason_code": "token_store_unavailable",
+                "tenant": scope.tenant,
+                "request_id": scope.request_id,
+                **breaker_field(exc),
+            },
+        )
         return
 
     # A key that has never been charged, or whose window expired, reads None.
@@ -368,5 +378,7 @@ async def get_usage(tenant: str, subject: str) -> tuple[int, int]:
     client = get_cost_client()
     tenant_key = f"cost:tenant:{tenant}"
     user_key = f"cost:user:{tenant}:{subject}"
-    tenant_raw, user_raw = await client.mget(tenant_key, user_key)
+    tenant_raw, user_raw = await cost_breaker().call(
+        lambda: client.mget(tenant_key, user_key)
+    )
     return int(tenant_raw or 0), int(user_raw or 0)

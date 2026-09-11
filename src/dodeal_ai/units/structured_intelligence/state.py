@@ -27,13 +27,14 @@ enforced rather than remembered:
 
 Do not "simplify" these into one policy. They are three different risks.
 
-SEQUENTIAL COMMANDS, NO LUA. Audit finding M5 records that no Lua script in
-this repo is executed by the test suite (fakeredis[lua] arrives at step 3), so
-a script here would be untested logic guarding paid work. The counter pattern
-below (INCR, then EXPIRE only when the key is new or has no TTL) is not atomic
-across the two commands, and does not need to be: a lost race re-sets the same
-TTL on the same key. Contrast core/cost/limiter.py, where the tenant and user
-counters must move together and Lua is therefore load-bearing.
+EVERY call here runs inside `operational_breaker` (core/breaker.py). BreakerOpen
+is a RedisError, so a refusal takes the same branch: the two politeness guards
+bypass, and the reservation still 503s.
+
+ONE LUA SCRIPT: the rate limit's check IS its increment (register item 27), so
+two judgements cannot both take the last slot; it runs on fakeredis[lua] in
+tests/unit/test_cost_lua.py. The attempt counter stays sequential INCR/EXPIRE,
+where a lost race only re-sets the same TTL.
 
 KEY VALUES ARE NEVER LOGGED. The idempotency key embeds a fingerprint of the
 note text; logging it would put a stable identifier for a specific note body
@@ -48,8 +49,9 @@ import hashlib
 import logging
 
 import redis
-from redis import asyncio as aioredis
+from redis import asyncio as redis_async
 
+from dodeal_ai.core.breaker import breaker_field, operational_breaker
 from dodeal_ai.core.redis import get_operational_client
 
 _logger = logging.getLogger("dodeal_ai.unit_a.state")
@@ -120,24 +122,30 @@ def _attempt_fingerprint_key(tenant: str, lead_id: int, note_id: int) -> str:
     return f"attempt_fp:{tenant}:{lead_id}:{note_id}"
 
 
-def _bypass(code: str, tenant: str, request_id: str) -> None:
+def _bypass(code: str, tenant: str, request_id: str, exc: BaseException) -> None:
     """One WARNING per bypassed call. Tenant and request_id only -- both are
-    identifiers we already log at the gates, neither is note-derived."""
+    identifiers we already log at the gates, neither is note-derived -- plus
+    `breaker: open` when the breaker refused rather than the store failing."""
     _logger.warning(
         code,
-        extra={"reason_code": code, "tenant": tenant, "request_id": request_id},
+        extra={
+            "reason_code": code,
+            "tenant": tenant,
+            "request_id": request_id,
+            **breaker_field(exc),
+        },
     )
 
 
-async def _incr_with_window(client: aioredis.Redis, key: str, ttl: int) -> int:
+async def _incr_with_window(client: redis_async.Redis, key: str, ttl: int) -> int:
     """INCR, then set the window's expiry when the key is NEW or has no TTL.
 
     The `or` short-circuits, so a brand-new key costs one INCR and one EXPIRE
     and never calls TTL. The TTL == -1 branch is audit finding M4 carried over
     to db2: the cost limiter's Lua sets EXPIRE only on create, so a key that
     somehow exists without a TTL never expires. Here that key would pin a
-    user's rate limit -- or a note's attempt count -- forever, silently
-    withholding every future clarification prompt.
+    note's attempt count forever, silently withholding every future
+    clarification prompt. The rate limit's own script carries the same guard.
     """
     count = int(await client.incr(key))
     if count == 1 or int(await client.ttl(key)) == _TTL_NO_EXPIRY:
@@ -168,10 +176,14 @@ async def reserve_idempotency(
     """
     key = _idempotency_key(tenant, note_id, fingerprint)
     try:
-        claimed = await get_operational_client().set(key, _RESERVED, nx=True, ex=ttl)
-    except redis.RedisError:
-        # No key material in the line: the key embeds the fingerprint.
-        _bypass("idempotency_unavailable", tenant, request_id)
+        claimed = await operational_breaker().call(
+            lambda: get_operational_client().set(key, _RESERVED, nx=True, ex=ttl)
+        )
+    except redis.RedisError as exc:
+        # No key material in the line: the key embeds the fingerprint. A breaker
+        # refusal lands here too, and denies for the same reason -- we still
+        # cannot tell whether this judgement has already been done.
+        _bypass("idempotency_unavailable", tenant, request_id, exc)
         raise IdempotencyUnavailableError() from None
     return bool(claimed)
 
@@ -194,12 +206,52 @@ async def release_idempotency(
     """
     key = _idempotency_key(tenant, note_id, fingerprint)
     try:
-        await get_operational_client().delete(key)
-    except redis.RedisError:
-        _bypass("idempotency_release_failed", tenant, request_id)
+        await operational_breaker().call(lambda: get_operational_client().delete(key))
+    except redis.RedisError as exc:
+        _bypass("idempotency_release_failed", tenant, request_id, exc)
 
 
 # --- rate limit: fails OPEN ------------------------------------------------
+
+
+# Take one slot or refuse, in one execution: the check IS the increment. The
+# window is set on creation and on a key with none (audit M4, as in
+# _incr_with_window). ARGV[1] is the limit, ARGV[2] the window.
+_TAKE_RATE_LIMIT_SCRIPT = """
+local count = tonumber(redis.call('GET', KEYS[1]) or '0')
+if count >= tonumber(ARGV[1]) then
+  return {0, count}
+end
+local taken = redis.call('INCR', KEYS[1])
+if taken == 1 or redis.call('TTL', KEYS[1]) == -1 then
+  redis.call('EXPIRE', KEYS[1], ARGV[2])
+end
+return {1, count}
+"""
+
+
+async def take_rate_limit(
+    tenant: str, subject: str, *, limit: int, ttl: int, request_id: str
+) -> tuple[bool, int]:
+    """Claim one prompt against this subject's window, in one round trip.
+
+    The only writer of this counter, called only where a prompt would be sent.
+    Returns (allowed, count BEFORE this call). Fails OPEN at (True, 0).
+    """
+    try:
+        allowed, count = await operational_breaker().call(
+            lambda: get_operational_client().eval(
+                _TAKE_RATE_LIMIT_SCRIPT,
+                1,
+                _rate_limit_key(tenant, subject),
+                limit,
+                ttl,
+            )
+        )
+    except redis.RedisError as exc:
+        _bypass("rate_limit_bypassed", tenant, request_id, exc)
+        return True, 0
+    return bool(allowed), int(count)
 
 
 async def read_rate_limit(tenant: str, subject: str, *, request_id: str) -> int:
@@ -209,31 +261,19 @@ async def read_rate_limit(tenant: str, subject: str, *, request_id: str) -> int:
     note's author_id. The limit exists to stop us pestering one person, and the
     person we would pester is the one making the request.
 
+    READ-ONLY, for a judgement with no question: an exhausted window still
+    reports `rate_limited`, and no slot is taken for a prompt nobody receives.
+
     0 when the store is unreachable (fail open) or the key has expired.
     """
     try:
-        raw = await get_operational_client().get(_rate_limit_key(tenant, subject))
-    except redis.RedisError:
-        _bypass("rate_limit_bypassed", tenant, request_id)
+        raw = await operational_breaker().call(
+            lambda: get_operational_client().get(_rate_limit_key(tenant, subject))
+        )
+    except redis.RedisError as exc:
+        _bypass("rate_limit_bypassed", tenant, request_id, exc)
         return 0
     return int(raw or 0)
-
-
-async def increment_rate_limit(
-    tenant: str, subject: str, *, ttl: int, request_id: str
-) -> None:
-    """Count one clarification prompt against this subject's window.
-
-    Called ONLY when a prompt is actually sent -- never on a judgement that
-    withheld one, and never on a resubmission. A counter that moved on a
-    withheld prompt would rate-limit a user for messages they never received.
-    """
-    try:
-        await _incr_with_window(
-            get_operational_client(), _rate_limit_key(tenant, subject), ttl
-        )
-    except redis.RedisError:
-        _bypass("rate_limit_bypassed", tenant, request_id)
 
 
 # --- attempts: fails OPEN --------------------------------------------------
@@ -247,9 +287,11 @@ async def read_attempts(
     0 when the store is unreachable (fail open) or the key has expired.
     """
     try:
-        raw = await get_operational_client().get(_attempt_key(tenant, lead_id, note_id))
-    except redis.RedisError:
-        _bypass("attempt_counter_bypassed", tenant, request_id)
+        raw = await operational_breaker().call(
+            lambda: get_operational_client().get(_attempt_key(tenant, lead_id, note_id))
+        )
+    except redis.RedisError as exc:
+        _bypass("attempt_counter_bypassed", tenant, request_id, exc)
         return 0
     return int(raw or 0)
 
@@ -260,11 +302,13 @@ async def increment_attempts(
     """Count one clarification prompt against this note. Same rule as the rate
     limit: only when a prompt is actually sent."""
     try:
-        await _incr_with_window(
-            get_operational_client(), _attempt_key(tenant, lead_id, note_id), ttl
+        await operational_breaker().call(
+            lambda: _incr_with_window(
+                get_operational_client(), _attempt_key(tenant, lead_id, note_id), ttl
+            )
         )
-    except redis.RedisError:
-        _bypass("attempt_counter_bypassed", tenant, request_id)
+    except redis.RedisError as exc:
+        _bypass("attempt_counter_bypassed", tenant, request_id, exc)
 
 
 # --- the resubmission reference (register item 33): also fails OPEN --------
@@ -299,14 +343,16 @@ async def write_attempt_fingerprint(
     later request, and losing it costs a null field, never a judgement.
     """
     try:
-        await get_operational_client().set(
-            _attempt_fingerprint_key(tenant, lead_id, note_id),
-            fingerprint,
-            nx=True,
-            ex=ttl,
+        await operational_breaker().call(
+            lambda: get_operational_client().set(
+                _attempt_fingerprint_key(tenant, lead_id, note_id),
+                fingerprint,
+                nx=True,
+                ex=ttl,
+            )
         )
-    except redis.RedisError:
-        _bypass("attempt_counter_bypassed", tenant, request_id)
+    except redis.RedisError as exc:
+        _bypass("attempt_counter_bypassed", tenant, request_id, exc)
 
 
 async def read_attempt_fingerprint(
@@ -321,11 +367,13 @@ async def read_attempt_fingerprint(
     cases, and distinguishing them would leak how long we keep state.
     """
     try:
-        raw = await get_operational_client().get(
-            _attempt_fingerprint_key(tenant, lead_id, note_id)
+        raw = await operational_breaker().call(
+            lambda: get_operational_client().get(
+                _attempt_fingerprint_key(tenant, lead_id, note_id)
+            )
         )
-    except redis.RedisError:
-        _bypass("attempt_counter_bypassed", tenant, request_id)
+    except redis.RedisError as exc:
+        _bypass("attempt_counter_bypassed", tenant, request_id, exc)
         return None
     if raw is None:
         return None
