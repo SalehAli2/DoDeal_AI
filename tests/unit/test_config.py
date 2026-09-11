@@ -70,42 +70,53 @@ def test_dd_api_keys_parses_json_map_of_secrets(monkeypatch):
 
 # --- Redis connection budget (audit H3) -------------------------------------
 
-_REDIS_BUDGET: tuple[tuple[str, str, object], ...] = (
-    ("DODEAL_REDIS_CONNECT_TIMEOUT_SECONDS", "redis_connect_timeout_seconds", 0.25),
-    ("DODEAL_REDIS_SOCKET_TIMEOUT_SECONDS", "redis_socket_timeout_seconds", 1.0),
-    ("DODEAL_REDIS_MAX_CONNECTIONS", "redis_max_connections", 20),
+# (env var, field, default, the type a set value parses to). The pool size's
+# default is None -- unset means "derived from max_inflight" (redis_pool_size) --
+# so its type cannot be read off the default the way the three timeouts' can.
+_REDIS_BUDGET: tuple[tuple[str, str, object, type], ...] = (
+    (
+        "DODEAL_REDIS_CONNECT_TIMEOUT_SECONDS",
+        "redis_connect_timeout_seconds",
+        0.25,
+        float,
+    ),
+    ("DODEAL_REDIS_SOCKET_TIMEOUT_SECONDS", "redis_socket_timeout_seconds", 1.0, float),
+    ("DODEAL_REDIS_MAX_CONNECTIONS", "redis_max_connections", None, int),
     (
         "DODEAL_REDIS_POOL_ACQUIRE_TIMEOUT_SECONDS",
         "redis_pool_acquire_timeout_seconds",
         1.0,
+        float,
     ),
 )
 
 
-@pytest.mark.parametrize(("env_name", "field", "default"), _REDIS_BUDGET)
-def test_the_redis_budget_defaults_are_the_recorded_values(env_name, field, default):
-    """The four provisional numbers a deployment inherits if it sets nothing."""
+@pytest.mark.parametrize(("env_name", "field", "default", "kind"), _REDIS_BUDGET)
+def test_the_redis_budget_defaults_are_the_recorded_values(
+    env_name, field, default, kind
+):
+    """The four provisional values a deployment inherits if it sets nothing."""
     from dodeal_ai.core.config import Settings
 
     assert getattr(Settings(_env_file=None, jwt_signing_key="k"), field) == default
 
 
-@pytest.mark.parametrize(("env_name", "field", "default"), _REDIS_BUDGET)
+@pytest.mark.parametrize(("env_name", "field", "default", "kind"), _REDIS_BUDGET)
 def test_the_redis_budget_round_trips_through_the_environment(
-    monkeypatch, env_name, field, default
+    monkeypatch, env_name, field, default, kind
 ):
     """Sizing Redis must be a deployment change, not a code change."""
     monkeypatch.setenv("DODEAL_JWT_SIGNING_KEY", "test-key-abc")
     monkeypatch.setenv(env_name, "5")
     get_settings.cache_clear()
 
-    assert getattr(get_settings(), field) == type(default)(5)
+    assert getattr(get_settings(), field) == kind(5)
 
 
-@pytest.mark.parametrize(("env_name", "field", "default"), _REDIS_BUDGET)
+@pytest.mark.parametrize(("env_name", "field", "default", "kind"), _REDIS_BUDGET)
 @pytest.mark.parametrize("value", ["0", "-1"])
 def test_a_non_positive_redis_budget_is_refused_at_construction(
-    monkeypatch, env_name, field, default, value
+    monkeypatch, env_name, field, default, kind, value
 ):
     """Zero is not "no limit": a zero timeout can never succeed and a zero pool
     can never hand out a connection, so both read as an outage while being a

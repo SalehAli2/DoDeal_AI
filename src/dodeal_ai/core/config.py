@@ -24,6 +24,11 @@ from pydantic import BaseModel, Field, SecretStr, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic_settings.exceptions import SettingsError
 
+# Connections each Redis pool holds beyond one per admitted request: the /ready
+# pings, which the in-flight cap does not count, plus slack. Not a setting --
+# the pool size itself is, through redis_max_connections below.
+REDIS_POOL_HEADROOM = 4
+
 
 class ConfigError(RuntimeError):
     """Required configuration missing or invalid.
@@ -159,17 +164,22 @@ class Settings(BaseSettings):
     # What one Redis command may take. This is what a Redis outage costs a
     # request before the cost gate fails open.
     redis_socket_timeout_seconds: float = Field(default=1.0, gt=0)
-    # BOUNDED pool. An unbounded one answers a Redis stall by opening more
-    # sockets, turning one slow dependency into fd exhaustion.
-    redis_max_connections: int = Field(default=20, gt=0)
+    # Optional override of each BOUNDED pool's size; read it as redis_pool_size.
+    # Unset = max_inflight + REDIS_POOL_HEADROOM, one per admitted request.
+    # Below max_inflight, load waits on the pool and is refused: 503s at db2.
+    redis_max_connections: int | None = Field(default=None, gt=0)
     # How long a caller waits for a free connection before the pool refuses.
     # Without it, "bounded" would mean "blocks forever at the cap".
     redis_pool_acquire_timeout_seconds: float = Field(default=1.0, gt=0)
 
     # --- Redis circuit breaker (core/breaker.py) ----------------------------
-    # PROVISIONAL, both: consecutive failures that open it, and how long it stays
-    # open before ONE probe. gt=0: zero would open unfailed, or probe every call.
+    # Consecutive store failures that open a connection's breaker. PROVISIONAL:
+    # 5 rides out a blip, then stops paying a dead store's timeout per request.
+    # Too low opens on a blip (db2: 503s for a window); too high pays each timeout.
     breaker_failure_threshold: int = Field(default=5, gt=0)
+    # How long an open breaker refuses before it lets ONE probe through.
+    # PROVISIONAL: 30s spares a dead store without leaving a live one refused long.
+    # Too long is that many seconds of 503s on db2; too short re-probes a dead one.
     breaker_open_seconds: float = Field(default=30.0, gt=0)
 
     # Cost/quota caps (placeholder values; tune to real budgets later).
@@ -211,6 +221,20 @@ class Settings(BaseSettings):
     # resilience, validation, ...). Third-party libraries are unaffected --
     # they stay at the root logger's WARNING default.
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+
+    @property
+    def redis_pool_size(self) -> int:
+        """Connections per Redis pool: the explicit override when one is set,
+        otherwise one per request the in-flight cap admits, plus headroom.
+
+        Derived rather than defaulted, so raising DODEAL_MAX_INFLIGHT raises the
+        pool with it. A fixed pool below the cap is register item 81: requests
+        the app has already admitted queue on the pool and are refused, which is
+        load turning into 503s on a Redis that is perfectly healthy.
+        """
+        if self.redis_max_connections is not None:
+            return self.redis_max_connections
+        return self.max_inflight + REDIS_POOL_HEADROOM
 
 
 def _build_settings(**overrides) -> Settings:

@@ -22,6 +22,11 @@ judgement. Two guards, because there are two ways not to report back:
 A cancelled probe is not COUNTED as a failure, only re-armed like one.
 Cancellation is news about the caller -- a deadline, a disconnect, a shutdown
 -- and never about the store; closing on it would be as wrong as opening on it.
+
+POOL EXHAUSTION IS NOT COUNTED EITHER (register item 81). PoolExhausted is our
+own pool refusing before the store was asked, so a latency spike that queues
+requests on the pool cannot open a breaker on a healthy Redis. It is re-raised
+unchanged, so the caller's policy still applies to that one call.
 """
 
 from __future__ import annotations
@@ -35,6 +40,7 @@ from functools import lru_cache
 import redis
 
 from dodeal_ai.core.config import get_settings
+from dodeal_ai.core.redis import PoolExhausted
 
 _logger = logging.getLogger("dodeal_ai.breaker")
 
@@ -92,15 +98,17 @@ class CircuitBreaker:
         """Run `factory()` under the breaker, or raise BreakerOpen without calling it.
 
         Only a RedisError counts as a failure, and it is re-raised unchanged; a
-        bug in our own code is not evidence about the store. Anything else, a
-        cancellation included, is re-raised unchanged too and moves the breaker
+        bug in our own code is not evidence about the store, and neither is our
+        own pool running out (PoolExhausted, re-raised uncounted). Anything else,
+        a cancellation included, is re-raised unchanged too and moves the breaker
         only when it ends a probe (guard 1 in the module docstring).
         """
         self._admit()
         try:
             result = await factory()
-        except redis.RedisError:
-            self._record_failure()
+        except redis.RedisError as exc:
+            if not isinstance(exc, PoolExhausted):
+                self._record_failure()
             raise
         except BaseException:
             # The probe did not answer the question (cancelled, or failed in

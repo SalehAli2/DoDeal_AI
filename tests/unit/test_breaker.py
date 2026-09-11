@@ -18,6 +18,7 @@ from dodeal_ai.core.breaker import (
     reset_breakers,
 )
 from dodeal_ai.core.config import get_settings
+from dodeal_ai.core.redis import PoolExhausted
 
 THRESHOLD = 3
 OPEN_SECONDS = 30.0
@@ -133,6 +134,56 @@ async def test_a_non_redis_error_neither_counts_nor_clears_the_count(breaker) ->
 
     await _fail(breaker, _Store(fail=True))
     assert breaker.state is BreakerState.OPEN  # ...and not cleared either
+
+
+# --- pool exhaustion is not a store failure (register item 81) --------------
+
+# The default threshold, so "five of them" reads the way the incident would.
+DEFAULT_THRESHOLD = 5
+
+
+@pytest.fixture
+def breaker_at_five(clock: _Clock) -> CircuitBreaker:
+    return CircuitBreaker(
+        "test",
+        failure_threshold=DEFAULT_THRESHOLD,
+        open_seconds=OPEN_SECONDS,
+        clock=clock,
+    )
+
+
+async def test_pool_exhaustion_is_not_counted(breaker_at_five) -> None:
+    """Five refusals from our OWN pool leave it CLOSED with the count at zero.
+    The store was never asked, so a latency spike that queues requests on the
+    pool must not become 30s of 503s on a healthy Redis."""
+
+    async def _exhausted() -> None:
+        raise PoolExhausted()
+
+    for _ in range(DEFAULT_THRESHOLD):
+        with pytest.raises(PoolExhausted):
+            await breaker_at_five.call(_exhausted)
+    assert breaker_at_five.state is BreakerState.CLOSED
+
+    # The count really is zero: it still takes the whole threshold to open it.
+    await _fail(breaker_at_five, _Store(fail=True), DEFAULT_THRESHOLD - 1)
+    assert breaker_at_five.state is BreakerState.CLOSED
+    await _fail(breaker_at_five, _Store(fail=True))
+    assert breaker_at_five.state is BreakerState.OPEN
+
+
+async def test_a_refused_connection_is_counted(breaker_at_five) -> None:
+    """The contrast. A ConnectionError from the socket IS the store talking, and
+    five of them open it -- only the pool's own refusal is excluded."""
+
+    async def _refused() -> None:
+        raise redis.ConnectionError("refused")
+
+    for _ in range(DEFAULT_THRESHOLD):
+        with pytest.raises(redis.ConnectionError):
+            await breaker_at_five.call(_refused)
+
+    assert breaker_at_five.state is BreakerState.OPEN
 
 
 # --- open -------------------------------------------------------------------

@@ -29,6 +29,10 @@ numeric literal in this module, and a test fails the build if one appears: a
 number here would be a second source of truth for a value the deployment is
 supposed to own.
 
+A pool that cannot hand out a connection in time raises PoolExhausted, a
+ConnectionError the breaker does not count (register item 81): our own load is
+not evidence that Redis is down.
+
 The client is created lazily and cached. Creating it does not open a socket and
 does not touch an event loop; the first awaited command does. A liveness check
 (ping) is exposed per connection for the readiness endpoint.
@@ -37,32 +41,72 @@ does not touch an event loop; the first awaited command does. A liveness check
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Any
 
 import redis
 
 # Aliased for readability. NOT the separate, archived PyPI package whose
 # name this used to borrow -- this is redis-py's own asyncio namespace.
 from redis import asyncio as redis_async
+from redis.asyncio.connection import AbstractConnection
 
 from dodeal_ai.core.config import get_settings
 
 
-def _build_pool(url: str) -> redis_async.BlockingConnectionPool:
+class PoolExhausted(redis.ConnectionError):
+    """No free connection in the pool within `redis_pool_acquire_timeout_seconds`.
+
+    A ConnectionError, so every existing RedisError handler keeps its meaning:
+    the reservation still 503s and the money guards still bypass. Only the
+    breaker's COUNT differs (core/breaker.py). The store was never asked, so
+    this is news about our own load and not about Redis, and a burst of them
+    must not open a breaker on a healthy store (register item 81).
+
+    The message is fixed, so no command, key or value can reach it.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("redis connection pool exhausted")
+
+
+class BoundedPool(redis_async.BlockingConnectionPool):
+    """A BlockingConnectionPool whose acquire timeout raises PoolExhausted.
+
+    ONLY THE ACQUIRE is relabelled. redis-py refuses an acquire with a
+    ConnectionError chained from the wait's own TimeoutError. A socket that will
+    not connect fails AFTER the acquire, without that cause, and passes through
+    unchanged -- that one IS evidence about the store, and the breaker counts it.
+    """
+
+    async def get_connection(self, *args: Any, **kwargs: Any) -> AbstractConnection:
+        try:
+            return await super().get_connection(*args, **kwargs)
+        except redis.ConnectionError as exc:
+            if isinstance(exc.__cause__, TimeoutError):
+                raise PoolExhausted() from exc
+            raise
+
+
+def _build_pool(url: str) -> BoundedPool:
     """A bounded pool for `url`, sized entirely from Settings.
 
-    BlockingConnectionPool, not ConnectionPool: at the cap the plain pool RAISES
+    Blocking, not a plain ConnectionPool: at the cap the plain pool RAISES
     immediately, while this one waits up to `redis_pool_acquire_timeout_seconds`
     and only then refuses -- a brief burst queues instead of erroring, and a
     sustained one still fails fast rather than blocking forever.
+
+    Sized by `redis_pool_size`, which by default is one connection per request
+    the in-flight cap admits plus headroom (core/config.py): a pool smaller than
+    the requests that may hold a connection turns ordinary load into refusals.
 
     Constructing a pool opens no socket, so this is safe to call at import-time
     depth and in tests with no Redis running.
     """
     settings = get_settings()
-    return redis_async.BlockingConnectionPool.from_url(
+    return BoundedPool.from_url(
         url,
         decode_responses=True,
-        max_connections=settings.redis_max_connections,
+        max_connections=settings.redis_pool_size,
         timeout=settings.redis_pool_acquire_timeout_seconds,
         socket_connect_timeout=settings.redis_connect_timeout_seconds,
         socket_timeout=settings.redis_socket_timeout_seconds,

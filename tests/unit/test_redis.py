@@ -5,13 +5,16 @@ Redis -- building a pool opens no socket, and the ping tests use a fake."""
 from __future__ import annotations
 
 import ast
+import asyncio
 import pathlib
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import redis
 from redis import asyncio as aioredis
 
 from dodeal_ai.core import redis as redis_module
+from dodeal_ai.core.config import REDIS_POOL_HEADROOM, Settings
 
 _REDIS_MODULE_PATH = pathlib.Path("src/dodeal_ai/core/redis.py")
 
@@ -93,6 +96,7 @@ def test_the_pool_is_bounded_and_sized_from_settings(monkeypatch, factory_name):
 
     pool = getattr(redis_module, factory_name)().connection_pool
 
+    assert isinstance(pool, redis_module.BoundedPool)
     assert isinstance(pool, aioredis.BlockingConnectionPool)
     assert pool.max_connections == 7
     assert pool.timeout == 3.5
@@ -101,13 +105,104 @@ def test_the_pool_is_bounded_and_sized_from_settings(monkeypatch, factory_name):
 
 
 def test_the_defaults_are_the_recorded_provisional_values():
-    """The four defaults a deployment inherits if it configures nothing."""
+    """The four defaults a deployment inherits if it configures nothing. The pool
+    size is DERIVED: the in-flight cap's 32 plus the headroom's 4."""
     pool = redis_module.get_cost_client().connection_pool
 
-    assert pool.max_connections == 20
+    assert pool.max_connections == 36
     assert pool.timeout == 1.0
     assert pool.connection_kwargs["socket_connect_timeout"] == 0.25
     assert pool.connection_kwargs["socket_timeout"] == 1.0
+
+
+# --- the pool is sized from the in-flight cap (register item 81) ------------
+
+
+def test_the_pool_size_is_the_in_flight_cap_plus_headroom():
+    """Unset, the pool holds one connection per request the app admits and then
+    some: a pool of 20 under a cap of 32 was twelve admitted requests queueing on
+    Redis connections instead of on nothing."""
+    settings = Settings(_env_file=None, jwt_signing_key="k")
+
+    assert settings.redis_max_connections is None
+    assert settings.redis_pool_size == 36
+    assert settings.redis_pool_size == settings.max_inflight + REDIS_POOL_HEADROOM
+
+
+def test_the_pool_size_follows_the_in_flight_cap(monkeypatch):
+    """Derived, not defaulted: raising the cap raises the pool without a second
+    setting to remember."""
+    monkeypatch.setenv("DODEAL_MAX_INFLIGHT", "10")
+    from dodeal_ai.core.config import get_settings
+
+    get_settings.cache_clear()
+
+    assert redis_module.get_operational_client().connection_pool.max_connections == 14
+
+
+def test_an_explicit_pool_size_is_honoured():
+    """The override wins as given -- the deployment that sets it owns the number."""
+    settings = Settings(_env_file=None, jwt_signing_key="k", redis_max_connections=50)
+
+    assert settings.redis_pool_size == 50
+
+
+# --- an exhausted pool says so, and only the acquire does -------------------
+
+
+class _NoSocket(aioredis.Connection):
+    """A connection that never opens a socket: the ACQUIRE is under test here,
+    so connecting succeeds by doing nothing."""
+
+    async def connect(self) -> None:
+        return None
+
+    async def can_read(self) -> bool:
+        return False
+
+
+class _Refused(aioredis.Connection):
+    """A connection whose socket will not connect -- the store's own failure."""
+
+    async def connect(self) -> None:
+        raise redis.ConnectionError("refused")
+
+
+def test_pool_exhausted_is_a_connection_error():
+    """So every existing RedisError handler keeps its policy for the one call."""
+    assert issubclass(redis_module.PoolExhausted, redis.ConnectionError)
+
+
+async def test_an_exhausted_pool_raises_pool_exhausted():
+    """Two concurrent acquires on a pool of one: the first holds the connection,
+    and the second is refused by the pool after its wait -- as PoolExhausted."""
+    pool = redis_module.BoundedPool(
+        max_connections=1, timeout=0.01, connection_class=_NoSocket
+    )
+
+    results = await asyncio.gather(
+        pool.get_connection(), pool.get_connection(), return_exceptions=True
+    )
+
+    held = [r for r in results if isinstance(r, aioredis.Connection)]
+    refused = [r for r in results if isinstance(r, BaseException)]
+    assert len(held) == 1
+    assert len(refused) == 1
+    assert isinstance(refused[0], redis_module.PoolExhausted)
+    await pool.release(held[0])
+
+
+async def test_a_socket_that_will_not_connect_is_not_pool_exhaustion():
+    """Only the acquire is relabelled. A refused socket is evidence about the
+    store, so it must reach the breaker as the plain ConnectionError it is."""
+    pool = redis_module.BoundedPool(
+        max_connections=1, timeout=0.01, connection_class=_Refused
+    )
+
+    with pytest.raises(redis.ConnectionError) as caught:
+        await pool.get_connection()
+
+    assert not isinstance(caught.value, redis_module.PoolExhausted)
 
 
 def test_no_number_is_hardcoded_in_the_redis_module():
