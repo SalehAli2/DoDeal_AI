@@ -3512,7 +3512,7 @@ is marked `[V]` (ASSUMPTIONS §8.11).
 
 ---
 
-### N.3 — circuit breaker on Redis; rate limit in one round trip   STATUS: DONE `sha pending`
+### N.3 — circuit breaker on Redis; rate limit in one round trip   STATUS: DONE `3199e3d`
 
 **Suite:** 998 → **1036 passing**, 1 skipped, 7 deselected. Coverage 99.42 % → **99.45 %**. **15** per-file
 floors (one new: `core/breaker.py` at 100). `decide.py` and `limiter.py` at 100, `state.py` at 100
