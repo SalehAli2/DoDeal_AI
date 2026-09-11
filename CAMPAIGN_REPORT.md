@@ -3701,7 +3701,7 @@ only, and no breaker has seen a real outage. Nothing is marked `[V]`.
 
 ---
 
-### N.3b — breaker wedge, pool exhaustion, per-request deadline, reservation release   STATUS: DONE `sha pending` · `sha pending` · `sha pending` · `sha pending`
+### N.3b — breaker wedge, pool exhaustion, per-request deadline, reservation release   STATUS: DONE `73cf893` · `7a8c48c` · `83bc11b` · `8ba3024`
 
 **Suite:** 1036 → **1070 passing**, 1 skipped, 7 deselected. Coverage 99.45 % → **99.47 %**. **15** per-file
 floors, none added. `core/breaker.py`, `pipeline.py` and `state.py` are at 100 %. `core/redis.py` has no floor
@@ -3709,10 +3709,10 @@ and is at 100 % anyway.
 
 | Commit | Register item | Suite after |
 | --- | --- | --- |
-| `sha pending` | 80 — a breaker cannot wedge in HALF_OPEN | 1040 passing, 99.46 % |
-| `sha pending` | 81 — pool exhaustion is not counted; the pool is sized from `max_inflight` | 1048 passing, 99.46 % |
-| `sha pending` | 83 — one deadline per judgement | 1059 passing, 99.47 % |
-| `sha pending` | 82 — the reservation is released on any exit; short in flight, long once judged | 1070 passing, 99.47 % |
+| `73cf893` | 80 — a breaker cannot wedge in HALF_OPEN | 1040 passing, 99.46 % |
+| `7a8c48c` | 81 — pool exhaustion is not counted; the pool is sized from `max_inflight` | 1048 passing, 99.46 % |
+| `83bc11b` | 83 — one deadline per judgement | 1059 passing, 99.47 % |
+| `8ba3024` | 82 — the reservation is released on any exit; short in flight, long once judged | 1070 passing, 99.47 % |
 
 ---
 
