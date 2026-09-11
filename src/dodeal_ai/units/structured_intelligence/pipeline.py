@@ -16,13 +16,15 @@ the step after it costs:
       LeadsClient call is made at all)
   3. too thin, or too long?              -> suppressed, STOP. No reservation,
                                             no model call, nothing spent.
-  4. reserve idempotency                 409 duplicate / 503 unavailable
+  4. reserve idempotency, SHORT          409 duplicate / 503 unavailable
   5. read the attempt count              (fail open)
   6. token pre-flight                    429 token_budget_exceeded
   7. classify, THEN vague + score        three passes, two round-trips
   8. compute, decide -- and the rate     ONE db2 trip, and only when it can
      limit in the same breath            change the answer (fail open)
-  9. increment the attempt counter ONLY if a prompt was actually sent
+  9. confirm the reservation, LONG       the judgement exists (fail open);
+                                         a classifier suppression confirms too
+ 10. increment the attempt counter ONLY if a prompt was actually sent
 
 A PASS IS NOT A CALL. Each of the three passes is one validated model call, and
 a malformed answer buys that pass one reprompt (llm_call.call_model) -- so the
@@ -30,7 +32,7 @@ happy path is three calls and a judgement that reprompted once costs four. The
 pipeline counts passes because passes are what it can see; `reprompt_issued`
 names the pass that needed a second attempt.
 
-WHY 8 IS "classify, THEN the other two" (register item 14). Classification must
+WHY 7 IS "classify, THEN the other two" (register item 14). Classification must
 finish first: the vague template is chosen by type and the applicable components
 are chosen by type, so neither of the other two prompts can even be ASSEMBLED
 until the answer is in. Vague detection and scoring, on the other hand, do not
@@ -45,7 +47,7 @@ raises: the request has already failed, and an abandoned pass whose answer
 comes back malformed would spend a reprompt on a judgement nobody will ever
 receive (register item 63).
 
-WHY THE ATTEMPT COUNTER MOVES LAST, AND ONLY SOMETIMES. Step 9 runs after the
+WHY THE ATTEMPT COUNTER MOVES LAST, AND ONLY SOMETIMES. Step 10 runs after the
 judgement exists and outside the release-on-error block, because by then the
 request has been answered: the note was fetched, three calls were paid for, and
 a decision was made. An unreachable db2 at that moment must not undo any of
@@ -64,16 +66,25 @@ WHY THIS ORDER, at the two places it matters:
   The length gate BEFORE the reservation. A three-word note -- or one longer
   than a tenant will score as a single interaction -- is refused without
   reserving anything, so the salesperson can fix it and resubmit immediately
-  rather than being told 409 for the next 24 hours.
+  rather than being told 409.
 
   The reservation BEFORE any model call. It is the only thing standing between
   a double-submit and paying twice, so it must be claimed before the first
   thing that costs money.
 
-RELEASE ON EVERY NON-200 AFTER RESERVING. If we reserved and then failed for a
-reason of OURS -- the backend went down, the model went down, output would not
-validate -- the caller must be able to retry. Without the release they would
-get 409 for a judgement that never happened.
+RELEASE ON ANY EXIT AFTER RESERVING (register item 82). If we reserved and then
+did not produce the judgement -- the backend went down, the model went down,
+output would not validate, the deadline passed, the client went away, the worker
+is shutting down -- the caller must be able to retry. Without the release they
+would get 409 for a judgement that never happened. The last three of those
+arrive as a CancelledError, which is not an Exception, so the release runs on
+BaseException.
+
+RESERVE SHORT, CONFIRM LONG (register item 82). A worker killed outright runs no
+except and no finally, so the release cannot be the only thing that frees a key.
+The reservation is taken for IDEMPOTENCY_INFLIGHT_MULTIPLIER deadlines, and only
+once the judgement exists is it confirmed for the tenant's long idempotency TTL.
+A hard kill leaves a key that expires in minutes, not a note locked for a day.
 
 ONE DEADLINE PER JUDGEMENT (register item 83). The CRM waits inline (Q16), and
 the per-call budgets alone sum to minutes: two backend reads, three model
@@ -88,6 +99,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from collections.abc import Awaitable
 from dataclasses import dataclass
@@ -150,6 +162,13 @@ PROMPT_SET_VERSION = "unit_a_prompts_v1"
 # pin on a judgement no model touched would make an unspent judgement look
 # like a spent one.
 NO_MODEL = ""
+
+# How many judgement deadlines a reservation lives while its judgement runs.
+# A hard kill leaves the key behind: four deadlines is long enough that the CRM's
+# own retries still meet 409 while the original may be running, and short enough
+# that a killed worker does not lock the note for a day. PROVISIONAL, like the
+# deadline it multiplies; the load lane sets the two together.
+IDEMPOTENCY_INFLIGHT_MULTIPLIER = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -610,7 +629,14 @@ async def _judge(
             scope.tenant,
             request.note_id,
             fingerprint,
-            ttl=config.idempotency_ttl_seconds,
+            # SHORT: the in-flight lifetime. The long one is the confirm's, at
+            # the end of the try below. Rounded UP, never down: a deadline
+            # under a quarter-second would otherwise give EX 0, which Redis
+            # refuses, and a refused reservation is a 503.
+            ttl=math.ceil(
+                deps.settings.judgement_deadline_seconds
+                * IDEMPOTENCY_INFLIGHT_MULTIPLIER
+            ),
             request_id=scope.request_id,
         )
     except state.IdempotencyUnavailableError:
@@ -772,15 +798,36 @@ async def _judge(
                 versions=_versions(config, score_response.model),
                 request_id=scope.request_id,
             )
-    except Exception:
-        # Reserved, then failed: release so the caller can retry instead of
-        # being told 409 for a judgement that never happened.
-        await state.release_idempotency(
-            scope.tenant, request.note_id, fingerprint, request_id=scope.request_id
+
+        # --- step 9: confirm. The judgement exists -- scored, or suppressed by
+        # the classifier -- so the reservation takes the long TTL. INSIDE the
+        # try, so a cancellation that lands during it still releases; BEFORE
+        # the outcome line, so nothing is logged as judged whose key is not
+        # settled. Fails OPEN inside state.py, so it cannot raise into the
+        # release path.
+        await state.confirm_idempotency(
+            scope.tenant,
+            request.note_id,
+            fingerprint,
+            ttl=config.idempotency_ttl_seconds,
+            request_id=scope.request_id,
+        )
+    except BaseException:
+        # Reserved, then did not finish: release so the caller can retry
+        # instead of being told 409 for a judgement that never happened.
+        # BaseException, because CancelledError is not an Exception -- and the
+        # deadline, a client disconnect and a worker shutdown all arrive as
+        # one. The shield keeps the DELETE running though the awaiting task is
+        # already cancelled: a second cancellation, which a shutdown or a
+        # cancel scope delivers, would otherwise kill it on the wire.
+        await asyncio.shield(
+            state.release_idempotency(
+                scope.tenant, request.note_id, fingerprint, request_id=scope.request_id
+            )
         )
         raise
 
-    # --- step 9: the attempt counter, only for a prompt that is actually sent
+    # --- step 10: the attempt counter, only for a prompt that is actually sent
     #
     # OUTSIDE the try, deliberately. The judgement exists: the note was
     # fetched, three calls were paid for, a decision was made. A db2 outage now

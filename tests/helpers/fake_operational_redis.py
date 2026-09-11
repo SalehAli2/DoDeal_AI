@@ -7,8 +7,8 @@ tests inject theirs:
     monkeypatch.setattr(state, "get_operational_client", lambda: fake)
 
 Implements exactly the seven commands units/structured_intelligence/state.py
-issues -- SET (with NX/EX), GET, INCR, TTL, EXPIRE, DELETE and the rate limit's
-EVAL -- and no more. A command the unit does not use is a command whose fake
+issues -- SET (with NX/XX/EX), GET, INCR, TTL, EXPIRE, DELETE and the rate
+limit's EVAL -- and no more. A command the unit does not use is a command whose fake
 semantics nobody has checked against real Redis.
 
 EVAL mirrors the rate-limit script against the same dict and records each call
@@ -61,11 +61,15 @@ class FakeOperationalRedis:
         value: str,
         nx: bool = False,
         ex: int | None = None,
+        xx: bool = False,
     ) -> bool | None:
-        """Returns True when the value was stored, None when NX declined --
-        matching redis-py, whose NX miss is None rather than False."""
+        """Returns True when the value was stored, None when NX or XX declined --
+        matching redis-py, whose miss is None rather than False. XX is the
+        confirm's: it only replaces, and never creates, the key."""
         self._guard("set", name)
         if nx and name in self.store:
+            return None
+        if xx and name not in self.store:
             return None
         self.store[name] = value
         if ex is not None:

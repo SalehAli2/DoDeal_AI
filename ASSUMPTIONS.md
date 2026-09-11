@@ -301,7 +301,7 @@ disagrees.
 | --- | --- |
 | **Attempt key** | `attempt:{tenant}:{lead_id}:{note_id}` — keyed on the note, not the person. The cap is "this note has been asked about once", so two salespeople sharing a lead cannot each spend an attempt on the same note. INCR, `EX` on create and whenever TTL is `-1`. |
 | **Fingerprint** | Hex SHA-256 of the **fetched note text** as UTF-8, with **no normalisation** — no trim, no case fold, no Unicode form change. Normalising would make two genuinely different notes look identical, and the fingerprint is what decides 200 versus 409. |
-| **Reserve and release** | The idempotency key is reserved (`SET NX EX`) **after the fetch and before any model call**, and released (`DEL`, best effort) on **every** non-200 outcome after reservation. So a `model_unavailable` can be retried by the caller without meeting a 409 for work that was never done. |
+| **Reserve, confirm and release** | The idempotency key is reserved (`SET NX EX`) **after the fetch and before any model call**. It has **two lifetimes** (Piece N.3b, register item 82). **While the judgement runs it is short:** four judgement deadlines, **100 s** at the default (§4.7). **Once the judgement exists it is confirmed** (`SET XX EX`, value `done`) for `idempotency_ttl_seconds`, **24 h**. The confirm fails **open**: the key keeps its short TTL, and a later duplicate costs money, never correctness. The key is released (`DEL`, best effort, shielded) on **any** exit that does not produce a judgement, **a cancellation included**, so a `model_unavailable`, a deadline or a disconnect can be retried without meeting a 409 for work that was never done. A worker killed outright releases nothing, so its key expires on the short TTL instead of locking the note for a day. **Both numbers are provisional**, and the load lane sets the multiplier together with the deadline. |
 | **`prompt_withheld`** | `null` when a prompt was sent **and** when the decision was `accept_silent` — there was nothing to withhold. Otherwise one of `resubmission`, `attempt_cap`, `rate_limited`, `nothing_to_ask`, in that fixed precedence. It names why a prompt that *would* have been sent was not. |
 | **Rate limit never 429** | Hitting the clarification rate limit on this route returns **200** with `prompt_withheld: "rate_limited"`, never a 429. The judgement was still produced and is still worth returning; only the question is withheld. A 429 would tell the CRM the request failed when it did not. |
 | **Thin evidence** | `min_note_chars 15`, `min_note_tokens 3`, both applied to the **stripped** text, and **both** must pass — "ok" fails on length, a long run of one repeated word fails on tokens. Whitespace-split, deliberately crude, and identical for Arabic, English and mixed text. Checked **before** any reservation and before any model call, so a thin note costs nothing. |
@@ -519,9 +519,15 @@ Ordered by what they release. Items 4.1–4.3 are the critical path.
   it. Past it the request answers **503 `judgement_deadline_exceeded`**, and the
   call it was waiting on is cancelled rather than left running. The per-call
   timeouts are unchanged.
-- **Provisional.** 25 s is chosen, not measured. It must be **at or below** the
-  CRM's own timeout. Above it, the CRM gives up on requests we go on to finish:
+- **Provisional.** The default is chosen, not measured. It must be **at or
+  below** the CRM's own timeout. Above it, the CRM gives up on requests we go on to finish:
   every paid call is spent, and nobody receives the answer.
+- **The retry half of Q16.** The reservation's in-flight lifetime is a multiple
+  of this deadline (§3.4, "Reserve, confirm and release"). A synchronous CRM
+  retry that arrives while the original is still running meets `409
+  duplicate_request`. A retry after a 503 does not, because every exit that
+  produces no judgement releases the key. Whether the CRM's UI can render that
+  409 is still the open half of the question.
 - **If wrong / when answered:** set `DODEAL_JUDGEMENT_DEADLINE_SECONDS`. No code
   change. The load lane sets it together with `DODEAL_MAX_INFLIGHT`, because the
   deadline is also how long one judgement can hold an in-flight slot.

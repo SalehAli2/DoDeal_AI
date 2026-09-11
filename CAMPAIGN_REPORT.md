@@ -3175,7 +3175,7 @@ non-constant and is named explicitly in the test rather than tolerated by a loos
 
 ---
 
-## Piece N: step 3   STATUS: IN PROGRESS (N.1, N.2 and N.3 done; the M4 TTL fix and policy-per-caller still owed, N.4)
+## Piece N: step 3   STATUS: IN PROGRESS (N.1, N.2, N.3 and N.3b done; the M4 TTL fix and policy-per-caller still owed, N.4)
 
 Step 3 is `enforce_token_cost` and the fail-open pre-flight read. This piece is the ground it stands
 on: the Redis connection has to be bounded and configurable before a second counter starts using it,
@@ -3698,3 +3698,217 @@ All four now use `FakeCostRedis`. The README and CONTRIBUTING sentences that nam
 
 **Nothing in this piece has been verified against a real Redis.** The script ran on `fakeredis[lua]`
 only, and no breaker has seen a real outage. Nothing is marked `[V]`.
+
+---
+
+### N.3b — breaker wedge, pool exhaustion, per-request deadline, reservation release   STATUS: DONE `sha pending` · `sha pending` · `sha pending` · `sha pending`
+
+**Suite:** 1036 → **1070 passing**, 1 skipped, 7 deselected. Coverage 99.45 % → **99.47 %**. **15** per-file
+floors, none added. `core/breaker.py`, `pipeline.py` and `state.py` are at 100 %. `core/redis.py` has no floor
+and is at 100 % anyway.
+
+| Commit | Register item | Suite after |
+| --- | --- | --- |
+| `sha pending` | 80 — a breaker cannot wedge in HALF_OPEN | 1040 passing, 99.46 % |
+| `sha pending` | 81 — pool exhaustion is not counted; the pool is sized from `max_inflight` | 1048 passing, 99.46 % |
+| `sha pending` | 83 — one deadline per judgement | 1059 passing, 99.47 % |
+| `sha pending` | 82 — the reservation is released on any exit; short in flight, long once judged | 1070 passing, 99.47 % |
+
+---
+
+### 80 — the wedge, and why it took two guards
+
+HALF_OPEN refuses everyone but the probe, and only the probe's *result* moved the breaker out of it. The
+only result `call` recognised was a `RedisError`. A probe that was cancelled (the new deadline, a disconnect,
+a shutdown), or that raised anything else, re-raised straight past the one branch that could move the
+state. The breaker was then HALF_OPEN with no probe out and no timer, refusing every call for the life of
+the process. On db2 that is 503 on every judgement.
+
+**Guard 1** is an `except BaseException` branch. When it ends a probe it logs `breaker_probe_abandoned`,
+re-arms the window through `_open()` (which logs `breaker_opened`), and re-raises unchanged. A cancellation is
+*not counted*, only re-armed like a failure. It is news about the caller, never about the store. In CLOSED
+such an exception neither counts nor clears the count, which is what it did before, now pinned by a test.
+
+**Guard 2** is for the probe that never ends at all: a task that is never resumed raises nothing, so no
+`except` can see it. `_admit` stamps `_probe_started` on every entry to HALF_OPEN. A probe older than
+`open_seconds` is taken as abandoned, and the arriving call becomes the probe in its place. Its own success
+closes the breaker.
+
+`core/breaker.py` has exactly two `except ` hits, both in `call`. The module docstring's old
+"every existing `except redis.RedisError`" was reworded so the count means what it says.
+
+---
+
+### 81 — what counts as the store failing
+
+`BlockingConnectionPool` refuses an acquire with `redis.ConnectionError("No connection available.")`
+chained **from the wait's own `TimeoutError`**. That is redis-py 8.1.0, read before writing this. The socket
+connect happens *after* the acquire, in `ensure_connection`, and fails as `redis.TimeoutError` or as a
+`ConnectionError` with no such cause. So `BoundedPool.get_connection` relabels exactly the error whose
+`__cause__` is a builtin `TimeoutError` as `PoolExhausted` and lets everything else through. Two stub
+connection classes that open no socket pin both sides: a pool of one refuses the second of two concurrent
+acquires as `PoolExhausted`, and a socket that will not connect stays a plain `ConnectionError`.
+
+`PoolExhausted` is still a `ConnectionError`, so every caller's policy for that one call is unchanged. The
+reservation still 503s and the money guards still bypass. Only the breaker's count skips it.
+
+`redis_max_connections` became an optional override. `Settings.redis_pool_size` is the override when set,
+otherwise `max_inflight + REDIS_POOL_HEADROOM`. Raising the in-flight cap raises the pool with it.
+
+---
+
+### 83 — the deadline
+
+`judge_note` and `judge_note_direct` each wrap everything after their `time.monotonic()` in
+`asyncio.timeout(deps.settings.judgement_deadline_seconds)`. That puts the fetch route's two backend reads
+inside the deadline, and the timeout **outside** `_judge`. `TimeoutError` becomes `JudgementDeadlineExceeded`
+through one helper, so both routes log the same line. Nothing in `src/` catches `CancelledError` or
+`BaseException` before this piece, and the watchdog converts its own timeouts into `ExternalCallError`, so a
+builtin `TimeoutError` reaching the entry point is the deadline's. The per-call timeouts are untouched, and
+so is `llm_call.py`.
+
+The deadline tests carry an outer `asyncio.wait_for` of 5 s. With the deadline removed they fail on their
+status in 5 s instead of hanging the suite, which is what made the sabotage runnable unattended.
+
+---
+
+### 82 — two lifetimes for one key
+
+**The release** now runs in `except BaseException`, and the `DEL` runs under `asyncio.shield`. The shield is
+not decoration. One cancellation is delivered once, and the awaited release would complete without it. But
+a worker shutdown, or a cancel scope that re-delivers on every await, cancels *again* while the `DEL` is on
+the wire, and that second cancellation kills an unshielded release. The test models exactly that, and
+removing the shield fails it every time rather than intermittently: the fake `delete` suspends once, as a
+real round trip does, and the test cancels a second time at that moment.
+
+**Reserve short, confirm long.** A SIGKILL runs no `except` and no `finally`, so no release can promise the
+key goes. The reservation now lives `ceil(deadline × 4)`. `state.confirm_idempotency` (`SET "done" XX EX`,
+under the breaker, failing open) applies the tenant's long TTL once the judgement exists, inside the try, so a
+cancellation *during* the confirm still releases, and before `_log_outcome`. `XX` means a reservation that
+has already expired is never written back. `"done"` sits beside `_RESERVED = "1"` as the D3 seam, and nothing
+is stored in it.
+
+---
+
+### Sabotage record
+
+Every sabotage was applied by a script that edits one file, runs the named tests, and restores the file
+byte for byte, confirmed each time.
+
+| # | Sabotage | Tests that failed |
+| --- | --- | --- |
+| 1a | delete the `except BaseException` branch in `CircuitBreaker.call` | `test_a_probe_that_raises_our_own_error_re_arms_the_window`, `test_a_cancelled_probe_re_arms_the_window` |
+| 1b | delete the abandoned-probe check in `_admit` (HALF_OPEN always refuses) | `test_a_probe_that_never_returns_is_taken_over_after_a_window` |
+| 2a | remove the `isinstance(exc, PoolExhausted)` exclusion | `test_pool_exhaustion_is_not_counted` |
+| 2b | *(extra)* relabel every `ConnectionError`, not only the acquire | `test_a_socket_that_will_not_connect_is_not_pool_exhaustion` |
+| 3a | remove the `async with asyncio.timeout` from `judge_note` | `test_a_model_that_never_answers_is_stopped_at_the_deadline`, `test_the_fetch_spends_the_same_deadline` |
+| 3b | remove it from `judge_note_direct` | `test_the_direct_route_is_stopped_at_the_same_deadline` |
+| 3c | *(extra)* move the fetch above the deadline | `test_the_fetch_spends_the_same_deadline` |
+| 4a | revert the release to `except Exception` | `test_a_request_cancelled_mid_classify_releases_the_reservation`, `test_a_model_that_never_answers_is_stopped_at_the_deadline`, `test_the_direct_route_is_stopped_at_the_same_deadline` |
+| 4b | remove the `asyncio.shield` | `test_a_request_cancelled_mid_classify_releases_the_reservation` (deterministic, not a flake) |
+| 4c | remove the confirm call | `test_a_judgement_confirms_the_reservation_for_the_long_ttl[discovery]` and `[system_event]`, `test_the_reservation_is_short_while_the_judgement_runs`, `test_a_confirmed_judgement_is_still_a_duplicate`, `test_a_confirm_that_fails_still_returns_the_judgement` |
+| 4d | *(extra)* reserve with the long TTL again | `test_the_reservation_is_short_while_the_judgement_runs`, `test_a_confirm_that_fails_still_returns_the_judgement` |
+| 4e | *(extra)* confirm without `XX` | `test_confirm_uses_xx_and_never_creates_a_key`, `test_a_confirm_that_fails_still_returns_the_judgement` |
+
+---
+
+### What changed
+
+| File | Change |
+| --- | --- |
+| `core/breaker.py` | Guard 1 (`except BaseException` re-arms a probe), guard 2 (`_probe_started`, abandoned-probe takeover), `breaker_probe_abandoned`, and `PoolExhausted` not counted. |
+| `core/redis.py` | `PoolExhausted`, `BoundedPool` (acquire timeout only), `_build_pool` sized by `redis_pool_size`. Still no numeric literal. |
+| `core/config.py` | `REDIS_POOL_HEADROOM`, `redis_max_connections: int \| None`, the `redis_pool_size` property, `judgement_deadline_seconds`. Three-line comments on the four settings touched. |
+| `core/errors.py` | `JudgementDeadlineExceeded` → 503 `judgement_deadline_exceeded`, and nothing else. |
+| `units/.../state.py` | `_CONFIRMED`, `confirm_idempotency`, and the two-lifetimes docstrings. |
+| `units/.../pipeline.py` | The deadline in both entry points and `_deadline_exceeded`. `IDEMPOTENCY_INFLIGHT_MULTIPLIER`, the short reservation, the confirm as step 9, and the shielded release on `BaseException`. The step list and the "WHY 7" heading are renumbered. |
+| `tests/helpers/fake_operational_redis.py` | `SET ... XX`. |
+| `tests/unit/test_breaker.py`, `test_redis.py`, `test_config.py`, `test_dodeal_errors.py`, `test_judgement_pipeline.py`, `test_unit_a_state.py` | The guards listed in the sabotage record, plus the pool-size, deadline-setting and confirm-state tests. |
+| `README.md`, `ASSUMPTIONS.md`, `docs/STATUS.md` | README: the breaker events, the redis and breaker rows, `DODEAL_REDIS_MAX_CONNECTIONS`, `DODEAL_JUDGEMENT_DEADLINE_SECONDS`, the deadline sentence and the 503 in the route contract, and the two lifetimes. ASSUMPTIONS: new §4.7 (Q16) and the "Reserve, confirm and release" row. STATUS: items 80–83 and a Piece N.3b row. |
+
+---
+
+### Disagreements between the brief and the tree
+
+1. **Q16 is not in `ASSUMPTIONS.md`.** It is in `docs/STATUS.md` §6. The brief asked for the deadline "under
+   Q16" in ASSUMPTIONS, so §4.7 was added there, naming Q16 and pointing at STATUS.
+2. **Floors.** The brief lists `pipeline.py` and `state.py` at 100. The tree's floors for both are 95, and
+   `core/breaker.py`'s is 100. No floor was changed, because that is a policy change. Both files are held at
+   100 % measured coverage.
+3. **`int(deadline × 4)` truncates to `EX 0`** for any deadline under 0.25 s, and Redis refuses `EX 0`, which
+   would make every reservation a 503. `math.ceil` gives the same 100 at the default and never 0. The
+   deadline tests run at 0.05 s, so this is not hypothetical in the suite.
+4. **"`redis_pool_size` never below `max_inflight`" and "honours an explicit value" cannot both hold.** The
+   override is honoured as given. The derived size cannot go below the cap. No validator was added: it would
+   refuse to start any environment still carrying the old `DODEAL_REDIS_MAX_CONNECTIONS=20` row.
+5. **README changed in commits 1 and 2** as well as 3 and 4. Without it those commits would have shipped a
+   breaker events table missing a line, and a pool default of 20 that is no longer true.
+6. **Files beyond each commit's list, all required by a change the brief asked for.** `test_config.py`
+   asserted the old default of 20 and read a type off it. `test_dodeal_errors.py` is the taxonomy table the
+   new code belongs in. `fake_operational_redis.py` did not support `XX`.
+7. **`pipeline.py` said "WHY 8 IS classify"** while its own list put classify at 7, drift from N.3's
+   renumbering. It was corrected while adding step 9.
+
+---
+
+### For the lead
+
+1. **Two provisional numbers, and the load lane owns both.** `DODEAL_JUDGEMENT_DEADLINE_SECONDS=25.0` must be
+   at or below the CRM's own timeout (Q16). `IDEMPOTENCY_INFLIGHT_MULTIPLIER=4` is a code constant: while a
+   judgement may still run, a reservation lives four deadlines. The lane sets the deadline together with
+   `DODEAL_MAX_INFLIGHT`, because the deadline is also how long a judgement holds an in-flight slot and a pool
+   connection. Change the multiplier in the same breath or not at all.
+2. **A probe refused by the pool stays HALF_OPEN** until guard 2 takes it over one window later. The brief's
+   code was followed as written: `PoolExhausted` is simply not counted, in any state. So in HALF_OPEN, pool
+   exhaustion still costs one window of refusals, the thing item 81 removes in CLOSED. Handing the probe
+   straight back (OPEN, window already expired) is a two-line change if you want it.
+3. **A late result can be attributed to the wrong probe.** Transitions key on the state, not on which call is
+   the probe. Suppose a probe is taken over by guard 2, then the old probe finally fails or is cancelled while
+   the new one is out: it reopens the breaker for a window, and the new probe's success is ignored. This is
+   strictly better than the wedge it replaces, and needs a probe older than `open_seconds` to happen at all. A
+   probe generation counter closes it. Not built, because it changes `_record_failure` as well.
+4. **One window is left open after the confirm.** The confirm sits inside the try, but step 10 (attempt counter
+   and fingerprint, only when a prompt is sent) sits outside it, as before. A cancellation landing in those two
+   db2 calls leaves the key **confirmed** with no judgement delivered, so the CRM's retry meets 409 for the long
+   TTL. D3 (store and replay the judgement under the key) closes it for good. Moving step 10 inside the try, or
+   the confirm after it, are the cheaper alternatives, and each has its own cost.
+5. **A cancellation during the reservation's own `SET`** propagates before the try, so nothing releases. The
+   key, if the `SET` landed, expires on the short TTL. This is the case "reserve short" exists for.
+6. **An environment built from `.env.example` since N.2 most likely sets `DODEAL_REDIS_MAX_CONNECTIONS=20`.**
+   N.2 added the pool row with the default of the day, and this session cannot read the file to confirm it. An
+   explicit value is honoured, so such an environment keeps a pool of 20 under a cap of 32, and item 81's
+   sizing never reaches it. Comment the row out, as the text below does.
+7. **On db1 one judgement can hold two connections at once.** Vague detection and scoring charge tokens
+   concurrently. The headroom of 4 does not cover `2 × max_inflight` in the worst instant. The pool's 1 s
+   acquire wait absorbs a brief overlap, and a refusal there bypasses a charge rather than failing anything.
+   Worth measuring in the load lane.
+8. **The shield holds a task nobody references.** If the awaiting request is cancelled a second time, the
+   shielded release carries on as a task referenced only through the socket future it is waiting on. That is
+   enough in practice. A module-level set of release tasks would make it explicit.
+9. **`.env.example` is not writable by this session.** Its working copy already has an unstaged modification
+   from outside the session, left untouched and unstaged. Rows to add by hand:
+   ```
+   # One deadline for the whole judgement, fetch included. PROVISIONAL: must be
+   # at or below the CRM's own inline timeout (Q16); above it, the CRM abandons
+   # requests we go on to finish.
+   DODEAL_JUDGEMENT_DEADLINE_SECONDS=25.0
+   # Optional override of the Redis pool size. Unset = DODEAL_MAX_INFLIGHT + 4,
+   # so the pool can never be smaller than the requests that may hold a
+   # connection at once; a value below that turns load into breaker trips.
+   # DODEAL_REDIS_MAX_CONNECTIONS=
+   ```
+   The last line of that text says "breaker trips". After this piece, a pool below the cap turns load into
+   **refusals** (`PoolExhausted`: a 503 at the reservation, a bypass on the money guards) and no longer into
+   breaker trips. Worth rewording when the row is added.
+10. **The known flake fired four times in ten full runs** (`test_elapsed_covers_more_than_any_single_pass`:
+    once on commit 1, once on commit 3, twice on commit 4). Each time it was the only failure, and the single
+    permitted re-run passed. The cause is outside this piece and untouched. On this machine `time.monotonic()`
+    is `GetTickCount64()`, at a resolution of 15.625 ms, so a 20 ms sleep can measure as 15 ms against the
+    test's 20 ms floor. The chain was also red once on this piece's own new code, a nested `with` in
+    `test_breaker.py` (SIM117), fixed before the green run.
+11. **Register items 80–83 could not be located** in any tracked or untracked file, the same gap as 20, 24,
+    25, 27 and 61.
+
+**Nothing in this piece has been verified against a real Redis, a real provider or a real CRM.** The pool
+tests use stub connections that open no socket, the deadline has only ever cancelled `FakeLLM`, and the
+shield has only ever protected a fake `DEL`. Nothing is marked `[V]`.

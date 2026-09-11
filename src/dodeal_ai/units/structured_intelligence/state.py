@@ -27,6 +27,14 @@ enforced rather than remembered:
 
 Do not "simplify" these into one policy. They are three different risks.
 
+THE IDEMPOTENCY KEY HAS TWO LIFETIMES (register item 82). It is RESERVED short,
+for as long as a judgement may still be running, and CONFIRMED long once the
+judgement exists. A worker that is killed outright runs no cleanup, so the short
+reservation is what stops it locking a note for a day. Only the reservation
+fails closed. The confirm fails OPEN (idempotency_confirm_bypassed): a lost
+confirm leaves the short reservation to expire, and a duplicate after that is
+judged again, which costs money but is never wrong.
+
 EVERY call here runs inside `operational_breaker` (core/breaker.py). BreakerOpen
 is a RedisError, so a refusal takes the same branch: the two politeness guards
 bypass, and the reservation still 503s.
@@ -59,6 +67,10 @@ _logger = logging.getLogger("dodeal_ai.unit_a.state")
 # A reservation only has to EXIST; nothing ever reads its value back. A fixed
 # inert byte keeps note-derived content out of the store as well as the log.
 _RESERVED = "1"
+# What a CONFIRMED key holds: as inert as _RESERVED, and different from it, so a
+# Redis console shows which of the two states a key is in. A seam for D3, which
+# will store the judgement itself here instead of this marker.
+_CONFIRMED = "done"
 
 # TTL sentinels redis returns for a key that has no expiry set and for a key
 # that is absent. -1 is the M4 edge: a key that survived without a TTL would
@@ -171,6 +183,10 @@ async def reserve_idempotency(
     win: NX is the atomicity here, and it is a single command, so no script is
     needed.
 
+    `ttl` is the SHORT, in-flight lifetime the pipeline derives from its
+    deadline; confirm_idempotency applies the long one once the judgement
+    exists (the module docstring's two lifetimes).
+
     Raises IdempotencyUnavailableError on any RedisError -- see the module
     docstring for why this one does not fail open.
     """
@@ -197,18 +213,48 @@ async def release_idempotency(
 ) -> None:
     """Drop the reservation. BEST EFFORT: swallows every RedisError.
 
-    Called on every non-200 after a successful reservation, so that a caller
-    whose judgement failed for a reason of ours (the model was down, the
-    backend was down, the output would not validate) can simply retry instead
-    of being told 409 for the next 24 hours. If the release itself fails the
-    reservation just expires on its TTL -- annoying, never wrong -- and raising
-    here would replace the real error with a less useful one.
+    Called on ANY exit after a successful reservation that did not produce a
+    judgement -- a cancellation included -- so that a caller whose judgement
+    failed for a reason of ours (the model was down, the backend was down, the
+    output would not validate, the deadline passed) can simply retry instead of
+    being told 409. If the release itself fails the reservation just expires on
+    its short TTL -- annoying, never wrong -- and raising here would replace the
+    real error with a less useful one.
     """
     key = _idempotency_key(tenant, note_id, fingerprint)
     try:
         await operational_breaker().call(lambda: get_operational_client().delete(key))
     except redis.RedisError as exc:
         _bypass("idempotency_release_failed", tenant, request_id, exc)
+
+
+async def confirm_idempotency(
+    tenant: str,
+    note_id: int,
+    fingerprint: str,
+    *,
+    ttl: int,
+    request_id: str,
+) -> None:
+    """The judgement exists: keep the reservation for the long TTL.
+
+    SET XX EX, so this only ever REPLACES the reservation this request holds and
+    never creates one. A key that has already expired stays gone -- writing it
+    back would lock the note on the strength of a reservation nobody holds.
+
+    FAILS OPEN, with idempotency_confirm_bypassed. The reservation then expires
+    on its short in-flight TTL, and a duplicate arriving after that is judged
+    again: money, never correctness. Failing closed here would throw away a
+    judgement that is already built and paid for.
+    """
+    key = _idempotency_key(tenant, note_id, fingerprint)
+    try:
+        await operational_breaker().call(
+            lambda: get_operational_client().set(key, _CONFIRMED, xx=True, ex=ttl)
+        )
+    except redis.RedisError as exc:
+        # No key material in the line, as for the reservation beside it.
+        _bypass("idempotency_confirm_bypassed", tenant, request_id, exc)
 
 
 # --- rate limit: fails OPEN ------------------------------------------------

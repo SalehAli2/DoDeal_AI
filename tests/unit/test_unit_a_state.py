@@ -11,10 +11,12 @@ import logging
 
 import pytest
 
+from dodeal_ai.core.breaker import operational_breaker
 from dodeal_ai.core.logging_config import JsonFormatter
 from dodeal_ai.units.structured_intelligence import state
 from dodeal_ai.units.structured_intelligence.state import (
     IdempotencyUnavailableError,
+    confirm_idempotency,
     increment_attempts,
     note_fingerprint,
     read_attempt_fingerprint,
@@ -25,6 +27,7 @@ from dodeal_ai.units.structured_intelligence.state import (
     take_rate_limit,
     write_attempt_fingerprint,
 )
+from tests.helpers import breakers
 from tests.helpers.fake_operational_redis import (
     TTL_NO_EXPIRY,
     FakeOperationalRedis,
@@ -236,6 +239,99 @@ async def test_release_swallows_a_redis_error(failing) -> None:
     # real failure with a less useful one.
     await release_idempotency(
         TENANT, NOTE_ID, SENTINEL_FINGERPRINT, request_id=REQUEST_ID
+    )
+
+
+# --- confirm: the long lifetime, once the judgement exists (item 82) -------
+
+# The pipeline's in-flight TTL at the default deadline; IDEM_TTL above is the
+# long one the confirm applies.
+INFLIGHT_TTL = 100
+
+# What the JSON formatter puts on every line; anything else came from extra=.
+_FORMATTER_FIELDS = {"message", "timestamp", "level", "logger"}
+
+
+async def _confirm() -> None:
+    await confirm_idempotency(
+        TENANT, NOTE_ID, SENTINEL_FINGERPRINT, ttl=IDEM_TTL, request_id=REQUEST_ID
+    )
+
+
+async def test_confirm_replaces_the_reservation_with_the_long_ttl(
+    fake: FakeOperationalRedis,
+) -> None:
+    await reserve_idempotency(
+        TENANT, NOTE_ID, SENTINEL_FINGERPRINT, ttl=INFLIGHT_TTL, request_id=REQUEST_ID
+    )
+    [key] = fake.store
+    assert (fake.store[key], fake.ttls[key]) == ("1", INFLIGHT_TTL)
+
+    await _confirm()
+
+    # "done", not "1": the two states are told apart in a console.
+    assert (fake.store[key], fake.ttls[key]) == ("done", IDEM_TTL)
+
+
+async def test_confirm_uses_xx_and_never_creates_a_key(
+    fake: FakeOperationalRedis,
+) -> None:
+    """A reservation that has already expired stays gone. Writing it back would
+    lock the note on a reservation nobody holds."""
+    await _confirm()
+
+    assert fake.store == {}
+    assert [c for c, _ in fake.commands] == ["set"]  # asked, and declined
+
+
+async def test_a_confirmed_key_is_still_a_duplicate(fake: FakeOperationalRedis) -> None:
+    await reserve_idempotency(
+        TENANT, NOTE_ID, SENTINEL_FINGERPRINT, ttl=INFLIGHT_TTL, request_id=REQUEST_ID
+    )
+    await _confirm()
+
+    again = await reserve_idempotency(
+        TENANT, NOTE_ID, SENTINEL_FINGERPRINT, ttl=INFLIGHT_TTL, request_id=REQUEST_ID
+    )
+    assert again is False
+
+
+async def test_confirm_fails_open_with_a_line_of_ids_only(failing, json_log) -> None:
+    """The one idempotency call that does not fail closed: the judgement is
+    already built. Its line names the tenant and the request and nothing else --
+    no key, and no fingerprint inside one."""
+    failing("set")
+
+    await _confirm()  # does not raise
+
+    text = json_log.getvalue()
+    assert SENTINEL_FINGERPRINT not in text
+    assert "idem:" not in text
+    line = _lines(json_log)[-1]
+    assert line["level"] == "WARNING"
+    assert line["message"] == "idempotency_confirm_bypassed"
+    assert set(line) - _FORMATTER_FIELDS == {"reason_code", "tenant", "request_id"}
+    assert (line["reason_code"], line["tenant"], line["request_id"]) == (
+        "idempotency_confirm_bypassed",
+        TENANT,
+        REQUEST_ID,
+    )
+
+
+async def test_an_open_breaker_bypasses_the_confirm_without_asking(
+    fake: FakeOperationalRedis, json_log
+) -> None:
+    """Under the operational breaker like every other call here: refused without
+    a SET, and the same bypass line says so."""
+    await breakers.trip(operational_breaker())
+
+    await _confirm()
+
+    assert fake.commands == []
+    line = _lines(json_log)[-1]
+    assert (line["reason_code"], line["breaker"]) == (
+        "idempotency_confirm_bypassed",
+        "open",
     )
 
 

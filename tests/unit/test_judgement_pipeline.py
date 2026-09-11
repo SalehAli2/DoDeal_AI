@@ -24,6 +24,7 @@ import logging
 import time
 
 import pytest
+import redis
 
 import dodeal_ai.units.structured_intelligence.pipeline as pipeline_module
 from dodeal_ai.core.breaker import operational_breaker
@@ -1054,6 +1055,9 @@ async def test_a_model_that_never_answers_is_stopped_at_the_deadline(
     # The classify call was the one in flight, and it was cancelled -- not
     # abandoned to run on after the 503 had gone out.
     assert (llm.call_count, llm.cancelled) == (1, 1)
+    # Item 82 (b): the deadline arrives as a cancellation, and the reservation
+    # still goes -- so the CRM's retry is judged, not told 409.
+    assert _idem_keys(operational) == []
 
 
 async def test_the_direct_route_is_stopped_at_the_same_deadline(
@@ -1076,6 +1080,7 @@ async def test_the_direct_route_is_stopped_at_the_same_deadline(
 
     _assert_the_deadline_503(caught.value, json_capture)
     assert (llm.call_count, llm.cancelled) == (1, 1)
+    assert _idem_keys(operational) == []  # item 82 (b), on this route too
 
 
 async def test_the_fetch_spends_the_same_deadline(
@@ -1133,6 +1138,156 @@ async def test_a_judgement_inside_its_deadline_is_unaffected(
     messages = _messages(json_capture)
     assert "judgement_completed" in messages
     assert "judgement_deadline_exceeded" not in messages
+
+
+# --- the reservation: released on any exit, short until judged (item 82) ----
+
+LONG_TTL = get_tenant_config("tenant-a").idempotency_ttl_seconds
+
+
+def _idem_keys(operational: FakeOperationalRedis) -> list[str]:
+    return [key for key in operational.store if key.startswith("idem:")]
+
+
+async def _until_the_first_call(llm) -> None:
+    """Run the loop until the classify call is in flight, and no further."""
+    for _ in range(200):
+        await asyncio.sleep(0)
+        if llm.call_count == 1:
+            return
+    raise AssertionError("the classify call was never issued")
+
+
+async def test_a_request_cancelled_mid_classify_releases_the_reservation(
+    leads, operational, monkeypatch
+):
+    """Item 82 (a). A cancellation is a BaseException, so a release that ran on
+    Exception alone left the key behind, and every retry met 409.
+
+    The cancellation lands TWICE here, the second while the release's DELETE is
+    on the wire. A worker shutdown does that, and so does a cancel scope that
+    re-delivers on every await. It is what the shield is for: without it, the
+    second cancellation kills the DELETE in flight and the key survives.
+    """
+    llm = FakeLLM(*_happy_path(), hold_after=0)
+    task = asyncio.create_task(
+        judge_note(
+            _scope(), _request(), resubmission=False, deps=_deps_with(llm, leads)
+        )
+    )
+    await _until_the_first_call(llm)
+    assert len(_idem_keys(operational)) == 1  # reserved, and classify is out
+
+    real_delete = operational.delete
+    delete_sent = asyncio.Event()
+
+    async def _delete_on_the_wire(*names: str) -> int:
+        delete_sent.set()
+        await asyncio.sleep(0)  # the round trip: where the second cancel lands
+        return await real_delete(*names)
+
+    monkeypatch.setattr(operational, "delete", _delete_on_the_wire)
+
+    task.cancel()
+    await asyncio.wait_for(delete_sent.wait(), SAFETY_SECONDS)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await _drain()
+
+    assert _idem_keys(operational) == []
+
+
+async def test_the_reservation_is_short_while_the_judgement_runs(leads, operational):
+    """Item 82 (d). Taken for four deadlines -- 100 s against a 25 s deadline --
+    so a worker killed mid-judgement cannot lock the note for a day."""
+    llm = FakeLLM(*_happy_path(), hold_after=0)
+    task = asyncio.create_task(
+        judge_note(
+            _scope(),
+            _request(),
+            resubmission=False,
+            deps=_with_deadline(llm, leads, 25.0),
+        )
+    )
+    await _until_the_first_call(llm)
+
+    [key] = _idem_keys(operational)
+    assert (operational.store[key], operational.ttls[key]) == ("1", 100)
+
+    llm.released.set()
+    await task
+    assert (operational.store[key], operational.ttls[key]) == ("done", LONG_TTL)
+
+
+@pytest.mark.parametrize("classified", ["discovery", "system_event"])
+async def test_a_judgement_confirms_the_reservation_for_the_long_ttl(
+    classified, leads, operational
+):
+    """Item 82 (c). Once the judgement exists the key holds "done" for the
+    tenant's long TTL -- a classifier suppression exists as much as a score
+    does, so it confirms the same way."""
+    script = (
+        _happy_path(classified)
+        if classified == "discovery"
+        else [_classified(classified)]
+    )
+    judgement = await judge_note(
+        _scope(),
+        _request(),
+        resubmission=False,
+        deps=_deps_with(FakeLLM(*script), leads),
+    )
+    assert (judgement.suppressed is None) is (classified == "discovery")
+
+    [key] = _idem_keys(operational)
+    assert (operational.store[key], operational.ttls[key]) == ("done", LONG_TTL)
+
+
+async def test_a_confirmed_judgement_is_still_a_duplicate(deps, operational):
+    """Item 82 (f), from the other side: the confirm REPLACES the reservation,
+    so the second identical request still meets 409."""
+    await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+    [key] = _idem_keys(operational)
+    assert operational.store[key] == "done"
+
+    with pytest.raises(DuplicateRequestError):
+        await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+
+
+async def test_a_confirm_that_fails_still_returns_the_judgement(
+    leads, operational, json_capture, monkeypatch
+):
+    """Item 82 (e). The judgement is built and paid for, so a store that refuses
+    the confirm costs a log line and a short-lived key -- never the answer."""
+    real_set = operational.set
+
+    async def _refuse_the_confirm(name, value, nx=False, ex=None, xx=False):
+        if xx:
+            raise redis.ConnectionError("confirm refused")
+        return await real_set(name, value, nx=nx, ex=ex, xx=xx)
+
+    monkeypatch.setattr(operational, "set", _refuse_the_confirm)
+
+    judgement = await judge_note(
+        _scope(),
+        _request(),
+        resubmission=False,
+        deps=_with_deadline(FakeLLM(*_happy_path()), leads, 25.0),
+    )
+
+    assert judgement.score is not None and judgement.decision is not None
+    messages = _messages(json_capture)
+    assert "judgement_completed" in messages
+    line = next(
+        x for x in json_capture() if x["message"] == "idempotency_confirm_bypassed"
+    )
+    assert line["reason_code"] == "idempotency_confirm_bypassed"
+    assert (line["tenant"], line["request_id"]) == ("tenant-a", "req-1")
+    # Neither released nor confirmed: left to expire on its in-flight TTL.
+    [key] = _idem_keys(operational)
+    assert (operational.store[key], operational.ttls[key]) == ("1", 100)
 
 
 # --- each pass names its own profile (Piece M, report R17) ------------------
