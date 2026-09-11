@@ -3175,7 +3175,7 @@ non-constant and is named explicitly in the test rather than tolerated by a loos
 
 ---
 
-## Piece N: step 3   STATUS: IN PROGRESS (N.1, N.2, N.3 and N.3b done; the M4 TTL fix and policy-per-caller still owed, N.4)
+## Piece N: step 3   STATUS: IN PROGRESS (N.1, N.2, N.3, N.3b and N.4 done; the M4 TTL fix and policy-per-caller still owed, unscheduled)
 
 Step 3 is `enforce_token_cost` and the fail-open pre-flight read. This piece is the ground it stands
 on: the Redis connection has to be bounded and configurable before a second counter starts using it,
@@ -3912,3 +3912,208 @@ byte for byte, confirmed each time.
 **Nothing in this piece has been verified against a real Redis, a real provider or a real CRM.** The pool
 tests use stub connections that open no socket, the deadline has only ever cancelled `FakeLLM`, and the
 shield has only ever protected a fake `DEL`. Nothing is marked `[V]`.
+
+---
+
+### N.4 — the real-Redis lane   STATUS: DONE `sha pending`
+
+Register item 3, closed, and the lane half of item 29. Tests and docs only: no line of `src/` changed.
+
+**Default run:** 1070 passing, 1 skipped, **28 deselected** (was 7: the `integration` marker's 7 plus this
+lane's 21). Coverage **99.47 %**, unchanged. 15 per-file floors met, none added.
+
+**The lane itself:** `uv run pytest -m redis_real --no-cov` with `DODEAL_REDIS_REAL_URL=redis://localhost:6379/9`,
+against the compose `redis:7-alpine` service, **Redis 7.4.10** (`INFO server`):
+
+```
+============================= 21 passed in 2.20s ==============================
+```
+
+Database 9 held 0 keys before the run and 0 after.
+
+---
+
+### What had only ever run on fakes
+
+| Behaviour | Where it ran before | Real-lane test (`tests/redis_real/`) |
+| --- | --- | --- |
+| Request script: pair moves together; window on create only; M4 | fakeredis[lua] | `test_the_cost_script_moves_both_counters_together`, `test_the_cost_window_is_set_on_create_and_only_on_create`, `test_a_cost_key_without_a_ttl_never_gains_one` |
+| Token script: the same three; namespaces disjoint | fakeredis[lua] (no M4 test anywhere) | `test_the_token_script_moves_both_counters_together`, `test_the_token_window_is_set_on_create_and_only_on_create`, `test_a_token_key_without_a_ttl_never_gains_one`, `test_charging_tokens_leaves_the_request_counters_alone`, `test_counting_a_request_leaves_the_token_counters_alone` |
+| Rate-limit script: `[1, before]` / `[0, count]`; window on create and on TTL −1; concurrency | fakeredis[lua] and a dict copy in `FakeOperationalRedis`; never concurrent | `test_the_rate_script_allows_up_to_the_limit_and_returns_the_count_before`, `test_the_rate_window_is_set_when_the_counter_is_created`, `test_a_rate_key_without_a_ttl_gains_one_on_the_next_slot`, `test_concurrent_slots_are_taken_exactly_up_to_the_limit` |
+| Reservation: `SET NX EX`, `SET XX EX`, `DEL` | `FakeOperationalRedis` (a dict, no clock) | `test_a_reservation_is_claimed_once_and_refused_the_second_time`, `test_concurrent_identical_reservations_have_exactly_one_winner`, `test_a_confirm_on_a_missing_key_creates_nothing`, `test_a_confirm_replaces_the_value_and_the_ttl`, `test_a_release_frees_the_note_for_a_new_reservation` |
+| `BoundedPool` at its cap → `PoolExhausted` | stub connection class, no socket | `test_a_real_pool_at_its_cap_refuses_as_pool_exhausted` |
+| A dead host is a store error, not `PoolExhausted` | stub connection class raising `ConnectionError` | `test_a_dead_host_fails_as_the_store_and_not_as_the_pool` |
+| The breaker opens on a dead host, then refuses without a call | fake clock, synthetic `RedisError` | `test_the_breaker_opens_on_a_dead_host_and_then_refuses_without_a_socket` |
+| A live host keeps it closed and clears the count | fake clock, synthetic success | `test_a_live_host_keeps_the_breaker_closed_and_clears_its_count` |
+
+Each test names its hermetic counterpart in its docstring, or says it has none. The concurrent `EVAL`s, the
+concurrent `SET NX` and the token script's M4 edge have none: fakeredis runs in-process, so nothing there is
+ever concurrent, and no test anywhere had tried M4 on the token script.
+
+---
+
+### How the lane is built
+
+- **Skipped, never failed.** The session fixture skips every test in three cases: `DODEAL_REDIS_REAL_URL`
+  unset (the brief's exact reason text), `PING` failing, or a URL that selects db0, db1 or db2. When `PING`
+  fails, the reason names the error type and never the URL, which may carry a password. The db guard was
+  not asked for. README now says the lane never touches the service's databases, and the guard makes that
+  true by construction.
+- **Marked by path.** A `pytestmark` in `conftest.py` marks nothing, so the conftest carries a
+  `pytest_collection_modifyitems` hook, `tryfirst`, that puts `redis_real` on every item under the directory
+  before the mark plugin deselects. Each module also carries `pytestmark`, because it needs
+  `asyncio(loop_scope="session")` too.
+- **One session loop.** The client is session-scoped, and a `redis.asyncio` connection belongs to the loop
+  that opened it. Every async fixture and test in the lane runs on pytest-asyncio's session loop.
+- **No factory patched.** Clients are built from the URL. `get_cost_client` and `get_operational_client` are
+  never touched, so `tests/test_hermetic_fakes.py` passes unchanged.
+- **Keys.** They use the production spellings, imported from `limiter.py` and `state.py`, under a uuid4 prefix
+  per test. Values are inert: numbers, `_RESERVED`, `_CONFIRMED`, and a fingerprint of 64 zeros. Teardown
+  deletes everything under the prefix with `SCAN`, then scans again and fails the test if anything is left.
+- **Settings' defaults, not the environment.** `Settings.model_construct()` gives the defaults with no env and
+  no `.env` read. The timing assertion in (f) is measured against a connect budget that a local override
+  cannot move, and the session fixture needs no signing key.
+- **TTLs are read, never waited for.** A fresh window reads back as the window itself (Redis rounds TTL to the
+  nearest second). The helper allows one second for a slow round trip.
+
+---
+
+### What a real server showed that the fakes did not
+
+1. **The default suite is not hermetic against a local Redis.** With the compose Redis up, `uv run pytest`
+   fails 42 or 43 tests with `RuntimeError: Event loop is closed`. The count varies with ordering. It fails
+   the same way with `tests/redis_real` ignored, so it is not this piece. Failures by file:
+   - `test_vague.py`: 16
+   - `test_reprompt.py`: 10
+   - `test_classification.py`: 9
+   - `test_scoring.py`: 4
+   - one each in `test_judgement_pipeline.py`, `test_logging_config.py`, `test_log_safety.py`, `test_fake_llm.py`
+
+   These tests drive the pipeline without patching `get_cost_client()`, so the token pre-flight and the
+   charge reach **the real db1**. The `lru_cache`'d client then outlives the event loop that opened its
+   connection. With no Redis on the machine, the connect fails, the gate fails open, and the tests pass,
+   which is why CI (no Redis) and every earlier chain were green. They also write
+   `tokens:tenant:tenant-a` and `tokens:user:tenant-a:42` into the local db1. `test_hermetic_fakes.py`
+   cannot see it: it inspects the patches that exist, not code that reaches a factory nobody patched.
+   CONTRIBUTING's own steps 4 and 6 (`docker compose up -d`, then `uv run pytest`) produce a red suite.
+   Not fixed here: the fix belongs in those test modules or the root conftest.
+2. **A dead host is not always a `ConnectionError`.** On this Windows host, a connect to a closed loopback
+   port outlives the 0.25 s connect budget. redis-py raises `redis.TimeoutError("Timeout connecting to
+   server")`, with no cause, in about 0.25 s. The stub in `test_redis.py` (`_Refused`) models only
+   `ConnectionError`, and so does `test_a_refused_connection_is_counted`. Production is unaffected.
+   `BoundedPool` relabels only a `ConnectionError` caused by a `TimeoutError`, and this one passes through. The
+   breaker counts every `RedisError` that is not `PoolExhausted`, and every caller catches `RedisError`. A
+   firewall that drops rather than refuses gives the same shape on any OS.
+3. **The token script has the M4 edge too.** A token key that exists without a TTL never gains one, exactly
+   like the request key. STATUS already said "the two cost scripts", and now a test shows it.
+4. **Otherwise the fakes agree with the server.** A declined `SET NX` or `XX` is `None`, as
+   `FakeOperationalRedis` claims. TTL answers −1 and −2. Lua replies arrive as lists of ints. redis-py's pool
+   refusal is `ConnectionError` caused by the builtin `TimeoutError`, the chain `BoundedPool` relies on.
+
+---
+
+### Sabotage record
+
+| Check | Result |
+| --- | --- |
+| **The sabotage:** `DODEAL_REDIS_REAL_URL=redis://localhost:56980/9`, a port found free by binding and closing it | `21 skipped in 0.74s`, exit 0. Every reason: `DODEAL_REDIS_REAL_URL is set but PING failed (TimeoutError); the real-Redis lane needs a live server` |
+| Variable unset: `uv run pytest --collect-only -q \| Select-String redis_real` | **0 hits**; `1071/1099 tests collected (28 deselected)` |
+| *(extra)* variable unset, `-m redis_real` | `21 skipped`, reason `DODEAL_REDIS_REAL_URL not set; the real-Redis lane needs a live server` |
+| *(extra)* URL selecting db 2 | `21 skipped`, reason `... selects db2; the real-Redis lane refuses db0 to db2, the service's own stores` |
+| *(extra, outside the tree)* a scratch copy of the conftest beside a module with **no** `pytestmark` | default addopts: `no tests collected (1 deselected)`; `-m redis_real`: `1 test collected`. The path hook alone keeps it out. |
+
+---
+
+### What changed
+
+| File | Change |
+| --- | --- |
+| `tests/redis_real/conftest.py` | New. The path hook, the session client, the db guard, the three skips, `real_redis_url`, `key_prefix`. |
+| `tests/redis_real/test_scripts_real.py` | New. Brief items (a) to (d), 17 tests. |
+| `tests/redis_real/test_pool_and_breaker_real.py` | New. Brief items (e) to (g), 4 tests; (f) is split into the store error and the breaker. |
+| `pyproject.toml` | The `redis_real` marker text only. |
+| `README.md` | "The real-Redis lane" subsection (what it shows, PowerShell and bash commands, db 9, skip rules, hand run). A `tests/redis_real/` file-reference table and a structure-tree line. "The default run is fully hermetic". The stale "nothing carries it yet" bullet replaced. |
+| `CONTRIBUTING.md` | The hermetic bullet names the three Redis lanes. |
+| `docs/STATUS.md` | A Piece N.4 row, and "Register items closed in Piece N.4" (3, 29 lane half). Item 3's "still partial" paragraph resolved. H3 and M4 rows corrected. Suite line. The step 3 rows (build position and sequence). |
+
+---
+
+### Disagreements between the brief and the tree
+
+1. **A CI system exists.** `.github/workflows/ci.yml` runs six checks on every push, on `ubuntu-latest`, with
+   no Redis service. The brief says none exists. `.github/` is untouched, as the brief says, and the lane is
+   not in CI.
+2. **(a) and (b) expected the M4 repair on the request and token scripts.** Neither script has it. M4 is
+   PLANNED, and `test_a_pre_existing_key_without_a_ttl_never_gains_one` pins the current behaviour. Asserting
+   the repair would have turned the lane red on tracked, known behaviour rather than on anything a real server
+   revealed. Both are pinned as they behave today, like the counterpart. Only the rate-limit script repairs
+   a key with no TTL, and (c) asserts that.
+3. **"The whole directory is marked with pytestmark"** cannot be done from `conftest.py`. The directory is
+   marked by a path hook, and each module carries its own `pytestmark`. Both are shown working above.
+4. **(f) expected `redis.ConnectionError`.** On this host it is `redis.TimeoutError` (finding 2). The test
+   asserts `ConnectionError | TimeoutError`, and never `PoolExhausted`.
+5. **(g) "failures 0".** The count is private and no test reads it. (g) shows it through behaviour instead:
+   - one dead-host failure first;
+   - then three live commands;
+   - at a threshold of two, the next failure leaves the breaker CLOSED, which it can do only from 0;
+   - the failure after that opens it.
+6. **STATUS's H3 row had no "not proven on a real server" sentence.** It said "**The breaker is NOT built**",
+   false since N.3 (`3199e3d`), and gave the pool as 20, false since N.3b. Both are corrected, and N.4 added.
+   The status stays **PARTLY DONE**: a host that accepts and then stalls costs `/ready` one 1.0 s socket
+   timeout. That is k8s's default probe timeout itself, not under it. Unmeasured, and the lead's call.
+7. **STATUS listed the M4 TTL fix and policy-per-caller as item 3's remaining work, "— N.4".** This brief closes
+   item 3 with the lane and names neither. Item 3 is marked DONE as briefed. Both are carried explicitly,
+   unscheduled, on the step 3 rows.
+8. **CONTRIBUTING had no "fakeredis / hand-rolled fakes split"** to put a sentence beside: it names only the
+   shared fakes, and README carries the split. The hermetic bullet now names all three lanes once, and its
+   "if a test needs real infrastructure, it doesn't belong here" became "any other real infrastructure".
+9. **The stopping chain is red with the brief's own Redis running** (finding 1). The brief states the invariant
+   as "a default run with no Redis on the machine must stay green". So the commit's chain ran with the
+   compose Redis **stopped**, as CI runs it, and Redis was started again after the commit.
+10. **Item 29 could not be located** in any tracked or untracked file, the same gap as 20, 24, 25, 27, 61 and
+    80–83.
+11. **Left as found:**
+    - `tests/unit/test_cost_lua.py`'s docstring still says of `redis_real` "nothing does yet". The brief says
+      the fakeredis tests stay as they are.
+    - README's structure tree was already stale (it lists `study.py`, deleted in 6a, and omits `tests/eval/`).
+      Only the lane's line was added.
+    - The closing "nothing verified against a real Redis" sentences of N.1–N.3b above are records of those
+      pieces and were left as written. `Select-String "real Redis"` over `docs/` and `README.md` finds only
+      the new lane text.
+
+---
+
+### For the lead
+
+1. **The default suite talks to a local Redis when one is up** (finding 1). This is the piece's real
+   discovery. CI cannot see it, and every developer who follows CONTRIBUTING gets 42–43 red tests and two
+   token counters written to their db1. The fix lives in tests only:
+   - patch `get_cost_client` in those eight modules with `FakeCostRedis`, or
+   - have the root conftest point both factories at a closed port for every test outside `tests/redis_real/`.
+
+   Extending `test_hermetic_fakes.py` to fail on an unpatched pipeline test would stop it coming back.
+2. **The `.env.example` row, exact text** (this session cannot write the file):
+   ```
+   # The real-Redis test lane (pytest -m redis_real). Unset by default: the lane
+   # is skipped, never failed, without it. Use a database the service does not
+   # (db0 to db2 are the queue, cost and operational stores).
+   # DODEAL_REDIS_REAL_URL=redis://localhost:6379/9
+   ```
+3. **CI.** The brief says no CI system exists in the repo, so the lane is a documented hand run until one is
+   chosen. **The tree disagrees**: GitHub Actions runs `.github/workflows/ci.yml`, with no Redis service in it.
+   The lane stays a documented hand run until you decide otherwise. If you want it in CI, the smallest
+   version is a second job with a `services: redis` container and `DODEAL_REDIS_REAL_URL` set. A second job,
+   not a step in `checks`, so the default job stays the hermetic one.
+4. **A dead host can be a `TimeoutError`** (finding 2). The hermetic stubs model only `ConnectionError`. A
+   `_TimedOut` twin of `_Refused` in `test_redis.py`, plus a counted-timeout case in `test_breaker.py`, would
+   pin the other shape without a server.
+5. **The M4 fix now has three tests to change**, one hermetic and two real, and it must cover the token
+   script as well as the request script.
+6. **Two keys this session's default-suite runs wrote to the compose Redis db1** are `tokens:tenant:tenant-a`
+   and `tokens:user:tenant-a:42`. Both are on the 24 h cost window. They were left in place. To remove them
+   now: `docker compose exec redis redis-cli -n 1 del tokens:tenant:tenant-a tokens:user:tenant-a:42`.
+7. **H3's status is yours to close** (disagreement 6).
+
+**What has now met a real server:** the three scripts, the reservation's commands, the pool's refusal and the
+breaker's reaction to a dead host, all by hand, against Redis 7.4.10 on one Windows machine. **Nothing else
+has.** Not a real provider, not a real CRM, not a Redis under load or behind a network. Nothing is marked `[V]`.

@@ -179,6 +179,7 @@ dodeal-ai/
 ├── tests/
 │   ├── helpers/{tokens.py,test_tokens.py}
 │   ├── integration/{fake_backend.py,test_leads_e2e.py}
+│   ├── redis_real/{conftest.py,test_scripts_real.py,test_pool_and_breaker_real.py}
 │   ├── security/
 │   └── unit/
 └── uv.lock
@@ -411,6 +412,16 @@ Excluded from the default test run (see Testing below).
 | `fake_backend.py` | A small FastAPI app standing in for the real backend: serves the confirmed lead/note shapes at the real paths and enforces `DD-API-KEY`, returning 401 without it. Test fixture code, not production code. |
 | `test_leads_e2e.py` | Runs `LeadsClient` through the real `HttpxTransport` (not the mocked transport the hermetic suite uses), wired to `fake_backend.py` via `httpx.ASGITransport` so no real socket, DNS, or TLS is involved. Proves the real HTTP code path end to end: leads parsed, the API key sent, empty notes handled as a valid result, and a malformed response failing closed. |
 
+### `tests/redis_real/`
+
+The real-Redis lane. It is excluded from the default run (see "The real-Redis lane" under Testing below). Each test names its hermetic counterpart in its docstring.
+
+| File | Purpose |
+| --- | --- |
+| `conftest.py` | Marks every test in the directory `redis_real` by path, so a module that forgets its own marker still stays out of the default run. Reads `DODEAL_REDIS_REAL_URL`, builds one `redis.asyncio` client with Settings' default socket timeouts and pings it once. It skips every test when the variable is unset, when `PING` fails (the reason names the error type), or when the URL selects db0, db1 or db2. It gives each test a uuid key prefix and deletes every key under it with `SCAN` on the way out, then checks none are left. The lane runs on one session event loop, because a `redis.asyncio` connection belongs to the loop that opened it. |
+| `test_scripts_real.py` | The three Lua scripts and the reservation, on a real server. It uses the imported scripts, key spellings and stored values, never retyped copies. **Request and token scripts:** both counters move together; the window is set on create and not refreshed; a key without a TTL never gains one (M4, pinned as it behaves today, on both scripts); and neither namespace moves the other. **Rate-limit script:** `[1, count before]` up to the limit and `[0, count]` at it; the window is set on create and repaired on a key with none; and 15 concurrent `EVAL`s against a limit of 10 take exactly 10 slots, each seeing a different count. **Reservation:** `SET NX EX` claims once, and has one winner among ten concurrent claims. `SET XX EX` creates nothing on a missing key and replaces both value and TTL on a held one. `DEL` frees the note for a new claim. |
+| `test_pool_and_breaker_real.py` | A `BoundedPool` of one, holding a real connection, refuses a second acquire as `PoolExhausted`, with redis-py's own cause chain (`ConnectionError` from `TimeoutError`), and recovers once the connection is handed back. A dead host (the lane's host on a port nothing listens on) fails as a store error that is **not** `PoolExhausted`. A breaker at a threshold of two opens on it and then refuses without calling the factory, inside the connect budget. A live host keeps the breaker closed and clears a failure count. |
+
 ## Configuration reference
 
 All configuration is read through `Settings` in `core/config.py`. Every variable uses the `DODEAL_` prefix. The signing key is the only variable with no default.
@@ -458,12 +469,52 @@ All configuration is read through `Settings` in `core/config.py`. Every variable
 ## Testing
 
 - Run the full suite with `uv run pytest`. Coverage runs by default and the build fails if total coverage drops below the floor configured in `pyproject.toml`.
-- The suite is fully hermetic: no test opens a live Redis connection, makes a network call, or calls an LLM. Redis is mocked or faked in every test; the shared fakes in `tests/helpers/` (`FakeCostRedis`, `FakeOperationalRedis`) are the pattern for a new test that needs Redis behavior (`tests/test_hermetic_fakes.py` fails the build on a locally written one), and `fakeredis[lua]` (`tests/unit/test_cost_lua.py`) is the one for a test that needs Redis to actually execute something — Lua included.
+- The default run is fully hermetic: no test opens a live Redis connection, makes a network call, or calls an LLM. Redis is mocked or faked in every test; the shared fakes in `tests/helpers/` (`FakeCostRedis`, `FakeOperationalRedis`) are the pattern for a new test that needs Redis behavior (`tests/test_hermetic_fakes.py` fails the build on a locally written one), and `fakeredis[lua]` (`tests/unit/test_cost_lua.py`) is the one for a test that needs Redis to actually execute something — Lua included.
 - Security-focused tests live under `tests/security/` and exercise the gate chain over HTTP with `TestClient`. Everything else lives under `tests/unit/`.
 - `tests/integration/` is excluded from the default run via a registered `integration` marker (`pyproject.toml`), so it stays out of `uv run pytest` and CI. Run it explicitly with `uv run pytest -m integration --no-cov` (`--no-cov`: the coverage gate is sized for the full hermetic suite, not this handful of tests).
 
-- A `redis_real` marker is registered and excluded from the default run the same way, for a test that needs a **genuine** Redis server rather than a fake. Nothing carries it yet; it exists so the first test that needs a live server does not have to change the default run in order to add itself. Run it with `uv run pytest -m redis_real --no-cov`.
+- `tests/redis_real/` is excluded from the default run the same way, by the `redis_real` marker: it is the third Redis lane, for a test that needs a **genuine** server. See "The real-Redis lane" below.
 - `scripts/real_fetch_check.py` is a separate, manual, non-pytest script for the one real credentialed call to the live backend, used for joint verification with the backend team. It dry-runs against a guaranteed-unreachable fake host by default; the real call requires an explicit `--live` flag. See the script's own docstring for usage.
+
+### The real-Redis lane
+
+The default run exercises Redis on fakes only: the shared fakes in `tests/helpers/`, and `fakeredis[lua]`, which runs real Lua in-process. `tests/redis_real/` runs the same behaviours against a real Redis server, which is the only place they meet a real network, a real clock and real concurrency. It shows the following:
+
+- **The three Lua scripts.**
+  - The request and token counters move together.
+  - Their windows are set on create and never refreshed.
+  - A counter without a TTL never gains one. That is audit M4, pinned as it behaves today.
+  - The two namespaces never touch.
+  - The rate limit takes exactly `limit` slots when its `EVAL`s arrive at once.
+- **The reservation.**
+  - `SET NX EX` has one winner, even among concurrent claims.
+  - `SET XX EX` never creates a key, and replaces value and TTL on a held one.
+  - `DEL` frees the note.
+- **The pool.** A `BoundedPool` at its cap refuses as `PoolExhausted`, through the exact cause chain `BoundedPool` relies on. A dead host fails as a store error that is not `PoolExhausted`: a `ConnectionError`, or a `TimeoutError` where the connect outlives its 0.25 s budget first (a Windows loopback does, and so does a firewall that drops rather than refuses).
+- **The breaker.** It opens on a dead host, then refuses without touching a socket. A live host keeps it closed.
+
+Start Redis, point the lane at database 9, and run it.
+
+PowerShell:
+
+```powershell
+docker compose up -d redis
+$env:DODEAL_REDIS_REAL_URL="redis://localhost:6379/9"
+uv run pytest -m redis_real --no-cov
+```
+
+bash:
+
+```bash
+docker compose up -d redis
+export DODEAL_REDIS_REAL_URL=redis://localhost:6379/9
+uv run pytest -m redis_real --no-cov
+```
+
+- **Database 9** is chosen so the lane never touches db0 to db2, the queue, cost and operational stores the service itself uses. The lane enforces this rather than trusting it: a URL that selects db0, db1 or db2 skips every test. Every key sits under a per-test uuid prefix and is deleted with `SCAN`, never `KEYS`, when the test ends.
+- **Skipped, never failed, without a server.** An unset `DODEAL_REDIS_REAL_URL`, or a server that does not answer `PING`, skips every test, and the reason names the variable (and the error type).
+- **`--no-cov`**, because the coverage gate is sized for the full default run.
+- **A hand run, not part of the default chain.** `uv run pytest` and CI deselect the marker. Run the lane by hand before any milestone that puts a real note through the service. It last ran in Piece N.4, against Redis 7.4.10: 21 passed.
 
 ## Code quality and tooling
 

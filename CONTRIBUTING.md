@@ -66,8 +66,12 @@ matching `.claude/*.local.*`) and which Claude Code merges over the shared file.
   `scripts/verify_wheel.py`. Run them locally too before a push that touches
   packaging or a module with a coverage floor.
 - **Tests must stay hermetic.** No live Redis, network, or LLM calls in the
-  suite — mock/fake them (see the shared fakes in `tests/helpers/` for the
-  pattern). If a test needs real infrastructure, it doesn't belong here.
+  default run — mock/fake them (see the shared fakes in `tests/helpers/` for the
+  pattern). Redis has three lanes: the shared fakes in `tests/helpers/`,
+  `fakeredis[lua]` for a test that needs Redis to execute something, and
+  `tests/redis_real/` (marker `redis_real`, excluded from the default run, run by
+  hand; see README, "The real-Redis lane") for one that needs a genuine server.
+  Any other real infrastructure doesn't belong here.
 - Model calls go through `core/llm/` only. No provider SDK is imported
   anywhere else, and the `LLMClient` Protocol stays one method — routing,
   fallback, breakers and quota grow behind `get_llm_client()`, never onto
