@@ -4645,3 +4645,156 @@ mypy: Success: no issues found in 66 source files
    rather than folded into 76.1's commit.
 
 **Still nothing has met a real provider.** Both fixes are proven on `httpx.MockTransport` and `FakeLLM`.
+
+---
+
+## Piece 76.2: the LLM client built once in lifespan   STATUS: DONE `de0080c`
+
+Register item 84, with the part-2 half of item 76. The seam is now wired end to end: lifespan builds one
+client, `/ready` refuses rotation without it, and the timeout fix from 76.1a is proven against a real socket
+rather than a mock. **The real Groq call is the lead's and has not been made.**
+
+### The headline: 76.1a proven outside a mock, with its counterfactual
+
+`--induce-timeout` stands up a real TCP listener that accepts a connection and never answers, points the
+adapter at it with a dummy key, and sets a 5s watchdog. This is the one measurement `httpx.MockTransport`
+structurally cannot produce, because it does not enforce timeouts at all — its handler simply runs to
+completion, which is why the probe in 76.1a could only demonstrate one of the two orderings.
+
+**At `_HTTP_TIMEOUT_SHARE = 0.9`, as shipped:**
+
+```
+Timeout:     5.0s watchdog
+HTTP budget: 4.50s (_HTTP_TIMEOUT_SHARE=0.9)
+Outcome:     ModelUnavailableError (503 model_unavailable)
+Elapsed:     4.52s
+
+  llm_provider_call_failed fired : True
+    provider  : openai_compatible
+    reason    : unavailable
+    status    : None
+    transient : True
+  judgement_model_unavailable    : True
+    provider_reason    : unavailable
+    provider_transient : True
+    error_type         : OpenAICompatibleError
+```
+
+**The same run with the share reverted to `1.0` — the pre-76.1a state:**
+
+```
+Elapsed:     5.00s
+
+  llm_provider_call_failed fired : False
+  judgement_model_unavailable    : True
+    provider_reason    : <<missing>>
+    provider_transient : <<missing>>
+    error_type         : TimeoutError
+```
+
+Read the two together. At parity the watchdog wins at exactly 5.00s, the adapter's timeout branch never runs,
+and the failure arrives as a bare builtin `TimeoutError` with no provider attached. At 0.9 httpx's timer wins
+at 4.52s, the adapter's branch runs, and the failure arrives as `OpenAICompatibleError` naming the provider
+and carrying `transient`. **This is the defect 76.1a described, reproduced and then closed, on a real
+socket.** It also settles a claim I got wrong twice: at parity the watchdog does not win *sometimes*, it wins
+*every time* — 5.00s on the nose, because its clock starts before `_resolve()` while httpx's read clock starts
+only after connect and send.
+
+**The provider label is `openai_compatible`, not `groq`.** Designed behaviour, reported and not fixed, per the
+brief: `DODEAL_LLM_BASE_URL` is an override here, and an unrecognised base URL is labelled generically because
+a proxy URL's host or path can itself be a credential.
+
+### What landed
+
+1. **`get_llm_client(request)`** reads `app.state.llm` and never builds. Building in the dependency would open
+   a fresh connection pool per request — the exact bug the lifespan exists to prevent — and would re-run the
+   profile sweep on every judgement. `None` is a fail-closed `LLMConfigurationError`. No test switch; the
+   dependency override in tests is signature-agnostic, so no existing override changed.
+
+2. **Lifespan** builds one `httpx.AsyncClient` and one LLM client onto `app.state`, and closes the HTTP client
+   before the two Redis pools — it is the one holding sockets to a third party.
+   - **Permissive when unset**, on the `dd_api_keys` precedent already in this file: `app.state.llm = None`
+     plus one `llm_not_configured` ERROR on `dodeal_ai.startup`, after `configure_logging()` for the same
+     reason as its neighbour. **No LLM config was wired into any test fixture**, as instructed.
+   - **Refuses to start when set and wrong**: no key, no adapter, no model, or a profile that fails the sweep.
+
+3. **The startup profile sweep**, inside `build_llm_client` rather than in lifespan. Putting it there means
+   "a bad profile refuses to start" needs no branch in `main.py` and cannot be forgotten by a second caller.
+   `OpenAICompatibleClient.validate_profile(name)` runs the same `_resolve` a real call runs, so the sweep can
+   never disagree with what a judgement would do.
+
+4. **`/ready` is strict about the model and stays lenient about Redis**, and the asymmetry is the point: the
+   cost gate fails open, so a Redis outage is a state the service serves correctly through, while there is no
+   fail-open path for a missing model — every judgement route 503s. A pod in that state can serve `/health`
+   and nothing that matters, so it must not join rotation. `getattr(..., None)` and not `app.state.llm`,
+   because a missing attribute must read as not-ready rather than AttributeError into a 500.
+
+5. **`scripts/model_smoke.py`**, shaped after `scripts/real_fetch_check.py`: dry run by default against
+   `model-smoke.invalid`, `--live` required for a paid call, a **named exit 1** when the key or provider is
+   absent so it is safe in CI, and `--induce-timeout` above. The note and lead are invented and hardcoded.
+
+### The pool number
+
+`max_inflight (32) × LLM_CALLS_PER_JUDGEMENT (2) = **64** connections`, keepalive set to the same. Sized
+against **passes, not requests**: classify runs alone, then vague and score are gathered, so one judgement can
+hold two connections. A pool of 32 would make the second gathered pass queue for a connection *inside its own
+timeout* — turning a pool wait into a model timeout and a 503, which is the failure mode I retracted in 76.1a
+as not-yet-real. It is real from this commit, and this is the line that answers it.
+
+### The sabotage record
+
+| Sabotage, one line | Tests that failed | Restored |
+| --- | --- | --- |
+| `await app.state.http.aclose()` dropped | `test_the_pooled_client_is_closed_on_shutdown` | yes |
+| Profile sweep iterates `[]` | `test_a_bad_profile_refuses_to_start` | yes |
+| Dependency builds a fresh client instead of reading `app.state` | `test_factory_returns_the_client_lifespan_built`, `test_factory_never_builds_a_client_of_its_own` | yes |
+| `/ready` LLM check behind `if False` | `test_ready_is_503_when_no_client_was_built`, `test_ready_is_503_when_lifespan_never_ran` | yes |
+
+Plus the fifth, which is the piece's headline: `_HTTP_TIMEOUT_SHARE` to `1.0`, run against the real socket,
+reproducing the bare `TimeoutError` at 5.00s. All five restored from byte copies; `diff` empty on all three
+source files.
+
+### The stopping chain at this head
+
+```
+1214 passed, 1 skipped, 28 deselected, 1 warning in 16.51s
+Required test coverage of 92.0% reached. Total coverage: 99.56%
+All 15 coverage floors met.
+ruff check: All checks passed!   ruff format: 144 files already formatted
+mypy: Success: no issues found in 66 source files
+```
+
+### For the lead
+
+1. **The real Groq run is yours.** `DODEAL_JWT_SIGNING_KEY=... uv run python scripts/model_smoke.py --live`
+   with the key in your `.env`. It prints the judgement, the model the provider **reported**, finish reason,
+   tokens in/out, the provider request id, and connect+send+read in ms. **That last number is the first real
+   measurement behind `_HTTP_TIMEOUT_SHARE`, which is still a judgement and not a measurement** — if connect
+   plus send turns out to be a meaningful fraction of the budget on a cold connection, 0.9 is the number to
+   revisit.
+
+2. **No new `Settings` field**, so no `.env.example` row is owed and the 76.1b guard stays green.
+   `LLM_CALLS_PER_JUDGEMENT` is a module constant in `main.py`, as instructed.
+
+3. **The brief said two assertions in `test_health.py` flip; it was five** — the Redis-reporting test is
+   parametrised four ways and the concurrency test is a fifth, and all five reach the real `/ready`. All five
+   now take an `llm_built` fixture that puts a `FakeLLM` on `app.state`. `test_inflight.py` was untouched, as
+   you said. Three new tests were added rather than one: the 503-without-client case, a 503-when-lifespan-
+   never-ran case (a missing attribute must not read as ready), and the configured-and-built case.
+
+4. **`tests/unit/test_llm_seam.py::test_factory_behaviour` was replaced, not edited.** It asserted the old
+   parameterless contract — including `NotImplementedError("llm_provider_not_wired")`, which this piece
+   deletes. Four tests now cover the request-scoped shape. The provider/model config cases it used to own
+   already live on `build_llm_client` in the adapter's own suite.
+
+5. **`.transient` is still recorded and unread**, and the induced-timeout run shows it reaching the outcome
+   line correctly (`provider_transient: True`). No cooldown, counter or breaker was built. Item 20's provider
+   half at A9, as ruled.
+
+6. **The smoke script exercises ONE pass, not a full judgement.** The three-pass pipeline needs Redis for its
+   reservation and counters, and a smoke script that needed a Redis to prove a model call would be testing the
+   wrong thing. `classify` goes through `complete_once`, which is the whole seam. Say the word if you want the
+   full pipeline behind a flag.
+
+**The service has still never called a real provider.** Everything above is `MockTransport`, `FakeLLM`, and
+one local socket that answers nothing.

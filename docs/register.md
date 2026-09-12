@@ -11,7 +11,7 @@ Rules:
 
 Carrying steps, in order (master section 15): N.4b, hand commits (101, `.env.example`), 102, 95, A9a (adapters), A-demo (demo runtime, pre-lane fixes, the load lane 74), A3 (the fix batch), A5 (step 4, the tool layer), A7a, A7b, A6 (step 14), A8 (first real CRM call), A9 (real notes), A10 (metrics), A11 (evaluation), A12 (pilot), A13.
 
-Last updated: 12 September 2026, at `38d60a0`, from master ed3r6.
+Last updated: 12 September 2026, at `de0080c`, from master ed3r6.
 
 ## Items 1 to 13: code, in scope now
 
@@ -99,7 +99,7 @@ Last updated: 12 September 2026, at `38d60a0`, from master ed3r6.
 | 73 | Load shedding: `DODEAL_MAX_INFLIGHT`, immediate 503 `load_shed` | L.2 | DONE | `85aa3e0` |
 | 74 | Load lane: `tests/load/`, `load` marker, scenarios in master 17.1, `tenant-c.json`, a request counter on the fake CRM | A-demo | DECIDED | |
 | 75 | Test that greps `src/` for sync clients, `time.sleep`, `urllib.request` | L.2 | DONE | `85aa3e0` |
-| 76 | Provider adapters: `OpenAICompatibleClient` (Groq, OpenAI) and `GeminiClient`; `LLM_API_KEY`; JSON mode; status and finish-reason mapping; per-provider temperature bound; conformance tests on `MockTransport`; `scripts/model_smoke.py` | A9a | **part 1 DONE** (`OpenAICompatibleClient`, `LLM_API_KEY`, JSON mode, the two maps, the 0-2 bound, conformance on `MockTransport`); part 2 (lifespan wiring, `/ready`, `scripts/model_smoke.py`, the live Groq run) and part 3 (`GeminiClient`) OPEN | 38d60a0 |
+| 76 | Provider adapters: `OpenAICompatibleClient` (Groq, OpenAI) and `GeminiClient`; `LLM_API_KEY`; JSON mode; status and finish-reason mapping; per-provider temperature bound; conformance tests on `MockTransport`; `scripts/model_smoke.py` | A9a | **parts 1 and 2 DONE** (`OpenAICompatibleClient`, `LLM_API_KEY`, JSON mode, the two maps, the 0-2 bound, conformance on `MockTransport`; lifespan wiring, `/ready`, `scripts/model_smoke.py`). **The live Groq run is owed by the lead**; part 3 (`GeminiClient`) OPEN | 38d60a0 |
 | 77 | Model profiles: `profile` keyword on `complete`; `core/llm/profiles.py`; `LLM_PROFILES` | M | DONE | `b263c8b` |
 | 78 | Demo runtime: `DODEAL_BACKEND_SCHEME`, `.env.demo`, `scripts/mint_demo_token.py`, compose Redis | A-demo | DECIDED | |
 | 79 | Fake CRM (other repo): a note-save endpoint that calls us; a request counter; a minimal display; `tenant-c` served | A-demo | DECIDED | |
@@ -112,7 +112,7 @@ Last updated: 12 September 2026, at `38d60a0`, from master ed3r6.
 | 81 | `PoolExhausted` excluded from the breaker count; pool sized `max_inflight + 4` | N.3b | DONE | `7a8c48c` |
 | 82 | Reservation released on `BaseException` under `asyncio.shield`; short in-flight TTL; confirmed to 24 h once judged | N.3b | DONE | `8ba3024` |
 | 83 | One `asyncio.timeout` per judgement, fetch included; 503 `judgement_deadline_exceeded` | N.3b | DONE | `83bc11b` |
-| 84 | Build the LLM client once in `lifespan`; fail startup on `ConfigError`; `/ready` fails closed without it | A9a, with 76 | OPEN | |
+| 84 | Build the LLM client once in `lifespan`; fail startup on `ConfigError`; `/ready` fails closed without it | A9a, with 76 | **DONE** (permissive startup, strict readiness; the profile sweep folded in) | de0080c |
 | 85 | Preload all nine prompt templates at startup; a missing file fails startup | A9a, with 76 | OPEN | |
 | 86 | Rewrite `RequestIDMiddleware` and `InflightMiddleware` as pure ASGI | A-demo, before 74 | OPEN | |
 | 87 | Pure-ASGI body-size limit, outermost, 64 kB, 413 above it, before Gate 1 | A-demo, before 74 | OPEN | |
