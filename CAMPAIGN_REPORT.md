@@ -4550,3 +4550,98 @@ core/llm/openai_compatible.py: 85 statements, 0 missed, 100%
 
 **Nothing in this piece has met a real provider.** No key exists, no call has been placed, and nothing is
 marked `[V]`. The adapter is proven against `httpx.MockTransport` and against nothing else.
+
+---
+
+## Piece 76.1a: the timeout race and the provider reason on the outcome line   STATUS: DONE `13ffdf9`
+
+Two defects found by reviewing 76.1's own explainer rather than by a test failing. Both were claims I made in
+that explainer; **checking them found one overstated and one understated**, and the understated one was a real
+defect in code that had just been committed. No register item — the lead adds items, not a session — so two
+are owed below.
+
+### What I claimed, and what checking it found
+
+**Claim: "a 429 and a 500 are indistinguishable in the logs." Overstated — it was already false.**
+`safe_error_fields` includes `str(exc)` for exceptions defined under `dodeal_ai`, and `OpenAICompatibleError`'s
+`str()` is the seam's fixed `llm_provider_error:<reason>`. So `judgement_model_unavailable` already carried
+`error: llm_provider_error:rate_limited`. The reason was there; it was in a string rather than a field.
+
+**Claim: "the two timers race, so about half of timeouts lose their provider attribution." Understated.**
+The watchdog's clock starts in `call_with_watchdog` before `_resolve()` and `_body()`. httpx's `read` clock
+starts only after connect and send. With both set to the same `llm_timeout_seconds`, **the watchdog's deadline
+always arrives first** — so the adapter's `except httpx.TimeoutException` branch was effectively dead code in
+production, and *every* provider timeout arrived as a bare `TimeoutError` with no provider name and without the
+adapter's own `llm_provider_call_failed` line ever firing. Not half. All of them.
+
+A probe forcing the watchdog to win confirmed the outcome: `cause type: TimeoutError`, `provider attr: <<NONE>>`,
+`adapter logged llm_provider_call_failed: False`. (The probe cannot demonstrate the *other* ordering, because
+`httpx.MockTransport` does not enforce timeouts at all — the handler's `asyncio.sleep` runs to completion
+regardless of what `httpx.Timeout` says. The good ordering is covered instead by
+`test_timeout_is_the_transient_seam_error_never_a_builtin`, which raises `httpx.ReadTimeout` from the handler.)
+
+### The two fixes
+
+1. **`_HTTP_TIMEOUT_SHARE = 0.9` in the adapter.** The HTTP call now gets a strict share of
+   `llm_timeout_seconds` rather than all of it, so httpx's timer fires first despite starting later, and the
+   failure arrives as `OpenAICompatibleError` with `.provider` set. **A share, not a subtraction**, so the
+   margin can never go negative or to zero however small the timeout is configured — a fixed `- 2.0` would
+   invert at `DODEAL_LLM_TIMEOUT_SECONDS=1.0`. `llm_timeout_seconds` stays the true outer bound; the watchdog
+   still enforces it, and is now a backstop for anything hanging *outside* the HTTP call rather than a
+   competitor to it.
+
+2. **`provider_reason` and `provider_transient` on `judgement_model_unavailable`.** The reason is promoted out
+   of the `error` string into fields of its own, so a dashboard can count rate limits without parsing; and
+   `transient` — which until now was set on every branch of `_status_error` and **read by nothing anywhere in
+   the service** — is recorded for the first time. Guarded by `isinstance(exc.cause, LLMProviderError)`, so a
+   transport error does not grow an invented reason. The seam's two attributes only: `provider` and `status`
+   live on the adapter's subclass, and reaching for them from `units/` would mean importing a provider into the
+   unit.
+
+`reason_code` stays `model_unavailable` and the caller still gets one 503 for every provider failure. **No
+behaviour changed** — this is attribution, not policy. Retrying a 429 remains forbidden.
+
+### The sabotage record
+
+| Sabotage, one line | Tests that failed | Restored |
+| --- | --- | --- |
+| `_HTTP_TIMEOUT_SHARE` back to `1.0` (parity, the bug) | `test_http_timeout_is_strictly_inside_the_watchdog_deadline` (2), `test_http_budget_scales_with_the_configured_timeout` (2), `test_the_share_leaves_a_real_margin` | yes |
+| `isinstance(exc.cause, LLMProviderError)` to `if False` | `test_the_outcome_line_carries_the_provider_reason_as_a_field` (3, one per reason) | yes |
+
+Both files restored from byte copies; `diff` against the copies is empty.
+
+### The stopping chain at this head
+
+```
+1197 passed, 1 skipped, 28 deselected, 1 warning in 15.30s
+Required test coverage of 92.0% reached. Total coverage: 99.56%
+All 15 coverage floors met.
+ruff check: All checks passed!   ruff format: 142 files already formatted
+mypy: Success: no issues found in 66 source files
+```
+
+### For the lead
+
+1. **Two register items are owed** (a session does not add them):
+   - *The HTTP budget is a strict share of the watchdog deadline, so a provider timeout keeps its attribution.*
+   - *The provider reason and transience are structured fields on the outcome line.*
+
+2. **`0.9` is a judgement, not a measurement.** At a 60s timeout it hands the HTTP call 54s and leaves a 6s
+   margin, which is far more than the milliseconds the race actually needs — the margin has to cover connect
+   and send, which is why it is proportional rather than tiny. If you would rather spend less of the budget,
+   the number is one constant with a comment above it. What must not change is that it stays strictly below 1.
+
+3. **`.transient` is now *recorded* but still not *acted on*.** Nothing branches on it, and under the
+   never-retry rule nothing should retry on it. The open question is whether a sustained run of
+   `provider_reason=rate_limited` should trip something — a cooldown in the shape of `core/breaker.py` — or
+   whether that is deliberately left to the provider's own backoff. **That is a design decision, not a bug**,
+   and it is the one thing here I have not resolved.
+
+4. **`test_classification.py` gained the tests for fix 2**, because it is where the provider-failure path is
+   already driven; there is no `tests/unit/test_llm_call.py` in this tree.
+
+5. **This is a second code commit in the session that built 76.1**, which `CLAUDE.md` says should have been two
+   prompts. You asked for the fixes directly, so it was built as its own piece with its own commit and backfill
+   rather than folded into 76.1's commit.
+
+**Still nothing has met a real provider.** Both fixes are proven on `httpx.MockTransport` and `FakeLLM`.
