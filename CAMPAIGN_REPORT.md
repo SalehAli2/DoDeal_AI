@@ -4798,3 +4798,115 @@ mypy: Success: no issues found in 66 source files
 
 **The service has still never called a real provider.** Everything above is `MockTransport`, `FakeLLM`, and
 one local socket that answers nothing.
+
+---
+
+## Piece 103b: the default run is hermetic against `.env`   STATUS: DONE `b263175`
+
+Register item 115, the lead's, closed. The `.env` half of the job Piece 103 did for Redis. Tests and docs
+only; no line of `src/` changed, and `_build_settings(**overrides)` keeps its signature — it is the correct
+seam and was never the defect.
+
+### How it was found, which matters more than what it was
+
+Nobody looked for this. The lead configured `.env` to make the live Groq call that Piece 76.2 exists to
+enable, and six tests went red. **The suite had been green only for people who had not configured a `.env`**,
+and that had been true for the whole campaign.
+
+Two of the six — `test_dd_api_keys_parses_json_map_of_secrets` and
+`test_backend_keys_missing_logs_error_when_map_is_empty` — touch no LLM code at all and break on
+`DODEAL_DD_API_KEYS` alone. They predate item 76 entirely. The other four arrived with 76.2 and share the
+cause.
+
+### `monkeypatch.setenv` could never have fixed it
+
+This is the part worth keeping. The obvious reading is "the environment beats the file, so a test that sets
+what it needs is safe." That is true for scalars and **false for dict fields**: pydantic-settings *merges*
+complex values across sources. `test_dd_api_keys_parses_json_map_of_secrets` sets `DODEAL_DD_API_KEYS`
+explicitly, which is the strongest thing a test can do, and still received:
+
+```
+AssertionError: assert {'localtenant', 't1', 't2'} == {'t1', 't2'}
+  Extra items in the left set: 'localtenant'
+```
+
+The file contaminated a setting the test had set by hand. No amount of `setenv` defends that — the file has
+to leave the source list entirely, which is why the fix is `env_file = None` and not a fixture that sets
+variables.
+
+### What landed
+
+1. **`_no_dotenv` in the root conftest**, session-scoped and autouse, clearing `Settings.model_config
+   ["env_file"]` for the run and restoring it after. The same shape and the same placement as
+   `_closed_redis_urls`, which points both Redis URLs at a closed port for the same reason: an ambient
+   dependency that must not decide whether the suite passes.
+
+2. **Four guard tests in `tests/test_hermetic_fakes.py`**, because 103's lesson was that the property gets
+   asserted, not assumed:
+   - the fixture's own property (`env_file is None`), so deleting the fixture fails *here* with a sentence
+     rather than somewhere downstream on whoever's machine has a `.env`;
+   - the real defect reproduced — a populated `.env` written into a temp CWD, since `env_file=".env"`
+     resolves against the working directory, so this is the actual situation and not an approximation;
+   - **the dict-merge case**, the half `setenv` could not defend;
+   - that `_build_settings(_env_file=...)` still reads a file somebody *asked* for. A fixture that broke
+     that seam would have traded one silent failure mode for another.
+
+3. **The false claim corrected in two places.** The root conftest's opening line —
+   *"no test may depend on a local .env"* — was an intention, not a fact, and now says so. `README.md`'s
+   "fully hermetic" paragraph claimed Redis hermeticity and said nothing about `.env`; it now carries both.
+
+### The two runs, as asked
+
+| Run | `.env` | Result |
+| --- | --- | --- |
+| A | the lead's populated one, present | **1218 passed**, 1 skipped, 28 deselected |
+| B | no `.env` anywhere | **1218 passed**, 1 skipped, 28 deselected |
+
+Identical. Run B was not produced by renaming the lead's file — if anything had crashed mid-run that would
+have left their working setup broken. It is a full copy of the tree **including `.git`**, with every `.env*`
+excluded except `.env.example`, run from that copy's own directory. Both earlier attempts at Run B were
+discarded as invalid rather than reported: running from a different working directory broke 15 tests that use
+repo-relative paths, and a copy without `.git` broke the seven in `test_assumption_markers.py`, which shells
+out to `git grep`. Neither difference was about `.env`, so neither number would have meant anything.
+
+(Coverage reads 0.00% in Run B because the editable install resolves `dodeal_ai` to the original `src/`, so
+the copy's own `src/` is never imported. The test counts are what that run is evidence for.)
+
+### The sabotage record
+
+| Sabotage, one line | Tests that failed | Restored |
+| --- | --- | --- |
+| `env_file` put back to `".env"` in `_no_dotenv` | `test_env_file_is_cut_out_of_settings_for_the_whole_session`, `test_a_dotenv_in_the_working_directory_cannot_reach_settings`, `test_a_dict_setting_is_not_merged_from_a_dotenv` | yes |
+
+Restored from a byte copy; `diff` empty.
+
+### The stopping chain at this head
+
+```
+1218 passed, 1 skipped, 28 deselected, 1 warning in 17.32s
+Required test coverage of 92.0% reached. Total coverage: 99.56%
+All 15 coverage floors met.
+ruff check (tracked files): All checks passed!   ruff format: 130 files already formatted
+mypy: Success: no issues found in 66 source files
+```
+
+### For the lead
+
+1. **`ruff check .` is red on an untracked `probe.py` at the repo root, which is not mine and not this
+   piece's.** One import-sort fix, or one `.gitignore` row — ruff honours `.gitignore`, so the still-owed
+   `docs: ignore scratch files` commit would cover it along with `n1.diff`, `n3.diff`, `n3b.diff`,
+   `docs/audit/` and `docs/campaign/`. **That commit has been owed since the first Phase 0 of this session.**
+   Ruff over every tracked file is clean.
+
+2. **Register item 115 is written into `docs/register.md` on your say-so** ("new register item 115, which I
+   am adding"). If you meant to add the row yourself, delete mine — a session does not add items, and this
+   one is in only because you authored it in the brief.
+
+3. **The `redis_real` lane is untouched** and still reads `os.environ` directly, so `DODEAL_REDIS_REAL_URL`
+   works exactly as before. `_no_dotenv` changes only what `Settings` treats as a source.
+
+4. **This makes CI and local agree for the first time.** CI has no `.env`, so it was always running the Run B
+   configuration; local developers with a configured `.env` were running something else. The gap was invisible
+   because the two populations never compared numbers.
+
+5. **Nothing here touched a provider.** 76.2a is unstashed and committed separately on this green tree.

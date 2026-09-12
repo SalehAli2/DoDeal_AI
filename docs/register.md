@@ -11,7 +11,7 @@ Rules:
 
 Carrying steps, in order (master section 15): N.4b, hand commits (101, `.env.example`), 102, 95, A9a (adapters), A-demo (demo runtime, pre-lane fixes, the load lane 74), A3 (the fix batch), A5 (step 4, the tool layer), A7a, A7b, A6 (step 14), A8 (first real CRM call), A9 (real notes), A10 (metrics), A11 (evaluation), A12 (pilot), A13.
 
-Last updated: 12 September 2026, at `de0080c`, from master ed3r6.
+Last updated: 12 September 2026, at `b263175`, from master ed3r6.
 
 ## Items 1 to 13: code, in scope now
 
@@ -113,6 +113,7 @@ Last updated: 12 September 2026, at `de0080c`, from master ed3r6.
 | 82 | Reservation released on `BaseException` under `asyncio.shield`; short in-flight TTL; confirmed to 24 h once judged | N.3b | DONE | `8ba3024` |
 | 83 | One `asyncio.timeout` per judgement, fetch included; 503 `judgement_deadline_exceeded` | N.3b | DONE | `83bc11b` |
 | 84 | Build the LLM client once in `lifespan`; fail startup on `ConfigError`; `/ready` fails closed without it | A9a, with 76 | **DONE** (permissive startup, strict readiness; the profile sweep folded in) | de0080c |
+| 115 | The default run is hermetic against a populated `.env`, exactly as 103 made it hermetic against a running Redis | 103b | **DONE** | b263175 |
 | 85 | Preload all nine prompt templates at startup; a missing file fails startup | A9a, with 76 | OPEN | |
 | 86 | Rewrite `RequestIDMiddleware` and `InflightMiddleware` as pure ASGI | A-demo, before 74 | OPEN | |
 | 87 | Pure-ASGI body-size limit, outermost, 64 kB, 413 above it, before Gate 1 | A-demo, before 74 | OPEN | |
