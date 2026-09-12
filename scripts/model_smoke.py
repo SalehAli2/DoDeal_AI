@@ -199,12 +199,6 @@ async def _run_induced_timeout() -> int:
     loop = asyncio.get_running_loop()
     server = loop.run_in_executor(None, hole.serve_forever)
 
-    capture = _Capture()
-    logger = logging.getLogger("dodeal_ai")
-    logger.addHandler(capture)
-    original_level = logger.level
-    logger.setLevel(logging.DEBUG)
-
     try:
         base = get_settings()
         settings = base.model_copy(
@@ -225,17 +219,22 @@ async def _run_induced_timeout() -> int:
         )
         print()
 
-        async with httpx.AsyncClient() as http:
-            client = build_llm_client(settings, http)
-            started = time.monotonic()
-            outcome = "NO EXCEPTION -- that is a defect"
-            try:
-                await classify(
-                    client, _note(), _lead(), scope=_scope(), settings=settings
-                )
-            except ModelUnavailableError as exc:
-                outcome = f"{type(exc).__name__} ({exc.http_status} {exc.reason_code})"
-            elapsed = time.monotonic() - started
+        # _capturing() is a SYNC context manager and cannot join an `async
+        # with`; nesting keeps the client closed on every path anyway.
+        with _capturing() as capture:
+            async with httpx.AsyncClient() as http:
+                client = build_llm_client(settings, http)
+                started = time.monotonic()
+                outcome = "NO EXCEPTION -- that is a defect"
+                try:
+                    await classify(
+                        client, _note(), _lead(), scope=_scope(), settings=settings
+                    )
+                except ModelUnavailableError as exc:
+                    outcome = (
+                        f"{type(exc).__name__} ({exc.http_status} {exc.reason_code})"
+                    )
+                elapsed = time.monotonic() - started
 
         print(f"Outcome:     {outcome}")
         print(f"Elapsed:     {elapsed:.2f}s")
@@ -243,10 +242,87 @@ async def _run_induced_timeout() -> int:
         _report_timeout_evidence(capture)
         return 0
     finally:
-        logger.removeHandler(capture)
-        logger.setLevel(original_level)
         hole.close()
         await server
+
+
+@contextlib.contextmanager
+def _capturing():
+    """Hold every `dodeal_ai` record for the duration of a call.
+
+    The adapter already logs reason_code, provider, status and transient at the
+    moment of failure (openai_compatible.py::_error). Before this, the script
+    threw that away and printed three things to go and check by hand. Capturing
+    is all that was needed -- nothing new is computed here.
+    """
+    capture = _Capture()
+    logger = logging.getLogger("dodeal_ai")
+    original = logger.level
+    logger.addHandler(capture)
+    logger.setLevel(logging.DEBUG)
+    try:
+        yield capture
+    finally:
+        logger.removeHandler(capture)
+        logger.setLevel(original)
+
+
+# What each status means for the NEXT action, one line each. Keyed on the
+# status the provider actually returned, so the script names one thing to fix
+# rather than a list to work through.
+_STATUS_HINTS: dict[int, str] = {
+    400: "The request body was rejected. The adapter built it; nothing to change in your env.",
+    401: "The key was not accepted. Check DODEAL_LLM_API_KEY is current and for this provider.",
+    403: "The key was understood but not allowed. Check its scope/project, not its spelling.",
+    404: "The MODEL ID was not found. Check DODEAL_LLM_MODEL against the provider's list.",
+    429: "Rate limited or out of quota. Wait, or check the account's limits. Never retried.",
+}
+
+
+def _status_hint(status: object) -> str:
+    if isinstance(status, int):
+        if status in _STATUS_HINTS:
+            return _STATUS_HINTS[status]
+        if status >= 500:
+            return "The provider failed, not the request. Check its status page and retry later."
+    return (
+        "No status: the call never got an answer (timeout, DNS, or connection refused)."
+    )
+
+
+def _report_provider_failure(capture: _Capture) -> None:
+    """The four fields the adapter already recorded, and one next action.
+
+    `<<missing>>` rather than a blank, so a field that is absent reads as a
+    fact about the failure instead of as a formatting gap. Still no body, no
+    header, no URL and no key -- that rule is the adapter's and this does not
+    relax it.
+    """
+    adapter = capture.find("llm_provider_call_failed")
+    if adapter is None:
+        print(
+            "  (the adapter logged no llm_provider_call_failed line, so this "
+            "failed before the request went out -- a config or profile refusal)",
+            file=sys.stderr,
+        )
+        return
+
+    status = getattr(adapter, "status", "<<missing>>")
+    print(
+        f"  reason_code : {getattr(adapter, 'reason_code', '<<missing>>')}",
+        file=sys.stderr,
+    )
+    print(f"  status      : {status}", file=sys.stderr)
+    print(
+        f"  provider    : {getattr(adapter, 'provider', '<<missing>>')}",
+        file=sys.stderr,
+    )
+    print(
+        f"  transient   : {getattr(adapter, 'transient', '<<missing>>')}",
+        file=sys.stderr,
+    )
+    print(file=sys.stderr)
+    print(f"  {_status_hint(status)}", file=sys.stderr)
 
 
 def _report_timeout_evidence(capture: _Capture) -> None:
@@ -328,29 +404,31 @@ async def _run_call(settings: Settings, live: bool) -> int:
         # Connect + send, measured separately: the first real number behind
         # _HTTP_TIMEOUT_SHARE, which is a judgement and not a measurement.
         connect_started = time.monotonic()
-        try:
-            started = time.monotonic()
-            parsed, response = await classify(
-                client, _note(), _lead(), scope=_scope(), settings=settings
-            )
-            elapsed_ms = int((time.monotonic() - started) * 1000)
-        except ModelUnavailableError as exc:
-            if not live:
-                print(
-                    f"{type(exc).__name__} ({exc.reason_code}) -- EXPECTED in dry "
-                    "run: the host is deliberately unresolvable. The request and "
-                    "error-handling path ran correctly. Pass --live for the real "
-                    "call."
+        with _capturing() as capture:
+            try:
+                started = time.monotonic()
+                parsed, response = await classify(
+                    client, _note(), _lead(), scope=_scope(), settings=settings
                 )
-                return 0
-            print(f"FAILED: {type(exc).__name__} ({exc.reason_code})", file=sys.stderr)
-            print(
-                "Check DODEAL_LLM_API_KEY, the model id, and the provider's "
-                "status page. Nothing about the failure is printed here; the "
-                "adapter logs the provider and status and never the body.",
-                file=sys.stderr,
-            )
-            return 1
+                elapsed_ms = int((time.monotonic() - started) * 1000)
+            except ModelUnavailableError as exc:
+                if not live:
+                    print(
+                        f"{type(exc).__name__} ({exc.reason_code}) -- EXPECTED in "
+                        "dry run: the host is deliberately unresolvable. The "
+                        "request and error-handling path ran correctly. Pass "
+                        "--live for the real call."
+                    )
+                    print()
+                    _report_provider_failure(capture)
+                    return 0
+                print(
+                    f"FAILED: {type(exc).__name__} ({exc.reason_code})",
+                    file=sys.stderr,
+                )
+                print(file=sys.stderr)
+                _report_provider_failure(capture)
+                return 1
 
     print(f"OK: one pass ({PROFILE_UNIT_A_CLASSIFY}) in {elapsed_ms} ms")
     print(f"  note_type        : {parsed.note_type}")
