@@ -34,6 +34,7 @@ from dodeal_ai.core.llm.client import (
     LLMProviderError,
 )
 from dodeal_ai.core.llm.openai_compatible import (
+    _HTTP_TIMEOUT_SHARE,
     BASE_URLS,
     GROQ_BASE_URL,
     OPENAI_BASE_URL,
@@ -294,6 +295,50 @@ async def test_prompt_is_one_user_message_in_stable_variable_tail_order(
         < content.index(PROMPT.variable)
         < content.index(PROMPT.tail)
     )
+
+
+# --- the HTTP budget sits inside the watchdog deadline ----------------------
+
+
+@BOTH_URLS
+async def test_http_timeout_is_strictly_inside_the_watchdog_deadline(
+    monkeypatch: pytest.MonkeyPatch, base_url: str
+) -> None:
+    """httpx must give up BEFORE the watchdog, or the failure loses its provider.
+
+    At parity the watchdog always won -- its clock starts before _resolve(),
+    httpx's read clock only after connect and send -- so the adapter's timeout
+    branch never ran in production and every timeout arrived as a bare
+    TimeoutError with no provider attached.
+    """
+    settings = _settings(monkeypatch, TIMEOUT_SECONDS="60.0")
+    recorder = Recorder(httpx.Response(200, json=_ok_body()))
+    await _call(settings, base_url, recorder)
+    sent = recorder.requests[0].extensions["timeout"]
+    assert sent["read"] < settings.llm_timeout_seconds
+    assert sent["read"] == pytest.approx(60.0 * _HTTP_TIMEOUT_SHARE)
+    # Every phase, not just read: a hang during connect or while waiting on the
+    # pool has to lose the same race.
+    assert sorted(sent) == ["connect", "pool", "read", "write"]
+    for phase, value in sent.items():
+        assert value == pytest.approx(60.0 * _HTTP_TIMEOUT_SHARE), phase
+
+
+@BOTH_URLS
+async def test_http_budget_scales_with_the_configured_timeout(
+    monkeypatch: pytest.MonkeyPatch, base_url: str
+) -> None:
+    """A share, not a subtraction: the margin can never go negative or to zero."""
+    settings = _settings(monkeypatch, TIMEOUT_SECONDS="0.5")
+    recorder = Recorder(httpx.Response(200, json=_ok_body()))
+    await _call(settings, base_url, recorder)
+    sent = recorder.requests[0].extensions["timeout"]
+    assert 0 < sent["read"] < 0.5
+
+
+def test_the_share_leaves_a_real_margin() -> None:
+    """Fail closed if anyone edits the share to parity or past it."""
+    assert 0 < _HTTP_TIMEOUT_SHARE < 1
 
 
 # --- the key ----------------------------------------------------------------

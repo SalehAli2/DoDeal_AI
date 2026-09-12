@@ -21,6 +21,8 @@ Three things are being pinned here, and they are different kinds of claim.
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from dodeal_ai.core.config import get_settings
@@ -205,6 +207,50 @@ async def test_a_provider_failure_leaks_no_provider_text(caplog):
         )
 
     assert NOTE_TEXT not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("reason", "transient"),
+    [
+        (LLMErrorReason.RATE_LIMITED, True),
+        (LLMErrorReason.UNAVAILABLE, True),
+        (LLMErrorReason.AUTH, False),
+    ],
+)
+async def test_the_outcome_line_carries_the_provider_reason_as_a_field(
+    caplog, reason, transient
+):
+    """Every provider failure is one 503, but they are not the same incident.
+
+    The reason already rode along inside `error` as part of the fixed message.
+    These are fields of their own so a dashboard can count rate limits without
+    parsing a string -- and `transient` was recorded nowhere at all before.
+    """
+    client = FakeLLM(LLMProviderError(reason, transient=transient))
+    with caplog.at_level(logging.WARNING), pytest.raises(ModelUnavailableError):
+        await classify(
+            client, _note(), _lead(), scope=TEST_SCOPE, settings=get_settings()
+        )
+
+    line = next(r for r in caplog.records if r.message == "judgement_model_unavailable")
+    assert line.provider_reason == reason.value
+    assert line.provider_transient is transient
+    # The outcome code is what the caller was told and does not change with it.
+    assert line.reason_code == "model_unavailable"
+
+
+async def test_a_foreign_failure_adds_no_provider_fields(caplog):
+    """Only an LLMProviderError has a reason; a transport error must not grow
+    an invented one."""
+    client = FakeLLM(RuntimeError("something else entirely"))
+    with caplog.at_level(logging.WARNING), pytest.raises(ModelUnavailableError):
+        await classify(
+            client, _note(), _lead(), scope=TEST_SCOPE, settings=get_settings()
+        )
+
+    line = next(r for r in caplog.records if r.message == "judgement_model_unavailable")
+    assert not hasattr(line, "provider_reason")
+    assert not hasattr(line, "provider_transient")
 
 
 # --- the two stops ----------------------------------------------------------

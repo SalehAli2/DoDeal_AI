@@ -59,7 +59,7 @@ from dodeal_ai.core.config import Settings
 from dodeal_ai.core.context import TenantScope
 from dodeal_ai.core.cost.limiter import enforce_token_cost
 from dodeal_ai.core.errors import MalformedOutputError, ModelUnavailableError
-from dodeal_ai.core.llm import FinishReason, LLMClient, LLMResponse
+from dodeal_ai.core.llm import FinishReason, LLMClient, LLMProviderError, LLMResponse
 from dodeal_ai.core.log_safety import safe_error_fields
 from dodeal_ai.core.prompting import AssembledPrompt, with_tail
 from dodeal_ai.core.resilience import ExternalCallError, call_with_watchdog
@@ -166,14 +166,20 @@ async def complete_once(
         # safe_error_fields keeps the message of OUR exceptions and drops the
         # message of foreign ones; the cause here is usually LLMProviderError,
         # whose str() is a fixed reason code by construction.
-        _logger.warning(
-            "judgement_model_unavailable",
-            extra={
-                "reason_code": "model_unavailable",
-                "label": label,
-                **safe_error_fields(exc.cause),
-            },
-        )
+        fields: dict[str, object] = {
+            "reason_code": "model_unavailable",
+            "label": label,
+            **safe_error_fields(exc.cause),
+        }
+        if isinstance(exc.cause, LLMProviderError):
+            # The reason already rides along inside `error` as part of the fixed
+            # message. Promoted to fields of their own so a dashboard can COUNT
+            # rate limits without parsing a string, and because `transient` is
+            # otherwise recorded nowhere at all. The seam's own two attributes
+            # only: a provider name would mean importing a provider here.
+            fields["provider_reason"] = exc.cause.reason.value
+            fields["provider_transient"] = exc.cause.transient
+        _logger.warning("judgement_model_unavailable", extra=fields)
         raise ModelUnavailableError() from None
 
     # No usage reported means nothing to charge and nothing to say about it: a

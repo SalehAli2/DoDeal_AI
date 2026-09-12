@@ -68,6 +68,14 @@ UNKNOWN_PROVIDER_NAME: Final = "openai_compatible"
 
 _COMPLETIONS_PATH: Final = "/chat/completions"
 
+# THE HTTP BUDGET, as a share of the watchdog deadline that wraps this call.
+# Strictly less than 1 so httpx's own timer fires FIRST and the failure arrives
+# as OpenAICompatibleError with a provider name; at parity the watchdog always
+# won -- its clock starts before _resolve(), httpx's read clock only after
+# connect and send -- so the branch below was dead and every timeout lost its
+# attribution. Too low wastes budget; at 1.0 the attribution is lost again.
+_HTTP_TIMEOUT_SHARE: Final = 0.9
+
 # THE TEMPERATURE BOUND for this API family. OpenAI and Groq both accept 0-2,
 # where Anthropic accepts 0-1 -- so the bound belongs to the adapter and not to
 # the shared ModelProfile field. Enforced at resolution, before any paid call.
@@ -171,7 +179,7 @@ class OpenAICompatibleClient:
                 f"{self._base_url}{_COMPLETIONS_PATH}",
                 json=payload,
                 headers=self._headers(),
-                timeout=httpx.Timeout(self._settings.llm_timeout_seconds),
+                timeout=httpx.Timeout(self._http_timeout_seconds()),
             )
         except httpx.TimeoutException:
             # Catch-list 55: a timeout leaves here as the seam's transient
@@ -192,6 +200,15 @@ class OpenAICompatibleClient:
         if response.status_code != httpx.codes.OK:
             raise self._status_error(response.status_code)
         return self._parse(response)
+
+    def _http_timeout_seconds(self) -> float:
+        """The HTTP budget: inside the watchdog deadline, never equal to it.
+
+        `llm_timeout_seconds` stays the true outer bound -- the watchdog still
+        enforces it -- and the HTTP call is given a strict fraction of it so it
+        gives up first and we learn WHICH provider was slow.
+        """
+        return self._settings.llm_timeout_seconds * _HTTP_TIMEOUT_SHARE
 
     # --- resolution ---------------------------------------------------------
 
