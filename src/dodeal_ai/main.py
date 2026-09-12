@@ -2,12 +2,14 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+import httpx
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from dodeal_ai.api.routes import _probe, judgements
-from dodeal_ai.core.config import ConfigError, get_settings
+from dodeal_ai.core.config import ConfigError, Settings, get_settings
 from dodeal_ai.core.errors import register_error_handlers
+from dodeal_ai.core.llm import build_llm_client
 from dodeal_ai.core.logging_config import configure_logging
 from dodeal_ai.core.redis import (
     check_cost_redis_ready,
@@ -17,6 +19,22 @@ from dodeal_ai.core.redis import (
 )
 from dodeal_ai.middleware.inflight import InflightMiddleware
 from dodeal_ai.middleware.request_id import RequestIDMiddleware
+
+# Model calls one judgement can have in flight AT ONCE: classify runs alone,
+# then vague and score are gathered (units/structured_intelligence/pipeline.py).
+# Sized against PASSES and not requests -- a pool of max_inflight would make the
+# second gathered pass queue for a connection INSIDE its own timeout, turning a
+# pool wait into a model timeout and a 503.
+LLM_CALLS_PER_JUDGEMENT = 2
+
+
+def _llm_limits(settings: Settings) -> httpx.Limits:
+    """Pool bounds derived from max_inflight, the way core/redis.py derives its
+    own from the same number. Keepalive is set to the full pool because every
+    connection goes to ONE host: a capped keepalive would make the pool
+    re-handshake TLS under exactly the load it was widened for."""
+    ceiling = settings.max_inflight * LLM_CALLS_PER_JUDGEMENT
+    return httpx.Limits(max_connections=ceiling, max_keepalive_connections=ceiling)
 
 
 @asynccontextmanager
@@ -35,7 +53,30 @@ async def lifespan(app: FastAPI):
         # JSON lines every other startup event uses. The loudest line in the
         # file was the one least likely to be seen.
         logging.getLogger("dodeal_ai.startup").error("backend_keys_missing count=0")
+
+    # ONE pooled client for every model call in the process. Built even when no
+    # provider is configured: constructing it opens no socket, and closing it
+    # unconditionally below keeps shutdown symmetrical -- the same argument the
+    # Redis aclose() calls are made on.
+    app.state.http = httpx.AsyncClient(limits=_llm_limits(settings))
+    if settings.llm_provider is None:
+        # PERMISSIVE, for the same reason as backend_keys_missing above and in
+        # the same shape: no provider is provisioned yet (Step 0), and a service
+        # that refuses to start cannot serve /health, /ready or the gate chain.
+        # /ready answers 503 while this is None, so the pod starts and stays OUT
+        # of rotation rather than joining it and 500ing every judgement.
+        app.state.llm = None
+        logging.getLogger("dodeal_ai.startup").error("llm_not_configured")
+    else:
+        # Provider SET and anything else wrong -- no key, a provider with no
+        # adapter, a profile that fails the sweep -- is a genuine ConfigError
+        # and refuses to start. Somebody meant to configure this and got it
+        # wrong; that is not a state to serve traffic in (item 84).
+        app.state.llm = build_llm_client(settings, app.state.http)
     yield
+    # The model pool first, before the Redis pools: it is the one holding
+    # sockets to a third party, and a client left unclosed leaks them.
+    await app.state.http.aclose()
     # Release the connection pools on shutdown. Building a client opens no
     # socket, so constructing one here only to close it costs nothing, and
     # closing unconditionally keeps shutdown symmetrical whether or not the app
@@ -80,11 +121,20 @@ register_error_handlers(app)
 
 
 @app.get("/ready")
-async def ready():
+async def ready(request: Request):
     try:
         get_settings()
     except ConfigError:
         return JSONResponse(status_code=503, content={"status": "not ready"})
+    # STRICT, unlike the Redis fields below, and deliberately unlike them. There
+    # is no fail-open path for a missing model: every judgement route 503s
+    # without a client, so a pod in this state can serve /health and nothing
+    # that matters. Answering 200 would put it in rotation to fail every
+    # request, which is the defect item 84 exists to close.
+    if getattr(request.app.state, "llm", None) is None:
+        return JSONResponse(
+            status_code=503, content={"status": "not ready", "llm": "not configured"}
+        )
     # Redis down does NOT take the pod out of rotation: the cost gate fails
     # OPEN on a Redis outage (core/cost/limiter.py), so the service still
     # serves requests correctly without it. Report the degraded state in the
@@ -105,6 +155,7 @@ async def ready():
     )
     return {
         "status": "ready",
+        "llm": "ok",
         "redis": "ok" if cost_ready else "degraded",
         "operational": "ok" if operational_ready else "degraded",
     }

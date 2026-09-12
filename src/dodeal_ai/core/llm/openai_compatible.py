@@ -212,6 +212,17 @@ class OpenAICompatibleClient:
 
     # --- resolution ---------------------------------------------------------
 
+    def validate_profile(self, profile: str) -> None:
+        """Run resolution's guards for `profile` and throw the answer away.
+
+        The startup sweep (main.py, item 84) so a bad temperature or a
+        cross-vendor profile refuses to START, rather than 503ing the first
+        judgement that happens to name it -- which could be days later and on
+        one task only. Same code path as a real call, so the sweep cannot
+        disagree with what a call would do.
+        """
+        self._resolve(profile)
+
     def _resolve(self, profile: str) -> ResolvedProfile:
         """The profile table's answer, checked against what THIS API accepts.
 

@@ -9,8 +9,23 @@ from fastapi.testclient import TestClient
 from dodeal_ai.core import redis as redis_module
 from dodeal_ai.core.config import ConfigError, get_settings
 from dodeal_ai.main import app
+from tests.helpers.fake_llm import FakeLLM
 
 client = TestClient(app)
+
+
+@pytest.fixture
+def llm_built():
+    """A client on app.state, the way lifespan leaves one.
+
+    TestClient(app) at module scope does NOT run the lifespan, so app.state has
+    no `llm` at all by default -- which is the unconfigured state, and /ready is
+    strict about it. Every test below that is about REDIS reporting has to say
+    the model half is fine first, or it is only ever re-testing the 503.
+    """
+    app.state.llm = FakeLLM()
+    yield
+    app.state.llm = None
 
 
 def _probe_result(*, pings: bool):
@@ -50,7 +65,12 @@ def test_ready_returns_503_when_config_missing(monkeypatch):
     ],
 )
 def test_ready_reports_each_connection_independently(
-    monkeypatch, cost_pings, operational_pings, expected_redis, expected_operational
+    llm_built,
+    monkeypatch,
+    cost_pings,
+    operational_pings,
+    expected_redis,
+    expected_operational,
 ):
     """All four combinations, because the two fields are the whole point: a
     healthy cost store and a dead idempotency store must not read as "Redis ok".
@@ -77,13 +97,14 @@ def test_ready_reports_each_connection_independently(
     assert response.status_code == 200
     assert response.json() == {
         "status": "ready",
+        "llm": "ok",
         "redis": expected_redis,
         "operational": expected_operational,
     }
     get_settings.cache_clear()
 
 
-def test_ready_probes_both_connections_concurrently(monkeypatch):
+def test_ready_probes_both_connections_concurrently(llm_built, monkeypatch):
     """Two slow probes cost ONE probe's time, not two.
 
     The number that matters operationally: an orchestrator's readiness
@@ -123,3 +144,61 @@ def test_ready_probes_both_connections_concurrently(monkeypatch):
     # above the 0.2s a concurrent one does: this asserts the SHAPE, not a
     # latency budget, so a slow CI runner cannot make it flaky.
     assert elapsed < delay * 1.8
+
+
+# --- the model half of readiness (item 84) ----------------------------------
+
+
+def test_ready_is_503_when_no_client_was_built(monkeypatch):
+    """THE DEFECT ITEM 84 CLOSES. A pod with no model client can serve /health
+    and nothing that matters; answering 200 puts it in rotation to 503 every
+    judgement it is then sent. Strict here, deliberately unlike the Redis
+    fields, because there is no fail-open path for a missing model."""
+    monkeypatch.setenv("DODEAL_JWT_SIGNING_KEY", "test-key")
+    get_settings.cache_clear()
+    app.state.llm = None
+
+    response = client.get("/ready")
+
+    assert response.status_code == 503
+    assert response.json() == {"status": "not ready", "llm": "not configured"}
+    get_settings.cache_clear()
+
+
+def test_ready_is_503_when_lifespan_never_ran(monkeypatch):
+    """No `llm` attribute at all must read as not-ready, not as ready-by-
+    omission -- `getattr(..., None)` and not `app.state.llm`, which would
+    AttributeError into a 500 and look like a bug rather than a refusal."""
+    monkeypatch.setenv("DODEAL_JWT_SIGNING_KEY", "test-key")
+    get_settings.cache_clear()
+    if hasattr(app.state, "llm"):
+        delattr(app.state, "llm")
+
+    response = client.get("/ready")
+
+    assert response.status_code == 503
+    assert response.json()["status"] == "not ready"
+    app.state.llm = None
+    get_settings.cache_clear()
+
+
+def test_ready_reports_llm_ok_once_a_client_is_built(llm_built, monkeypatch):
+    """Configured and built: the pod joins rotation and says why it may."""
+    monkeypatch.setenv("DODEAL_JWT_SIGNING_KEY", "test-key")
+    get_settings.cache_clear()
+
+    with (
+        patch.object(
+            redis_module, "get_cost_client", return_value=_probe_result(pings=True)
+        ),
+        patch.object(
+            redis_module,
+            "get_operational_client",
+            return_value=_probe_result(pings=True),
+        ),
+    ):
+        response = client.get("/ready")
+
+    assert response.status_code == 200
+    assert response.json()["llm"] == "ok"
+    get_settings.cache_clear()

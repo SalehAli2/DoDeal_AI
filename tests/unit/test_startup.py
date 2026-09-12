@@ -28,9 +28,10 @@ import logging
 import pytest
 from fastapi.testclient import TestClient
 
-from dodeal_ai.core.config import get_settings
+from dodeal_ai.core.config import ConfigError, get_settings
+from dodeal_ai.core.llm.profiles import PROFILE_UNIT_A_CLASSIFY
 from dodeal_ai.core.logging_config import JsonFormatter
-from dodeal_ai.main import app
+from dodeal_ai.main import LLM_CALLS_PER_JUDGEMENT, _llm_limits, app
 
 STARTUP_LOGGER = "dodeal_ai.startup"
 EVENT = "backend_keys_missing"
@@ -102,4 +103,141 @@ def test_backend_keys_missing_not_logged_when_map_is_non_empty(monkeypatch, json
         "would pass vacuously"
     )
     assert _events(lines, EVENT) == []
+    get_settings.cache_clear()
+
+
+# --- the LLM client lifespan builds (item 84) -------------------------------
+
+LLM_EVENT = "llm_not_configured"
+_PROFILE = PROFILE_UNIT_A_CLASSIFY
+
+
+def _llm_env(monkeypatch, **extra: str) -> None:
+    """A configured provider, plus whatever the case is actually about."""
+    monkeypatch.setenv("DODEAL_JWT_SIGNING_KEY", "test-key")
+    for key in ("PROVIDER", "MODEL", "API_KEY", "PROFILES", "BASE_URL"):
+        monkeypatch.delenv(f"DODEAL_LLM_{key}", raising=False)
+    for key, value in extra.items():
+        monkeypatch.setenv(f"DODEAL_LLM_{key}", value)
+    get_settings.cache_clear()
+
+
+def test_unset_provider_starts_the_app_and_says_so_loudly(monkeypatch, json_lines):
+    """PERMISSIVE startup, the dd_api_keys precedent: no provider is
+    provisioned yet (Step 0), and a service that refuses to start cannot serve
+    /health, /ready or the gate chain. Loud, so it is never discovered later as
+    every judgement 503ing."""
+    _llm_env(monkeypatch)
+
+    with TestClient(app):
+        assert app.state.llm is None
+
+    found = _events(json_lines(), LLM_EVENT)
+    assert found, "no llm_not_configured line reached the JSON stream"
+    assert found[0]["level"] == "ERROR"
+    assert found[0]["logger"] == STARTUP_LOGGER
+    get_settings.cache_clear()
+
+
+def test_a_configured_provider_builds_one_client(monkeypatch):
+    _llm_env(monkeypatch, PROVIDER="groq", MODEL="pinned-model", API_KEY="k")
+
+    with TestClient(app):
+        first = app.state.llm
+        assert first is not None
+        # ONE client for the process, not one per request: the same object is
+        # still there after traffic has gone through the app.
+        assert app.state.llm is first
+    get_settings.cache_clear()
+
+
+def test_the_pooled_client_is_closed_on_shutdown(monkeypatch):
+    """A client left open leaks sockets to a third party. Closing is asserted
+    on the real object rather than a spy, so a future edit that closes the
+    wrong thing cannot pass."""
+    _llm_env(monkeypatch, PROVIDER="groq", MODEL="pinned-model", API_KEY="k")
+
+    with TestClient(app):
+        http = app.state.http
+        assert not http.is_closed
+
+    assert http.is_closed
+    get_settings.cache_clear()
+
+
+def test_the_pool_is_sized_from_max_inflight(monkeypatch):
+    """Sized against PASSES, not requests -- see LLM_CALLS_PER_JUDGEMENT."""
+    _llm_env(monkeypatch, PROVIDER="groq", MODEL="pinned-model", API_KEY="k")
+    monkeypatch.setenv("DODEAL_MAX_INFLIGHT", "7")
+    get_settings.cache_clear()
+
+    limits = _llm_limits(get_settings())
+
+    assert limits.max_connections == 7 * LLM_CALLS_PER_JUDGEMENT
+    assert limits.max_keepalive_connections == limits.max_connections
+    get_settings.cache_clear()
+
+
+@pytest.mark.parametrize(
+    ("env", "fragment"),
+    [
+        ({"PROVIDER": "groq", "MODEL": "m"}, "llm_api_key_missing"),
+        (
+            {"PROVIDER": "gemini", "MODEL": "m", "API_KEY": "k"},
+            "llm_provider_not_supported",
+        ),
+        ({"PROVIDER": "groq", "API_KEY": "k"}, "llm_not_configured"),
+    ],
+    ids=["no-key", "no-adapter", "no-model"],
+)
+def test_a_configured_but_broken_provider_refuses_to_start(monkeypatch, env, fragment):
+    """Somebody MEANT to configure this and got it wrong. That is not a state to
+    serve traffic in, so it is a genuine ConfigError and the app does not come
+    up -- the other half of item 84 from the permissive case above."""
+    _llm_env(monkeypatch, **env)
+
+    with pytest.raises(ConfigError) as caught, TestClient(app):
+        pass
+
+    assert fragment in str(caught.value)
+    get_settings.cache_clear()
+
+
+def test_a_bad_profile_refuses_to_start(monkeypatch):
+    """THE STARTUP SWEEP. A cross-vendor profile would otherwise post an
+    Anthropic model id to Groq on the first judgement that named it -- days
+    later, on one task only. Resolved once here instead."""
+    _llm_env(
+        monkeypatch,
+        PROVIDER="groq",
+        MODEL="pinned-model",
+        API_KEY="k",
+        PROFILES=json.dumps(
+            {_PROFILE: {"provider": "anthropic", "model": "claude-something"}}
+        ),
+    )
+
+    with pytest.raises(ConfigError) as caught, TestClient(app):
+        pass
+
+    assert "llm_profile_provider_mismatch" in str(caught.value)
+    # The provider is named; no value from the profile is interpolated.
+    assert "claude-something" not in str(caught.value)
+    get_settings.cache_clear()
+
+
+def test_a_good_profile_starts(monkeypatch):
+    """The sweep must not refuse a profile a real call would accept."""
+    _llm_env(
+        monkeypatch,
+        PROVIDER="groq",
+        MODEL="pinned-model",
+        API_KEY="k",
+        PROFILES=json.dumps(
+            {_PROFILE: {"provider": "groq", "model": "m", "temperature": 0.5}}
+        ),
+    )
+
+    with TestClient(app):
+        assert app.state.llm is not None
     get_settings.cache_clear()

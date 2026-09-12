@@ -122,33 +122,63 @@ def test_llm_timeout_is_separate_from_global(monkeypatch: pytest.MonkeyPatch) ->
 
 
 # 6 -------------------------------------------------------------------------
-@pytest.mark.parametrize(
-    ("overrides", "expected", "message"),
-    [
-        ({}, LLMConfigurationError, "llm_not_configured"),
-        ({"llm_provider": "anthropic"}, LLMConfigurationError, "llm_not_configured"),
-        ({"llm_model": "pinned"}, LLMConfigurationError, "llm_not_configured"),
-        (
-            {"llm_provider": "anthropic", "llm_model": "pinned"},
-            NotImplementedError,
-            "llm_provider_not_wired",
-        ),
-    ],
-)
-def test_factory_behaviour(
+# The factory READS the client lifespan built; it never builds one. Settings do
+# not reach it at all any more (item 84), so the cases that used to be about
+# provider/model config now live on build_llm_client in
+# tests/unit/test_openai_compatible_adapter.py.
+
+
+class _FakeState:
+    """Stands in for app.state, which is a plain attribute bag."""
+
+    def __init__(self, **attrs: object) -> None:
+        self.__dict__.update(attrs)
+
+
+class _FakeApp:
+    def __init__(self, state: _FakeState) -> None:
+        self.state = state
+
+
+class _FakeRequest:
+    def __init__(self, state: _FakeState) -> None:
+        self.app = _FakeApp(state)
+
+
+def test_factory_returns_the_client_lifespan_built() -> None:
+    built = _StructuralClient()
+    request = _FakeRequest(_FakeState(llm=built))
+    assert get_llm_client(request) is built  # type: ignore[arg-type]
+
+
+def test_factory_refuses_when_no_client_was_built() -> None:
+    """Provider unset: the app started (permissively), but a judgement cannot."""
+    request = _FakeRequest(_FakeState(llm=None))
+    with pytest.raises(LLMConfigurationError) as exc:
+        get_llm_client(request)  # type: ignore[arg-type]
+    assert str(exc.value) == "llm_not_configured"
+
+
+def test_factory_refuses_when_lifespan_never_ran() -> None:
+    """No `llm` attribute at all -- an app assembled without its lifespan must
+    not read as configured just because the attribute is missing."""
+    request = _FakeRequest(_FakeState())
+    with pytest.raises(LLMConfigurationError):
+        get_llm_client(request)  # type: ignore[arg-type]
+
+
+def test_factory_never_builds_a_client_of_its_own(
     monkeypatch: pytest.MonkeyPatch,
-    overrides: dict[str, str],
-    expected: type[Exception],
-    message: str,
 ) -> None:
-    settings = _build_settings(
-        _env_file=None, jwt_signing_key="test-only-key", **overrides
+    """One pool per process. A factory that built would open a fresh connection
+    pool per request and re-run the startup profile sweep on every judgement."""
+    monkeypatch.setattr(
+        llm_pkg,
+        "build_llm_client",
+        lambda *a, **k: pytest.fail("the dependency built a client"),
     )
-    monkeypatch.setattr(llm_pkg, "get_settings", lambda: settings)
-    _clear_factory_cache()
-    with pytest.raises(expected) as exc:
-        get_llm_client()
-    assert str(exc.value) == message
+    built = _StructuralClient()
+    assert get_llm_client(_FakeRequest(_FakeState(llm=built))) is built  # type: ignore[arg-type]
 
 
 # 7 -------------------------------------------------------------------------
