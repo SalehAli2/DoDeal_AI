@@ -11,7 +11,7 @@ Rules:
 
 Carrying steps, in order (master section 15): N.4b, hand commits (101, `.env.example`), 102, 95, A9a (adapters), A-demo (demo runtime, pre-lane fixes, the load lane 74), A3 (the fix batch), A5 (step 4, the tool layer), A7a, A7b, A6 (step 14), A8 (first real CRM call), A9 (real notes), A10 (metrics), A11 (evaluation), A12 (pilot), A13.
 
-Last updated: 12 September 2026, at `ffbf9b0`, from master ed3r6.
+Last updated: 12 September 2026, at `38d60a0`, from master ed3r6.
 
 ## Items 1 to 13: code, in scope now
 
@@ -99,7 +99,7 @@ Last updated: 12 September 2026, at `ffbf9b0`, from master ed3r6.
 | 73 | Load shedding: `DODEAL_MAX_INFLIGHT`, immediate 503 `load_shed` | L.2 | DONE | `85aa3e0` |
 | 74 | Load lane: `tests/load/`, `load` marker, scenarios in master 17.1, `tenant-c.json`, a request counter on the fake CRM | A-demo | DECIDED | |
 | 75 | Test that greps `src/` for sync clients, `time.sleep`, `urllib.request` | L.2 | DONE | `85aa3e0` |
-| 76 | Provider adapters: `OpenAICompatibleClient` (Groq, OpenAI) and `GeminiClient`; `LLM_API_KEY`; JSON mode; status and finish-reason mapping; per-provider temperature bound; conformance tests on `MockTransport`; `scripts/model_smoke.py` | A9a | DECIDED | |
+| 76 | Provider adapters: `OpenAICompatibleClient` (Groq, OpenAI) and `GeminiClient`; `LLM_API_KEY`; JSON mode; status and finish-reason mapping; per-provider temperature bound; conformance tests on `MockTransport`; `scripts/model_smoke.py` | A9a | **part 1 DONE** (`OpenAICompatibleClient`, `LLM_API_KEY`, JSON mode, the two maps, the 0-2 bound, conformance on `MockTransport`); part 2 (lifespan wiring, `/ready`, `scripts/model_smoke.py`, the live Groq run) and part 3 (`GeminiClient`) OPEN | 38d60a0 |
 | 77 | Model profiles: `profile` keyword on `complete`; `core/llm/profiles.py`; `LLM_PROFILES` | M | DONE | `b263c8b` |
 | 78 | Demo runtime: `DODEAL_BACKEND_SCHEME`, `.env.demo`, `scripts/mint_demo_token.py`, compose Redis | A-demo | DECIDED | |
 | 79 | Fake CRM (other repo): a note-save endpoint that calls us; a request counter; a minimal display; `tenant-c` served | A-demo | DECIDED | |

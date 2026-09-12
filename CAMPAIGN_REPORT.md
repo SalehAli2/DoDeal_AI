@@ -4363,3 +4363,190 @@ Identical to the numbers at `fcdd091`, as expected: this piece adds no test.
 7. **The lock now carries `requests` and `urllib3` as dev dependencies.** They are the two packages with the longest advisory histories in the ecosystem. They are dev-only and no `src/` module imports either, but they are now the most likely source of a future red `audit` job, and a red job there will not be a defect in this service's code.
 
 **Nothing in this piece has met a real provider or a real CRM.** The one external service it touched is the PyPI advisory database, read-only, over the network. Nothing is marked `[V]`.
+
+---
+
+## Piece 76.1: OpenAI-compatible adapter for Groq and OpenAI   STATUS: DONE `38d60a0`
+
+Register item 76, part 1 of 3. The LLM seam gets its first real implementation: one adapter class for every
+provider that speaks OpenAI's `/chat/completions`. Nothing has called a provider — the class is proven on
+`httpx.MockTransport` and on nothing else.
+
+### Phase 0 was reported BLOCKED, and the lead cleared it
+
+The brief named a head "exactly one commit above `51d227d`, message starting `docs: ignore scratch files`".
+That commit does not exist on any ref — `git log --all --grep="ignore scratch"` is empty — and HEAD was
+`51d227d` itself. The five scratch paths it would have ignored (`n1.diff`, `n3.diff`, `n3b.diff`,
+`docs/audit/`, `docs/campaign/`) are still untracked and `.gitignore` carries no row for any of them.
+
+Reported BLOCKED with three options and **the lead chose to build on `51d227d`**. The ignore commit was NOT
+made here: `.gitignore` is not in this piece's file list, and one register item per session is the rule. The
+scratch files cannot reach a commit anyway — every path is staged explicitly and `git add .` is forbidden.
+**The `docs: ignore scratch files` commit is still owed.**
+
+### What landed
+
+1. **`core/config.py`.** `LLMProvider` gains `GROQ`, `OPENAI` and `GEMINI`. Membership means *the name
+   parses*, not *an adapter exists* — `GEMINI` is in the enum and refused by the factory, because
+   `llm_provider_not_supported:gemini` tells a deployment which half is missing where a rejected enum value
+   would only say the name is wrong. `llm_api_key: SecretStr | None` (read in exactly one place) and
+   `llm_base_url: str | None` (proxy override only) join it.
+
+2. **`core/llm/openai_compatible.py`, new.** `OpenAICompatibleClient(base_url, model, api_key, http, *,
+   settings)` satisfying `LLMClient`, plus `OpenAICompatibleError`. The two vendor base URLs are **constants
+   in this module, not settings**: they are facts about a vendor's API, not a per-deployment choice, and the
+   only legitimate reason to point elsewhere is a proxy, which is what `DODEAL_LLM_BASE_URL` is for.
+
+3. **`core/llm/__init__.py`.** `build_llm_client(settings, http)`. It takes both dependencies as arguments
+   rather than reading them, so lifespan (item 84) can build it once at startup and a `ConfigError` is a
+   refusal to start rather than a 500 on the first judgement. `get_llm_client()` is untouched and still
+   raises: nothing owns the pooled `AsyncClient` until 76.2.
+
+### The four decisions worth arguing about
+
+**One class for two vendors (R16).** Groq and OpenAI differ by base URL and nothing else that matters: same
+path, same bearer auth, same body, same response shape, same `finish_reason` vocabulary. A class each would
+have been a copy whose two halves drift. The defence against that claim being quietly wrong is that **every
+conformance assertion is parametrised over both URLs** — 115 tests, most of them running twice — so the day
+one vendor needs a branch, a test says so first.
+
+**Two guards at resolution, before the transport is entered.** The temperature bound (0–2) is **per provider**
+— OpenAI and Groq accept 0–2 where Anthropic accepts 0–1 — which is exactly why it is not on the shared
+`ModelProfile` field. And a profile naming a *different* vendor is refused outright: one client is built for
+one base URL, so an `anthropic` profile reaching this adapter would post an Anthropic model id to Groq. Both
+raise before the request is built, so a bad profile costs nothing. Routing per profile is the gateway's job
+(item 84), and that refusal is the line to delete when it lands.
+
+**Exceptions carry the status and the provider name, and nothing else.** `OpenAICompatibleError` subclasses
+`LLMProviderError` so `str()` stays the seam's fixed `llm_provider_error:<reason>` — which is what lets
+`safe_error_fields` keep the message of *our* exceptions. The body, the headers and the provider's own message
+are **never captured at all**, rather than captured and carefully not printed. The base URL is never carried
+either: a proxy override's host or path can itself be the credential, so failures are labelled `groq`,
+`openai`, or the generic `openai_compatible` for an override we do not recognise.
+
+**No retry, and never a builtin `TimeoutError`.** One `post` per `complete()`. `httpx.TimeoutException`
+becomes the seam's transient error (catch-list 55) — if it left as a builtin `TimeoutError`, the watchdog
+could not tell a provider timeout from `asyncio.wait_for`'s own deadline. Every `raise ... from None`: the
+originals carry the request URL, and the JSON decoder's carries the body.
+
+### A finding the tests produced: httpx logs the full request URL
+
+`test_a_failure_behind_a_proxy_names_no_host` failed on first run — and not on our own logging. **httpx logs
+every request line, URL included, on its own `httpx` logger at INFO.** With a proxy base URL that carries a
+credential in its path, that is the credential in the logs.
+
+It does not happen in the service: `configure_logging()` leaves the **root** logger at WARNING and raises only
+`dodeal_ai` to `settings.log_level`, so a third-party INFO line is dropped before any handler — even at
+`DODEAL_LOG_LEVEL=DEBUG`. `caplog.at_level(DEBUG)` in the test had forced the root floor down. Rather than
+weaken the assertion and move on, the guard is now **two** tests: the proxy test asserts over `dodeal_ai`
+records (and fails if the adapter logged nothing, so it cannot pass vacuously), and
+`test_third_party_request_lines_stay_below_the_root_floor` asserts the root floor itself — so lowering it
+fails a test instead of leaking quietly.
+
+### The sabotage record
+
+| Sabotage, one line | Tests that failed | Restored |
+| --- | --- | --- |
+| `response_format` dropped from the body | `test_request_demands_json_mode` (2) | yes |
+| 429 mapped to `AUTH`/not-transient | `test_status_maps_to_reason_and_transience[429]` (2), `test_failure_never_carries_the_provider_body[429]` (2) | yes |
+| A second `post` on 5xx | `test_transport_is_entered_exactly_once_on_a_failed_status[500, 503]` (4) | yes |
+| `response.text` appended to the exception's args | `test_failure_never_carries_the_provider_body` (12 — every status) | yes |
+
+The file was restored from a byte copy after each and re-checksummed: `dcb6258364e77e4ad7ab8a71db9737b6`
+before the first sabotage and after the last, with `git diff` empty against the copy.
+
+### The stopping chain at this head
+
+```
+1188 passed, 1 skipped, 28 deselected, 1 warning in 28.43s
+Required test coverage of 92.0% reached. Total coverage: 99.56%
+All 15 coverage floors met.
+ruff check: All checks passed!   ruff format: all files formatted
+mypy: Success: no issues found in 66 source files
+core/llm/openai_compatible.py: 85 statements, 0 missed, 100%
+```
+
+### For the lead
+
+1. **`.env.example` rows, exact text** (a session may not write that file):
+
+   ```
+   # The provider API key. SecretStr: a stray repr of Settings prints **********.
+   # No default and no placeholder -- absent is a ConfigError naming the provider.
+   # Read in exactly ONE place, the adapter's bearer-header builder.
+   DODEAL_LLM_API_KEY=change-me-local-only
+   # Proxy override for the provider base URL. Unset uses the vendor constant in
+   # core/llm/openai_compatible.py. Set it ONLY to put a proxy in front.
+   # A wrong value sends every prompt to the wrong host, so it is never logged.
+   # DODEAL_LLM_BASE_URL=
+   ```
+
+   The brief gave `DODEAL_LLM_API_KEY=` with an empty value. Every other secret in that file reads
+   `change-me-local-only` (audited field-by-field in fix 6b), and an empty value would load as the empty
+   string rather than `None` — which builds a client with a blank bearer token instead of refusing. **The
+   value above is a deliberate departure from the brief's text; take it, or keep the brief's and accept that
+   a local `.env` copied from the example fails at the provider rather than at startup.**
+
+2. **The seam's exception names, as found.** `LLMProviderError(reason, *, transient)` and
+   `LLMConfigurationError(ConfigError)`, both already in `core/llm/client.py`; `FinishReason.OTHER` already
+   existed, so there was nothing to stop and ask about. **Added:** `OpenAICompatibleError(LLMProviderError)`,
+   carrying `.status` and `.provider`. **Where the transient one is caught:** nowhere directly. It escapes
+   `complete()` into `call_with_watchdog`, whose bare `except Exception` wraps it as `ExternalCallError`;
+   `llm_call.complete_once` catches *that* and raises `ModelUnavailableError()` (503 `model_unavailable`).
+   **So `.transient` is currently read by nobody** — auth failures and rate limits 503 identically. That is
+   the existing wiring and this piece did not change it, but if the flag is meant to mean something, the
+   place to make it mean something is `complete_once`.
+
+3. **What did not fit `LLMResponse`, and what was done.** Dropped, deliberately: `object`, `created`,
+   `system_fingerprint`, `service_tier`, `choices[0].index`, `choices[0].logprobs`, `message.role`,
+   `message.refusal`, `usage.total_tokens` (computed), `usage.prompt_tokens_details` /
+   `completion_tokens_details` (**cached-prompt and reasoning token counts — the two that will matter once
+   prompt caching is on, and there is no field for either**), Groq's `x_groq` timings, and the `x-request-id`
+   header. Kept: `id` to `provider_request_id`. **`choices[1..]` is ignored**: we never send `n>1`, and
+   silently taking `[0]` is the right behaviour, but nothing asserts the provider did not send more.
+
+4. **Packages `uv.lock` gained: zero.** `httpx` and `pydantic` were already direct dependencies. `uv.lock` is
+   untouched by this piece.
+
+5. **The constructor takes a fifth argument, `settings`,** beyond the four the brief named. Resolution
+   (`resolve_profile`) and the per-call timeout both read it, and reading it from ambient `get_settings()`
+   would make the class untestable without an environment. The four named arguments keep their order and
+   positions; `settings` is keyword-only. **`model` is now near-redundant** — the profile table decides the
+   model and returns `settings.llm_model` on the fallback path, so the two always agree. It is kept because
+   the brief named it; say the word and 76.2 drops it.
+
+6. **`ModelProfile.temperature` is still capped at `le=1.0`,** which is the *Anthropic* bound applied
+   globally. The adapter's 0–2 bound is therefore defence in depth rather than the effective limit: a Groq or
+   OpenAI profile cannot today be configured above 1.0 even though both vendors accept 2.0. Widening that
+   field would loosen validation for Anthropic profiles too, so it was left alone as the more conservative
+   option. **Decide whether the field should become per-provider.** The adapter's bound is proven by
+   injecting an out-of-range `ResolvedProfile` at `resolve_profile`, which the test says in as many words.
+
+7. **One existing test had to change**, and it is the only file outside this piece's list that did:
+   `tests/unit/test_model_profiles.py::test_an_unknown_provider_in_a_profile_is_a_config_error` used the
+   literal `"openai"` as its example of an *unknown* provider. This piece makes that name valid, so the
+   sample is now `"mistral"` with a comment saying why. The test's intent is unchanged.
+
+8. **The temperature bound is enforced per call, not at startup.** Every profile in `DODEAL_LLM_PROFILES`
+   could be swept once when `build_llm_client` runs, which would turn a bad profile into a refusal to start
+   instead of a 503 on the first judgement using that profile. The brief said "enforced at resolution", so
+   that is what was built. **Worth folding into item 84.**
+
+9. **`R16` could not be located in this repo.** No tracked file carries a ruling numbered R16 — the only
+   ruling in `CAMPAIGN_REPORT.md` is R17, and `ASSUMPTIONS.md` references R17 alone. The one-class-for-two-
+   vendors reasoning is written out in full in `README.md` and `ASSUMPTIONS.md` §3.8 rather than cited, and
+   the R16 reference is carried in the adapter's module docstring on the brief's authority. Same gap the
+   N.1–N.3b pieces reported for their item numbers.
+
+10. **`DECISION[DEMO_PROVIDER]` did not exist** and was created, not edited. `CLAUDE.md:67` referenced it but
+    no section carried it; it is now `ASSUMPTIONS.md` §3.8 beside `DECISION[PRODUCTION_PROVIDER]`. **The
+    reasons recorded there are inferred from the brief's provider split (Groq for the demo, OpenAI for
+    production), not quoted from the master document — check them.** In particular §3.8 says the demo choice
+    is about *latency* and explicitly not about cost; if that is wrong, it is one paragraph to fix.
+
+11. **The residency question (Q20) is untouched and still unowned.** Choosing providers does not answer where
+    note text rests or under whose DPA, and §3.8 says so rather than letting a provider decision read as a
+    residency decision.
+
+**Nothing in this piece has met a real provider.** No key exists, no call has been placed, and nothing is
+marked `[V]`. The adapter is proven against `httpx.MockTransport` and against nothing else.
