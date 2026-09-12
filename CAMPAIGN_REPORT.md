@@ -4272,7 +4272,7 @@ S1 is not what the brief predicted. Removing the autouse fixture alone does not 
 
 ---
 
-## Piece N.4b: pip-audit on the locked dependency set   STATUS: DONE `sha pending`
+## Piece N.4b: pip-audit on the locked dependency set   STATUS: DONE `ffbf9b0`
 
 Register item 29, the `pip-audit` half and the last of three. `fakeredis[lua]` (`dffeb80`) and the real-Redis lane (`44e9071`) were the other two, so **item 29 is closed**. The last piece of step 3. Dependencies, CI and docs only: no line of `src/` changed, and no test was added.
 
