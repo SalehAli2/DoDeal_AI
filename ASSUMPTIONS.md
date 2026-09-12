@@ -402,6 +402,56 @@ direct body is `extra="forbid"` with no score-shaped field, so it can only ever 
 answer; and both routes run the same `_judge`, so there is no behaviour to gain by choosing the direct one.
 It exists because the read surface is down, and it is the read surface's return that removes the reason for it.
 
+## 3.8 DECISION[DEMO_PROVIDER] and DECISION[PRODUCTION_PROVIDER] — which model runs
+
+**Status: DECIDED. The adapter is BUILT (register item 76, part 1); neither provider has been called.**
+Recorded here beside item 76 because `CLAUDE.md` names `DECISION[DEMO_PROVIDER]` as the marker that
+licenses a provider before the first real CRM call, and no section carried it until now.
+
+### DECISION[DEMO_PROVIDER] — Groq, for the demo
+
+**The decision.** The demo runs on **Groq** (`https://api.groq.com/openai/v1`). It is the exception
+`CLAUDE.md` already grants: a real provider may be wired ahead of the first real CRM call *when the notes are
+invented ones on the fake CRM*. The demo judges invented notes on the vendored fake CRM and no customer text
+reaches the provider, so the never-list item is not being bent — the condition it names is met.
+
+**The reason.** Latency, and nothing else. The demo is watched live and a judgement is three model calls
+deep; Groq answers fast enough that the pause reads as a system working rather than a system hung. **Cost is
+not the reason** and should not be recorded as one — the demo's volume makes any provider's bill rounding
+error.
+
+### DECISION[PRODUCTION_PROVIDER] — OpenAI, for production
+
+**The decision.** Production runs on **OpenAI** (`https://api.openai.com/v1`).
+
+**The reason.** The pilot is judged on output quality and on answers we can give a customer about where their
+data went, not on speed. Both are OpenAI's stronger side today, and the demo's latency argument stops applying
+the moment nobody is watching a screen.
+
+### Why one class serves both, and what that costs
+
+Both are the **same API** — `POST /chat/completions`, bearer auth, the same body, the same response shape, the
+same `finish_reason` vocabulary — so `core/llm/openai_compatible.py` is **one class parameterised by base URL**
+(report R16) and the conformance suite runs every assertion against **both URLs**. Switching provider is
+therefore `DODEAL_LLM_PROVIDER` plus `DODEAL_LLM_API_KEY`, not a code change.
+
+**What this does NOT settle.** Nothing about either provider is verified: no call has been placed to either,
+and neither is marked `[V]`. In particular **the residency question (Q20) is unanswered for both** — note text
+sent to a model provider still has no DPA and no known storage country, and choosing a provider here does not
+choose an answer to that. See §4 and `docs/STATUS.md` §6.
+
+### Correction paths
+
+| If | Then |
+| --- | --- |
+| **Groq's quality is not good enough for the demo** | `DODEAL_LLM_PROVIDER=openai` and a different key. No code changes; the adapter is the same class on a different base URL. |
+| **A model must be chosen per task** rather than per deployment | The profile table already carries `provider` per profile (`DODEAL_LLM_PROFILES`). Today the adapter **refuses** a profile naming a provider other than its own, because one client is built for one base URL. Routing per profile is the gateway's job (item 84), and that refusal is the line to delete first. |
+| **Either provider must sit behind a proxy** | `DODEAL_LLM_BASE_URL` overrides the constant. It is never logged and never carried on an exception, because a proxy URL's host or path can itself be the credential. |
+| **A third OpenAI-compatible vendor is added** | A base URL constant and an `LLMProvider` member. No new class — that is what the shared conformance suite is defending. |
+
+**Seams:** `core/llm/openai_compatible.py` (the adapter and the two base-URL constants),
+`core/llm/__init__.py` (`build_llm_client`), `core/config.py` (`LLMProvider`, `llm_api_key`, `llm_base_url`).
+
 ---
 
 # 4. PENDING — awaiting a backend answer

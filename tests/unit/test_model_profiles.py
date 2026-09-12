@@ -197,7 +197,9 @@ def test_an_unknown_provider_in_a_profile_is_a_config_error(
     with pytest.raises(ConfigError):
         _settings(
             monkeypatch,
-            PROFILES='{"unit_a.vague": {"provider": "openai", "model": "m"}}',
+            # Not "openai": that became a real provider with the adapter
+            # (item 76). The value has to be a name no LLMProvider member holds.
+            PROFILES='{"unit_a.vague": {"provider": "mistral", "model": "m"}}',
         )
 
 

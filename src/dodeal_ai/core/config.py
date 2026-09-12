@@ -40,9 +40,17 @@ class ConfigError(RuntimeError):
 
 class LLMProvider(str, Enum):
     """Providers get_llm_client() can build. A typo in DODEAL_LLM_PROVIDER
-    fails at settings load (ConfigError), not at the first model call."""
+    fails at settings load (ConfigError), not at the first model call.
+
+    Membership here means "the name parses", NOT "an adapter exists":
+    build_llm_client() refuses ANTHROPIC and GEMINI by name until their
+    adapters land (76.3), which is a clearer failure than a rejected enum.
+    """
 
     ANTHROPIC = "anthropic"
+    GROQ = "groq"
+    OPENAI = "openai"
+    GEMINI = "gemini"
 
 
 class ModelProfile(BaseModel):
@@ -137,8 +145,16 @@ class Settings(BaseSettings):
     # falls back to the llm_provider/llm_model pair above at temperature 0,
     # which is what a single-model deployment configures and nothing else.
     llm_profiles: dict[str, ModelProfile] = {}
-    # The provider API key lands in Step 14 with the adapter: a SecretStr with
-    # no default and no placeholder, the same fail-closed shape dd_api_keys uses.
+    # The provider API key. SecretStr so a stray repr or log of Settings prints
+    # `**********`; None (the default) means no key, and build_llm_client
+    # refuses rather than sending an unauthenticated call that 401s at cost.
+    # Read in exactly ONE place -- the adapter's header builder.
+    llm_api_key: SecretStr | None = None
+    # Proxy/gateway override for the provider base URL. None (the default) uses
+    # the provider constant in core/llm/openai_compatible.py; set it only to put
+    # a proxy in front. A wrong value sends every prompt to the wrong host, so
+    # it is never logged and never carried on an exception.
+    llm_base_url: str | None = None
 
     # Redis connections. Two named connections so code never guesses which
     # instance it is using: a queue connection and a cost/quota connection.
