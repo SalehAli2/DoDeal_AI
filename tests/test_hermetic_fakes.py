@@ -1,6 +1,6 @@
 """Every Redis client a test injects is a shared fake from tests/helpers/ or fakeredis
 (the N.2 finding), and no test reaches a real one (register item 103, the N.4
-finding)."""
+finding). And no test reads the developer's `.env` (register item 115)."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ import pytest
 
 from dodeal_ai import main
 from dodeal_ai.core import redis as redis_module
-from dodeal_ai.core.config import get_settings
+from dodeal_ai.core.config import Settings, _build_settings, get_settings
 from dodeal_ai.core.cost import limiter
 from tests.helpers.fake_cost_redis import FakeCostRedis
 
@@ -239,3 +239,89 @@ def test_a_module_patch_wins_over_the_default_fakes(own_cost, redis_fakes) -> No
     assert limiter.get_cost_client() is own_cost
     assert own_cost is not redis_fakes.cost
     assert main.get_cost_client() is redis_fakes.cost
+
+
+# --- .env is not a source for any test (register item 115) ------------------
+
+
+def test_env_file_is_cut_out_of_settings_for_the_whole_session() -> None:
+    """The fixture's own property, asserted rather than assumed.
+
+    `tests/conftest.py::_no_dotenv` clears it session-wide. Asserted directly
+    so that deleting that fixture fails HERE, with a sentence explaining what
+    broke, rather than somewhere downstream on whichever machine happens to
+    have a populated `.env`.
+    """
+    assert Settings.model_config.get("env_file") is None
+
+
+def test_a_dotenv_in_the_working_directory_cannot_reach_settings(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real defect, reproduced: a populated file where Settings looks.
+
+    `env_file=".env"` resolves against the WORKING DIRECTORY, so a file written
+    here and a chdir is exactly the situation that turned the suite red -- not
+    an approximation of it. Every value below is deliberately one a test
+    elsewhere asserts the absence of.
+    """
+    (tmp_path / ".env").write_text(
+        "DODEAL_JWT_SIGNING_KEY=key-from-the-file\n"
+        'DODEAL_DD_API_KEYS={"leaked-tenant":"leaked-key"}\n'
+        "DODEAL_LLM_PROVIDER=groq\n"
+        "DODEAL_LLM_MODEL=leaked-model\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DODEAL_JWT_SIGNING_KEY", "key-from-the-environment")
+
+    settings = _build_settings()
+
+    assert settings.dd_api_keys == {}
+    assert settings.llm_provider is None
+    assert settings.llm_model == ""
+    # The environment still works; it is the FILE that is cut out.
+    assert settings.jwt_signing_key == "key-from-the-environment"
+
+
+def test_a_dict_setting_is_not_merged_from_a_dotenv(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The half that setenv could never have defended.
+
+    For a DICT field pydantic-settings MERGES sources instead of letting the
+    environment replace the file, so before item 115 a test that set
+    DODEAL_DD_API_KEYS by hand received the file's entries merged in on top --
+    `{'localtenant', 't1', 't2'}` where it asserted `{'t1', 't2'}`. Setting the
+    value explicitly is the strongest thing a test can do, and it was not
+    enough; only removing the file from the sources is.
+    """
+    (tmp_path / ".env").write_text(
+        'DODEAL_DD_API_KEYS={"leaked-tenant":"leaked-key"}', encoding="utf-8"
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DODEAL_JWT_SIGNING_KEY", "test-key")
+    monkeypatch.setenv("DODEAL_DD_API_KEYS", '{"t1":"k1"}')
+
+    settings = _build_settings()
+
+    assert set(settings.dd_api_keys) == {"t1"}
+    assert "leaked-tenant" not in settings.dd_api_keys
+
+
+def test_the_explicit_env_file_seam_still_works(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cutting `.env` out must not break reading a file somebody ASKED for.
+
+    `_build_settings(_env_file=...)` is the correct seam and is not the defect;
+    a fixture that broke it would have replaced one silent failure mode with
+    another.
+    """
+    named = tmp_path / "asked-for.env"
+    named.write_text("DODEAL_JWT_SIGNING_KEY=key-from-the-named-file", encoding="utf-8")
+    monkeypatch.delenv("DODEAL_JWT_SIGNING_KEY", raising=False)
+
+    settings = _build_settings(_env_file=named)
+
+    assert settings.jwt_signing_key == "key-from-the-named-file"

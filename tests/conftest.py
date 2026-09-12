@@ -6,9 +6,18 @@ the environment, so a test that reaches get_settings() without supplying the
 key itself passes locally and fails in CI -- or passes only because an earlier
 test happened to seed the lru_cache first.
 
+That first sentence was an INTENTION and not a fact until register item 115:
+Settings read `.env` on every construction, so the suite was green only for
+developers who had not configured one. `_no_dotenv` below makes it true.
+
 Every test also gets the shared Redis fakes, and the default run reaches no
 Redis whether or not one is listening (register item 103): `redis_fakes`,
 `_closed_redis_urls` and `_real_pool_builds` below.
+
+And no test reads the developer's `.env`, whether or not one exists (register
+item 115): `_no_dotenv` below. That is the same promise as 103, for the other
+ambient dependency -- see that fixture for why monkeypatching the environment
+was not enough.
 """
 
 from __future__ import annotations
@@ -23,7 +32,7 @@ import pytest
 from dodeal_ai import main
 from dodeal_ai.core import redis as redis_module
 from dodeal_ai.core.breaker import reset_breakers
-from dodeal_ai.core.config import get_settings
+from dodeal_ai.core.config import Settings, get_settings
 from dodeal_ai.core.cost import limiter
 from dodeal_ai.units.structured_intelligence import state
 from tests.helpers.fake_cost_redis import FakeCostRedis
@@ -130,6 +139,36 @@ def redis_fakes(
     reset_breakers()
     redis_module.get_cost_client.cache_clear()
     redis_module.get_operational_client.cache_clear()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _no_dotenv() -> Iterator[None]:
+    """Cut `.env` out of Settings for the whole run, by clearing `env_file`.
+
+    WHAT IT DOES: Settings declares `env_file=".env"`, resolved against the
+    working directory, so every get_settings() in the suite reads whatever the
+    developer has configured locally. None means it reads nothing.
+
+    WHY IT IS NOT DONE WITH monkeypatch.setenv: for a DICT field, pydantic-
+    settings MERGES sources rather than letting the environment replace the
+    file. A test that set DODEAL_DD_API_KEYS by hand still received the `.env`
+    entries merged in on top, so no amount of setenv could defend a test -- the
+    file has to be out of the sources entirely. This is why a populated `.env`
+    turned the suite red (item 115) the first time anybody configured one to
+    make a live provider call.
+
+    WHAT A WRONG VALUE DOES: restore the ".env" string here and the suite goes
+    green or red depending on a file that is not in the repository, which is
+    the defect this closes. A test that genuinely wants a file passes
+    `_build_settings(_env_file=...)`, which is untouched and is the correct
+    seam. The redis_real lane reads os.environ directly and is unaffected.
+    """
+    original = Settings.model_config.get("env_file")
+    Settings.model_config["env_file"] = None
+    try:
+        yield
+    finally:
+        Settings.model_config["env_file"] = original
 
 
 @pytest.fixture(scope="session", autouse=True)
