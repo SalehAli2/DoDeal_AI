@@ -4910,3 +4910,81 @@ mypy: Success: no issues found in 66 source files
    because the two populations never compared numbers.
 
 5. **Nothing here touched a provider.** 76.2a is unstashed and committed separately on this green tree.
+
+---
+
+## Piece 76.2a: the smoke script prints the failure it already has   STATUS: DONE `a3c8c48`
+
+Item 76's debugging half. No `src/` change. Held back one piece: the chain was red when it was finished, for
+a reason that turned out to be register item 115, and it is committed here on the green tree 103b left.
+
+### What it replaces
+
+```
+FAILED: ModelUnavailableError (model_unavailable)
+Check DODEAL_LLM_API_KEY, the model id, and the provider's status page.
+```
+
+Three guesses, and the lead spent three debugging rounds rebuilding the request by hand against them. The
+adapter had already recorded which of the three it was: `openai_compatible.py::_error` puts `reason_code`,
+`provider`, `status` and `transient` on the `llm_provider_call_failed` record at the moment of failure. **The
+script was throwing that away and asking the operator to guess.** Nothing new is computed here; a log handler
+is attached for the duration of the call and the four fields are printed.
+
+### Proven against a real server, per status
+
+Each row is an end-to-end run: a real local HTTP server returning that status, the script's own failure path,
+the printed output.
+
+| HTTP | reason_code | status | transient | the one next action printed |
+| --- | --- | --- | --- | --- |
+| 400 | `invalid_request` | 400 | False | the adapter built the body; nothing in your env |
+| 401 | `auth` | 401 | False | the key was not accepted |
+| 403 | `auth` | 403 | False | the key's scope, not its spelling |
+| 404 | `unknown` | 404 | False | **the MODEL ID** — check `DODEAL_LLM_MODEL` |
+| 429 | `rate_limited` | 429 | True | rate/quota; never retried |
+| 5xx | `unavailable` | 500 | True | the provider, not the request |
+| — | `unavailable` | `None` | True | no answer at all: timeout, DNS, or refused |
+
+A sentinel planted in every response body appears in **no** run's stdout or stderr. The rule is unchanged:
+four fields and a status hint, never a body, a header, a URL or the key.
+
+`<<missing>>` rather than a blank where a field is absent, so a missing field reads as a fact about the
+failure instead of as a formatting gap. `status: None` is a real value with its own hint, which is why it is
+not folded into the missing case.
+
+### A false alarm I raised and then closed
+
+The first harness pass reported 401 mapping to `unavailable`/`None` instead of `auth`/401 — which would have
+been an adapter defect. It was **my throwaway test server**: it answers without draining the request body, so
+with a ~4KB prompt the connection can reset mid-write and the call fails at the transport layer before a
+status exists. Two clean re-runs confirm 401 maps correctly. Recorded because I raised it.
+
+### Also in this commit
+
+`--induce-timeout` now uses the same `_capturing()` context manager as the failure path, rather than its own
+inline handler juggling. Re-verified identical afterwards: 4.52s, `OpenAICompatibleError`, adapter line fired.
+The refactor broke it once — `_capturing()` is a **sync** context manager and cannot join an `async with` —
+which is in the comment now.
+
+### The stopping chain at this head
+
+```
+1218 passed, 1 skipped, 28 deselected, 1 warning
+Required test coverage of 92.0% reached. Total coverage: 99.56%
+All 15 coverage floors met.
+ruff check (every tracked file): All checks passed!
+mypy: Success: no issues found in 66 source files
+```
+
+### For the lead
+
+1. **The real run is still yours:** `uv run python scripts/model_smoke.py --live`. If it fails now, it names
+   which of the three things it is instead of listing them.
+2. **No test covers this script**, by design — it is not collected by pytest (no `test_` name, lives under
+   `scripts/`). Its evidence is the seven runs in the table above, which are hand runs and recorded here
+   because a script that must never run in CI cannot be guarded by CI. That is the same arrangement as
+   `scripts/real_fetch_check.py`.
+3. **The status-hint table is a judgement about what a human should check next**, not a mapping the service
+   depends on. `404 -> model id` is the one most likely to be wrong for a provider whose 404 means something
+   else; it costs one line to change.
