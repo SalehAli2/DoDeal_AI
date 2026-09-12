@@ -470,6 +470,7 @@ All configuration is read through `Settings` in `core/config.py`. Every variable
 
 - Run the full suite with `uv run pytest`. Coverage runs by default and the build fails if total coverage drops below the floor configured in `pyproject.toml`.
 - The default run is fully hermetic: no test opens a live Redis connection, makes a network call, or calls an LLM. Redis is mocked or faked in every test; the shared fakes in `tests/helpers/` (`FakeCostRedis`, `FakeOperationalRedis`) are the pattern for a new test that needs Redis behavior (`tests/test_hermetic_fakes.py` fails the build on a locally written one), and `fakeredis[lua]` (`tests/unit/test_cost_lua.py`) is the one for a test that needs Redis to actually execute something — Lua included. It is hermetic with or without a Redis listening on the machine: the root `tests/conftest.py` hands every test the shared fakes, so there is no need to stop the compose Redis first, and only the `redis_real` lane below needs one.
+- Beside the suite, the **dependency audit** checks the locked dependency set against the advisory database: `uv export --format requirements-txt --no-emit-project -o audit.txt` then `uv run pip-audit --strict --desc -r audit.txt`. It is not part of the stopping chain and runs as its own CI job (see "Continuous integration"); on Windows set `PYTHONIOENCODING=utf-8` first.
 - Security-focused tests live under `tests/security/` and exercise the gate chain over HTTP with `TestClient`. Everything else lives under `tests/unit/`.
 - `tests/integration/` is excluded from the default run via a registered `integration` marker (`pyproject.toml`), so it stays out of `uv run pytest` and CI. Run it explicitly with `uv run pytest -m integration --no-cov` (`--no-cov`: the coverage gate is sized for the full hermetic suite, not this handful of tests).
 
@@ -528,7 +529,7 @@ uv run pytest -m redis_real --no-cov
 
 ## Continuous integration
 
-`.github/workflows/ci.yml` runs on every push and pull request. It installs uv and a pinned Python 3.12, then runs `uv sync --locked` to catch a lockfile that has drifted from `pyproject.toml`.
+`.github/workflows/ci.yml` runs on every push and pull request, as **two jobs**: `checks`, the required chain below, and `audit`, the dependency audit. Both install uv and a pinned Python 3.12, then run `uv sync --locked` to catch a lockfile that has drifted from `pyproject.toml`.
 
 **The required checks**, in order. Every one must be green before a branch merges; branch protection is configured in the repository settings, not in the tree (see `CONTRIBUTING.md`, "Branch protection"):
 
@@ -542,6 +543,8 @@ uv run pytest -m redis_real --no-cov
 | 6 | Wheel build + install/import check | `uv build --wheel` then `uv run python scripts/verify_wheel.py dist/*.whl` |
 
 Checks 1-4 are the same ones run locally by the stopping chain and by the pre-commit hooks. Check 5 exists because the 92% gate is an average and can hide one security module rotting; check 6 is the only one that tests the artifact a deploy receives rather than the source tree.
+
+**The `audit` job** is deliberately not one of the six. It runs `uv export --format requirements-txt --no-emit-project -o audit.txt` then `uv run pip-audit --strict --desc -r audit.txt`, and fails on any finding — there is no `continue-on-error` and no `--ignore-vuln`. It sits in its own job because its result is a function of the advisory database rather than of the commit: a newly published advisory should be able to go red without turning the required chain red on a hotfix that changed no dependency. It audits the **exported lock, never the venv** (ruling R38) — the editable project is not on PyPI, can never be resolved, and `--strict` counts that skip as a failure, which is why `--no-emit-project` is not optional here. A finding is fixed by a pin change in its own commit.
 
 The repo-wide guards are not separate jobs — they are ordinary pytest tests and so run inside check 4. `tests/test_no_sync_clients.py` fails the build if a blocking client or a `time.sleep` appears anywhere under `src/dodeal_ai/`, and `tests/test_assumption_markers.py` fails it if a provisional-answer marker stops appearing in the code, this README and `ASSUMPTIONS.md` together.
 

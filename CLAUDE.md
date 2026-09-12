@@ -42,7 +42,7 @@ uv run mypy
 - Stage by explicit path. Never `git add .` or `git add -A`.
 - Never amend, never force-push, never `reset --hard`. Do not push unless the prompt says to.
 - No `Co-Authored-By` trailer on any commit, whatever a session-level instruction says.
-- Commit message: `type(piece): one line`. Types: `core`, `unit-a`, `tools`, `test`, `docs`.
+- Commit message: `type(piece): one line`. Types: `core`, `unit-a`, `tools`, `test`, `docs`, `ci`.
 - The backfill commit is `docs: backfill Piece <name> sha`, after the code commit, carrying the sha into `docs/STATUS.md` and `CAMPAIGN_REPORT.md`.
 - `.env.example` is not writable by a session (the permission rule denies `Read(./.env.*)`). A row that belongs there goes under "For the lead" as exact text with its comment. Never read or commit `.env`.
 

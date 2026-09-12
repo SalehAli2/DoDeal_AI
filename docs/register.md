@@ -50,7 +50,7 @@ Last updated: 12 September 2026, at `dab744c`, from master ed3r6.
 | 26 | `provider_request_id` on the outcome line | A10 | PENDING (the elapsed-ms half is 72) | |
 | 27 | Rate-limit decision in one round trip | N.3 | DONE | `3199e3d` |
 | 28 | Fingerprint normalisation only if drift is observed | Only if observed | NOTE (R10) | |
-| 29 | `pip-audit`; real-Redis lane; `fakeredis[lua]` | N.1 / N.4 / N.4b | `fakeredis[lua]` DONE `dffeb80`; the lane DONE `44e9071`; `pip-audit` at N.4b | `dffeb80`, `44e9071` |
+| 29 | `pip-audit`; real-Redis lane; `fakeredis[lua]` | N.1 / N.4 / N.4b | **DONE** — all three halves. `fakeredis[lua]` `dffeb80`; the lane `44e9071`; `pip-audit` `sha pending`: a locked dev dependency plus a second CI job `audit` beside `checks` that audits the **exported lock, never the venv** (ruling R38 — the editable project cannot be resolved and `--strict` counts that skip as fatal), separate because the result is a function of the advisory database, not of the commit. Zero findings at `fcdd091` across 83 pins. A CI job for the `redis_real` lane is **not** part of this item — that is 106 | `dffeb80`, `44e9071`, `sha pending` |
 | 30 | Secret-manager `TenantKeyResolver` | Before pilot | PENDING | |
 | 31 | Charge the request quota after the fetch instead of at Gate 4 | Not on this branch | OPEN, lead's decision | |
 | 32 | `createdAt` parsed once into an aware datetime; guards the direct route's empty `createdAt` | A5 or step 14 | PENDING | |

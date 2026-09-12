@@ -4269,3 +4269,97 @@ S1 is not what the brief predicted. Removing the autouse fixture alone does not 
 6. **Item 104** (the CI job with a Redis service) can now keep its default job beside a live Redis container: the default run was green here with one listening.
 
 **Nothing in this piece has met a real provider or a real CRM.** The only real server was the compose Redis, used to show that the default run leaves it alone. Nothing is marked `[V]`.
+
+---
+
+## Piece N.4b: pip-audit on the locked dependency set   STATUS: DONE `sha pending`
+
+Register item 29, the `pip-audit` half and the last of three. `fakeredis[lua]` (`dffeb80`) and the real-Redis lane (`44e9071`) were the other two, so **item 29 is closed**. The last piece of step 3. Dependencies, CI and docs only: no line of `src/` changed, and no test was added.
+
+### Phase 0 found that the command as briefed cannot work
+
+The brief's step 2 named `uv run pip-audit --strict --desc` against the synced environment. Run at `dab744c`, it fails — and not for a vulnerability:
+
+```
+ERROR:pip_audit._cli:dodeal-ai: Dependency not found on PyPI and could not be audited: dodeal-ai (0.1.0)
+EXIT=1
+```
+
+`uv sync` installs the project itself editable — `direct_url.json` reads `{"dir_info":{"editable":true}}` — so it is not on PyPI and `pip-audit` can never resolve it. `--strict` turns that unresolvable dependency into a failure. Without `--strict` the same run is exit 0 with one skip row. **`--skip-editable` does not rescue it**, because `--strict` counts a deliberate skip as a failure too:
+
+```
+ERROR:pip_audit._cli:dodeal-ai: distribution marked as editable
+EXIT=1
+```
+
+So `--strict` and the venv are mutually exclusive in this tree, and the briefed step would have turned CI red on every push forever. The brief's own reason for withholding the step on a finding — that it must not turn CI red on the next push — applies with more force. The piece was reported BLOCKED at Phase 0 (the head check had also failed: the four hand commits were not yet made), and the resolution was accepted as **ruling R38: audit the exported lock, never the venv.**
+
+### What landed
+
+1. **`pip-audit>=2.10.1` in the `dev` group**, locked like every other tool so CI and a hand run use one advisory client. `uv.lock` goes from **63 to 84 packages, +21** for the auditor's closure, none removed: `boolean-py cachecontrol charset-normalizer cyclonedx-python-lib defusedxml license-expression markdown-it-py mdurl msgpack packageurl-python pip pip-api pip-audit pip-requirements-parser py-serializable pyparsing requests rich tomli tomli-w urllib3`. Note it pulls **`requests` and `urllib3` into the dev group** — dev only, never onto the request path. The resulting 83-pin set audits clean, so the new job does not go red on its own dependencies.
+
+2. **A second CI job, `audit`, beside `checks`** — not an eighth step inside it. Checkout, install uv, install Python 3.12, `uv sync --locked`, then:
+
+   ```
+   uv export --format requirements-txt --no-emit-project -o audit.txt && uv run pip-audit --strict --desc -r audit.txt
+   ```
+
+   Three choices are deliberate and each is commented on the job:
+   - **Separate job.** The result is a function of the advisory database, not of the commit. A newly published advisory must be free to go red without turning the required chain red on a hotfix that changed no dependency. This is the one CI result that is not a function of the tree.
+   - **`--no-emit-project`.** Not optional — it is what removes the unresolvable editable project, per R38 above.
+   - **`--strict` stays.** A third-party pin the auditor cannot check fails the job instead of passing silently. No `continue-on-error`, no `--ignore-vuln`. A finding is fixed by a pin change in its own commit.
+
+   The seven steps of `checks` are untouched.
+
+3. **Docs.** `CONTRIBUTING.md` gains a bullet with the same two commands as the hand run, the network requirement, the pin-change-not-ignore rule, and the Windows `PYTHONIOENCODING=utf-8` note. `README.md` gains a "Testing" sentence, a two-job sentence in "Continuous integration", and a paragraph on why `audit` is deliberately not one of the six required checks. `CLAUDE.md` gains `ci` to the commit-type list.
+
+### The audit result
+
+`uv sync --locked` at `fcdd091`: `Resolved 63 packages`, `Checked 61 packages`, exit 0 — the lock had not drifted. Then the two commands as CI runs them, over **83 pins**:
+
+```
+No known vulnerabilities found
+EXIT=0
+```
+
+**Zero findings.** Exit 0 *under `--strict`* is the stronger statement: it proves nothing was skipped, so all 83 were actually audited. The same result held at `dab744c` in Phase 0 over 62 pins, before the auditor's own 21 packages joined the lock.
+
+### The sabotage record
+
+An audit step cannot be proven by a repo test — a passing audit and an absent audit look identical from inside the suite — so the guard is external, and the brief specified it that way. In a temporary directory, a `requirements.txt` containing one pin with a published advisory, then `uvx pip-audit --strict --desc -r requirements.txt`:
+
+```
+Found 22 known vulnerabilities in 3 packages
+requests 2.25.0  PYSEC-2023-74   fix 2.31.0
+idna     2.10    PYSEC-2024-60   fix 3.7
+urllib3  1.26.20 PYSEC-2026-1999 fix 2.5.0
+EXIT=1
+```
+
+Non-zero exit with the advisory named in the output: the tool does fail on a known finding, so the zero-findings result above is a real check and not a silent no-op. The temporary directory was deleted and its absence verified. Restored: nothing in the repository was changed to run the guard.
+
+One Windows-only finding came out of it. `--desc` prints an arrow (`→`) that the cp1252 console cannot encode, and the run dies with `UnicodeEncodeError` **after** the findings table has printed — so a hand run on the Windows machine looks like a crash rather than a result. `PYTHONIOENCODING=utf-8` fixes it, and `CONTRIBUTING.md` and `README.md` both say so. CI on ubuntu is unaffected.
+
+### The stopping chain at this head
+
+```
+========= 1073 passed, 1 skipped, 28 deselected, 1 warning in 26.89s ==========
+Required test coverage of 92.0% reached. Total coverage: 99.47%
+All 15 coverage floors met.
+ruff check: All checks passed!      ruff format: 140 files already formatted
+mypy: Success: no issues found in 65 source files
+```
+
+Identical to the numbers at `fcdd091`, as expected: this piece adds no test.
+
+### For the lead
+
+1. **Zero findings, so no pin commits are owed** and there is nothing to order. Whether the fix would be a patch, minor or major bump does not arise.
+2. **`audit.txt` is not in `.gitignore`.** The hand run writes it to the repo root, where it shows up as untracked in `git status`. `.gitignore` was not in this piece's file list, so it was left alone rather than widened. One line, `audit.txt`, is owed — or the documented hand run should write to a temp path instead.
+3. **Register item 101 reads "Written; commit owed"** in `docs/register.md`. `CLAUDE.md` was committed by hand as `afd5fa0`, so that row is stale. Item 101 is outside this piece's scope, so it was not touched.
+4. **Piece 103's report block, "For the lead" point 6, calls the Redis-service CI job "item 104".** Per `docs/register.md` it is item 106; 104 is the M4 TTL fix. A past piece's block was not edited, but the number is wrong there.
+5. **Item 29's third half was numbered but its CI half was not.** The `redis_real` CI job is item 106, owed with the 74 prep; `docs/STATUS.md`'s item 29 row now says so, where it previously said only "no workflow runs it".
+6. **The brief said the step 3 row should read "owed as items 104 and 105".** Both are defined in `docs/register.md` (104 the M4 TTL fix, 105 policy-per-caller for fail-closed workers). The row previously owed a third thing as well — degradation behaviour at the warning ratio (A9) — which is not numbered with them, so it is named separately rather than dropped.
+7. **The lock now carries `requests` and `urllib3` as dev dependencies.** They are the two packages with the longest advisory histories in the ecosystem. They are dev-only and no `src/` module imports either, but they are now the most likely source of a future red `audit` job, and a red job there will not be a defect in this service's code.
+
+**Nothing in this piece has met a real provider or a real CRM.** The one external service it touched is the PyPI advisory database, read-only, over the network. Nothing is marked `[V]`.

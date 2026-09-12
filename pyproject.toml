@@ -69,6 +69,10 @@ dev = [
     "httpx2>=2.9.1",
     "hypothesis>=6.100.0",
     "mypy>=2.3.0",
+    # The dependency auditor, locked like every other tool so CI and a hand run
+    # use one advisory client. Always run against the EXPORTED lock, never the
+    # venv: the editable project cannot be resolved and --strict makes it fatal.
+    "pip-audit>=2.10.1",
     "pre-commit>=4.6.1",
     "pytest>=8.3.0",
     "pytest-asyncio>=1.4.0",

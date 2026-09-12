@@ -43,3 +43,31 @@ jobs:
 
       - name: Wheel installs and imports outside the repo
         run: uv run python scripts/verify_wheel.py dist/*.whl
+
+  # A SEPARATE job, beside `checks`, not an eighth step inside it. This result
+  # is a function of the advisory database, not of the commit: a newly
+  # published advisory must be free to go red without turning the chain red on
+  # a hotfix that changed nothing.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      # Audits the EXPORTED lock, never the venv (ruling R38).
+      # --no-emit-project: the editable project is not on PyPI, can never be
+      # resolved, and --strict counts that skip as a failure.
+      # --strict: a third-party pin the auditor cannot check fails the job
+      # instead of passing silently. No continue-on-error, no --ignore-vuln.
+      - name: Dependency audit
+        run: uv export --format requirements-txt --no-emit-project -o audit.txt && uv run pip-audit --strict --desc -r audit.txt

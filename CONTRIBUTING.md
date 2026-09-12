@@ -64,7 +64,26 @@ matching `.claude/*.local.*`) and which Claude Code merges over the shared file.
   so the chain stops at the first failure. CI runs two more on top of these
   four — `scripts/check_coverage_floors.py` and the wheel build plus
   `scripts/verify_wheel.py`. Run them locally too before a push that touches
-  packaging or a module with a coverage floor.
+  packaging or a module with a coverage floor. The dependency audit is a
+  separate CI job and is not part of this chain — see the next bullet.
+- **The dependency audit** runs in CI as its own `audit` job, and by hand with:
+
+  ```bash
+  uv export --format requirements-txt --no-emit-project -o audit.txt
+  uv run pip-audit --strict --desc -r audit.txt
+  ```
+
+  It audits the **exported lock, never the venv** (ruling R38): the editable
+  project is not on PyPI, can never be resolved, and `--strict` counts that
+  skip as a failure. It needs network for the advisory database, so it is the
+  one check that cannot run offline. A finding is fixed by a **pin change in
+  its own commit** — never by `--ignore-vuln` and never by dropping
+  `--strict`. It is a separate job because its result is a function of the
+  advisory database, not of the commit: a newly published advisory must not
+  turn the chain red on a hotfix that changed nothing.
+  **On Windows, set `PYTHONIOENCODING=utf-8` first** — `--desc` prints an
+  arrow (`→`) that the cp1252 console cannot encode, and the run dies
+  with `UnicodeEncodeError` after the findings table has already printed.
 - **Tests must stay hermetic.** No live Redis, network, or LLM calls in the
   default run — mock/fake them (see the shared fakes in `tests/helpers/` for the
   pattern). Redis has three lanes: the shared fakes in `tests/helpers/`,
