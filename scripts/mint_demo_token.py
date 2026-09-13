@@ -49,10 +49,13 @@ import jwt
 from dodeal_ai.core.auth.claims import normalise_tenant_label
 from dodeal_ai.core.config import ConfigError, Settings, _build_settings
 
-# The base of the env-file stack, matching docker-compose.yml's own `env_file`.
-# The demo file is layered on top of it (--env-file), later winning, exactly as
-# Compose layers them for the container.
-_BASE_ENV_FILE = ".env"
+# THE env-file stack, in precedence order (later wins), and the ONE definition
+# of it. It mirrors what Compose hands the container: docker-compose.yml
+# contributes `.env` and docker-compose.demo.yml appends `.env.demo`. Pinned to
+# those two files by tests/test_demo_env_stack.py -- if the orders ever diverge
+# this script signs with a key the service does not verify with, and that
+# surfaces as a generic 401 invalid_token that reads like a broken gate.
+DEFAULT_ENV_STACK: tuple[str, str] = (".env", ".env.demo")
 
 # The vendored corpus (tests/fixtures/fake_crm/tenant-a.json) has notes for 19
 # of its 1448 leads; lead 1004 is one of them and note 115 is its newest. Named
@@ -125,7 +128,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--note-id", type=int, default=_DEMO_NOTE_ID)
     parser.add_argument(
         "--env-file",
-        default=".env.demo",
+        default=DEFAULT_ENV_STACK[-1],
         help="Layered on top of .env, later winning -- the same stack Compose "
         "gives the container, so this signs with the key that service "
         "verifies with. A file that does not exist is skipped "
@@ -217,14 +220,14 @@ def main() -> int:
     # rather than calling Settings() directly keeps the fail-closed
     # ConfigError conversion in the ONE place that owns it.
     try:
-        settings = _build_settings(_env_file=(_BASE_ENV_FILE, args.env_file))
+        settings = _build_settings(_env_file=(*DEFAULT_ENV_STACK[:-1], args.env_file))
     except ConfigError as exc:
         print(f"CONFIG: {exc}", file=sys.stderr)
         print(
             "DODEAL_JWT_SIGNING_KEY must be set -- it is the key this token is "
-            f"signed with and the one the service verifies it against. It was "
-            f"looked for in {_BASE_ENV_FILE}, then {args.env_file}, then the "
-            "environment.",
+            f"signed with and the one the service verifies it against. It "
+            f"was looked for in {', then '.join((*DEFAULT_ENV_STACK[:-1], args.env_file))}, "
+            "then the environment.",
             file=sys.stderr,
         )
         return 2

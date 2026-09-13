@@ -241,3 +241,68 @@ def test_a_good_profile_starts(monkeypatch):
     with TestClient(app):
         assert app.state.llm is not None
     get_settings.cache_clear()
+
+
+# --- the insecure backend scheme (register item 78a) ------------------------
+
+SCHEME_EVENT = "backend_scheme_insecure"
+
+
+def test_http_backend_scheme_logs_an_error(monkeypatch, json_lines):
+    """http is a KEY DISCLOSURE risk, not a misconfiguration: the per-tenant
+    DD-API-KEY rides every backend request and http puts it in clear."""
+    monkeypatch.setenv("DODEAL_JWT_SIGNING_KEY", "test-key")
+    monkeypatch.setenv("DODEAL_BACKEND_SCHEME", "http")
+    get_settings.cache_clear()
+
+    with TestClient(app):
+        pass
+
+    found = _events(json_lines(), SCHEME_EVENT)
+    assert found, "no backend_scheme_insecure line reached the JSON stream"
+    assert found[0]["level"] == "ERROR"
+    assert found[0]["logger"] == STARTUP_LOGGER
+    get_settings.cache_clear()
+
+
+def test_http_backend_scheme_line_names_no_key_tenant_or_url(monkeypatch, json_lines):
+    """The line travels to a collector. It must carry the FACT and nothing that
+    identifies whose key, which tenant or which host is exposed."""
+    monkeypatch.setenv("DODEAL_JWT_SIGNING_KEY", "test-key")
+    monkeypatch.setenv("DODEAL_BACKEND_SCHEME", "http")
+    monkeypatch.setenv("DODEAL_BACKEND_BASE_DOMAIN", "leaky.example.test")
+    monkeypatch.setenv("DODEAL_DD_API_KEYS", '{"tenant-a":"a-real-looking-key"}')
+    get_settings.cache_clear()
+
+    with TestClient(app):
+        pass
+
+    message = str(_events(json_lines(), SCHEME_EVENT)[0]["message"])
+    assert "a-real-looking-key" not in message
+    assert "tenant-a" not in message
+    assert "leaky.example.test" not in message
+    assert "http://" not in message
+    get_settings.cache_clear()
+
+
+def test_the_default_scheme_logs_nothing(monkeypatch, json_lines):
+    """https is the default and the overwhelmingly common case. A line on every
+    healthy startup is a line nobody reads on the one unhealthy startup."""
+    monkeypatch.setenv("DODEAL_JWT_SIGNING_KEY", "test-key")
+    monkeypatch.delenv("DODEAL_BACKEND_SCHEME", raising=False)
+    get_settings.cache_clear()
+
+    with TestClient(app):
+        pass
+
+    # PROVE THE CHANNEL FIRST, the backend_keys_missing precedent: an absence
+    # assertion over a capture that sees nothing passes for the wrong reason.
+    logging.getLogger(STARTUP_LOGGER).error("startup_probe_line count=0")
+
+    lines = json_lines()
+    assert _events(lines, "startup_probe_line"), (
+        "the capture channel saw nothing at all, so the absence assertion below "
+        "would pass vacuously"
+    )
+    assert _events(lines, SCHEME_EVENT) == []
+    get_settings.cache_clear()

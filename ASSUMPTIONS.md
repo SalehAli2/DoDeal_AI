@@ -478,6 +478,7 @@ interpolated into a URL.
 | **Bounded at construction** | `Literal["https", "http"]` — anything else is a `ConfigError` when `Settings` is built, not a scheme silently pasted into a URL. A typo fails at startup with the rest of the config. |
 | **One reader** | `LeadsClient._base_url` is the only place in `src/` that names a scheme. `scripts/real_fetch_check.py` prints its URL from the same two settings so a printed line cannot disagree with the call it describes. |
 | **What a wrong value costs** | `http` in production puts the **per-tenant `DD-API-KEY` on the wire in clear**, on every lead and note fetch. That is the whole risk, and it is why the default is `https` and why the setting is documented as demo-only in three places (`core/config.py`, `.env.example`, `.env.demo`). |
+| **How it is noticed** | Startup logs `backend_scheme_insecure` at **ERROR** from `dodeal_ai.startup`, beside `backend_keys_missing` and `llm_not_configured` and for the same reason: after `configure_logging()`, so it reaches a collector as a JSON object rather than through whatever handler `logging` happened to have. It **never refuses to start** — the demo needs `http` — and it names no key, no tenant and no URL, because a line saying which host is exposed carries that fact to wherever the logs go. Piece 78a. |
 | **Not covered by this** | Nothing about the INBOUND side. Gate 2 matches a Host header and never dials it; the demo terminates plain HTTP on `localhost` because nothing is in front of it, and that is a deployment fact, not a setting. |
 
 ### Correction paths

@@ -54,6 +54,18 @@ async def lifespan(app: FastAPI):
         # file was the one least likely to be seen.
         logging.getLogger("dodeal_ai.startup").error("backend_keys_missing count=0")
 
+    if settings.backend_scheme == "http":
+        # NOT a refusal, and never one: the demo needs http, so this is the
+        # loudest thing short of not serving. ERROR rather than WARNING because
+        # the consequence is a live credential on the wire, not degraded
+        # behaviour. Names no key, no tenant and no URL -- the fact is the whole
+        # message, and anything identifying would travel with it into the log.
+        logging.getLogger("dodeal_ai.startup").error(
+            "backend_scheme_insecure -- every backend request puts that "
+            "tenant's DD-API-KEY on the wire in clear. Treat as key "
+            "disclosure, not misconfiguration, unless this is the demo."
+        )
+
     # ONE pooled client for every model call in the process. Built even when no
     # provider is configured: constructing it opens no socket, and closing it
     # unconditionally below keeps shutdown symmetrical -- the same argument the
