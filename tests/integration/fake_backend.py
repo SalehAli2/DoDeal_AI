@@ -11,7 +11,7 @@ anything under src/.
 
 from __future__ import annotations
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 
 EXPECTED_API_KEY = "test-dd-api-key"
 
@@ -86,18 +86,24 @@ def _meta(total: int) -> dict:
 
 
 class FakeBackend:
-    """Wraps the fake FastAPI app and records the last DD-API-KEY it saw, so
-    tests can assert the header was actually sent, not just infer it from a
-    200."""
+    """Wraps the fake FastAPI app and records the last DD-API-KEY and the last
+    URL it saw, so tests can assert what was actually sent rather than infer it
+    from a 200. The URL is recorded as the ASGI scope reconstructs it, scheme
+    included -- which is what makes DODEAL_BACKEND_SCHEME checkable through the
+    real httpx path rather than only at the string that builds it."""
 
     def __init__(self) -> None:
         self.last_dd_api_key: str | None = None
+        self.last_url: str | None = None
         self.app = self._build_app()
 
     def _require_api_key(
-        self, dd_api_key: str | None = Header(default=None, alias="DD-API-KEY")
+        self,
+        request: Request,
+        dd_api_key: str | None = Header(default=None, alias="DD-API-KEY"),
     ) -> None:
         self.last_dd_api_key = dd_api_key
+        self.last_url = str(request.url)
         if dd_api_key != EXPECTED_API_KEY:
             raise HTTPException(status_code=401, detail="Unauthorized")
 

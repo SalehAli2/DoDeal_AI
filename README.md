@@ -122,6 +122,26 @@ docker compose up --build
 
 The API reads `.env` (copy `.env.example` first) and talks to the `redis` service's queue and cost databases automatically.
 
+#### The demo
+
+One command brings up Redis and the API against the committed demo runtime (`.env.demo`, register item 78):
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.demo.yml up --build
+```
+
+`.env.demo` is layered **over** `.env`, so the demo's invented tenant, host and signing key win and are the same on every machine, while the three `DODEAL_LLM_*` rows it deliberately leaves unset are whatever a real `.env` supplies. Until a provider, a model and a key are set, `/ready` answers `503 {"llm": "not configured"}` and every judgement route `503`s — that is register item 84 working, not a broken demo.
+
+Then mint a token and run the curl line it prints:
+
+```bash
+uv run python scripts/mint_demo_token.py --route probe    # the gate chain alone
+uv run python scripts/mint_demo_token.py --route direct   # a judgement, no CRM needed
+uv run python scripts/mint_demo_token.py                  # the primary fetch route
+```
+
+The `Host` header in that line is the load-bearing part: the connection goes to `localhost:8000`, but Gate 2 only ever reads the header. The `fetch` route additionally needs the fake CRM (register item 79, a separate repository) listening on port **8001** of the Docker host; `docker-compose.demo.yml` maps `tenant-a.crm.demo.invalid` there through `extra_hosts`, and `.invalid` never resolves in DNS, so if that mapping is ever removed the call fails immediately instead of reaching somebody else's host.
+
 See `CONTRIBUTING.md` for the architectural rules and deliberate decisions that apply to any change in this repository.
 
 ## Project structure
@@ -193,13 +213,15 @@ dodeal-ai/
 | --- | --- |
 | `pyproject.toml` | Project metadata, runtime dependencies, dev dependency groups, and tool configuration for pytest, coverage, and mypy. |
 | `uv.lock` | Locked, reproducible dependency versions resolved by uv. Committed so every environment installs identical packages. |
-| `.gitignore` | Excludes the virtual environment, caches, coverage artifacts, editor files, any `.env*` file except `.env.example`, and the per-developer Claude Code settings (`.claude/settings.local.json`, `.claude/*.local.*`) while keeping the shared `.claude/settings.json` tracked. |
+| `.gitignore` | Excludes the virtual environment, caches, coverage artifacts, editor files, any `.env*` file except `.env.example` and `.env.demo`, and the per-developer Claude Code settings (`.claude/settings.local.json`, `.claude/*.local.*`) while keeping the shared `.claude/settings.json` tracked. |
 | `.env` | Local environment variables. Not committed. Must be UTF-8 with no byte order mark. |
-| `.env.example` | Documents every `DODEAL_*` setting in `core/config.py::Settings` with its default, or `change-me-local-only` for a secret. Audited field-by-field against `Settings`, in the same order. Copy to `.env` and fill in real local values; never holds real secrets. UTF-8, no BOM, LF. |
+| `.env.example` | Documents every `DODEAL_*` setting in `core/config.py::Settings` with its default, or `change-me-local-only` for a secret. Held in step with `Settings` by `tests/test_env_example_matches_settings.py`, which compares key **names** both ways and asserts every secret-shaped row holds a `change-me` placeholder — that last check is what makes the file safe to write without reading it, which is the situation every Claude Code session is in (`.env.*` is a denied read). Grouping is by hand and is not enforced. Copy to `.env` and fill in real local values; never holds real secrets. UTF-8, no BOM, LF. |
+| `.env.demo` | **Committed**, and safe to commit: every value in it is invented — no real tenant, no real key, no real host. The demo runtime (register item 78), passed to the container by `docker-compose.demo.yml` as a second `env_file` layered over `.env`. Not a template: `tests/test_env_example_matches_settings.py` pins `.env.example` to `Settings` and is deliberately **not** extended to this file, which sets only what the demo needs to differ from the defaults. It leaves the three `DODEAL_LLM_*` rows unset on purpose — which model the demo runs on is a person's decision and the key is a person's to hold. |
+| `docker-compose.demo.yml` | The demo override for `docker-compose.yml`: adds `.env.demo`, resolves the demo's `.invalid` backend host to the Docker host via `extra_hosts` so the fake CRM on the laptop is reachable, and waits for Redis to answer `PING` before starting the API so the first judgement cannot meet a fail-closed idempotency store. A separate file so a plain `docker compose up` is unchanged. |
 | `.dockerignore` | Keeps the build context small and secrets out of it: the virtual environment, `.git`, `.env*`, tests, docs, build artifacts, caches, and `study.py`. |
 | `Dockerfile` | Multi-stage build. Installs the locked dependencies and the project **non-editable** into a venv, then copies only that venv into a slim runtime image — no source tree in the final image, so this is the same installed-wheel shape `scripts/verify_wheel.py` checks in CI. |
 | `.pre-commit-config.yaml` | Local git hooks: ruff lint, ruff format check, and mypy, all run through `uv run` so they use the exact versions locked in `uv.lock`. |
-| `docker-compose.yml` | `api` (built from the `Dockerfile`) plus a local Redis 7 container for the cost and queue gates. |
+| `docker-compose.yml` | `api` (built from the `Dockerfile`) plus a local Redis 7 container for the cost and queue gates. Its `.env` is `required: false`, so a clean checkout comes up and fails closed in `Settings` with a reason rather than in Compose without one. |
 | `ASSUMPTIONS.md` | The single seam ledger for the service. Every provisional decision, organized by status (confirmed, built, parked, pending, deferred), the seam it lives behind, and how to correct it when the real answer lands. |
 | `CONTRIBUTING.md` | The contributor guide: local setup, shared vs personal Claude Code permissions, architectural rules that tooling cannot enforce, deliberate decisions not to reverse, branch-protection requirements, the OWASP LLM Top 10 checkpoint habit, and commit style. |
 | `.gitattributes` | `* text=auto eol=lf` plus explicit `binary` for `*.png` and `*.pdf`. Line endings are decided here rather than by each developer's `core.autocrlf`. |
@@ -233,6 +255,7 @@ dodeal-ai/
 | File | Purpose |
 | --- | --- |
 | `real_fetch_check.py` | A manual, one-shot script for the real, credentialed verification call against the live backend, run by hand for the joint session with the backend team. Not a pytest test and never runs in CI. Dry-runs by default against a guaranteed-unreachable fake host (no real network call); the real call requires an explicit `--live` flag, with a defense-in-depth guard that refuses to target a `dodealcrm.com` host without it. |
+| `mint_demo_token.py` | Mints one demo token and prints the `curl` line that uses it, including the `Host` header Gate 2 requires. Makes no network call and never prints the signing key. Reads the signing key, the algorithm, the three claim **names** and the inbound base domain from `Settings`, over the same `.env` → `.env.demo` stack Compose gives the container, so a token it mints cannot be signed with a different key from the one the service verifies against. `--route` picks the curl line: `fetch` (the primary route, needs the fake CRM), `direct` (note in the body, needs no CRM) or `probe` (the gate chain alone). Every default is invented. |
 | `check_coverage_floors.py` | Enforces per-**file** coverage minimums for the modules on a deny path (`core/auth/**`, `core/tenancy.py`, `core/cost/**`, `core/errors.py`, `core/validation.py`, `core/log_safety.py`). Reads `coverage.json` written by the pytest run. The repo-wide 92% gate is an average and can be paid for by well-covered code elsewhere; these cannot. Fails closed when a pattern matches no file, so a rename cannot silently drop a floor. stdlib only. |
 | `verify_wheel.py` | Installs a built wheel into a throwaway venv and, from a temp directory outside the repo, imports every module under `dodeal_ai` and confirms the packaged prompts directory exists and holds `unit_a_v1.txt`. Runs in CI after the wheel is built; proves an installed copy actually works, not just the editable dev install. |
 
@@ -441,6 +464,7 @@ All configuration is read through `Settings` in `core/config.py`. Every variable
 | `DODEAL_CLAIM_DATABASE` | `database` | The wire claim name mapped to the tenant's database name, carried for the tool layer. |
 | `DODEAL_DD_API_KEYS` | `{}` (empty map) | JSON map of tenant subdomain to that tenant's DD-API-KEY, e.g. `{"tenant-a":"<key>","tenant-b":"<key>"}`. No default value exists for any tenant; an unknown tenant fails closed in `tools/keys.py` before any network call. An empty map means nothing can reach the backend, and is logged at `ERROR` on startup. |
 | `DODEAL_BACKEND_BASE_DOMAIN` | `dodealcrm.com` | The base domain used to build a tenant's **outbound** backend URL. |
+| `DODEAL_BACKEND_SCHEME` | `https` | The scheme that same outbound URL is built with. `https` or `http`, nothing else — any other value is a `ConfigError` when `Settings` is built. **`http` is demo-only** and is set in exactly one committed file, `.env.demo`: a laptop serving the fake CRM has no certificate for `tenant-a.dodealcrm.com`. It does **not** disable certificate verification, and no setting does. Set to `http` in production it puts the per-tenant `DD-API-KEY` on the wire in clear on every fetch — see ASSUMPTIONS.md §3.9, `DECISION[DEMO_SCHEME]`. |
 | `DODEAL_INBOUND_BASE_DOMAIN` | `dodealcrm.com` | The base domain requests to this service arrive under. Gate 2 requires `Host == <tenant>.<inbound_base_domain>`. Kept separate from the outbound domain because the host of arrival is an open question with the backend and may become e.g. `ai.dodealcrm.com` independently. |
 | `DODEAL_PROMPTS_DIR` | none | Overrides where prompt templates are read from. Unset uses the copies shipped inside the package (`src/dodeal_ai/prompts/`); set only for local prompt iteration without a rebuild. |
 | `DODEAL_EXTERNAL_CALL_TIMEOUT_SECONDS` | `10.0` | The timeout applied to every external call by the resilience watchdog. |

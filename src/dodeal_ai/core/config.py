@@ -112,6 +112,10 @@ class Settings(BaseSettings):
     # Empty map = nothing can reach the backend; startup logs this at ERROR (main.py).
     dd_api_keys: dict[str, SecretStr] = {}
     backend_base_domain: str = "dodealcrm.com"
+    # The scheme LeadsClient builds every backend URL with. https by default because the per-tenant
+    # DD-API-KEY rides each request and must never cross the wire in clear. http is DEMO ONLY -- a
+    # laptop has no certificate for tenant-a.dodealcrm.com; set in production it leaks every key.
+    backend_scheme: Literal["https", "http"] = "https"
     # The base domain requests to THIS service arrive under: Gate 2 requires
     # Host == "<tenant>.<inbound_base_domain>". Same as the backend's domain today; kept separate
     # because the host of arrival is an open question with the backend (design note, Decision 1,

@@ -5,6 +5,7 @@ malformed one."""
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from dodeal_ai.core.config import Settings
 from dodeal_ai.core.context import RequestContext, TenantScope
@@ -214,3 +215,52 @@ def test_the_factory_is_not_a_singleton():
     # Audit M1: a fresh AsyncClient per call, until step 4 gives the transport
     # a lifespan-owned pool. Asserted so the change is deliberate when it lands.
     assert get_leads_client() is not get_leads_client()
+
+
+# --- DODEAL_BACKEND_SCHEME (register item 78, demo only) --------------------
+
+
+async def test_the_default_scheme_is_https_and_no_env_is_needed_to_get_it():
+    """An unset DODEAL_BACKEND_SCHEME still builds an https URL."""
+    settings = Settings(
+        _env_file=None,
+        jwt_signing_key="test-key",
+        dd_api_keys={"tenant-a": "key-tenant-a"},
+        backend_base_domain="dodealcrm.com",
+    )
+    assert settings.backend_scheme == "https"
+    transport = MockTransport(_list_body([{"id": 1}]))
+    await _client(transport, settings).get_leads(_scope("tenant-a"))
+    assert transport.last_url == "https://tenant-a.dodealcrm.com/api/service/leads"
+
+
+async def test_http_is_produced_only_when_the_setting_says_http():
+    """The demo scheme reaches the URL, and reaches only the scheme."""
+    settings = _settings().model_copy(update={"backend_scheme": "http"})
+    transport = MockTransport(_list_body([{"id": 1}]))
+    await _client(transport, settings).get_leads(_scope("tenant-a"))
+    assert transport.last_url == "http://tenant-a.dodealcrm.com/api/service/leads"
+
+
+async def test_the_scheme_applies_to_every_read_path():
+    """get_lead and get_lead_notes build their URLs through the same seam."""
+    settings = _settings().model_copy(update={"backend_scheme": "http"})
+    transport = MockTransport(_lead_body({"id": 7}))
+    await _client(transport, settings).get_lead(_scope("tenant-a"), 7)
+    assert transport.last_url == "http://tenant-a.dodealcrm.com/api/service/leads/7"
+
+    transport = MockTransport(_notes_body([]))
+    await _client(transport, settings).get_lead_notes(_scope("tenant-a"), 7)
+    assert (
+        transport.last_url == "http://tenant-a.dodealcrm.com/api/service/leads/7/notes"
+    )
+
+
+def test_a_scheme_that_is_neither_https_nor_http_is_refused_at_construction():
+    """ftp:// or a typo fails closed when Settings is built, not at the call."""
+    with pytest.raises(ValidationError):
+        Settings(
+            _env_file=None,
+            jwt_signing_key="test-key",
+            backend_scheme="ftp",
+        )

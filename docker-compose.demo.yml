@@ -1,0 +1,43 @@
+# The demo runtime (register item 78). An OVERRIDE of docker-compose.yml, never
+# a replacement:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.demo.yml up --build
+#
+# Kept as a second file rather than folded into the first so that a plain
+# `docker compose up` behaves exactly as it did before this piece. The demo's
+# settings are opt-in, and every one of them is visible here or in .env.demo.
+services:
+  api:
+    # AFTER the base file's `.env`, and a later env_file WINS: the demo's
+    # invented host, tenant and signing key override whatever a developer has
+    # configured, so the demo is the same on every machine. What .env.demo
+    # leaves unset -- the three DODEAL_LLM_* rows -- is what a real .env still
+    # supplies, which is how the demo gets a model key without this repo ever
+    # holding one. Required: a demo missing its own env file is broken, not
+    # defaulted.
+    env_file:
+      - path: .env.demo
+        required: true
+    # Where LeadsClient's backend calls go. DODEAL_BACKEND_BASE_DOMAIN is
+    # crm.demo.invalid:8001, so every fetch resolves tenant-a.crm.demo.invalid
+    # -- mapped here to the Docker host, where the fake CRM (register item 79,
+    # the other repo) listens on 8001. .invalid never resolves in DNS, so if
+    # this line is ever removed the call fails immediately instead of reaching
+    # somebody else's host. Add one line per demo tenant.
+    extra_hosts:
+      - "tenant-a.crm.demo.invalid:host-gateway"
+    # The demo is watched, and the first judgement is the one being watched.
+    # The cost gate fails OPEN without Redis, but the idempotency reservation
+    # fails CLOSED -- so a judgement issued in the seconds before Redis accepts
+    # connections answers 503 idempotency_unavailable. Waiting removes that.
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  redis:
+    # Only so `depends_on: service_healthy` above has something to wait on.
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 15

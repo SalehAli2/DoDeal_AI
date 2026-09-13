@@ -2,7 +2,14 @@ services:
   api:
     build: .
     ports: ["8000:8000"]
-    env_file: .env
+    # Optional, and it is the DEMO that made it optional: a clean checkout has
+    # no .env, and `required: true` made `docker compose up` fail before the
+    # service could tell anyone what was missing. Nothing is loosened by this --
+    # Settings still refuses to start without DODEAL_JWT_SIGNING_KEY, so an
+    # empty environment fails closed in the app, with a reason, as it always did.
+    env_file:
+      - path: .env
+        required: false
     environment:
       DODEAL_REDIS_QUEUE_URL: redis://redis:6379/0
       DODEAL_REDIS_COST_URL: redis://redis:6379/1

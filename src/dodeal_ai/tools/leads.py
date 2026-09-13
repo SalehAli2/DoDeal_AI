@@ -11,7 +11,9 @@ Endpoints (base https://<subdomain>.<base_domain>/api/service):
 
 Request flow, all three methods:
   - URL is built from the request's authoritative subdomain:
-    https://<subdomain>.<base_domain>/api/service/...
+    <scheme>://<subdomain>.<base_domain>/api/service/...
+    The scheme is DODEAL_BACKEND_SCHEME and is https everywhere but the demo,
+    where a laptop-served fake CRM has no certificate. See Settings.
   - Authentication uses the DD-API-KEY header; these endpoints take no JWT.
     The key is per-tenant (a key is valid only against its own tenant host),
     resolved for the request's tenant via TenantKeyResolver (tools/keys.py)
@@ -72,7 +74,8 @@ class LeadsClient:
         self._settings = settings or get_settings()
 
     def _base_url(self, subdomain: str) -> str:
-        return f"https://{subdomain}.{self._settings.backend_base_domain}/api/service"
+        s = self._settings
+        return f"{s.backend_scheme}://{subdomain}.{s.backend_base_domain}/api/service"
 
     def _headers(self, tenant: str) -> dict[str, str]:
         # The ONLY .get_secret_value() call in src/ -- the key exists as

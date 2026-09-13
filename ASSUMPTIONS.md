@@ -452,6 +452,46 @@ choose an answer to that. See §4 and `docs/STATUS.md` §6.
 **Seams:** `core/llm/openai_compatible.py` (the adapter and the two base-URL constants),
 `core/llm/__init__.py` (`build_llm_client`), `core/config.py` (`LLMProvider`, `llm_api_key`, `llm_base_url`).
 
+## 3.9 DECISION[DEMO_SCHEME] — `DODEAL_BACKEND_SCHEME`, and why http exists at all
+
+**Status: DECIDED and BUILT (register item 78). DEMO ONLY.** Recorded beside §3.8 because it is the
+other half of the same demo: §3.8 chose the model, this chose how the demo reaches a CRM.
+
+**The decision.** `LeadsClient` builds its backend URL with `DODEAL_BACKEND_SCHEME`, a
+`Literal["https", "http"]` defaulting to **`https`**, instead of the `https://` literal it carried
+before. `.env.demo` is the only file in the repository that sets it to `http`.
+
+**The reason.** The demo serves a fake CRM from a laptop, and a laptop has no certificate for
+`tenant-a.dodealcrm.com`. The alternatives were all worse: a self-signed certificate means teaching
+the client to trust it, which is a TLS-verification switch — a far more dangerous setting to own than
+a scheme; and pointing the demo at a real HTTPS host would mean either a real tenant or a second
+deployment, and the demo's whole point is that it needs neither.
+
+**What it does NOT do.** It does not disable certificate verification, and there is no setting that
+does. `https` still means verified `https`. The only thing this changes is which four characters are
+interpolated into a URL.
+
+### Why the blast radius is small, and where it is not
+
+| | |
+| --- | --- |
+| **Bounded at construction** | `Literal["https", "http"]` — anything else is a `ConfigError` when `Settings` is built, not a scheme silently pasted into a URL. A typo fails at startup with the rest of the config. |
+| **One reader** | `LeadsClient._base_url` is the only place in `src/` that names a scheme. `scripts/real_fetch_check.py` prints its URL from the same two settings so a printed line cannot disagree with the call it describes. |
+| **What a wrong value costs** | `http` in production puts the **per-tenant `DD-API-KEY` on the wire in clear**, on every lead and note fetch. That is the whole risk, and it is why the default is `https` and why the setting is documented as demo-only in three places (`core/config.py`, `.env.example`, `.env.demo`). |
+| **Not covered by this** | Nothing about the INBOUND side. Gate 2 matches a Host header and never dials it; the demo terminates plain HTTP on `localhost` because nothing is in front of it, and that is a deployment fact, not a setting. |
+
+### Correction paths
+
+| If | Then |
+| --- | --- |
+| **The demo gets a real certificate** (a tunnel, a local CA, a staging host) | Delete the `DODEAL_BACKEND_SCHEME` row from `.env.demo`. The default is already `https`; nothing else changes. |
+| **A deployment needs a scheme per tenant** rather than per process | It becomes a field on the per-tenant record beside the key, not a widening of this setting. One global scheme is what keeps "is production on http?" a single question with a single answer. |
+| **The setting is found set to `http` anywhere but the demo** | Treat it as a key-disclosure incident, not a misconfiguration: every `DD-API-KEY` that reached that process crossed the network in clear. `docs/runbooks/secret-rotation.md` is the procedure. |
+
+**Seams:** `core/config.py` (`backend_scheme`), `tools/leads.py` (`_base_url`, the one reader),
+`.env.demo` (the only file that sets it), `docker-compose.demo.yml` (which resolves the demo's
+`.invalid` backend host to the Docker host, so the plain-HTTP call has somewhere to land).
+
 ---
 
 # 4. PENDING — awaiting a backend answer

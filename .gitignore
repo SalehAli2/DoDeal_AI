@@ -18,6 +18,10 @@ AIService.zip
 .env
 .env.*
 !.env.example
+# The demo runtime (register item 78). Committed, and safe to commit: every
+# value in it is invented -- no real tenant, no real key, no real host. A
+# demo whose values live only in somebody's shell is not reproducible.
+!.env.demo
 
 .pytest_cache/
 .coverage

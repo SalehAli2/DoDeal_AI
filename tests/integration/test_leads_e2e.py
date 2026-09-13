@@ -126,3 +126,22 @@ async def test_fake_backend_returns_401_with_no_key_header_at_all(fake_backend):
     ) as raw_client:
         response = await raw_client.get("/api/service/leads")
     assert response.status_code == 401
+
+
+# --- DODEAL_BACKEND_SCHEME (register item 78, demo only) --------------------
+
+
+async def test_the_default_scheme_reaches_the_backend_as_https(fake_backend):
+    """Unset, the real httpx path still dials https -- the production default."""
+    await _client(_settings()).get_leads(_scope())
+    assert fake_backend.last_url is not None
+    assert fake_backend.last_url.startswith("https://tenant-a.dodealcrm.com/")
+
+
+async def test_the_demo_scheme_reaches_the_backend_as_http(fake_backend):
+    """Set to http, the scheme survives the real request build, and only the
+    scheme changes: the host, path and key are the ones the default sends."""
+    settings = _settings().model_copy(update={"backend_scheme": "http"})
+    await _client(settings).get_leads(_scope())
+    assert fake_backend.last_url == "http://tenant-a.dodealcrm.com/api/service/leads"
+    assert fake_backend.last_dd_api_key == EXPECTED_API_KEY

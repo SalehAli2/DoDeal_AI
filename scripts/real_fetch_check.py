@@ -221,7 +221,13 @@ async def _run(tenant: str, live: bool) -> int:
 
     scope = _build_scope(tenant)
     client = LeadsClient(HttpxTransport(), key_resolver, settings)
-    url = f"https://{tenant}.{settings.backend_base_domain}/api/service/leads"
+    # Built from the same two settings LeadsClient._base_url reads, scheme
+    # included: a printed URL that disagrees with the call it describes is
+    # worse than no printed URL at all.
+    url = (
+        f"{settings.backend_scheme}://{tenant}."
+        f"{settings.backend_base_domain}/api/service/leads"
+    )
     mode = (
         "LIVE (real call to production)" if live else "DRY RUN (no real network call)"
     )
