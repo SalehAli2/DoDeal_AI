@@ -4988,3 +4988,128 @@ mypy: Success: no issues found in 66 source files
 3. **The status-hint table is a judgement about what a human should check next**, not a mapping the service
    depends on. `404 -> model id` is the one most likely to be wrong for a provider whose 404 means something
    else; it costs one line to change.
+
+---
+
+## Piece 78: the demo runtime   STATUS: DONE `ca22b2f`
+
+Register item 78, closed. One `src/` change of four lines and two of a URL, plus three committed artefacts the
+demo cannot run without. The fake CRM itself is register item 79, in the other repository, and is not here.
+
+### The one `src/` change, and what it is not
+
+`LeadsClient._base_url` carried the literal `https://`. It now reads `DODEAL_BACKEND_SCHEME`, a
+`Literal["https", "http"]` defaulting to `https`.
+
+**Why a setting at all.** The demo serves a fake CRM from a laptop, and a laptop has no certificate for
+`tenant-a.dodealcrm.com`. Every alternative was worse. A self-signed certificate means teaching the client to
+trust it, and that switch is *certificate verification* — a far more dangerous setting to own permanently
+than four characters of a URL. Pointing the demo at a real HTTPS host means either a real tenant or a second
+deployment, and the demo exists precisely because neither is available.
+
+**What it is not.** It is not a verification switch. `https` still means verified `https`, and no setting in
+this repository disables verification. The bound is `Literal`, so `ftp`, `HTTP` or a typo is a `ConfigError`
+when `Settings` is built — at startup, with the rest of the config, never a scheme quietly pasted into a URL.
+
+**What a wrong value costs, stated plainly:** `http` in production puts the per-tenant `DD-API-KEY` on the
+wire in clear on every lead and note fetch. That is the entire risk, it is why the default is `https`, and it
+is why the setting is documented as demo-only in `core/config.py`, `.env.example`, `.env.demo`, the README
+configuration table and `ASSUMPTIONS.md` §3.9. Found set to `http` anywhere but the demo, it is a
+key-disclosure incident and `docs/runbooks/secret-rotation.md` is the procedure — not a misconfiguration to
+correct quietly.
+
+`scripts/real_fetch_check.py` printed its target URL with its own hardcoded `https://`. It now builds that
+line from the same two settings `_base_url` reads. A printed URL that disagrees with the call it describes is
+worse than no printed URL, and it would have disagreed the moment the scheme was set.
+
+### The trap this piece walked into, and the fix
+
+`docker-compose.demo.yml` gives the container `.env` and then `.env.demo`, and **a later `env_file` wins**.
+`scripts/mint_demo_token.py` reading `get_settings()` would therefore have read `.env` alone and signed with a
+*different* signing key from the one the service verifies with. Every minted token would have failed Gate 1
+with `invalid_token` — a generic 401 that reads exactly like a bug in the gates.
+
+The script builds `Settings` over the same stack in the same order (`_build_settings(_env_file=(".env",
+args.env_file))`, default `.env.demo`, missing files skipped), so the two cannot disagree by construction. It
+goes through `_build_settings` rather than `Settings(...)` so the fail-closed `ConfigError` conversion stays
+in the one place that owns it.
+
+This is also what makes `.env.demo` able to leave `DODEAL_LLM_PROVIDER`, `DODEAL_LLM_MODEL` and
+`DODEAL_LLM_API_KEY` unset: what the demo file does not set, a real `.env` still supplies. The repository
+therefore never holds a provider key, and the lead's existing `.env` is never touched.
+
+### Verified, not asserted
+
+| Claim | How |
+| --- | --- |
+| The minted token passes **both** gates | Minted through the script's own code path under the demo environment, then run through `verify_token(JwtVerifier)` and `check_tenant` directly: `Identity(tenant='tenant-a', subject='42', database='demo_tenant_a')`, Gate 2 returns `tenant-a`. |
+| A wrong Host is still refused | Same identity against `Host: localhost:8000` → `TenantMismatchError('invalid_host')`. |
+| The signing key never leaves | The demo key's literal value asserted absent from the script's stdout **and** stderr. |
+| The scheme survives the **real** httpx path | Two tests in the `integration` lane, through `HttpxTransport` and `ASGITransport` with nothing mocked but the transport. `FakeBackend` now records `str(request.url)`, so the assertion is on the URL the server saw, not on the string that built it. |
+| Compose merges as the comments claim | `docker compose config` on the merged pair: `DODEAL_BACKEND_SCHEME=http`, the demo domains and the demo signing key win over `.env`; `DODEAL_LLM_PROVIDER` still comes from `.env`; the three Redis URLs from `environment:` still outrank both files; `extra_hosts` and the healthcheck render. |
+
+### Sabotage
+
+| # | Change | Tests that failed | Restored |
+| --- | --- | --- | --- |
+| 1 | `_base_url` back to the `https://` literal | `test_http_is_produced_only_when_the_setting_says_http`, `test_the_scheme_applies_to_every_read_path`, and in the integration lane `test_the_demo_scheme_reaches_the_backend_as_http` | yes, byte for byte |
+| 2 | `Literal["https", "http"]` widened to `str` | `test_a_scheme_that_is_neither_https_nor_http_is_refused_at_construction` | yes, byte for byte |
+
+Sabotage 1 is the one that matters: it proves the two default-preserving tests are not the whole coverage, and
+that something fails when the seam is removed rather than only when it is misused.
+
+### The 76.1b guard needed no change, and that is the point
+
+`tests/test_env_example_matches_settings.py` pins `.env.example` **by path**. `.env.demo` is invisible to it,
+which is the correct arrangement and required no code to achieve: `.env.example` is a TEMPLATE, pinned
+field-for-field to `Settings`; `.env.demo` is a DEMO ARTEFACT that sets only what the demo needs to differ
+from the defaults. Extending the pin would force the demo file to carry every setting and turn it into a
+second, competing template that drifts against the first.
+
+The guard did require its own row for the new field, and `.env.example` was appended to **blind** — the
+permission rule denies reading `.env.*`. That is exactly the situation 76.1b's docstring describes as the
+reason its secret-shape test exists. The row is commented (`# DODEAL_BACKEND_SCHEME=https`), which the guard
+counts as documented, and which is the right shape for a demo-only override: discoverable, and unset unless
+somebody means it. Placement is at the end of the file rather than beside `DODEAL_BACKEND_BASE_DOMAIN`,
+because a file that cannot be read cannot be inserted into.
+
+### `docker-compose.demo.yml` is an override, not a change to the base
+
+Kept as a second file so that a plain `docker compose up` behaves exactly as it did before this piece. It adds
+three things beyond `.env.demo`:
+
+1. **`extra_hosts: tenant-a.crm.demo.invalid:host-gateway`.** `DODEAL_BACKEND_BASE_DOMAIN` is
+   `crm.demo.invalid:8001` — the port is in the domain because `_base_url` interpolates that string directly,
+   and it is the only way to reach a fake CRM that is not on port 80. `.invalid` is RFC 2606 reserved and
+   never resolves, so removing this line fails the call immediately instead of letting it reach somebody
+   else's host. That is the same argument `scripts/real_fetch_check.py` already makes for `leads-check.invalid`.
+2. **A Redis healthcheck the API waits on.** The cost gate fails **open** without Redis, but the idempotency
+   reservation fails **closed**: a judgement issued in the seconds before Redis accepts connections answers
+   `503 idempotency_unavailable`. The demo is watched, and the first judgement is the one being watched.
+3. Nothing about the model. That is the lead's decision (§3.8, `DECISION[DEMO_PROVIDER]`).
+
+The base file's `env_file: .env` became `required: false`, because a clean checkout has no `.env` and Compose
+refused to start before the service could say what was missing. Nothing is loosened: `Settings` still refuses
+to build without `DODEAL_JWT_SIGNING_KEY`, so an empty environment still fails closed, in the app, with a
+reason.
+
+### Three things I chose, being unnamed by the prompt
+
+1. **An override file rather than a `demo` profile in `docker-compose.yml`.** A profile cannot work: a service
+   with no profile always starts, so `--profile demo` would have raced a second API container against the
+   first on port 8000. Putting `.env.demo` into the base file's `env_file` list was the other candidate and is
+   worse — a developer whose `.env` omits `DODEAL_BACKEND_BASE_DOMAIN` (relying on the default) would have
+   silently inherited the demo's domain.
+2. **`--route {fetch,direct,probe}` on the mint script.** Without `direct`, the piece's own deliverable — "the
+   command sequence that produces one judgement" — is blocked on register item 79, in another repository. The
+   default is `fetch`, which is the contract.
+3. **Invented ids from the vendored corpus as defaults** (`--lead-id 1004 --note-id 115`) as plain numbers,
+   not read from `tests/fixtures/`. `scripts/` must not import from `tests/`, and a default that is
+   occasionally stale beats a coupling that is permanently wrong.
+
+### What is still owed by a person
+
+`.env.demo` deliberately leaves the three `DODEAL_LLM_*` rows unset. Until they are set the demo comes up,
+passes both gates and answers `/health`, and `/ready` reports `503 {"llm": "not configured"}` while every
+judgement route `503`s. **That is register item 84 working as designed**, not a broken demo — but it does mean
+this piece cannot, by itself, produce a judgement.

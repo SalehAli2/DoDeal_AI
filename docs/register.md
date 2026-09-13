@@ -101,7 +101,7 @@ Last updated: 12 September 2026, at `b263175`, from master ed3r6.
 | 75 | Test that greps `src/` for sync clients, `time.sleep`, `urllib.request` | L.2 | DONE | `85aa3e0` |
 | 76 | Provider adapters: `OpenAICompatibleClient` (Groq, OpenAI) and `GeminiClient`; `LLM_API_KEY`; JSON mode; status and finish-reason mapping; per-provider temperature bound; conformance tests on `MockTransport`; `scripts/model_smoke.py` | A9a | **parts 1 and 2 DONE** (`OpenAICompatibleClient`, `LLM_API_KEY`, JSON mode, the two maps, the 0-2 bound, conformance on `MockTransport`; lifespan wiring, `/ready`, `scripts/model_smoke.py`). **The live Groq run is owed by the lead**; part 3 (`GeminiClient`) OPEN | 38d60a0 |
 | 77 | Model profiles: `profile` keyword on `complete`; `core/llm/profiles.py`; `LLM_PROFILES` | M | DONE | `b263c8b` |
-| 78 | Demo runtime: `DODEAL_BACKEND_SCHEME`, `.env.demo`, `scripts/mint_demo_token.py`, compose Redis | A-demo | DECIDED | |
+| 78 | Demo runtime: `DODEAL_BACKEND_SCHEME`, `.env.demo`, `scripts/mint_demo_token.py`, compose Redis | A-demo | **DONE** (`docker-compose.demo.yml` as an override, not a change to the base file; the three `DODEAL_LLM_*` rows left unset for the lead) | ca22b2f |
 | 79 | Fake CRM (other repo): a note-save endpoint that calls us; a request counter; a minimal display; `tenant-c` served | A-demo | DECIDED | |
 
 ## Items 80 to 96: the 11 September code review
