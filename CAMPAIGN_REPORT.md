@@ -5113,3 +5113,103 @@ reason.
 passes both gates and answers `/health`, and `/ready` reports `503 {"llm": "not configured"}` while every
 judgement route `503`s. **That is register item 84 working as designed**, not a broken demo — but it does mean
 this piece cannot, by itself, produce a judgement.
+
+---
+
+## Piece 78a: the two runtime guards Piece 78's explainer named   STATUS: DONE `5cc1e55`
+
+**No register item.** This piece exists because Piece 78's own explainer listed two production failure modes
+and then shipped without guarding either. Writing the failure mode down is not the same as defending against
+it, and an explainer that names a risk nobody then closes is worse than one that stays quiet — it creates a
+record that reads as due diligence.
+
+### Guard 1: a loud line when the backend scheme is http
+
+`lifespan` now logs `backend_scheme_insecure` at **ERROR** when `settings.backend_scheme == "http"`.
+
+**It is never a refusal, and that is the design.** The demo needs `http` — a laptop has no certificate for the
+fake CRM — so refusing to start would break the one deployment the setting exists for. This is the loudest
+thing available short of not serving.
+
+**Three deliberate choices in four lines:**
+
+| Choice | Why |
+| --- | --- |
+| **ERROR, not WARNING** | The consequence is a live credential crossing the network in clear. That is not degraded behaviour; it is disclosure, and WARNING is the level people filter out. |
+| **After `configure_logging()`** | Audit §6.9, the same reason `backend_keys_missing` and `llm_not_configured` sit there. Emitted earlier the line goes out through whatever handler `logging` happened to have — unformatted, and invisible to a collector that parses only the JSON objects every other startup event produces. The loudest line in the file would be the one least likely to be seen. |
+| **Names no key, no tenant and no URL** | The line travels to wherever logs go. A line that says *which* host is exposed carries that fact to a second place, and the operator reading it already knows their own configuration. The fact is the whole message. |
+
+The wording says "key disclosure, not misconfiguration" on purpose. The natural read of a scheme setting is
+"someone set this wrong, change it" — but by the time the line is read, every `DD-API-KEY` that process used
+has already crossed the network. The next action is rotation
+(`docs/runbooks/secret-rotation.md`), not an edit to an env file, and the line has to say so or it will be
+triaged as tidy-up.
+
+### Guard 2: the demo env-file order, pinned
+
+Piece 78's second named failure mode: `docker-compose.demo.yml` and `scripts/mint_demo_token.py` each define
+an env-file stack, they must agree, and **nothing checked**. A divergence — a file added to one, the demo file
+moved ahead of `.env`, a rename done in one place — makes the minter sign with one key while the service
+verifies with another.
+
+**Why it needed a test rather than a comment.** The symptom points away from the cause. Nothing errors at
+startup; the token is well-formed; Gate 1 simply returns a generic **401** with reason `invalid_token`, which
+is byte-for-byte what a forged token produces. The first hour of that debugging goes into the gates, which are
+correct. Piece 78's report said as much in prose, and prose does not fail a build.
+
+`scripts/mint_demo_token.py` now exposes `DEFAULT_ENV_STACK: tuple[str, str] = (".env", ".env.demo")` as the
+**one** definition of that stack. Before, it was `_BASE_ENV_FILE` at module level plus a `.env.demo` string
+literal as an argparse default, joined only at the call site — two places, one of them inside a function, and
+not importable as data. The test imports the constant rather than restating the list, so there is no third
+copy to drift.
+
+### No YAML parser, deliberately
+
+`pyyaml` **is** importable in this venv, but only as a transitive dependency of `uvicorn[standard]` and
+`pre-commit` — this project declares it in neither `[project].dependencies` nor the `dev` group. A guard built
+on an undeclared transitive is a guard that disappears the day a dependency is dropped, and it would have been
+invisible in review because the import works.
+
+It is not needed. What is being pinned is two literal list entries in a known, small, hand-written file — not
+YAML semantics. A line scan reads both forms Compose accepts (`- .env` and `- path: .env` / `required: false`)
+and **fails closed**: an unrecognised block yields no entries, and the exact-match assertion then fails rather
+than passing over an empty list. Two additional tests defend the scanner itself — one runs it against an
+inline sample with both forms, and one asserts each compose file contributes at least one entry, so a reformat
+to flow style fails the pin loudly instead of hollowing it out.
+
+The scan is service-blind (it takes the first `env_file:` in each file), so a fifth test asserts neither
+compose file grows a second `env_file:` block. That assumption is correct today and would rot silently.
+
+### Sabotage
+
+| # | Change | Tests that failed | Restored |
+| --- | --- | --- | --- |
+| A | `.env` appended **after** `.env.demo` in `docker-compose.demo.yml` — the exact divergence the pin exists for | `test_compose_env_file_order_matches_the_minter_default_stack`, `test_the_demo_file_is_last_so_it_wins` | yes, byte for byte |
+| B | The `backend_scheme_insecure` branch deleted from `lifespan` | `test_http_backend_scheme_logs_an_error`, `test_http_backend_scheme_line_names_no_key_tenant_or_url` | yes, byte for byte |
+| C | The message edited to name `backend_base_domain` — the helpful-looking edit the no-leak test refuses | `test_http_backend_scheme_line_names_no_key_tenant_or_url` | yes, byte for byte |
+
+Sabotage C is the one worth keeping. Adding the offending host to the message is the obvious next improvement
+somebody will make in good faith, and it is precisely wrong: it copies the identity of the exposed system into
+the log pipeline. The test exists to make that edit fail rather than to make it unthinkable.
+
+The silent-on-default test follows the `backend_keys_missing` precedent and **proves the capture channel works
+before asserting an absence** — it logs a probe line through the same post-`configure_logging()` channel and
+asserts the probe arrived. Without that, the absence assertion passes when the capture sees nothing at all,
+which is exactly how the original `backend_keys_missing` absence test survived the §6.9 move while its partner
+failed.
+
+### A coverage reading I got wrong on the way
+
+An intermediate run reported 9 missing lines against Piece 78's 8, with `logging_config.py:60` newly uncovered
+— which is impossible from adding tests, since coverage is cumulative. It was a stale `coverage.json` left by
+the run that immediately followed the sabotage restore. Two clean consecutive full runs agree: **8 missing
+lines, identical to the Piece 78 baseline**, with `main.py` at zero misses — the new branch is exercised in
+both directions. Recorded because the wrong number was believed for a few minutes and the next person reading
+a one-line coverage drift should check for a stale artefact first.
+
+### What was touched outside the named scope, and why
+
+`README.md`'s repo-wide guards table said "Three tests" and listed three. It was already wrong before this
+piece: `test_env_example_matches_settings.py` landed in 76.1b and was never added to it. Writing "Five" and
+listing four would have been incoherent, so that row was written too. Named here rather than left as a silent
+ride-along.
