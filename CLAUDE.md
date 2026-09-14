@@ -32,7 +32,7 @@ uv run mypy
 - Run `uv run ruff format .` right after writing code, before the chain.
 - `uv run python scripts/check_coverage_floors.py` must pass too (CI runs it). Floors are never changed unasked; changing one is a policy change and goes under "For the lead".
 - The default run is hermetic with or without a local Redis listening. If it goes red only when a Redis is up, that is a suite defect to report, never a reason to stop Redis.
-- One test is known to be flaky on the Windows machine: `test_elapsed_covers_more_than_any_single_pass` (the clock ticks in 15.6 ms steps there). If it is the only red test, re-run once. Anything else red in an unattended run: stop, leave the tree as it is, record BLOCKED with what failed. Never fix forward, never skip.
+- No test carries a re-run exemption. `test_elapsed_covers_more_than_any_single_pass` was the one known flake on the Windows machine (the clock ticks in 15.6 ms steps there); Piece 102 put it on a clock the test controls at `498d937`, so a red there is a real failure and never a re-run. Anything red in an unattended run: stop, leave the tree as it is, record BLOCKED with what failed. Never fix forward, never skip.
 - The `redis_real` lane (`uv run pytest -m redis_real --no-cov` with `DODEAL_REDIS_REAL_URL` set to a database the service does not use, db 9 recommended) is a hand run. It skips, never fails, without a usable server. Run it when the piece touches Redis code or Lua.
 - The `integration` lane is `uv run pytest -m integration --no-cov`.
 

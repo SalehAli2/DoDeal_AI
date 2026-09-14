@@ -9,9 +9,9 @@ Rules:
 - A new item is added by the lead from a piece report, never by a session.
 - Status words: PENDING (designed, step named), OPEN (an answer is owed by a named party), DECIDED (a decision recorded, not built), NOTE (recorded, no action), RETRACTED, DONE.
 
-Carrying steps, in order (master section 15): N.4b, hand commits (101, `.env.example`), 102, 95, A9a (adapters), A-demo (demo runtime, pre-lane fixes, the load lane 74), A3 (the fix batch), A5 (step 4, the tool layer), A7a, A7b, A6 (step 14), A8 (first real CRM call), A9 (real notes), A10 (metrics), A11 (evaluation), A12 (pilot), A13.
+Carrying steps, in order (master section 15): 102, 95, 85, 86, 87, 88, then the load lane 74 carrying 104, 106 and 96.
 
-Last updated: 12 September 2026, at `b263175`, from master ed3r6.
+Last updated: 14 September 2026, at `498d937`, from master ed3r9.
 
 ## Items 1 to 13: code, in scope now
 
@@ -135,8 +135,8 @@ Last updated: 12 September 2026, at `b263175`, from master ed3r6.
 | 98 | A scheduler for the daily brief (07:30 Dubai per tenant) | A6 | OPEN | |
 | 99 | Unit A2a: the three per-rep measures through one read adapter (fake and real) over the backend's judgement rows | A7a | OPEN | |
 | 100 | Unit A2b: the daily brief, three role versions, returned as text | A7b | OPEN | |
-| 101 | `CLAUDE.md` at the repo root holding the stable session rules (R31, R35) | Hand commit, 12 Sep | Written; commit owed | |
-| 102 | The flaky elapsed test on a fake clock (`time.monotonic()` ticks in 15.6 ms steps on the Windows machine) | Own piece, after 101 | OPEN | |
+| 101 | `CLAUDE.md` at the repo root holding the stable session rules (R31, R35) | Hand commit, 12 Sep | DONE | `afd5fa0` |
+| 102 | The flaky elapsed test on a fake clock (`time.monotonic()` ticks in 15.6 ms steps on the Windows machine) | Own piece, after 101 | DONE | `498d937` |
 
 ## Items 103 to 106: from Pieces N.4 and 103, 12 September
 

@@ -5213,3 +5213,129 @@ a one-line coverage drift should check for a stale artefact first.
 piece: `test_env_example_matches_settings.py` landed in 76.1b and was never added to it. Writing "Five" and
 listing four would have been incoherent, so that row was written too. Named here rather than left as a silent
 ride-along.
+
+## Piece 102: the flaky elapsed test on a controlled clock   STATUS: DONE `498d937`
+
+**Register item 102, closed.** `tests/unit/test_judgement_pipeline.py::test_elapsed_covers_more_than_any_single_pass`
+failed at random on the Windows machine — observed **1 in 6** on one head and **5 in 14** during a later
+piece. The cause is not in `src/`. No file under `src/` is touched by this piece.
+
+### What was actually wrong
+
+The test injected a delay into the note fetch and asserted the outcome line saw it:
+
+```python
+async def _slow_get_lead(*args, **kwargs):
+    await asyncio.sleep(0.02)  # 20 ms, in real time
+    ...
+```
+
+...and then asserted `line["elapsed_ms"] >= 20` on the outcome line.
+
+`elapsed_ms` is computed as `int((time.monotonic() - started) * 1000)`. On this machine
+`time.monotonic()` advances in **~15.6 ms steps** — the default Windows timer period — so a real 20 ms sleep
+can be observed as a *single tick*, 15 ms, and `15 >= 20` is false. The pipeline was correct every time; the
+**instrument** was too coarse to measure what the test asked it to measure.
+
+This is the worst shape a flaky test comes in. It is red on correct code, which trains everyone reading the
+suite to re-run rather than to look — and `CLAUDE.md` had written that training down as a rule.
+
+### The fix: a clock the test owns
+
+`_FakeClock` is substituted for the **pipeline module's `time` global**, not for `time.monotonic` itself:
+
+```python
+clock = _FakeClock()
+monkeypatch.setattr(pipeline_module, "time", clock)
+
+
+async def _slow_get_lead(*args, **kwargs):
+    clock.advance(0.02)  # 20 ms, on a clock that cannot round it down
+    ...
+```
+
+**Why the module global rather than the function.** `test_the_pipeline_uses_the_monotonic_clock`, a few lines
+further down the same file, does `monkeypatch.setattr(pipeline_module.time, "monotonic", _counting)` — and
+`pipeline_module.time` **is** the shared `time` module, so that patch is process-wide. It is harmless there
+because the replacement delegates to the real clock and only counts reads. It is not harmless here: asyncio's
+`BaseEventLoop.time()` calls `time.monotonic()`, so a clock that jumps twenty milliseconds would be jumping
+under the event loop's own scheduling — including the `asyncio.timeout(judgement_deadline_seconds)` this very
+code path opens. That trades one source of flakiness for a subtler one. Patching the module's `time` **name**
+confines the fake to the four call sites in `pipeline.py`, which are the only `time.` reads in that file.
+`__getattr__` delegates every other attribute to the real module, so the patch narrows to `monotonic` alone.
+
+**Why the fetch and not the passes.** The clock advances only inside the fetch wrapper. The three model passes
+never advance it, so `classify_ms` is `0` **by construction** rather than by being fast — the 20 ms can only
+have come from the fetch, which is the claim the test was written to make.
+
+### The assertions are unchanged
+
+```python
+assert line["elapsed_ms"] >= 20
+assert line["classify_ms"] < 20
+```
+
+Neither was weakened to `>=`, and no tolerance margin was added. Both were available as "fixes" and both are
+wrong: a margin wide enough to absorb a 15.6 ms tick is wide enough to absorb the defect the assertion exists
+to catch. The flake was in how the span was **produced**, so that is the only thing that changed.
+
+`int((0.02 - 0.0) * 1000)` was checked to be exactly `20`, not `19`. The clock starts at `0.0` and the span is
+small, so the subtraction stays in the range where the double nearest `0.02` multiplies back above 20. Had it
+started at a large base — `1000.0`, say — the spacing of doubles near 1000 is 1.1e-13 and the difference can
+land *below* 0.02, which would have reintroduced the same off-by-one-tick failure from the opposite direction.
+
+### The twenty-run guard
+
+Twenty consecutive runs of the module: **twenty green, zero red.** Before the change the same loop would be
+expected to show two or three reds at the observed rates.
+
+### Sabotage
+
+| # | Change in `pipeline.py` | Result | Restored |
+| --- | --- | --- | --- |
+| A | `elapsed_ms=_ms_since(started),` deleted from the `_Timings(...)` on the outcome line — the literal sabotage the brief names | Fails by name, but on `TypeError: _Timings.__init__() missing 1 required positional argument: 'elapsed_ms'`. **The assertion never runs.** | yes |
+| B | `started` re-read *after* `_fetch_note` in `judge_note` — the clock starting late, which is the defect the test guards | `FAILED ... test_elapsed_covers_more_than_any_single_pass` on **`assert 0 >= 20`**, the `elapsed_ms` assertion itself | yes |
+
+Sabotage A is reported as run, and as **insufficient**. `elapsed_ms` is a required field of `_Timings`, so the
+line cannot be removed without the constructor raising — the test goes red, but on a `TypeError` that would
+also take dozens of other tests with it, and it proves nothing about the assertion. Sabotage B is the one that
+carries the claim: it changes the measurement's *meaning* while leaving everything well-typed, it is the
+mistake somebody could actually make, and the named assertion is what catches it. **`assert 0 >= 20`** is also
+a sharper failure than the old test could produce — on a real sleep the sabotaged value would still have been
+a small non-zero number.
+
+Restoration is verified by blob hash, not by eye: the working tree's `pipeline.py` hashes to
+`dfbef412f1982f0cce9859c90f4cda7b60108403`, identical to `HEAD:src/.../pipeline.py`.
+
+### A line-ending trap worth recording
+
+Rewriting `pipeline.py` for the sabotage normalised it from CRLF to LF on disk. The tree is **mixed** — 15 of
+57 `src/*.py` files are CRLF — while `.gitattributes` declares `* text=auto eol=lf`, so `git status` reports
+the CRLF copies as *modified* and the LF copies as clean. A byte-compare against a pre-sabotage `cp` backup
+therefore reported all 1034 lines as differing while the file was in fact correctly restored. **`git
+hash-object` against the `HEAD` blob is the check that means something here; `cmp` is not.**
+
+### `CLAUDE.md`, changed outside the named scope
+
+`CLAUDE.md` carried a standing rule: *"One test is known to be flaky on the Windows machine:
+`test_elapsed_covers_more_than_any_single_pass` ... If it is the only red test, re-run once."* That rule is
+now false, and false in the dangerous direction — it instructs every future session to re-run past a red in
+exactly this test, which is now the one place a red is guaranteed to be real. The line was rewritten to
+withdraw the exemption and name this commit. The surrounding rule (stop, BLOCKED, never fix forward, never
+skip) is unchanged. Named here because the brief did not ask for it.
+
+### Chain
+
+`1230 passed, 1 skipped, 30 deselected; 99.51% coverage`. All 15 coverage floors met; none added, none moved.
+`ruff check`, `ruff format --check`, `mypy` clean. Test count unchanged — the test was rewritten, not added.
+The `redis_real` lane was not run: this piece touches no Redis code and no Lua.
+
+### Files
+
+| File | Change |
+| --- | --- |
+| `tests/unit/test_judgement_pipeline.py` | `_FakeClock`; the test driven by `clock.advance` instead of `asyncio.sleep` |
+| `CLAUDE.md` | the re-run exemption withdrawn |
+| `docs/register.md` | header sha and master edition; items 101 and 102 to DONE; the step order replaced |
+| `docs/STATUS.md` | the Piece 102 row; suite coverage line corrected to 99.51% |
+| `CAMPAIGN_REPORT.md` | this block |
