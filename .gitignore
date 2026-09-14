@@ -40,3 +40,7 @@ htmlcov/
 .claude/*.local.*
 *.swp
 .DS_Store
+
+*.diff
+audit.txt 
+body.json
