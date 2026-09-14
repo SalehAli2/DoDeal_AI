@@ -27,6 +27,14 @@ POOL EXHAUSTION IS NOT COUNTED EITHER (register item 81). PoolExhausted is our
 own pool refusing before the store was asked, so a latency spike that queues
 requests on the pool cannot open a breaker on a healthy Redis. It is re-raised
 unchanged, so the caller's policy still applies to that one call.
+
+AND IT DOES NOT HOLD THE PROBE SLOT (register item 95). A probe the pool refuses
+is not a probe that failed to ANSWER but one that never STARTED, so neither
+guard above fires; without this it would hold HALF_OPEN, and a busy pool would
+refuse every other caller for a window on a Redis nobody had asked. The state
+reverts to OPEN with `_opened_at` untouched: that window is already elapsed, so
+the next arriving call is promoted to the probe at once. Re-arming it instead
+would cost a full window of refusals -- worse than the defect it fixes.
 """
 
 from __future__ import annotations
@@ -99,7 +107,8 @@ class CircuitBreaker:
 
         Only a RedisError counts as a failure, and it is re-raised unchanged; a
         bug in our own code is not evidence about the store, and neither is our
-        own pool running out (PoolExhausted, re-raised uncounted). Anything else,
+        own pool running out (PoolExhausted, re-raised uncounted, and handing
+        the probe slot back when it held one). Anything else,
         a cancellation included, is re-raised unchanged too and moves the breaker
         only when it ends a probe (guard 1 in the module docstring).
         """
@@ -107,8 +116,15 @@ class CircuitBreaker:
         try:
             result = await factory()
         except redis.RedisError as exc:
-            if not isinstance(exc, PoolExhausted):
-                self._record_failure()
+            if isinstance(exc, PoolExhausted):
+                if self._state is BreakerState.HALF_OPEN:
+                    # The store was never asked, so give the probe slot back
+                    # instead of holding it. _opened_at stays elapsed, so the
+                    # next call probes at once; re-stamping refuses them all.
+                    self._log_probe_abandoned()
+                    self._state = BreakerState.OPEN
+                raise
+            self._record_failure()
             raise
         except BaseException:
             # The probe did not answer the question (cancelled, or failed in

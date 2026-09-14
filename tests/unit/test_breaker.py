@@ -398,6 +398,72 @@ async def test_a_probe_that_never_returns_is_taken_over_after_a_window(
     assert breaker.state is BreakerState.CLOSED
 
 
+# --- a probe the pool refused (register item 95) ----------------------------
+
+
+async def _exhausted() -> None:
+    raise PoolExhausted()
+
+
+async def test_a_pool_refused_probe_reopens_without_a_new_window(
+    breaker, clock, caplog
+) -> None:
+    """Item 95. The probe never reached the store, so the slot goes back at once
+    and the elapsed window is left elapsed -- not re-stamped from the clock."""
+    await _open_past_the_window(breaker, clock)
+    opened_at = breaker._opened_at
+    caplog.clear()
+
+    with (
+        caplog.at_level(logging.WARNING, logger="dodeal_ai.breaker"),
+        pytest.raises(PoolExhausted) as caught,
+    ):
+        await breaker.call(_exhausted)
+
+    assert breaker.state is BreakerState.OPEN
+    assert breaker._opened_at == opened_at
+    assert type(caught.value) is PoolExhausted
+    # The existing line, not a new event name: a refused probe did not answer.
+    assert [r.getMessage() for r in caplog.records] == ["breaker_probe_abandoned"]
+    assert {r.breaker for r in caplog.records} == {"test"}
+
+
+async def test_the_next_call_after_a_pool_refused_probe_is_the_probe(
+    breaker, clock
+) -> None:
+    """Item 95, the point of it. No clock advance at all: the very next caller
+    reaches the store, and its success closes the breaker."""
+    await _open_past_the_window(breaker, clock)
+    with pytest.raises(PoolExhausted):
+        await breaker.call(_exhausted)
+
+    probe = _Store()
+    assert await breaker.call(probe) == "answered"
+
+    assert (probe.calls, breaker.state) == (1, BreakerState.CLOSED)
+
+
+async def test_a_pool_refusal_while_closed_still_changes_nothing(
+    breaker, clock, caplog
+) -> None:
+    """The fix must not widen. In CLOSED a pool refusal is still uncounted, still
+    silent, and still leaves the state and the failure count where they were."""
+    await _fail(breaker, _Store(fail=True), THRESHOLD - 1)
+    caplog.clear()
+
+    with (
+        caplog.at_level(logging.WARNING, logger="dodeal_ai.breaker"),
+        pytest.raises(PoolExhausted),
+    ):
+        await breaker.call(_exhausted)
+
+    assert breaker.state is BreakerState.CLOSED
+    assert caplog.records == []
+    # The count was neither raised nor cleared: one more store failure opens it.
+    await _fail(breaker, _Store(fail=True))
+    assert breaker.state is BreakerState.OPEN
+
+
 # --- the two log lines ------------------------------------------------------
 
 
