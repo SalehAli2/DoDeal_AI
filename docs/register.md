@@ -9,9 +9,9 @@ Rules:
 - A new item is added by the lead from a piece report, never by a session.
 - Status words: PENDING (designed, step named), OPEN (an answer is owed by a named party), DECIDED (a decision recorded, not built), NOTE (recorded, no action), RETRACTED, DONE.
 
-Carrying steps, in order (master section 15): 102, 95, 85, 86, 87, 88, then the load lane 74 carrying 104, 106 and 96.
+Carrying steps, in order (master section 15): 95, 85, 86, 87, 88, then the load lane 74 carrying 104, 106 and 96.
 
-Last updated: 14 September 2026, at `498d937`, from master ed3r9.
+Last updated: 14 September 2026, at `cf86985`, from master ed3r9.
 
 ## Items 1 to 13: code, in scope now
 
@@ -124,7 +124,7 @@ Last updated: 14 September 2026, at `498d937`, from master ed3r9.
 | 92 | Direct route: reject `str(author_id) != sub` unless the caller is a service principal; key `attempt:*` on the subject as well | Before pilot; revisit at Q1 | OPEN | |
 | 93 | `/_probe/protected` out of the production app | Before pilot | OPEN | |
 | 94 | Deployment: non-root, `HEALTHCHECK`, graceful shutdown, `--proxy-headers`, `terminationGracePeriodSeconds`; folds 11 | Before pilot | OPEN | |
-| 95 | A half-open probe refused by the pool reverts to OPEN without refreshing `_opened_at`, so the next caller probes at once | Own piece, after 102 | OPEN | |
+| 95 | A half-open probe refused by the pool reverts to OPEN without refreshing `_opened_at`, so the next caller probes at once | Own piece, after 102 | DONE | `cf86985` |
 | 96 | Startup WARNING when an explicit `DODEAL_REDIS_MAX_CONNECTIONS` is below `max_inflight + 4` | With 74 prep | OPEN | |
 
 ## Items 97 to 102: from the roadmap fold and the BRD, 11 September

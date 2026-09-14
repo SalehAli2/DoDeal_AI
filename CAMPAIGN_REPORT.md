@@ -5339,3 +5339,163 @@ The `redis_real` lane was not run: this piece touches no Redis code and no Lua.
 | `docs/register.md` | header sha and master edition; items 101 and 102 to DONE; the step order replaced |
 | `docs/STATUS.md` | the Piece 102 row; suite coverage line corrected to 99.51% |
 | `CAMPAIGN_REPORT.md` | this block |
+
+---
+
+## Piece 95: a pool-refused probe must not hold the breaker half-open   STATUS: DONE `cf86985`
+
+**Register item 95, closed.** It is the gap Piece N.3b recorded and left open in its own "For the lead",
+item 2: *"A probe refused by the pool stays HALF_OPEN until guard 2 takes it over one window later ... Handing
+the probe straight back (OPEN, window already expired) is a two-line change if you want it."* This is that
+change. One file under `src/`: `core/breaker.py`.
+
+### What was actually wrong
+
+`PoolExhausted` subclasses `redis.ConnectionError`, so in `CircuitBreaker.call` the `except redis.RedisError`
+clause matches it **first** and the `except BaseException` clause below — item 80's guard 1 — never sees it.
+The branch did exactly one thing: skip `_record_failure`.
+
+```python
+except redis.RedisError as exc:
+    if not isinstance(exc, PoolExhausted):
+        self._record_failure()
+    raise
+```
+
+That is right about counting and silent about state. `_admit` had already moved the breaker to HALF_OPEN and
+stamped `_probe_started = now`, so after the refusal the breaker sat in HALF_OPEN **holding a probe slot for a
+probe that never ran**. Every other caller then met `BreakerOpen` at `_admit`'s `now - self._probe_started <
+self._open_seconds` for a full `DODEAL_BREAKER_OPEN_SECONDS`, until guard 2's takeover handed the slot on.
+
+The trigger matters. Item 81 exists because a latency spike that queues requests on our own pool must not open
+a breaker on a healthy Redis. In CLOSED it does not. In HALF_OPEN it did — and worse, because HALF_OPEN
+refuses *everyone*, not just the caller who lost the acquire. On the operational connection that is a 503 on
+every judgement for a window, with the store never asked and nothing wrong with it.
+
+**A third way not to report back.** The module docstring numbers two, and both are about a probe that did not
+**answer**: one that ended without an answer (guard 1), one that never ended (guard 2). A probe the pool
+refused never **started**. That is why neither guard covered it.
+
+### The change
+
+```python
+except redis.RedisError as exc:
+    if isinstance(exc, PoolExhausted):
+        if self._state is BreakerState.HALF_OPEN:
+            self._log_probe_abandoned()
+            self._state = BreakerState.OPEN
+        raise
+    self._record_failure()
+    raise
+```
+
+Three properties, each of which is the point:
+
+1. **`_state = BreakerState.OPEN`, not `self._open()`.** `_open()` re-stamps `_opened_at` from the clock. The
+   window that had already elapsed is exactly what makes the next call a probe: `_admit` promotes OPEN →
+   HALF_OPEN on `now - self._opened_at >= self._open_seconds`. Leaving the stamp alone means the next arriving
+   call probes **at once, with no clock advance at all**. Re-stamping would impose a fresh full window of
+   refusals — strictly worse than the defect being fixed, which at least ended at guard 2's takeover.
+2. **`raise`, unchanged.** `PoolExhausted` reaches the caller as the same object, so the reservation still
+   fails closed with a 503 and the money guards still fail open on that one call. The breaker's decision about
+   the *next* call is separate from that caller's policy for *this* one.
+3. **Still never counted.** The state revert is not a failure record. `_failures` is untouched, in every state.
+
+### On the log line
+
+`breaker_probe_abandoned` is reused, not extended with a new name. Its docstring already reads *"one line per
+probe that did not answer"*, and a probe the pool refused did not answer. The named-events list in `README.md`
+is a documented surface; adding to it is a decision for the lead, not an implementation detail. The argument
+for a distinct name is recorded under "For the lead" below and **not built**.
+
+One consequence worth naming: on this path the line is **not** followed by `breaker_opened`, because `_open()`
+is what logs that and `_open()` is deliberately not called. The other two paths are followed by either
+`breaker_opened` (guard 1) or nothing (guard 2's takeover). The `README.md` event row said the `PoolExhausted`
+case arrived through guard 2 a window later; that is no longer true and was corrected.
+
+### Guards
+
+| Test | What it holds |
+| --- | --- |
+| `test_a_pool_refused_probe_reopens_without_a_new_window` | HALF_OPEN + `PoolExhausted` → state OPEN, `_opened_at` **unchanged** (compared against the value read before the call), the exception re-raised with `type(caught.value) is PoolExhausted`, and exactly one log record: `breaker_probe_abandoned`, carrying `breaker` |
+| `test_the_next_call_after_a_pool_refused_probe_is_the_probe` | **No clock advance whatsoever.** The very next caller reaches the factory and its success closes the breaker — `(probe.calls, state) == (1, CLOSED)` |
+| `test_a_pool_refusal_while_closed_still_changes_nothing` | The fix does not widen. In CLOSED: state unchanged, **no log records at all**, and the consecutive count neither raised nor cleared — one more store failure still opens it, and no fewer would |
+
+The clock is the test module's existing `_Clock`, moved by hand. No `asyncio.sleep`, no real time.
+
+### Sabotage
+
+| # | Change in `core/breaker.py` | Result | Restored |
+| --- | --- | --- | --- |
+| A | `self._state = BreakerState.OPEN` replaced by `self._open()` — the brief's named sabotage, and the plausible mistake | **2 failed, 26 passed.** Test 1 on **`assert 1030.0 == 1000.0`** (`breaker._opened_at`, re-stamped by the clock). Test 2 on `assert await breaker.call(probe) == "answered"`, raising `BreakerOpen` from `_admit`'s `now - self._opened_at < self._open_seconds` — the next caller refused for a fresh window, which is the defect made worse | yes |
+
+Test 2 is the one carrying the claim: it fails on the **behaviour** a user sees, not on a private attribute.
+Test 1 names the mechanism. Restoration verified by re-running the module: **28 passed**.
+
+### The existing guard 2 test
+
+`test_a_probe_that_never_returns_is_taken_over_after_a_window` **passes unchanged** and was not touched. It
+drives a probe that hangs rather than one the pool refuses, so this piece does not make it unreachable: a probe
+task that is never resumed still raises nothing, and only its age can free the breaker. What the fix removes
+from guard 2 is one *cause* of an abandoned probe, not the guard.
+
+### Chain
+
+`1233 passed, 1 skipped, 30 deselected; 99.51% coverage` (1230 → 1233, the three new tests; coverage
+unchanged). All 15 coverage floors met, none added, none moved; `core/breaker.py` measures **100.00%**
+against its floor of 100, with its statement count 96 → 102.
+
+**One coverage reading is not reproducible, and it is not this piece's.** The first full run of the session
+reported `99.56%` with **8** statements missed. The four runs after it all reported `99.51%` with **9** — the
+figure `docs/STATUS.md` already carried before this piece, and the one recorded. **Which** statement flipped
+was not captured: that first run's per-file table was read only from `tools/` down, and the nine missed
+statements in the stable runs sit in five files above it (`auth/claims.py` 95 and 112, `auth/dependencies.py`
+55, `auth/verify.py` 110, `logging_config.py` 60, `tools/httpx_transport.py` 18–21). `core/breaker.py`
+measured **100.00% in every run**, so this piece is not the source. The wobble is older than the piece: five
+earlier blocks in this file record `99.56%` and Piece 102's records `99.51%`, with no coverage-relevant change
+between them. Worth pinning down before any floor is set near those five files — a statement whose coverage
+depends on process state rather than on the tests is a floor that can move on its own.
+`ruff check`, `ruff format --check`, `mypy` clean. `integration` lane: 9 passed. `redis_real` lane: **21
+skipped** — no server was available on this machine (nothing listening on 6379, `DODEAL_REDIS_REAL_URL`
+unset). It is a hand run and is owed to the lead for this piece, though the change is pure state-machine logic
+on an injected clock and touches no socket, no pool and no Lua.
+
+### For the lead
+
+1. **The docstring was extended, and the two guards were not renumbered.** The pool paragraph gained a
+   paragraph of its own ("AND IT DOES NOT HOLD THE PROBE SLOT"), rather than item 80's numbered list becoming
+   three. That list answers *"how can a probe fail to answer?"* and has exactly two members; a probe that never
+   started is a different question, and it belongs beside the other `PoolExhausted` reasoning it depends on.
+   Renumbering would also silently invalidate every doc and report that cites "guard 1" and "guard 2" by
+   number, including `README.md` and three prior blocks in this file.
+2. **The argument for a distinct event name, recorded and not built.** `breaker_probe_abandoned` now covers
+   three distinguishable causes, and an operator reading it cannot tell a Redis that went quiet (guards 1
+   and 2 — investigate the store) from a pool that was full (this path — investigate our own concurrency and
+   `DODEAL_REDIS_MAX_CONNECTIONS`). Those call for opposite responses. The cheap answer is a field rather than
+   a name — `extra={"breaker": ..., "cause": "pool"}` — which keeps the named-events list at its current
+   length and is still a documented-surface change. **Your call; nothing was added.**
+3. **Item 96 is now the remaining half of this failure mode.** A pool sized below `max_inflight` turns ordinary
+   load into `PoolExhausted`. This piece makes that stop costing a breaker window; it does not make the pool
+   big enough. 96 (the startup WARNING for an explicit size below the cap) is still OPEN and still owed.
+4. **N.3b's "For the lead" item 3 is untouched and still true.** A late result can be attributed to the wrong
+   probe, because transitions key on the state rather than on which call is the probe. This piece adds no new
+   instance of it — the refused call's own `raise` happens immediately, with no `await` between `_admit` and
+   the branch — but it does not close it either. The probe generation counter is still at A9.
+5. **`ASSUMPTIONS.md` carries no entry for this.** The brief asked for the accepted-risk entry saying a
+   half-open probe refused by the pool holds the breaker for one window to be corrected there. It does not
+   appear in that file — the only breaker mention in `ASSUMPTIONS.md` is line 1218, about step 3 and the H3
+   breaker, which is unaffected. The risk was recorded in **`CAMPAIGN_REPORT.md`, Piece N.3b, "For the lead"
+   item 2**, and is closed by this block rather than by editing that historical record. Nothing was added to
+   `ASSUMPTIONS.md`.
+6. **No `.env.example` row is owed and no setting changed**, as the brief said.
+
+### Files
+
+| File | Change |
+| --- | --- |
+| `src/dodeal_ai/core/breaker.py` | the `PoolExhausted` branch reverts HALF_OPEN to OPEN without re-stamping `_opened_at`; module docstring gains the third path; `call`'s docstring updated |
+| `tests/unit/test_breaker.py` | three tests, and a module-level `_exhausted` factory |
+| `README.md` | the `breaker_probe_abandoned` event row (the `PoolExhausted` case no longer arrives through guard 2); the `breaker.py` module row; the `test_breaker.py` row |
+| `docs/register.md` | item 95 to DONE; header sha; 102 dropped from the step order |
+| `docs/STATUS.md` | the Piece 95 row; the register-item section; suite line to 1233 / 99.51%; header piece list |
+| `CAMPAIGN_REPORT.md` | this block |
