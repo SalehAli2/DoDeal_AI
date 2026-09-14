@@ -861,20 +861,52 @@ async def test_the_numbers_are_the_only_thing_added_to_the_line(
     assert line["band"] and line["action"]
 
 
+class _FakeClock:
+    """The pipeline's `time`, with a monotonic the test moves by hand.
+
+    Substituted for the module's `time` global rather than for `time.monotonic`
+    itself, because that attribute is shared with asyncio's event loop: a clock
+    that jumps twenty milliseconds under the loop's own scheduling is a second
+    source of flakiness in place of the first. Everything other than
+    `monotonic` is delegated to the real module, so the patch narrows to the
+    one reading under test.
+    """
+
+    def __init__(self) -> None:
+        self._now = 0.0
+
+    def monotonic(self) -> float:
+        return self._now
+
+    def advance(self, seconds: float) -> None:
+        self._now += seconds
+
+    def __getattr__(self, name: str):
+        return getattr(time, name)
+
+
 async def test_elapsed_covers_more_than_any_single_pass(
     leads, operational, json_capture, monkeypatch
 ):
     """The clock starts at the ENTRY point, not at the first model call.
 
-    Injecting a measurable delay into the note fetch -- which happens before
+    Putting a measurable span into the note fetch -- which happens before
     `_judge` is even called -- and asserting `elapsed_ms` reflects it is what
     distinguishes a whole-judgement measurement from one that quietly began
     after the slowest thing the fetch route does.
+
+    The span is ADVANCED on a clock this test owns, never slept: `time.monotonic()`
+    advances in ~15.6 ms steps on Windows, so a real 20 ms sleep can measure 15
+    and fail an assertion that is correct about code that is correct (register
+    item 102). The passes are left on the same clock and never advance it, so
+    the twenty milliseconds can only have come from the fetch.
     """
+    clock = _FakeClock()
+    monkeypatch.setattr(pipeline_module, "time", clock)
     real_get_lead = leads.get_lead
 
     async def _slow_get_lead(*args, **kwargs):
-        await asyncio.sleep(0.02)
+        clock.advance(0.02)
         return await real_get_lead(*args, **kwargs)
 
     monkeypatch.setattr(leads, "get_lead", _slow_get_lead)
@@ -889,8 +921,8 @@ async def test_elapsed_covers_more_than_any_single_pass(
 
     line = _outcome(json_capture)
     assert line["elapsed_ms"] >= 20  # the fetch is inside the measurement
-    # ...and the passes themselves are not: they ran against a fake and took
-    # essentially no time, so the delay cannot have leaked into them.
+    # ...and the passes themselves are not: they ran against a fake and never
+    # advanced the clock, so the span cannot have leaked into them.
     assert line["classify_ms"] < 20
 
 
