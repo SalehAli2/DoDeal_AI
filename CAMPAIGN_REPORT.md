@@ -5500,7 +5500,7 @@ on an injected clock and touches no socket, no pool and no Lua.
 | `docs/STATUS.md` | the Piece 95 row; the register-item section; suite line to 1233 / 99.51%; header piece list |
 | `CAMPAIGN_REPORT.md` | this block |
 
-## Piece 85: the prompt templates are read once at startup   STATUS: DONE ``
+## Piece 85: the prompt templates are read once at startup   STATUS: DONE `f3e3788`
 
 **Register item 85, closed.** *"Preload all nine prompt templates at startup; a missing file fails startup."*
 Two files under `src/` changed and one was added: `core/prompting.py`, `main.py`, and

@@ -9,9 +9,9 @@ Rules:
 - A new item is added by the lead from a piece report, never by a session.
 - Status words: PENDING (designed, step named), OPEN (an answer is owed by a named party), DECIDED (a decision recorded, not built), NOTE (recorded, no action), RETRACTED, DONE.
 
-Carrying steps, in order (master section 15): 95, 85, 86, 87, 88, then the load lane 74 carrying 104, 106 and 96.
+Carrying steps, in order (master section 15): 86, 87, 88, then the load lane 74 carrying 104, 106 and 96.
 
-Last updated: 14 September 2026, at `cf86985`, from master ed3r9.
+Last updated: 15 September 2026, at `f3e3788`, from master ed3r9.
 
 ## Items 1 to 13: code, in scope now
 
@@ -114,7 +114,7 @@ Last updated: 14 September 2026, at `cf86985`, from master ed3r9.
 | 83 | One `asyncio.timeout` per judgement, fetch included; 503 `judgement_deadline_exceeded` | N.3b | DONE | `83bc11b` |
 | 84 | Build the LLM client once in `lifespan`; fail startup on `ConfigError`; `/ready` fails closed without it | A9a, with 76 | **DONE** (permissive startup, strict readiness; the profile sweep folded in) | de0080c |
 | 115 | The default run is hermetic against a populated `.env`, exactly as 103 made it hermetic against a running Redis | 103b | **DONE** | b263175 |
-| 85 | Preload all nine prompt templates at startup; a missing file fails startup | A9a, with 76 | OPEN | |
+| 85 | Preload all nine prompt templates at startup; a missing file fails startup | A9a, with 76 | **DONE** (its own piece; the nine named by the unit, the cache and the fallback in `core/prompting.py`) | `f3e3788` |
 | 86 | Rewrite `RequestIDMiddleware` and `InflightMiddleware` as pure ASGI | A-demo, before 74 | OPEN | |
 | 87 | Pure-ASGI body-size limit, outermost, 64 kB, 413 above it, before Gate 1 | A-demo, before 74 | OPEN | |
 | 88 | `JsonFormatter` formats `exc_info` frames only; a stdout-wide sentinel test through the ASGI stack | A-demo, before 74 | OPEN | |
