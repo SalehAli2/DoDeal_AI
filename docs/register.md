@@ -9,9 +9,9 @@ Rules:
 - A new item is added by the lead from a piece report, never by a session.
 - Status words: PENDING (designed, step named), OPEN (an answer is owed by a named party), DECIDED (a decision recorded, not built), NOTE (recorded, no action), RETRACTED, DONE.
 
-Carrying steps, in order (master section 15): 87, 88, then the load lane 74 carrying 104, 106 and 96.
+Carrying steps, in order (master section 15): 88, then the load lane 74 carrying 104, 106 and 96.
 
-Last updated: 15 September 2026, at `76ed6af`, from master ed3r9.
+Last updated: 15 September 2026, at `39018b5`, from master ed3r9.
 
 ## Items 1 to 13: code, in scope now
 
@@ -116,7 +116,7 @@ Last updated: 15 September 2026, at `76ed6af`, from master ed3r9.
 | 115 | The default run is hermetic against a populated `.env`, exactly as 103 made it hermetic against a running Redis | 103b | **DONE** | b263175 |
 | 85 | Preload all nine prompt templates at startup; a missing file fails startup | A9a, with 76 | **DONE** (its own piece; the nine named by the unit, the cache and the fallback in `core/prompting.py`) | `f3e3788` |
 | 86 | Rewrite `RequestIDMiddleware` and `InflightMiddleware` as pure ASGI | A-demo, before 74 | **DONE** (behaviour, order, log lines, bodies and headers unchanged; a non-http scope now passes through uncounted; `tests/test_no_base_http_middleware.py` keeps the base class out) | `76ed6af` |
-| 87 | Pure-ASGI body-size limit, outermost, 64 kB, 413 above it, before Gate 1 | A-demo, before 74 | OPEN | |
+| 87 | Pure-ASGI body-size limit, outermost, 64 kB, 413 above it, before Gate 1 | A-demo, before 74 | **DONE** (`middleware/body_limit.py`, the last `add_middleware` call; `max_request_body_bytes` 64 kB read per request; a `content-length` over the cap refused without calling `receive`, a streamed or lying one counted and refused at the byte it passes; the middleware sends both 413s itself because FastAPI re-raises any exception out of `await request.body()` as its own `HTTPException(400)`) | `39018b5` |
 | 88 | `JsonFormatter` formats `exc_info` frames only; a stdout-wide sentinel test through the ASGI stack | A-demo, before 74 | OPEN | |
 | 89 | `_retryable` predicate (5xx, 429, transport, timeout) plus jitter in the watchdog; folds 5 and 19 | A5 | OPEN | |
 | 90 | Per-item page validation with `rows_rejected`; `bookedAmount: Any`; `Field(ge=1)`; folds 10 and 18 | A5; per-item half pulled forward if A8 lands first | OPEN | |
@@ -147,14 +147,24 @@ Last updated: 15 September 2026, at `76ed6af`, from master ed3r9.
 | 105 | Policy-per-caller for fail-closed workers: a worker draining a backlog pauses on a cost or token guard failure instead of failing open | Step 14 (A6), with the first worker | OPEN | |
 | 106 | A CI job for the `redis_real` lane with a Redis service container | With 74 prep | OPEN | |
 
-## Item 122: from Piece 86, 15 September
+## Items 116 to 123: from the master, 15 September
 
 | # | Item | Carrying step | Status | Sha |
 |---|---|---|---|---|
-| 122 | `main.py` lifespan: if `build_llm_client` raises, `app.state.http` is never closed; wrap the two in a try that closes and re-raises | The next piece that touches `main.py` | OPEN | |
+| 116 | The three output ceilings assume a non-reasoning model and nothing in the code says so. Where: `classify.py`, `vague.py`, `scoring.py`, `core/llm/profiles.py` | Decided at A11 with the model comparison | OPEN | |
+| 117 | No `ASSUMPTIONS.md` entry records that a CRM note id is unique and never reused; the attempt cap, the resubmission fingerprint (item 33) and the six-hour attempt TTL all rest on it. Where: `ASSUMPTIONS.md` and the backend ask list | The next docs commit, and the question to the backend | OPEN | |
+| 118 | On the direct route `lead_id` comes from the body and is never checked against the note, so a wrong `lead_id` addresses a different attempt key. Where: `pipeline.py` | A3 fix batch | OPEN | |
+| 119 | The attempt counter is read before the three model calls and incremented after, so two concurrent requests for one note both read zero and both spend; the reservation keys on text, this keys on id. Where: `state.py`, `pipeline.py` | With item 74 | OPEN | |
+| 120 | A `redis_real` test that the attempt cap follows the id and not the text: text A then text B on one id without a flush expects `attempt_cap` with the counter at 1. Where: `tests/redis_real/` | With 119 | OPEN | |
+| 121 | An `event` field on the three startup log lines, all three together or none. Where: `main.py` | After the small fixes | OPEN | |
+| 122 | A `cause` field on `breaker_probe_abandoned` (`cancelled`, `never_returned`, `pool`), a field never a fourth name. Where: `core/breaker.py` | With item 96 at load-lane prep | OPEN | |
+| 123 | The elapsed test's fake clock holds a float from zero, so any realistic base reads 19 against `_ms_since`'s truncation; hold whole milliseconds and make the shim refuse any `time` attribute but `monotonic`. Where: the test module only | Own piece, before 74 | OPEN | |
 
-Numbered 122 and not 116: this file's items stop at 115, but the master carries at least one beyond it (item
-121, the `event` field on the startup lines, named in Piece 86's prompt and absent here). 116 risks colliding
-with a master number; renumber if the master's next free is lower.
+## Items 124 and 125: from Pieces 86 and 85, 15 September
+
+| # | Item | Carrying step | Status | Sha |
+|---|---|---|---|---|
+| 124 | `main.py` lifespan: if `build_llm_client` raises, `app.state.http` is never closed; wrap the two in a try that closes and re-raises | The next piece that touches `main.py` | OPEN | |
+| 125 | `core/prompting.py` logs one WARNING `prompt_template_not_preloaded` per name on a cache miss when the cache is populated, and a test scans `src/` for template names and asserts each is in `UNIT_A_TEMPLATES`. Where: `core/prompting.py`, `tests/` | Own half piece, after 88, before 74 | OPEN | |
 
 Not applicable by decision: a dead-letter queue for Unit A; a jobs table; streaming; result caching beyond D3; prompt caching before a provider exists.

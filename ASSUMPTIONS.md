@@ -1137,18 +1137,11 @@ discovered at build time.
 
 # 10. DEFERRED
 
-### 10.1 Input size limit — home undecided
-- Built once as ASGI middleware, removed after a regression (forced eager config
-  load; middleware-ordering conflict).
-- Re-add **last**, alone, run the full suite immediately, watch the
-  error/chain/audit tests. Read the cap **lazily** — never call `get_settings()`
-  in middleware `__init__`.
-- **The in-app limit is not coming back.** The edge limit is DevOps's (Q21), and
-  a byte cap belongs where bytes are first accepted, not one layer inside the
-  app that has already read them. **Load shedding is a different guard** — a
-  count of requests in flight, not a size of one — and it lives in
-  `middleware/inflight.py` (Piece L, register item 73), where it does obey the
-  lazy-read rule this section wrote down.
+### 10.1 Input size limit: in the app, outermost (register item 87)
+- Built once as a Starlette base-class middleware and removed: it read settings in its constructor, which forced config to load at import time, and it fought the middleware order.
+- Re-added as a pure ASGI middleware, outermost, after Piece 86 made the other two pure ASGI. The cap is `DODEAL_MAX_REQUEST_BODY_BYTES` (64 kB), read lazily per request, never in `__init__`. A `content-length` over the cap is refused before the body is read; a streamed body is counted and refused at the byte it passes the cap. 413 `payload_too_large`.
+- This does not replace the edge limit (item 43, DevOps). Bytes should be refused where they are first accepted; the in-app cap is the bound that holds when the edge has none.
+- Load shedding is a different guard, a count of requests, not a size of one: `middleware/inflight.py`, item 73.
 
 ### 10.2 Per-unit prompt-injection hardening
 - **Built:** the injection-resistant prompt builder and its structural tests.

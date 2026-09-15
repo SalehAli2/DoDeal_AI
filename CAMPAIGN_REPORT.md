@@ -5987,3 +5987,160 @@ FAILED tests/unit/test_middleware_asgi.py::test_a_non_http_scope_takes_no_slot[w
 | `docs/register.md` | item 86 to DONE; header sha to this head; 86 dropped from the step order; the lead's new item 122 |
 | `docs/STATUS.md` | the Piece 86 row; the register-item section; suite line to 1256 and the deselected count corrected to 30; header piece list and date |
 | `CAMPAIGN_REPORT.md` | this block |
+
+---
+
+## Piece 87: the body-size limit, outermost   STATUS: DONE `39018b5`
+
+**Register item 87, closed.** *"Pure-ASGI body-size limit, outermost, 64 kB, 413 above it, before Gate 1."*
+One new file under `src/` and three edited: `middleware/body_limit.py` (new), `core/config.py`,
+`core/errors.py`, `main.py`, plus the `.env.example` row in the same commit because the pin test requires it.
+
+### What was actually wrong
+
+Nothing in the app bounded a request body. A caller could send megabytes and the app would read every one of
+them into memory **before Gate 1 decided whether that caller was allowed to send anything at all**. The order
+was backwards: identification was paying for the request rather than the request paying for itself. Register
+item 43 puts a limit at the edge, but it is DevOps's, it is unowned, and an in-app service that has no bound
+of its own is one misconfigured ingress away from having none at all.
+
+`ASSUMPTIONS.md` §10.1 said the in-app limit "is not coming back" — that section is rewritten by this piece.
+The reason it was removed was never that an in-app cap is wrong; it was that the first build called
+`get_settings()` in a middleware constructor, which forced config to load at import time. That is a fixable
+mistake and it is fixed here: the cap is read per request, and `__init__` takes the inner app and nothing else.
+
+### The disagreement between the prompt and the tree, and how it was resolved
+
+The prompt specified the streamed path like this:
+
+> the moment the running total passes the cap, raise `PayloadTooLarge`. The exception surfaces inside the
+> route's own body read, propagates to the `DodealError` handler, and comes back as the same 413 with a real
+> request id
+
+**It does not.** FastAPI wraps the body read in a broad `except Exception` and re-raises whatever comes out of
+it as its own `HTTPException(400, "There was an error parsing the body")` (`fastapi/routing.py`, and the
+adjacent comment shows it is deliberate). Measured against the real stack at `7a3ec5c`, before any code for
+this piece was written — a minimal FastAPI app, a middleware raising `PayloadTooLarge` out of a wrapped
+`receive`:
+
+```
+http.response.start 400
+http.response.body  b'{"detail":"There was an error parsing the body"}'
+```
+
+So a delegated refusal tells the caller its request was **malformed** when it was only too big — 400 where
+the register says 413, and a status that points the CRM at its own serialiser rather than at the size.
+
+**The workaround that looks obvious is worse.** FastAPI's `except HTTPException: raise` branch exists exactly
+so a middleware can raise one, so making `PayloadTooLarge` inherit `DodealError` *and* `HTTPException` should
+thread it through. It cannot: under the combined MRO, `DodealError.__init__`'s `super().__init__(reason_code)`
+resolves to `HTTPException.__init__`, which reads the reason code as a status —
+`ValueError: 'payload_too_large' is not a valid HTTPStatus`. Measured too. Worse than not working, it is a
+trap laid for every future `DodealError` subclass.
+
+**Resolution: the middleware owns its refusal end to end, on both paths.** The wrapped `receive` raises to
+stop the read where it stands; the wrapped `send` discards whatever the inner app answered with; the
+middleware sends the 413 itself, from the same `dodeal_error_response` builder every other enumerated refusal
+uses. What the framework inside makes of the exception stops mattering — which is the property worth having
+across a FastAPI upgrade, since the alternative fails *into a 400* rather than loudly.
+
+The status, the reason code, the body shape, the placement, the cap and the `>`-not-`>=` boundary are all
+exactly as item 87 specifies. Only the mechanism differs, and it differs because the specified one was
+measured not to hold.
+
+### The change
+
+`middleware/body_limit.py`, the Piece 86 shape: `__slots__ = ("app",)`, `__init__(app)`,
+`__call__(scope, receive, send)`, no settings read in the constructor.
+
+- **Non-http scopes** pass through untouched, as in the other two.
+- **The header path.** A `content-length` that parses as an int above the cap is refused with
+  `dodeal_error_response(PayloadTooLarge(), request_id)` awaited as an ASGI app. `receive` is **never called**,
+  so not one byte of the body comes off the socket. `request_id` is `"unknown"`: outermost, nothing has minted
+  one yet, and generating one here would mean two middlewares minting ids.
+- **The streamed path.** No length, chunked, or a lying header: every `http.request` message's body length is
+  added to a running integer — never a copy of the bytes — and the moment the total passes the cap the read
+  raises. That 413 carries a **real** request id, because the overflow is noticed while the route is reading
+  the body, which is inside every middleware below this one. Same lookup, different moment.
+- **Exactly the cap is admitted**; one byte over is refused.
+- **It cannot retract a response that has already started.** A route that streams a reply while still reading
+  the request would have its first bytes on the wire already; ASGI offers no way to take those back, so the
+  `started` flag passes the rest through rather than corrupting the response. No route here does that today.
+- **It logs nothing.** The 413 is the record. A WARNING per oversized request is a log-volume lever a caller
+  controls — the same asymmetry this middleware closes, arriving through the log pipeline instead.
+- **`/health` and `/ready` are not exempt**, unlike in `inflight.py`. They carry no body, so the check costs
+  them a dict lookup, and an exemption is a path a caller can aim a large body at. The test asserts the
+  *absence* of an exemption list, not just that `/health` answers 200 — which it would either way.
+
+`core/config.py`: the commented placeholder becomes `max_request_body_bytes: int = Field(default=65_536, ge=1)`.
+`core/errors.py`: `PayloadTooLarge` → `("payload_too_large", 413)`. 413 and not 503 because this is about
+**this request's size**: not the service's capacity (`LoadShed`'s 503) and not the caller's quota (Gate 4's
+429). `main.py`: registered **last**, so outermost; the order comment now reads body limit → request id →
+inflight → routing, and the dead `# register_body_size_limit(app)` line is gone.
+
+### Sabotage
+
+| Change | Result | Restored |
+| --- | --- | --- |
+| The fast-path header check replaced by `if False:` | 5 failed: `test_a_declared_length_over_the_cap_never_touches_the_body` (`receive` was called), `test_the_refusal_body_is_the_shared_error_shape`, `test_the_header_path_request_id_is_unknown_by_placement`, `test_the_first_content_length_header_wins`, `test_one_byte_over_the_cap_is_413` — the last three because the slow path still refuses with 413 but now carries a **real** id, which is the discriminator between the two paths | byte for byte, sha256 verified |
+| `received > cap` to `received >= cap` | 2 failed: `test_a_body_of_exactly_the_cap_is_admitted` and `test_a_body_of_exactly_the_cap_is_judged` | byte for byte, sha256 verified |
+
+### For the lead
+
+1. **No existing test posts a body over 64 kB.** The largest body construction anywhere in the tree is
+   `"x" * 4001` (`test_direct_routes.py`, the over-length note), about 4 kB. Nothing was raised to fit.
+2. **The per-file floor for `middleware/body_limit.py` is not added**, per the prompt. It measures **100%**
+   today. `scripts/check_coverage_floors.py` is unchanged and still lists 15 floors.
+3. **The slow-path 413 does carry a real request id**, as expected — asserted directly
+   (`test_the_streamed_refusal_carries_a_real_request_id`). Neither 413 carries an `X-Request-ID`
+   *header*, because both are sent from outside `RequestIDMiddleware`'s send wrapper. That is inherent to
+   being outermost and is the same on both paths, so the two refusals are consistent with each other rather
+   than one being an anomaly. Say if the header is wanted on the streamed one; it would mean this middleware
+   knowing the id header's name, which today only `request_id.py` does.
+4. **`middleware/inflight.py`'s docstring is now stale and was deliberately left alone.** The paragraph under
+   "THE CAP IS READ LAZILY" says *"The body-size middleware that used to live here was removed after exactly
+   that"*. The history is still true; the implication that there is no such middleware is not. The prompt's
+   Out list forbids touching that file beyond registration order, so it is reported rather than fixed. It
+   wants one clause in the next piece that may touch it.
+5. **`docs/STATUS.md` has no config list to add the setting to.** The prompt asked for "the new setting in the
+   config list"; STATUS records settings only inside register-item rows, and the row for 87 names it. The
+   configuration reference table is in `README.md` and did get the row.
+6. **The `.env.example` row, as exact text** (already committed — the pin test requires it in the same commit
+   as the field, and it was written by a script that prints a status and never a line of the file):
+
+   ```
+   # The largest request body the app will read, in bytes. Above it the
+   # request is refused with 413 payload_too_large at the outermost
+   # middleware, before any gate runs. 64 kB is four times the largest real
+   # note plus its lead fields: a memory bound, not a content rule. This does
+   # not replace the edge limit; it is what holds when the edge has none.
+   DODEAL_MAX_REQUEST_BODY_BYTES=65536
+   ```
+
+7. **Item 43 stays open and its note is unchanged.** This piece does not close it. Bytes should still be
+   refused where they are first accepted; 64 kB in the app is the bound that holds when the edge has none.
+8. **The 413 status phrase is computed, not spelled out, in the test.** `_unit_error_body` builds `detail`
+   from `HTTPStatus(413).phrase`, which the stdlib renamed from "Request Entity Too Large" to "Content Too
+   Large" in 3.13. `requires-python` is `>=3.12`, so a literal would pin the suite to one interpreter over a
+   string this service does not choose. Every other field in that body is asserted literally.
+9. **`main.py`'s dead `# register_body_size_limit(app)` line was removed.** It named a function that does not
+   exist and, with the real middleware now registered twenty lines above it, read as a second unregistered one.
+10. **The numbering repair is applied as instructed**: item 122 (the lifespan close-on-raise, from Piece 86)
+    renumbered to **124**, its numbering note deleted, items **116–123** appended above it all OPEN, and **125**
+    added OPEN. The file now runs 1–125 with no gap.
+
+### Files
+
+| File | Change |
+| --- | --- |
+| `src/dodeal_ai/middleware/body_limit.py` | new: `BodyLimitMiddleware`, `_declared_length`, `_request_id`; the two paths, the send guard, the lazy cap |
+| `src/dodeal_ai/core/config.py` | the commented placeholder becomes `max_request_body_bytes: int = Field(default=65_536, ge=1)` with its three-line comment |
+| `src/dodeal_ai/core/errors.py` | `PayloadTooLarge` as `("payload_too_large", 413)`, docstring in `LoadShed`'s style plus why it is never rendered by the handler |
+| `src/dodeal_ai/main.py` | `BodyLimitMiddleware` imported and registered **last**; the order comment extended; the dead `# register_body_size_limit(app)` line removed |
+| `.env.example` | the `DODEAL_MAX_REQUEST_BODY_BYTES` row beside `DODEAL_MAX_INFLIGHT` |
+| `tests/unit/test_body_limit.py` | new: 25 tests — raw ASGI for the middleware's own claims, `TestClient` at the real cap for the stack's |
+| `README.md` | the middleware bullet and the request order; the file tree; the `body_limit.py` module row; the `main.py` row; the `DODEAL_MAX_REQUEST_BODY_BYTES` configuration row; the test-file row; the error catalogue |
+| `ASSUMPTIONS.md` | §10.1 replaced with the lead's text: the in-app limit, outermost |
+| `docs/register.md` | item 87 to DONE; header sha to this head; 87 dropped from the step order; the numbering repair (116–123 added, 122 to 124, 125 added) |
+| `docs/STATUS.md` | the Piece 87 row; the register-item section; suite line to 1281 and 99.59%; header piece list |
+| `CAMPAIGN_REPORT.md` | this block |
