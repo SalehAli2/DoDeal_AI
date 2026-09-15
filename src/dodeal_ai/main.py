@@ -11,6 +11,7 @@ from dodeal_ai.core.config import ConfigError, Settings, get_settings
 from dodeal_ai.core.errors import register_error_handlers
 from dodeal_ai.core.llm import build_llm_client
 from dodeal_ai.core.logging_config import configure_logging
+from dodeal_ai.core.prompting import clear_templates, preload_templates
 from dodeal_ai.core.redis import (
     check_cost_redis_ready,
     check_operational_redis_ready,
@@ -19,6 +20,7 @@ from dodeal_ai.core.redis import (
 )
 from dodeal_ai.middleware.inflight import InflightMiddleware
 from dodeal_ai.middleware.request_id import RequestIDMiddleware
+from dodeal_ai.units.structured_intelligence.templates import UNIT_A_TEMPLATES
 
 # Model calls one judgement can have in flight AT ONCE: classify runs alone,
 # then vague and score are gathered (units/structured_intelligence/pipeline.py).
@@ -42,6 +44,10 @@ async def lifespan(app: FastAPI):
     # Fail closed: if required config (signing key) is absent, refuse to start.
     settings = get_settings()
     configure_logging()
+    # FIRST, before any socket or pool exists: a missing template must refuse
+    # here, not on the first paid call days later. Read once for the app's life
+    # so no judgement makes a disk read on the event loop (register item 85).
+    preload_templates(UNIT_A_TEMPLATES)
     if not settings.dd_api_keys:
         # Not fail-closed: the gate chain and /ready must work before a key is
         # provisioned (Step 0). Loud so a deployment with no backend keys at
@@ -86,6 +92,9 @@ async def lifespan(app: FastAPI):
         # wrong; that is not a state to serve traffic in (item 84).
         app.state.llm = build_llm_client(settings, app.state.http)
     yield
+    # Before the pools, because clearing a dict cannot fail: a cache that
+    # outlived its app would serve this deployment's templates to the next one.
+    clear_templates()
     # The model pool first, before the Redis pools: it is the one holding
     # sockets to a third party, and a client left unclosed leaks them.
     await app.state.http.aclose()

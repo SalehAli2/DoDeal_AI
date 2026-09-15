@@ -5499,3 +5499,208 @@ on an injected clock and touches no socket, no pool and no Lua.
 | `docs/register.md` | item 95 to DONE; header sha; 102 dropped from the step order |
 | `docs/STATUS.md` | the Piece 95 row; the register-item section; suite line to 1233 / 99.51%; header piece list |
 | `CAMPAIGN_REPORT.md` | this block |
+
+## Piece 85: the prompt templates are read once at startup   STATUS: DONE ``
+
+**Register item 85, closed.** *"Preload all nine prompt templates at startup; a missing file fails startup."*
+Two files under `src/` changed and one was added: `core/prompting.py`, `main.py`, and
+`units/structured_intelligence/templates.py`.
+
+### What was actually wrong
+
+`_load_template` read from disk on every call, and `build_prompt` and `with_tail` each call it:
+
+```python
+def _load_template(name: str) -> str:
+    path = _prompts_dir() / name
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise PromptError(f"prompt template not found: {name}") from exc
+```
+
+Two costs, and the second is the expensive one.
+
+**A blocking read on the event loop, three to six times per judgement.** `_prompts_dir()` also builds
+`Settings` on each of them. This service is one loop (`tests/test_no_sync_clients.py` exists to say so): a
+read that blocks does not slow the request that made it, it stops every request in the process. Three reads on
+the happy path — classify, vague, score — and up to six when both gathered passes are reprompted, since the
+tail is a fourth template and `with_tail` re-reads it each time.
+
+**A missing template was discovered on the first paid call.** A deployment whose image lost
+`vague_won_lost_v1.txt` started, passed `/ready`, answered `/health`, served every judgement whose note was
+not a `won_lost` — and then, on one that was, raised `PromptError` **after** classification had already been
+bought and charged. The fault is in the image, and it was being reported as a runtime failure of one note
+type.
+
+### The change
+
+`core/prompting.py` gains the cache and the two functions that bracket its life, and the disk read is
+extracted into the one site both go through:
+
+```python
+_TEMPLATE_CACHE: dict[str, str] = {}
+
+
+def preload_templates(names: Iterable[str]) -> None:
+    loaded = {name: _read_template_file(name) for name in names}
+    _TEMPLATE_CACHE.update(loaded)
+
+
+def clear_templates() -> None:
+    _TEMPLATE_CACHE.clear()
+
+
+def _load_template(name: str) -> str:
+    cached = _TEMPLATE_CACHE.get(name)
+    if cached is not None:
+        return cached
+    return _read_template_file(name)
+```
+
+Four properties, each of which is the point:
+
+1. **The fallback is deliberate, not a leftover.** An uncached name reads from disk exactly as it did before
+   the cache existed. That is what keeps `scripts/verify_wheel.py`, `tests/unit/test_assembled_prompt.py`,
+   `tests/unit/test_prompting.py` and `FakeLLM.script_for` — none of which runs inside a lifespan — working
+   with no change at all, and it is what lets a test point `_prompts_dir` at a `tmp_path` and still read what
+   it wrote. A cache that raised on a miss would have made this piece a rewrite of four test modules.
+2. **The preload is all-or-nothing.** `loaded` is a local mapping published only once every name resolved, so
+   the first missing file raises with `_TEMPLATE_CACHE` still empty. Without that, a caller that caught the
+   `PromptError` — a test, a script, anything embedding the app — would carry on against eight templates the
+   app never had.
+3. **The refusal names the template, not the path.** `prompt template not found:
+   structured_intelligence/score_v1.txt`, and nothing else. That string reaches a log line, and the resolved
+   path carries the deployment's directory layout with it. A test asserts `str(tmp_path)` is absent.
+4. **`_read_template_file` is one function so a test can count reads by patching one name.** Patching
+   `Path.read_text` globally would count pytest's own reads of source files and prove nothing about this
+   module.
+
+`main.py` places the preload **first**, and the clear **first** on the way out:
+
+```python
+    settings = get_settings()
+    configure_logging()
+    # FIRST, before any socket or pool exists: a missing template must refuse
+    # here, not on the first paid call days later. ...
+    preload_templates(UNIT_A_TEMPLATES)
+```
+
+Before `app.state.http`, which is the reason this piece adds no unclosed resource: the refusal happens while
+the process still owns nothing. After `configure_logging()`, so anything that does log during startup logs in
+the JSON shape a collector parses (audit §6.9, the same argument as `backend_keys_missing`). And the ordering
+choice on shutdown — `clear_templates()` before the three `aclose()` calls — is made on failure, not on
+tidiness: clearing a dict cannot raise, so it is the one shutdown step that cannot be skipped by an earlier
+one failing.
+
+**The nine are named by the unit, not by core.** `units/structured_intelligence/templates.py`:
+
+```python
+VAGUE_CHECKED_TYPES: tuple[NoteType, ...] = tuple(
+    note_type for note_type in NoteType if note_type is not NoteType.SYSTEM_EVENT
+)
+
+UNIT_A_TEMPLATES: tuple[str, ...] = (
+    CLASSIFY_TEMPLATE,
+    *(template_for(note_type) for note_type in VAGUE_CHECKED_TYPES),
+    SCORE_TEMPLATE,
+    REPROMPT_TAIL_TEMPLATE,
+)
+```
+
+`core/prompting.py` knows how to read a template and has never known which ones exist; nine hardcoded
+filenames there would be a second place to edit every time this unit grows a pass. Every entry is the
+**constant the calling module already passes to `build_prompt`**, never a retyped string, so a renamed file
+cannot leave a template that is sent out of the preload — which would be the worst outcome available here: a
+disk read back on a paid call, silently, with every test still green.
+
+The six vague names come from iterating `NoteType` and dropping `SYSTEM_EVENT` (the classifier suppresses it
+before pass two), so an eighth note type joins the preload the moment it is added, and a type with no template
+is a `PromptError` at **import** rather than a `KeyError` on a judgement.
+
+### The guard
+
+Seven tests in `tests/unit/test_prompt_preload.py`:
+
+- **Startup refuses.** A `tmp_path` holding eight of the nine, `_prompts_dir` patched to it, entering the
+  lifespan raises `PromptError`; the message names `structured_intelligence/score_v1.txt` and does not
+  contain the directory.
+- **A refused startup leaves no half-filled cache.** `_TEMPLATE_CACHE == {}` after a caught failure.
+- **The tuple is the nine that ship.** Nine entries, nine distinct, every one a real file under
+  `src/dodeal_ai/prompts/`. This is the test that catches the renamed-constant case the tuple is built to
+  prevent.
+- **Zero reads.** A lifespan that actually ran, a full judgement on the fetch route against `FakeLLM` with a
+  malformed vague answer so the reprompt fires — four model calls, five prompts assembled — and the read
+  counter, installed *after* startup, is empty.
+- **The cache does not outlive the app.** Populated inside the lifespan, `== {}` after it, and
+  `_load_template` then reads the disk again (the counter increments).
+- **The fallback still reads disk with no app started**, and **a preloaded name is served from the cache**
+  even after the file under it changes.
+
+`tests/unit/test_assembled_prompt.py` and `tests/unit/test_prompting.py` pass unchanged, which is the fallback
+being proven by the tests that were already there.
+
+### Sabotage
+
+**(a) `_load_template` skips the cache lookup** (the body reduced to `return _read_template_file(name)`):
+
+```
+FAILED tests/unit/test_prompt_preload.py::test_a_full_judgement_reads_no_template_from_disk
+FAILED tests/unit/test_prompt_preload.py::test_a_preloaded_name_is_served_from_the_cache_not_the_file
+2 failed, 5 passed
+```
+
+`assert read_counter == []` failed with five reads, and the second test read `SECOND` where the cache holds
+`FIRST`. Restored byte for byte.
+
+**(b) `preload_templates` swallows the missing-file error.** The read site wraps `OSError` in `PromptError`
+before `preload_templates` ever sees it, so the sabotage is the `except PromptError: continue` that a
+swallow would actually look like here:
+
+```
+FAILED tests/unit/test_prompt_preload.py::test_startup_refuses_when_one_template_is_missing
+FAILED tests/unit/test_prompt_preload.py::test_a_refused_startup_leaves_no_half_filled_cache
+2 failed, 5 passed
+```
+
+`Failed: DID NOT RAISE PromptError` — the app came up on eight templates. Restored byte for byte.
+
+### For the lead
+
+1. **`UNIT_A_TEMPLATES` lives in a new `units/structured_intelligence/templates.py`, not in the package
+   `__init__.py`.** That file is deliberately empty (its own docstring says so), and filling it would make
+   importing **any** module in the package — `state`, which the root `tests/conftest.py` imports — drag in
+   `classify`, `vague`, `scoring` and `llm_call` with it, and put the package `__init__` in a position to
+   import a submodule that imports the package. A separate module leaves the import graph exactly as it was.
+2. **`core/prompting.py` gained no per-file coverage floor.** It now holds a cache with a fallback branch,
+   which is an argument for one; it is not on a deny path or a scoring path, which is the argument the
+   existing list is built on. It measures **100%** at this head. Not added — floors are the lead's.
+3. **The lifespan's existing order is untouched and still leaves `app.state.http` unclosed if
+   `build_llm_client` raises.** This piece's step runs *before* the client exists, so it adds no instance of
+   that; it does not close it either. Worth its own decision.
+4. **The preload runs before `backend_keys_missing` and `backend_scheme_insecure` are logged**, as the brief
+   specified ("immediately after `configure_logging()`"). A deployment missing both a template and its backend
+   keys therefore refuses without the keys line. That is the right trade — a refusal is a refusal — but it is
+   a visible consequence of the ordering, so it is recorded here rather than assumed.
+5. **`docs/register.md` lists item 85's carrying step as "A9a, with 76"**, while the step-order line at the top
+   of the same file reads "95, 85, 86, 87, 88 ..." and this piece carried 85 alone. The column is stale
+   against the order line; nothing was changed but the status and sha.
+6. **No `.env.example` row is owed and no setting changed.** `DODEAL_PROMPTS_DIR` already exists and its
+   behaviour is unchanged — it still overrides the location, and the override is now read once at startup
+   rather than on every call.
+7. **`ASSUMPTIONS.md` is untouched.** §8.5 (`AssembledPrompt`) and §8.6 (packaging, and
+   `DODEAL_PROMPTS_DIR` "overrides the prompt location for local iteration only") are both still true
+   word for word after this piece. Nothing in that file described the per-call read.
+
+### Files
+
+| File | Change |
+| --- | --- |
+| `src/dodeal_ai/core/prompting.py` | `_read_template_file` extracted as the one disk read; `_TEMPLATE_CACHE`, `preload_templates`, `clear_templates`; `_load_template` reads the cache first |
+| `src/dodeal_ai/main.py` | `preload_templates(UNIT_A_TEMPLATES)` immediately after `configure_logging()` and before `app.state.http`; `clear_templates()` first after `yield`; two imports |
+| `src/dodeal_ai/units/structured_intelligence/templates.py` | new: `VAGUE_CHECKED_TYPES` and `UNIT_A_TEMPLATES`, built from the four constants |
+| `tests/unit/test_prompt_preload.py` | new: seven tests (startup refusal, no half-filled cache, the nine, zero reads, lifetime, and both sides of the fallback) |
+| `README.md` | the `prompting.py` module row; the `main.py` module row; the `structured_intelligence/` directory row; the `DODEAL_PROMPTS_DIR` configuration row |
+| `docs/register.md` | item 85 to DONE; header sha; 85 dropped from the step order |
+| `docs/STATUS.md` | the Piece 85 row; the register-item section; suite line to 1240 / 99.57%; header piece list |
+| `CAMPAIGN_REPORT.md` | this block |
