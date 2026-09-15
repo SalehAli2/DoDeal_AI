@@ -5704,3 +5704,286 @@ FAILED tests/unit/test_prompt_preload.py::test_a_refused_startup_leaves_no_half_
 | `docs/register.md` | item 85 to DONE; header sha; 85 dropped from the step order |
 | `docs/STATUS.md` | the Piece 85 row; the register-item section; suite line to 1240 / 99.57%; header piece list |
 | `CAMPAIGN_REPORT.md` | this block |
+
+---
+
+## Piece 86: the two middlewares as pure ASGI   STATUS: DONE `76ed6af`
+
+**Register item 86, closed.** *"Rewrite `RequestIDMiddleware` and `InflightMiddleware` as pure ASGI."*
+Two files under `src/` changed and nothing else: `middleware/request_id.py`, `middleware/inflight.py`.
+`main.py` is untouched — the class names and the one-argument constructor are the same, so the registration
+and its comment stay word for word.
+
+### What was actually wrong
+
+Both classes were `starlette.middleware.base.BaseHTTPMiddleware`. That base class is not a naming choice; it
+is a runtime. Every request it sees is run through an anyio task group and a pair of memory object streams,
+so that `dispatch` can be handed a `Request` and return a `Response`. Three costs, and the middle one is the
+one that decided this piece.
+
+**The load-shed middleware was paying for a task group in order to refuse work.** Its own docstring is
+explicit about the standard it has to meet:
+
+> Before everything else, so a refusal costs a counter comparison and nothing more -- no token verification,
+> no tenant resolution, no body read, no Redis round-trip.
+
+And then, before reaching that comparison, every request — admitted or refused — had a task group created
+for it, two memory streams opened, and a child task spawned. A defence that costs more than the work it
+refuses is not a defence, which is the argument the module already makes against reading a body; it applied
+to the base class too and had not been noticed.
+
+**The route ran in a child task, so `contextvars` did not survive a round trip.** This is the property the
+rewrite restores, and it is worth being precise about which half was broken, because the obvious test does
+not discriminate:
+
+- **Downward** (set outside the middleware, read in the route) **worked before this piece.** A child task
+  copies its parent's context at spawn, so a `ContextVar` set before `call_next` reaches the endpoint. A test
+  asserting this would have passed on both trees and proved nothing.
+- **Upward** (set in the route, read by a middleware after the call returns) **did not, and cannot.** The
+  route's `set()` lands in the child task's copy of the context and is discarded with the task. Measured on
+  the tree at `516f94d`, with one probe middleware outside the pair and a route that sets the var:
+
+  ```
+  with the two middlewares in the stack: outer sees -> MISSING
+  without them:                         outer sees -> SET-IN-ROUTE
+  ```
+
+  That is the direction any future request-scoped context depends on: a tenant, a trace span, a cost tally
+  set deep in the pipeline and read on the way out.
+
+**Cancellation behaviour that moves between releases.** `BaseHTTPMiddleware`'s handling of a disconnect
+mid-response has changed more than once upstream. Starlette is pinned at 1.3.1, which defers the question
+rather than answering it. A plain callable has no such behaviour of its own to change.
+
+### The change
+
+Both are now the two-method shape. `RequestIDMiddleware`:
+
+```python
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        request_id = _accepted_inbound_id(scope) or str(uuid.uuid4())
+        state = scope.setdefault("state", {})
+        state["request_id"] = request_id
+        state["observability"] = RequestObservability(
+            request_id=request_id, trace_id=request_id
+        )
+```
+
+Four things in that are deliberate, and each is a way it could have been got wrong:
+
+**`scope["state"]` is not a second home for the id.** `Request.state` is a *view* over exactly this dict —
+Starlette's `HTTPConnection.state` does `scope.setdefault("state", {})` and wraps the result — so writing the
+key here **is** writing `request.state.request_id`. All four `getattr(request.state, "request_id", "unknown")`
+reads in `core/auth/dependencies.py`, the one in `core/errors.py:149`, and every audit line downstream keep
+working with no change of their own. That is why the security tests pass unedited.
+
+**`setdefault`, not assignment.** An ASGI server may have put a `state` dict there already — uvicorn hands
+each request a shallow copy of the lifespan state — and replacing it would drop whatever the lifespan put in.
+
+**The header is read from `scope["headers"]`, first occurrence wins.** ASGI header names are lower-cased
+bytes; the value is decoded `latin-1`, which is the decoding HTTP header bytes have, is what Starlette's
+`Headers` uses, and cannot raise — so a caller cannot reach this code with an exception. First-match is what
+`Headers.get` did, so a caller who sends the header twice still does not get to choose which copy is checked.
+`_VALID_REQUEST_ID` is unchanged, and a rejected value is still dropped without being logged.
+
+**The response header goes onto a copy:**
+
+```python
+        async def send_with_request_id(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                message = {
+                    **message,
+                    "headers": [
+                        *message.get("headers", []),
+                        (_REQUEST_ID_HEADER, request_id.encode("latin-1")),
+                    ],
+                }
+            await send(message)
+```
+
+A `Response` sends its own `raw_headers` list, and a `Response` object can be sent more than once. Appending
+in place would add one `x-request-id` per send, so the second response from a reused object would carry two.
+The bytes on the wire are unchanged: `MutableHeaders.__setitem__` lower-cased the name on the way out too, so
+`b"x-request-id"` is what went out before.
+
+`InflightMiddleware` is the same shape, with the three lines that were `request.*` now `scope[...]`:
+
+```python
+        scope["app"].state.inflight = _counter
+
+        if scope["path"] in EXEMPT_PATHS:
+            ...
+            request_id = scope.get("state", {}).get("request_id", "unknown")
+            ...
+            await dodeal_error_response(LoadShed(), request_id)(scope, receive, send)
+            return
+
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            _counter.release()
+```
+
+`URL.path` **is** `scope["path"]` in this Starlette (`datastructures.py` builds it with no root-path
+handling), so the exempt match is unchanged rather than merely equivalent. The refusal is the same
+`JSONResponse` from the same `dodeal_error_response`, now *called* rather than returned — a `Response` is
+itself an ASGI app, so the status, the headers and the body bytes are identical, and `core/errors.py`'s
+explanation of why a middleware cannot simply `raise` is still exactly true.
+
+**The `finally` matters more now, not less.** Under `BaseHTTPMiddleware` an exception from the inner app came
+back through `call_next`; now it propagates straight up to `ServerErrorMiddleware`. A `release()` written on
+the success path alone would leak a slot on every 500 — item 73's hardening, unchanged and re-proved below.
+
+**One thing is genuinely new in both: a non-http scope passes straight through.** `BaseHTTPMiddleware` did
+that for us; a plain callable has to do it itself, and getting it wrong is silent. A counted `lifespan` scope
+holds its slot until the process exits, so the cap is one lower for the life of the pod; an id written into a
+lifespan scope is one id shared by everything that later reads that state.
+
+### The guard
+
+**Every existing test passes unedited.** That is the actual evidence for "behaviour unchanged", and none of
+them needed so much as a whitespace change: `tests/unit/test_inflight.py` in full (the twenty-concurrent
+exactness test, arrival order, the `finally` release on a raising route, `app.state.inflight` live, the
+refusal body, the `WARNING` line with no tenant, the sentinel body reaching no log line, both exempt paths
+taking no slot) and `tests/security/test_chain.py` in full (the honoured well-formed inbound id, the overlong
+one replaced by a generated uuid4, the newline / CRLF / brace-bearing ones replaced and never logged, the
+echoed header).
+
+Two new files, sixteen tests:
+
+`tests/test_no_base_http_middleware.py` — the grep, in the shape of `tests/test_no_sync_clients.py`. **The
+patterns are import-shaped and class-shaped, not the bare word**, and that is a decision worth recording: both
+middleware docstrings now *name* `BaseHTTPMiddleware` to explain why they are not one, which is the single
+most useful sentence in each file, and a bare-word grep would forbid the explanation along with the thing. So
+it matches the two import spellings and `class X(...BaseHTTPMiddleware...)`, which an alias
+(`from starlette.middleware import base`) still has to write out. A self-test asserts the patterns hit the
+four spellings they forbid and miss a line of the prose, because a pattern typo is the failure mode a grep
+has that produces a green run.
+
+`tests/unit/test_middleware_asgi.py` — the properties that were not true before:
+
+- **A `ContextVar` set in the route is visible to an outer middleware**, and — the mechanism behind it — the
+  route runs in the **same asyncio task** as the middleware.
+- **A `lifespan` and a `websocket` scope** reach the inner app **as the same object**, with nothing added to
+  it (`state` included) and **no slot taken**. Both scopes carry `app`, as every scope Starlette builds does,
+  so a middleware that wrongly counted one would be *counted* by the assertion rather than raising `KeyError`
+  before reaching it.
+- **An `http` scope on the same stack is counted and identified** — the control. A pass-through that swallowed
+  real requests too would pass both tests above.
+- **The id header is added to a copy**, asserted by handing the middleware an inner app that sends a list the
+  test still holds.
+
+### Sabotage
+
+**(a) The `finally` release removed** (the `try:`/`finally:` reduced to the bare `await self.app(...)`):
+
+```
+FAILED tests/unit/test_inflight.py::test_the_counter_returns_to_zero
+FAILED tests/unit/test_inflight.py::test_a_request_that_raises_still_decrements
+FAILED tests/unit/test_inflight.py::test_the_request_at_the_cap_is_refused
+FAILED tests/unit/test_inflight.py::test_the_count_is_exact_under_twenty_concurrent_requests
+FAILED tests/unit/test_inflight.py::test_the_cap_is_reusable_after_a_burst
+FAILED tests/unit/test_inflight.py::test_the_count_is_exposed_on_app_state
+FAILED tests/unit/test_middleware_asgi.py::test_an_http_scope_on_the_same_stack_is_counted_and_identified
+7 failed, 24 passed
+```
+
+The twenty-concurrent test failed on `current_inflight() == 0` with a leaked slot per request. Restored byte
+for byte (md5 verified against the pre-sabotage copy).
+
+**(b) The `_VALID_REQUEST_ID` check skipped** (`_accepted_inbound_id` reduced to `return _inbound_header(scope)`):
+
+```
+FAILED tests/security/test_chain.py::test_overlong_inbound_request_id_is_replaced_by_a_generated_uuid
+FAILED tests/security/test_chain.py::test_malformed_inbound_request_id_is_replaced_by_a_generated_uuid[newline-...]
+FAILED tests/security/test_chain.py::test_malformed_inbound_request_id_is_replaced_by_a_generated_uuid[crlf-...]
+FAILED tests/security/test_chain.py::test_malformed_inbound_request_id_is_replaced_by_a_generated_uuid[json_brace-...]
+4 failed, 146 passed
+```
+
+The injected newline, CRLF and brace values were accepted and echoed. Restored byte for byte.
+
+**(c) A `lifespan` scope counted** (`scope["type"] != "http"` changed to `== "websocket"`):
+
+```
+FAILED tests/unit/test_middleware_asgi.py::test_a_non_http_scope_reaches_the_inner_app_untouched[lifespan]
+FAILED tests/unit/test_middleware_asgi.py::test_a_non_http_scope_takes_no_slot[lifespan]
+2 failed, 7 passed
+```
+
+Both lifespan cases failed, on `KeyError: 'path'` — a lifespan scope has no `path`, so the exempt-path lookup
+raised before the counting assertion was reached. That proves the guard but not the *counting* claim, so a
+narrower variant was run as well:
+
+**(c′) The non-http pass-through takes a slot** (one `_counter.acquire(get_settings().max_inflight)` added
+before the delegation):
+
+```
+FAILED tests/unit/test_middleware_asgi.py::test_a_non_http_scope_takes_no_slot[lifespan]
+FAILED tests/unit/test_middleware_asgi.py::test_a_non_http_scope_takes_no_slot[websocket]
+2 failed, 7 passed
+```
+
+`At index 0 diff: 1 != 0` — the scope was counted while inside. Restored byte for byte.
+
+### For the lead
+
+1. **Phase 0 question 4, both halves NO.**
+   - *Does `core/prompting.py` log `prompt_template_not_preloaded` on a cache miss?* **No.** That module has
+     no logger at all — no `logging` import, no `_logger`. `_load_template` (`core/prompting.py:137-143`)
+     falls back to `_read_template_file` silently.
+   - *Does any test scan `src/` for template names and assert each is in `UNIT_A_TEMPLATES`?* **No.** The
+     nearest is `tests/unit/test_prompt_preload.py:101-110`
+     (`test_the_tuple_names_the_nine_templates_that_ship`), which runs the **other** direction: it takes the
+     tuple and asserts each name is a file that ships. Nothing reads `src/` for the names a pass actually
+     sends. Neither was added; they are not this piece.
+2. **The contextvar test is the *reverse* direction, on purpose, and the prompt's suggested direction would
+   not have proved anything.** The prompt asked for "a request id set by the middleware ... visible inside a
+   route through a `contextvars.ContextVar` set in the middleware and read in the route". Measured on
+   `516f94d`: that already worked, because a child task copies its parent's context at spawn — the assertion
+   passes identically before and after the rewrite. The direction a task boundary actually severs is
+   route → outer middleware, and it is measured in both trees (`MISSING` before, `SET-IN-ROUTE` after). The
+   test asserts that, plus the mechanism directly (`asyncio.current_task()` is the same object in the
+   middleware and in the route). The grep test is kept either way.
+3. **No existing test needed an edit.** None.
+4. **`middleware/inflight.py` and `middleware/request_id.py` both measure 100%** at this head, and neither has
+   a per-file floor. Inflight is a deny path, which is the argument the existing floor list is built on. Not
+   added — floors are the lead's.
+5. **One line of prose in `src/` had to be reworded to get past an *existing* guard.** The request-id
+   docstring cited `starlette/requests.py` as the file that makes `request.state` a view over `scope["state"]`,
+   and `tests/test_no_sync_clients.py` greps `src/` for `\brequests\.` — a true positive for its own purpose
+   and a false one here. The sentence now names `HTTPConnection.state` instead, which is more precise anyway.
+   The alternative was editing that guard's pattern, which is a policy change and not this piece's.
+6. **Nothing in `README.md`, `ASSUMPTIONS.md` or a module docstring was left false, and one line was already
+   stale.** No line anywhere named `BaseHTTPMiddleware` or "task group" before this piece, so nothing became
+   wrong; the README rows gained the new fact. The stale one is in `docs/STATUS.md`: the suite line read "the
+   deselected 28 are the `integration` marker (7) and the `redis_real` lane (21)" while the tree deselects
+   **30** (integration is **9**, measured this session). Corrected in the same edit.
+7. **`ASSUMPTIONS.md` is untouched.** §10.1 ("the cap is read lazily, per request, never in `__init__`") is
+   still true word for word — and is now true of a constructor that genuinely exists and takes the inner app
+   and nothing else.
+8. **The new register item is numbered 122, not 116.** `docs/register.md` stops at 115, but the master carries
+   at least item 121 (the `event` field on the startup lines, named in this prompt's Out list and absent from
+   the file). 116 risked colliding with a master number. Renumber if the master's next free is lower; the note
+   is in the register beside the item.
+9. **No `.env.example` row is owed and no setting changed.** `DODEAL_MAX_INFLIGHT`, the exempt paths and the
+   request-id character set are all untouched, as the scope required.
+10. **`current_inflight` still lives in `middleware/inflight.py`** and `pipeline.py:119` still imports it from
+    there. That is item 13's job, with `import-linter`, and was left alone.
+
+### Files
+
+| File | Change |
+| --- | --- |
+| `src/dodeal_ai/middleware/request_id.py` | `RequestIDMiddleware` as `__init__`/`__call__`; header read from `scope["headers"]`; state written to `scope["state"]`; id appended to a copy of the response-start headers; non-http pass-through; docstring's ordering paragraph rewritten for the new shape |
+| `src/dodeal_ai/middleware/inflight.py` | `InflightMiddleware` as `__init__`/`__call__`; counter published through `scope["app"].state`; `scope["path"]` against `EXEMPT_PATHS`; the refusal `Response` awaited as an ASGI app; the `finally` release kept; non-http pass-through; docstring gains the SHAPE paragraph, "WHERE IT SITS" and the `add_middleware` note unchanged |
+| `tests/test_no_base_http_middleware.py` | new: the grep, import-shaped and class-shaped, plus a self-test of the patterns |
+| `tests/unit/test_middleware_asgi.py` | new: nine tests (contextvar upward, same task, `request.state` through the route, two non-http scopes × untouched and uncounted, the http control, the header copy) |
+| `README.md` | the middleware directory bullet; the `inflight.py` and `request_id.py` module rows; two test-file rows; the repo-wide guards paragraph |
+| `docs/register.md` | item 86 to DONE; header sha to this head; 86 dropped from the step order; the lead's new item 122 |
+| `docs/STATUS.md` | the Piece 86 row; the register-item section; suite line to 1256 and the deselected count corrected to 30; header piece list and date |
+| `CAMPAIGN_REPORT.md` | this block |
