@@ -18,6 +18,7 @@ from dodeal_ai.core.redis import (
     get_cost_client,
     get_operational_client,
 )
+from dodeal_ai.middleware.body_limit import BodyLimitMiddleware
 from dodeal_ai.middleware.inflight import InflightMiddleware
 from dodeal_ai.middleware.request_id import RequestIDMiddleware
 from dodeal_ai.units.structured_intelligence.templates import UNIT_A_TEMPLATES
@@ -116,8 +117,9 @@ app = FastAPI(title="DODEAL AI Intelligence Layer", lifespan=lifespan)
 # MIDDLEWARE ORDER, and it is the reverse of how it reads. `add_middleware`
 # INSERTS AT THE FRONT of the list, and the front of that list is the OUTERMOST
 # layer -- so the LAST call below is the first middleware a request meets.
-# Registered inflight-then-request-id gives request-id OUTSIDE inflight, which
-# is the order that is wanted: a refused request still gets an id.
+# Registered inflight, then request-id, then body-limit gives a request the
+# order: BODY LIMIT, then REQUEST ID, then INFLIGHT, then routing and the
+# gates. Each one is cheaper than the one under it and refuses before it.
 #
 # Load shedding, innermost of the two and before routing, the gate chain and
 # any body read: a refusal must cost a counter comparison and nothing more.
@@ -128,6 +130,12 @@ app.add_middleware(InflightMiddleware)
 # before routing/the gate chain -- see request_id.py's module docstring.
 app.add_middleware(RequestIDMiddleware)
 
+# OUTERMOST of the three, and this must stay the LAST add_middleware call:
+# bytes are refused before an id is minted, before a slot is taken and before
+# any gate runs (register item 87). Its 413 therefore carries request_id
+# "unknown" on the header path, which is the cost of refusing that early.
+app.add_middleware(BodyLimitMiddleware)
+
 app.include_router(_probe.router)
 app.include_router(judgements.router)
 
@@ -137,7 +145,6 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-# register_body_size_limit(app)
 register_error_handlers(app)
 
 

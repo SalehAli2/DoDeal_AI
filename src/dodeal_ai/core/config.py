@@ -100,10 +100,21 @@ class Settings(BaseSettings):
     claim_subject: str = "sub"
     claim_subdomain: str = "subdomain"
     claim_database: str = "database"
-    # --- Input guard: max request body size in bytes (config-driven) ---------
-    # Placeholder cap; tune per real payload sizes later. Guards memory/cost
-    # abuse before any tool/LLM work happens.
-    # max_request_body_bytes: int = 1_000_000
+
+    # --- Input guard: max request body size in bytes (middleware/body_limit.py)
+    # The largest body the app will read. Above it the request is refused with
+    # 413 payload_too_large at the outermost middleware, before Gate 1.
+    #
+    # 64 kB because the largest real note plus its lead fields is well under
+    # 16 kB: this is four times that, so it is a MEMORY BOUND and not a content
+    # rule -- a body under the cap is not thereby valid, and the schemas still
+    # decide that. It does not replace the edge limit (register item 43); it is
+    # the bound that holds when the edge has none.
+    #
+    # ge=1: too small a value makes every judgement a 413, an outage that looks
+    # like the CRM sending bad requests, so the row in .env.example carries the
+    # default rather than leaving it to be guessed.
+    max_request_body_bytes: int = Field(default=65_536, ge=1)
 
     # Backend service credentials, ONE PER TENANT (integration guide §1: a key is valid only against
     # its own tenant host). Keyed by tenant subdomain. Parsed from JSON in the env var, e.g.
