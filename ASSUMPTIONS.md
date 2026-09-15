@@ -268,7 +268,7 @@ version against three endpoints."
 | --- | --- |
 | **Versioning** | Every output records prompt, model, rubric/formula and config version. Past outputs are never recomputed when rules change. |
 | **Configuration** | Weights, thresholds and catalogues live in our configuration, per tenant, read at runtime. **Not yet business-changeable** — no reachable config store. State that plainly rather than letting it read as "administrator-changeable". |
-| **Logging** | Client responses are generic, from a fixed enumerated set with no interpolation. Raw note text and model output are never logged. Exceptions from outside this codebase are logged by type only; our own carry fixed-vocabulary messages. Tracebacks are frames-only, unchained. `OutputValidationError` never holds the pydantic error or the input. Enforced by `tests/security/test_log_safety.py`. |
+| **Logging** | Client responses are generic, from a fixed enumerated set with no interpolation. Raw note text and model output are never logged. Exceptions from outside this codebase are logged by type only; our own carry fixed-vocabulary messages. Tracebacks are frames-only, unchained — and since register item 88 that holds for a record logged with `exc_info` by ANY logger in the process, including uvicorn's and starlette's: `JsonFormatter` emits `exc_type` and `exc_frames` and never the message. `OutputValidationError` never holds the pydantic error or the input. Enforced by `tests/security/test_log_safety.py` and `tests/security/test_log_exc_info.py`. |
 | **Never invent** | If budget was not discussed, the field stays empty. A wrong figure is more damaging than a blank one. |
 | **Salary firewall** | Nothing this unit produces is written into a performance, rating, target or salary record. Currently guaranteed by having no write access at all — it must survive the day that changes. |
 
@@ -1062,7 +1062,7 @@ discovered at build time.
 - **Seam:** `core/auth/verify.py`, `core/config.py`.
 
 ### 8.10 Log safety — content cannot reach a log line
-- The rule (§3.3) is enforced by code in three places, not by discipline:
+- The rule (§3.3) is enforced by code in four places, not by discipline:
   - `core/log_safety.py::safe_error_fields()` returns `error_type` and
     `error_module` for ANY exception, and the message (`error`) **only when the
     class is defined under `dodeal_ai.`** — because our own exceptions build
@@ -1077,6 +1077,15 @@ discovered at build time.
     — never the `ValidationError`, its messages, or `input_value`. Chaining it
     would carry the rejected content into any traceback formatted downstream.
     Deliberate: do not "restore" the chain.
+  - `core/logging_config.py::JsonFormatter.format()` calls `frames_only` itself
+    (register item 88), so the rule holds for records this codebase never
+    wrote: a library, uvicorn's error logger or starlette's
+    `ServerErrorMiddleware` logging with `exc_info=True` through our root
+    handler yields `exc_type` and `exc_frames` and no message. It was
+    `self.formatException`, which printed `str(exc)` and the whole
+    `__cause__`/`__context__` chain. The `exc_info` KEY IS GONE — a collector
+    query on it matches nothing. `record.exc_text` is never read: the stdlib
+    caches the message-bearing text there when a record is formatted twice.
 - The JSON formatter never parses a message. Structured fields reach the output
   one way only — `extra=` attributes merged at the top level. An earlier version
   unpacked a message that was itself JSON, so any line beginning with `{` could
@@ -1084,6 +1093,9 @@ discovered at build time.
 - Sentinel tests in `tests/security/test_log_safety.py` fail if raw content
   reaches a line. They bind the sentinel on a non-raising line, so the traceback
   frame's own source text cannot be mistaken for a leak.
+  `tests/security/test_log_exc_info.py` makes the same claim about the BYTES ON
+  STDOUT, with `capfd` under the real `configure_logging()`, so a line written
+  by a logger outside this package is captured too.
 - **Seam:** `core/log_safety.py`, `core/validation.py`, `core/logging_config.py`.
 
 ### 8.11 Unit A Project 1 — built against FakeLLM and the fake CRM, nothing `[V]`

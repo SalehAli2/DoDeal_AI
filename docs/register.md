@@ -9,9 +9,9 @@ Rules:
 - A new item is added by the lead from a piece report, never by a session.
 - Status words: PENDING (designed, step named), OPEN (an answer is owed by a named party), DECIDED (a decision recorded, not built), NOTE (recorded, no action), RETRACTED, DONE.
 
-Carrying steps, in order (master section 15): 88, then the load lane 74 carrying 104, 106 and 96.
+Carrying steps, in order (master section 15): 125, then 123, then the load lane 74 carrying 104, 106 and 96.
 
-Last updated: 15 September 2026, at `39018b5`, from master ed3r9.
+Last updated: 15 September 2026, at `77a2bbd`, from master ed3r9.
 
 ## Items 1 to 13: code, in scope now
 
@@ -117,7 +117,7 @@ Last updated: 15 September 2026, at `39018b5`, from master ed3r9.
 | 85 | Preload all nine prompt templates at startup; a missing file fails startup | A9a, with 76 | **DONE** (its own piece; the nine named by the unit, the cache and the fallback in `core/prompting.py`) | `f3e3788` |
 | 86 | Rewrite `RequestIDMiddleware` and `InflightMiddleware` as pure ASGI | A-demo, before 74 | **DONE** (behaviour, order, log lines, bodies and headers unchanged; a non-http scope now passes through uncounted; `tests/test_no_base_http_middleware.py` keeps the base class out) | `76ed6af` |
 | 87 | Pure-ASGI body-size limit, outermost, 64 kB, 413 above it, before Gate 1 | A-demo, before 74 | **DONE** (`middleware/body_limit.py`, the last `add_middleware` call; `max_request_body_bytes` 64 kB read per request; a `content-length` over the cap refused without calling `receive`, a streamed or lying one counted and refused at the byte it passes; the middleware sends both 413s itself because FastAPI re-raises any exception out of `await request.body()` as its own `HTTPException(400)`) | `39018b5` |
-| 88 | `JsonFormatter` formats `exc_info` frames only; a stdout-wide sentinel test through the ASGI stack | A-demo, before 74 | OPEN | |
+| 88 | `JsonFormatter` formats `exc_info` frames only; a stdout-wide sentinel test through the ASGI stack | A-demo, before 74 | **DONE** (`exc_type` module-qualified plus `exc_frames`, the `exc_info` key removed; `record.exc_text` never read; the tuple shape only, `(type, None, None)` yielding the type alone; `tests/security/test_log_exc_info.py` captures stdout with `capfd` under the real `configure_logging()`) | `77a2bbd` |
 | 89 | `_retryable` predicate (5xx, 429, transport, timeout) plus jitter in the watchdog; folds 5 and 19 | A5 | OPEN | |
 | 90 | Per-item page validation with `rows_rejected`; `bookedAmount: Any`; `Field(ge=1)`; folds 10 and 18 | A5; per-item half pulled forward if A8 lands first | OPEN | |
 | 91 | `jwt_signing_key` as `SecretStr`, read in `JwtVerifier` only; `raise ConfigError from None` | Before pilot (A12) | OPEN | |

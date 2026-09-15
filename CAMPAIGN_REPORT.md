@@ -6144,3 +6144,189 @@ inflight → routing, and the dead `# register_body_size_limit(app)` line is gon
 | `docs/register.md` | item 87 to DONE; header sha to this head; 87 dropped from the step order; the numbering repair (116–123 added, 122 to 124, 125 added) |
 | `docs/STATUS.md` | the Piece 87 row; the register-item section; suite line to 1281 and 99.59%; header piece list |
 | `CAMPAIGN_REPORT.md` | this block |
+
+---
+
+## Piece 88: JsonFormatter formats exc_info frames only   STATUS: DONE `77a2bbd`
+
+**Register item 88, closed.** *"`JsonFormatter` formats `exc_info` frames only; a stdout-wide sentinel test
+through the ASGI stack."* One file edited under `src/`: `core/logging_config.py`. One new test file.
+
+### What was actually wrong
+
+Nothing inside the `dodeal_ai` tree passes `exc_info` to a log call, and `core/errors.py`'s catch-all logs
+the traceback by hand with `frames_only` and a comment saying why. That discipline covered every log line
+this codebase writes — and none of the ones it does not.
+
+`JsonFormatter` is on the **root** logger. Starlette's `ServerErrorMiddleware`, uvicorn's error logger
+("Exception in ASGI application") and any library in the process log exceptions with `exc_info=True`, and
+those records reached our formatter, which rendered them with:
+
+```python
+if record.exc_info:
+    payload["exc_info"] = self.formatException(record.exc_info)
+```
+
+`formatException` is `traceback.format_exception`, which prints `str(exc)` **and walks
+`__cause__`/`__context__`, printing every message in the chain**. For an exception raised outside this
+package that message is frequently the data that failed: pydantic puts the rejected `input_value` in its
+message, a `KeyError`'s message is the missing key, an httpx error can carry a URL with a query string, a
+backend error string can quote the note it choked on. The rule in ASSUMPTIONS §3.3 was enforced at our own
+call sites and unenforced at the one place every record in the process passes through.
+
+### What landed
+
+Two fields replace one, and the old key is **gone**:
+
+```python
+exc_info = record.exc_info
+if isinstance(exc_info, tuple):
+    exc_class, exc_value = exc_info[0], exc_info[1]
+    if exc_class is not None:
+        payload["exc_type"] = f"{exc_class.__module__}.{exc_class.__name__}"
+    if exc_value is not None:
+        payload["exc_frames"] = frames_only(exc_value)
+```
+
+- **`str()` is never called on the value anywhere in `format`.** The only thing read off the exception is
+  `__traceback__`, by `frames_only`, which formats the outer frames and neither the exception line nor the
+  chain.
+- **`record.exc_text` is never read**, and a comment says why: the stdlib caches the *message-bearing*
+  formatted exception there when a handler formats a record twice, so reading it would restore the exact
+  text this piece removes.
+- **The tuple shape only.** `(type, None, None)` reaches a formatter on some logging paths; it yields
+  `exc_type` and no `exc_frames`. A bare `True` — the value before the logging module resolves it — yields
+  neither field, because a formatter that raised here would lose the whole line, including the fields that
+  are safe.
+- **`record.stack_info` is ignored**, before this change and after; the docstring now says so, since the
+  question is otherwise asked once per reader.
+- **The `exc_info` key disappears.** The class docstring says that, and why, so a collector query on it is
+  corrected rather than silently returning nothing.
+- The import is `from dodeal_ai.core.log_safety import frames_only`. `log_safety.py` imports `traceback`
+  and nothing else — no `dodeal_ai` import at all — so the direction is one way and there is no cycle.
+
+`safe_error_fields` is deliberately **not** called: it also emits the message for classes defined under
+`dodeal_ai`, and a formatter must not know which classes are ours. The spelling is its two type fields
+joined instead — see the disagreement below.
+
+### The guard
+
+`tests/security/test_log_exc_info.py`, 7 tests. Two sentinels, an outer and an inner, both passed as
+**arguments** to the raising helper: a traceback quotes the source text of every frame it lists, so a
+sentinel written down in a raising frame would be printed by the frames themselves and prove nothing.
+
+- **The stdout-wide test through the ASGI stack.** A test-only route is registered on the **real** app by
+  the fixture and removed on teardown — never added to `src/`, where a route that raises on purpose has no
+  business being. It raises a foreign `RuntimeError` whose message is the outer sentinel, chained `from` a
+  `ValueError` carrying the inner one, and a library-shaped logger logs it with `exc_info` before it goes on
+  to the catch-all. Driven through `TestClient(raise_server_exceptions=False)` with the real
+  `configure_logging()`, captured with **`capfd`** and not `caplog`: the claim is about the bytes on the
+  file descriptor, where a uvicorn-style logger's line is seen too. Neither sentinel appears in stdout, in
+  stderr or in the 500 body; a line carrying `exc_frames` names the failing route function.
+  **Why the log call is in the route:** TestClient never runs uvicorn, and uvicorn is what logs an escaping
+  exception with `exc_info` in production. A library logging inside the request reaches the same root
+  handler by the same path, and the record the formatter receives is identical. The uvicorn logger itself is
+  covered directly by the next test.
+- **`uvicorn.error` directly**, after `configure_logging()` has handed it back to the root handler: the same
+  chained exception, absent from stdout, the line carrying `logger: "uvicorn.error"`, `exc_type`,
+  `exc_frames` naming the raising helper, and no `exc_info` key.
+- **The chained cause contributes nothing** — not its message, not its class name, not its frames.
+- **`exc_type` present and `exc_info` absent** as JSON keys on every framed line.
+- **The three record shapes**: `(type, None, None)`, all-`None`, and a bare `True`.
+
+Every existing test in `tests/security/test_log_safety.py` passes **unedited**. None asserted the
+`exc_info` key by name — `grep -rn exc_info --include=*.py` over the repo hit only `core/errors.py`'s
+comment and the two formatter lines this piece replaced — so there was nothing to stop and report.
+
+### Sabotage record
+
+| Sabotage | Result |
+| --- | --- |
+| (a) `payload["exc_info"] = self.formatException(exc_info)` restored alongside the new fields | **5 of 7 failed.** The ASGI test on `RuntimeError: SENTINEL-OUTER-…` in the captured stdout; the uvicorn test on the same; the key test on `exc_info` present; **the chained test on the INNER sentinel** (`ValueError: SENTINEL-INNER-… / The above exception was the direct cause of…`), which is the chain walk the piece exists to stop; the `(type, None, None)` test on `exc_info: "NoneType: None"` |
+| (b) `frames_only` kept, `exc_type` changed to `f"{module}.{name}: {exc_value}"` | **5 of 7 failed**, the sentinel tests on the outer message inside `exc_type`, the chained test on its `exc_type` equality, the tuple test on the same |
+
+Restored byte for byte after each: `md5sum` of `core/logging_config.py` is `007847c498c980dff0aaad098584f83f`
+before sabotage (a), after the restore, before sabotage (b) and after the final restore. 7 passed.
+
+### Coverage, and the flip at line 60
+
+`core/logging_config.py` is at **100%, no missing lines**, in every run. The old line 60 was reached only
+when something outside the tree happened to log an `exc_info` record during the suite, which is what moved
+the total between 99.51% and 99.57% in earlier runs. Three full runs at this head, all identical:
+
+| Run | Result | Total coverage | `core/logging_config.py` |
+| --- | --- | --- | --- |
+| 1 | 1288 passed, 1 skipped, 30 deselected | 99.5885% | 100%, missing `[]` |
+| 2 | 1288 passed, 1 skipped, 30 deselected | 99.5885% | 100%, missing `[]` |
+| 3 | 1288 passed, 1 skipped, 30 deselected | 99.5885% | 100%, missing `[]` |
+
+**The flip is gone**, and it is gone because the branch is now driven deterministically by this piece's own
+tests rather than incidentally by another test's log line. All 15 coverage floors met. The `integration`
+lane: 9 passed. The `redis_real` lane was not run — this piece touches no Redis code and no Lua.
+
+### The disagreement between the prompt and the tree, and how it was resolved
+
+1. **`exc_type`'s spelling.** The prompt asked for "the exception's class name with its module, the same
+   spelling `safe_error_fields` uses for its type field". `safe_error_fields` has no single dotted field: it
+   reports `error_type` = `__name__` and `error_module` = `__module__` **separately**. Those two clauses
+   cannot both be satisfied in one field. Resolved in favour of the field list the prompt actually specifies
+   — two fields, `exc_type` and `exc_frames` — with `exc_type` as `f"{__module__}.{__name__}"`, which is
+   those two values joined and nothing else. **The consequence for the lead:** a collector query that
+   matches `error_type == "RuntimeError"` exactly will not match `exc_type` on a formatter line, which reads
+   `builtins.RuntimeError`; it needs a suffix match, or the lead prefers a third field (`exc_module`) and
+   says so.
+2. **README line numbers.** The prompt named "README.md lines 283 and 405 (the log_safety row and the
+   sentinel-test row)". Line 283 is the `logging_config.py` row, 405 is the `log_safety.py` row, and the
+   sentinel-test row (`test_log_safety.py`) is at **408**. All three were read and all three are updated;
+   the new test file gets a row of its own beside the existing one.
+3. **Sabotage (b)'s expected failure.** The prompt expected the chained test to fail "on the inner" under
+   sabotage (b). It cannot: `str(exc)` of the outer exception is the outer message only, and the inner one
+   is reachable only by walking the chain — which is sabotage (a). Under (a) the chained test does fail on
+   the inner sentinel, as recorded above. The first version of that test was too weak to show this (it
+   inspected one field rather than the captured stdout) and was strengthened before the sabotage runs, which
+   is why it now fails under both.
+4. **Ruff G201.** The library-shaped log call inside the test route was written `.error(..., exc_info=True)`
+   and ruff's default rule set rejects it in favour of `.exception(...)`. Changed to `.exception(...)`, which
+   *is* `exc_info=True` and is the spelling a library actually uses; the record the formatter receives is the
+   same.
+
+### For the lead
+
+1. **Should the chained cause's frames be printed too?** `frames_only` formats the outer traceback only, so
+   when an exception is re-raised `from` another, the original failure's frames are lost along with its
+   message. A second field `exc_cause_frames` would be **safe** — frames carry a file, a line, a function
+   name and a source line from our own or a library's source, none of it caller data — and it is what makes
+   a wrapped failure debuggable: today `exc_frames` shows where the wrapper was raised, not where the
+   original broke. **Recommended, as its own item, not folded into anything**, with two conditions: it walks
+   `__cause__`/`__context__` one level only (a deep chain is a log-size lever nobody controls), and it is a
+   change to `core/log_safety.py`, whose floor is 100 — so it is a piece with its own tests, not a line
+   added here. Deliberately **not** in this piece: item 88 is about what must never be printed, and adding a
+   field is a different decision from removing one.
+2. **`exc_type`'s spelling**, and that it does not literally match `safe_error_fields` — see disagreement 1
+   above. The decision to make is whether a collector prefers the joined field or a split pair.
+3. **No per-file floor for `core/logging_config.py`.** It now sits on the log-safety deny path, next to
+   `core/log_safety.py`, which has a floor of 100. The file is at 100% today. **Not added** — floors are the
+   lead's. If added, 100 is reachable: every branch in the module is driven by a unit test now.
+4. **Three-run figures and the flip:** in the coverage section above. The flip is gone.
+5. **No `.env.example` row.** This piece adds no setting.
+6. **Lines that were true before and are false after**, all updated in this commit:
+   - `README.md:283` — the `logging_config.py` row said what the formatter emits; it said nothing about
+     exceptions, and a reader would have assumed `exc_info`.
+   - `README.md:405` — the `log_safety.py` row said "the two helpers every exception-logging **site** uses".
+     That is now weaker than the truth: `frames_only` is applied to every **record**, whoever wrote the call.
+   - `ASSUMPTIONS.md §3.3` — "Tracebacks are frames-only, unchained" was true of our call sites only, and
+     "Enforced by `tests/security/test_log_safety.py`" named one test file.
+   - `ASSUMPTIONS.md §8.10` — "enforced by code in **three** places" is now four; the formatter is the
+     fourth, and it is the one that covers records this codebase never wrote.
+
+### Files
+
+| File | Change |
+| --- | --- |
+| `src/dodeal_ai/core/logging_config.py` | the `exc_info` branch becomes `exc_type` + `exc_frames`; `frames_only` imported; the class docstring gains the exception rule, the removed key and the `stack_info` note; a comment on why `record.exc_text` is never read |
+| `README.md` | the `logging_config.py` row; the `log_safety.py` row; a row for the new test file |
+| `ASSUMPTIONS.md` | §3.3's logging row; §8.10's count, its fourth bullet and the sentinel-test bullet |
+| `docs/register.md` | item 88 to DONE with the sha; header sha to this head; the step order left behind is 125, then 123, then 74 with 104, 106 and 96 |
+| `docs/STATUS.md` | the Piece 88 row; the register-item section; suite line to 1288 and the three-run figures; header piece list |
+| `CAMPAIGN_REPORT.md` | this block |
+| `tests/security/test_log_exc_info.py` | new: 7 tests — the stdout-wide sentinel through the ASGI stack with `capfd`, `uvicorn.error` directly, the chained cause, the key swap, and the three record shapes |
