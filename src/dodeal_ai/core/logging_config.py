@@ -19,6 +19,7 @@ import sys
 from datetime import UTC, datetime
 
 from dodeal_ai.core.config import get_settings
+from dodeal_ai.core.log_safety import frames_only
 
 # Every attribute a stock LogRecord carries. Anything ELSE on the record --
 # set via `extra=` on a logging call, or by a `logging.Filter` (e.g. a
@@ -47,6 +48,22 @@ class JsonFormatter(logging.Formatter):
     "{" -- a note body, a model completion, an echoed payload -- could set or
     overwrite top-level fields such as decision or reason_code and forge an
     audit record. The message is always a plain string under "message".
+
+    An exception is NEVER formatted either, for the same reason. A record
+    logged with exc_info yields "exc_type" (the class, module-qualified) and
+    "exc_frames" (the traceback frames); THE "exc_info" KEY IS GONE, so a
+    collector query on it now matches nothing and has to move to those two.
+    `self.formatException` printed str(exc) and every message in the
+    __cause__/__context__ chain, and for an exception raised OUTSIDE this
+    package -- by starlette's ServerErrorMiddleware, by uvicorn, by any
+    library logging through our root handler -- that message is frequently
+    the data that failed: a note body, a model completion, a backend error
+    string. The frames stay, because they are what makes a failure
+    debuggable; the messages are the risk, and no logger in the process can
+    put one on stdout. See core/log_safety.py.
+
+    record.stack_info is ignored, before this change and after: it is set
+    only by an explicit stack_info=True, which nothing here passes.
     """
 
     def format(self, record: logging.LogRecord) -> str:
@@ -56,8 +73,21 @@ class JsonFormatter(logging.Formatter):
             if key not in _STANDARD_RECORD_ATTRS:
                 payload[key] = value
 
-        if record.exc_info:
-            payload["exc_info"] = self.formatException(record.exc_info)
+        # record.exc_text is deliberately never read: the stdlib caches the
+        # MESSAGE-BEARING formatted exception there when a record is formatted
+        # twice, which is the text this branch exists to keep off stdout.
+        exc_info = record.exc_info
+        if isinstance(exc_info, tuple):
+            # Tuple shape only. A bare exc_info=True is resolved to a tuple by
+            # the logging module before a formatter sees it; anything else on
+            # this attribute has no frames to read, and a formatter never raises.
+            exc_class, exc_value = exc_info[0], exc_info[1]
+            if exc_class is not None:
+                # The two halves safe_error_fields reports separately
+                # (error_type, error_module), joined. Never str(exc).
+                payload["exc_type"] = f"{exc_class.__module__}.{exc_class.__name__}"
+            if exc_value is not None:
+                payload["exc_frames"] = frames_only(exc_value)
 
         # Applied last so nothing above can shadow these.
         payload["timestamp"] = datetime.fromtimestamp(
