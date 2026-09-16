@@ -59,6 +59,30 @@ warn_redundant_casts = true
 warn_unused_ignores = true
 no_implicit_optional = true
 plugins = ["pydantic.mypy"]
+
+# The layer rule (register item 13), run as `uv run lint-imports` in CI. Core is
+# the bottom layer and units sit under api and middleware; an import against the
+# arrow fails the chain. Indirect imports count, so a detour does not pass.
+[tool.importlinter]
+root_package = "dodeal_ai"
+
+[[tool.importlinter.contracts]]
+name = "core imports nothing from units, api, middleware or tools"
+type = "forbidden"
+source_modules = ["dodeal_ai.core"]
+forbidden_modules = [
+    "dodeal_ai.units",
+    "dodeal_ai.api",
+    "dodeal_ai.middleware",
+    "dodeal_ai.tools",
+]
+
+[[tool.importlinter.contracts]]
+name = "units import nothing from api or middleware"
+type = "forbidden"
+source_modules = ["dodeal_ai.units"]
+forbidden_modules = ["dodeal_ai.api", "dodeal_ai.middleware"]
+
 [dependency-groups]
 # The ONE dev list. `uv sync` installs from here; a second copy under
 # [project.optional-dependencies] was never installed from and drifted.
@@ -69,6 +93,7 @@ dev = [
     # with the transport rewrite).
     "httpx2>=2.9.1",
     "hypothesis>=6.100.0",
+    "import-linter>=2.15",
     "mypy>=2.3.0",
     # The dependency auditor, locked like every other tool so CI and a hand run
     # use one advisory client. Always run against the EXPORTED lock, never the

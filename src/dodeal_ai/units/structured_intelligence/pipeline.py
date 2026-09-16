@@ -112,9 +112,9 @@ from dodeal_ai.core.errors import (
     JudgementDeadlineExceeded,
     NoteNotFoundError,
 )
+from dodeal_ai.core.inflight import current_inflight
 from dodeal_ai.core.llm import LLMClient, LLMResponse
 from dodeal_ai.core.resilience import ExternalCallError, gather_or_cancel
-from dodeal_ai.middleware.inflight import current_inflight
 from dodeal_ai.schemas.lead import Lead, LeadNote
 from dodeal_ai.tools.keys import BackendKeyError
 from dodeal_ai.tools.leads import LeadsClient

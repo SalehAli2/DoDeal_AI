@@ -27,6 +27,7 @@ import pytest
 import redis
 
 import dodeal_ai.units.structured_intelligence.pipeline as pipeline_module
+from dodeal_ai.core import inflight
 from dodeal_ai.core.breaker import operational_breaker
 from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.context import RequestContext
@@ -41,6 +42,7 @@ from dodeal_ai.core.errors import (
     NoteNotFoundError,
     dodeal_error_response,
 )
+from dodeal_ai.core.inflight import InflightCounter
 from dodeal_ai.core.llm import LLMErrorReason, LLMProviderError
 from dodeal_ai.core.llm.profiles import (
     PROFILE_UNIT_A_CLASSIFY,
@@ -50,8 +52,6 @@ from dodeal_ai.core.llm.profiles import (
 from dodeal_ai.core.logging_config import JsonFormatter
 from dodeal_ai.core.prompting import AssembledPrompt, build_prompt
 from dodeal_ai.core.resilience import ExternalCallError
-from dodeal_ai.middleware import inflight
-from dodeal_ai.middleware.inflight import InflightCounter
 from dodeal_ai.tools.keys import BackendKeyError
 from dodeal_ai.units.structured_intelligence import state
 from dodeal_ai.units.structured_intelligence.classify import (

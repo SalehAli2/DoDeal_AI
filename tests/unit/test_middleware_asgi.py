@@ -40,13 +40,11 @@ import pytest
 from fastapi import FastAPI, Request
 from starlette.types import Message, Receive, Scope, Send
 
+from dodeal_ai.core import inflight as core_inflight
 from dodeal_ai.core.config import Settings
+from dodeal_ai.core.inflight import InflightCounter, current_inflight
 from dodeal_ai.middleware import inflight
-from dodeal_ai.middleware.inflight import (
-    InflightCounter,
-    InflightMiddleware,
-    current_inflight,
-)
+from dodeal_ai.middleware.inflight import InflightMiddleware
 from dodeal_ai.middleware.request_id import RequestIDMiddleware
 
 _PROBE: contextvars.ContextVar[str] = contextvars.ContextVar(
@@ -73,7 +71,7 @@ def _fresh_counter(monkeypatch: pytest.MonkeyPatch):
     """A counter of its own per test, for the reason test_inflight.py has one:
     the real one is a process-wide global and a test that mutated it would leak
     its state into the next."""
-    monkeypatch.setattr(inflight, "_counter", InflightCounter())
+    monkeypatch.setattr(core_inflight, "_counter", InflightCounter())
 
 
 @pytest.fixture(autouse=True)
@@ -176,7 +174,7 @@ async def test_an_http_scope_on_the_same_stack_is_counted_and_identified():
     request_id = scope["state"]["request_id"]
     assert request_id
     assert scope["state"]["observability"].request_id == request_id
-    assert app.state.inflight is inflight._counter
+    assert app.state.inflight is core_inflight._counter
     start = next(m for m in messages if m["type"] == "http.response.start")
     assert (b"x-request-id", request_id.encode()) in start["headers"]
 

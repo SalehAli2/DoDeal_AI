@@ -59,6 +59,7 @@ import logging
 
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from dodeal_ai.core import inflight as core_inflight
 from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.errors import LoadShed, dodeal_error_response
 
@@ -68,59 +69,6 @@ _logger = logging.getLogger("dodeal_ai.inflight")
 # shed. Matched exactly: a path is not a prefix here, so `/healthz` or
 # `/health/../judgements` is counted like anything else.
 EXEMPT_PATHS = frozenset({"/health", "/ready"})
-
-
-class InflightCounter:
-    """How many requests are inside the app right now.
-
-    A plain integer behind three methods rather than a bare module global,
-    because the thing that has to be true of it is that every increment is
-    matched by a decrement — and a named object with `release()` on it is
-    something a reader can check, whereas `_count -= 1` scattered across a
-    dispatch method is something a reader has to trace.
-
-    NO LOCK, deliberately. This counts work on ONE event loop in ONE process:
-    the read-compare-increment below never awaits between its steps, so no other
-    task can run inside it and there is nothing for a lock to protect. (It is
-    per-process for the same reason it is exact — two pods each shed against
-    their own ceiling, which is what a per-pod ceiling means.)
-    """
-
-    __slots__ = ("_count",)
-
-    def __init__(self) -> None:
-        self._count = 0
-
-    @property
-    def count(self) -> int:
-        return self._count
-
-    def acquire(self, limit: int) -> bool:
-        """Take a slot if one is free. True = admitted, False = shed."""
-        if self._count >= limit:
-            return False
-        self._count += 1
-        return True
-
-    def release(self) -> None:
-        self._count -= 1
-
-
-# Module-level and shared by the whole process, which is what "in flight" means.
-# It is also how the pipeline reads the number for its outcome line: a unit has
-# a TenantScope and no Request, so it cannot reach app.state.
-_counter = InflightCounter()
-
-
-def current_inflight() -> int:
-    """The count as of right now, for anything that wants to record it.
-
-    A snapshot and nothing more. It is an observation about the process at the
-    moment it was taken, never an input to a decision -- the only code allowed
-    to decide on this number is `acquire` above, which reads and acts on it
-    without an await in between.
-    """
-    return _counter.count
 
 
 class InflightMiddleware:
@@ -137,9 +85,9 @@ class InflightMiddleware:
 
     def __init__(self, app: ASGIApp) -> None:
         # The inner app and nothing else -- see THE CAP IS READ LAZILY above.
-        # The counter is NOT captured here either: `_counter` below is looked up
-        # per request, which is what lets a test swap the process-wide counter
-        # for one of its own without rebuilding the app.
+        # The counter is NOT captured here either: core/inflight.py's `_counter`
+        # is looked up per request, which is what lets a test swap the
+        # process-wide counter for one of its own without rebuilding the app.
         self.app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
@@ -152,15 +100,18 @@ class InflightMiddleware:
             await self.app(scope, receive, send)
             return
 
+        # Read once, so the slot taken and the slot released are on one counter.
+        counter = core_inflight._counter
+
         # Exposed for anything holding the app rather than the module: the same
         # object, so `app.state.inflight.count` is live and not a snapshot.
-        scope["app"].state.inflight = _counter
+        scope["app"].state.inflight = counter
 
         if scope["path"] in EXEMPT_PATHS:
             await self.app(scope, receive, send)
             return
 
-        if not _counter.acquire(get_settings().max_inflight):
+        if not counter.acquire(get_settings().max_inflight):
             # Read from the scope dict that RequestIDMiddleware -- outside this
             # one -- wrote, which is the same dict `request.state` is a view
             # over. "unknown" if this is somehow reached without it, exactly as
@@ -174,7 +125,7 @@ class InflightMiddleware:
                 extra={
                     "reason_code": "load_shed",
                     "request_id": request_id,
-                    "inflight": _counter.count,
+                    "inflight": counter.count,
                 },
             )
             # A Response IS an ASGI app: calling it sends the same status, the
@@ -191,4 +142,4 @@ class InflightMiddleware:
             # line after the await: an exception from the inner app now
             # propagates straight up to ServerErrorMiddleware, so a `release()`
             # on the success path alone would leak a slot on every 500.
-            _counter.release()
+            counter.release()

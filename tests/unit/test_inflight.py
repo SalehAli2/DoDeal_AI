@@ -38,6 +38,7 @@ from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from dodeal_ai.core import inflight as core_inflight
 from dodeal_ai.core.config import (
     ConfigError,
     Settings,
@@ -45,14 +46,10 @@ from dodeal_ai.core.config import (
     get_settings,
 )
 from dodeal_ai.core.errors import register_error_handlers
+from dodeal_ai.core.inflight import InflightCounter, current_inflight
 from dodeal_ai.core.logging_config import JsonFormatter
 from dodeal_ai.middleware import inflight
-from dodeal_ai.middleware.inflight import (
-    EXEMPT_PATHS,
-    InflightCounter,
-    InflightMiddleware,
-    current_inflight,
-)
+from dodeal_ai.middleware.inflight import EXEMPT_PATHS, InflightMiddleware
 from dodeal_ai.middleware.request_id import RequestIDMiddleware
 
 # Shaped like a note body, because the point of the assertion is that a REFUSED
@@ -70,7 +67,7 @@ def _fresh_counter(monkeypatch):
     it is safe because nothing captures it at import time — `current_inflight`
     and the middleware both read the module attribute when they run.
     """
-    monkeypatch.setattr(inflight, "_counter", InflightCounter())
+    monkeypatch.setattr(core_inflight, "_counter", InflightCounter())
 
 
 def _settings(max_inflight: int) -> Settings:
@@ -422,7 +419,7 @@ def test_the_count_is_exposed_on_app_state(cap):
     with TestClient(app) as client:
         client.get("/fast")
 
-    assert app.state.inflight is inflight._counter
+    assert app.state.inflight is core_inflight._counter
     assert app.state.inflight.count == 0
 
 

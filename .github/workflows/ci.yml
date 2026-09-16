@@ -30,6 +30,10 @@ jobs:
       - name: Type check (mypy)
         run: uv run mypy
 
+      # The layer rule (register item 13): the contracts are in pyproject.toml.
+      - name: Import layers (import-linter)
+        run: uv run lint-imports
+
       - name: Tests (with coverage gate)
         run: uv run pytest
 
