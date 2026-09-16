@@ -71,6 +71,9 @@ _FLOORS: dict[str, float] = {
     "src/dodeal_ai/core/errors.py": 95,
     "src/dodeal_ai/core/validation.py": 100,
     "src/dodeal_ai/core/log_safety.py": 100,
+    # What a model reads of a note (register item 59). Pure functions over a
+    # string, so every rule and every kept shape is reachable in a unit test.
+    "src/dodeal_ai/core/redaction.py": 100,
     # Unit A. The unit decides what a salesperson is told about their own work,
     # and its config is the only source of a weight or a threshold -- a gap
     # there is a silently wrong score, not a crash.

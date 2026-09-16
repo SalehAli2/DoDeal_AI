@@ -123,6 +123,7 @@ from dodeal_ai.core.errors import (
 )
 from dodeal_ai.core.inflight import current_inflight
 from dodeal_ai.core.llm import LLMClient, LLMResponse
+from dodeal_ai.core.redaction import Redaction, redact
 from dodeal_ai.core.resilience import (
     ExternalCallError,
     gather_first_wins,
@@ -674,6 +675,11 @@ async def _judge(
     compares it to a clock, and it is not on any line.
     """
     config = deps.config
+    # Register item 59: the key is the ORIGINAL text's fingerprint; only the
+    # three prompts read the redacted copy. Counts reach the outcome line.
+    fingerprint = state.note_fingerprint(note.note)
+    redaction = redact(note.note)
+    prompt_note = note.model_copy(update={"note": redaction.text})
 
     # --- length: before any reservation, before any spend -------------------
     gated = _length_gate(note, config)
@@ -694,12 +700,12 @@ async def _judge(
             # No pass ran, so all three are null. Not zero: this note did not
             # take no time to classify, it was never classified.
             timings=_Timings(elapsed_ms=_ms_since(started)),
+            redaction=redaction,
             author_differs_from_subject=author_differs_from_subject,
         )
         return judgement
 
     # --- reserve: the only thing between a double-submit and paying twice ---
-    fingerprint = state.note_fingerprint(note.note)
     # SHORT: the in-flight lifetime. The long one is the confirm's, at the end
     # of the try below. Rounded UP, never down: a deadline under a quarter-second
     # would otherwise give EX 0, which Redis refuses, and a refused reservation
@@ -761,7 +767,7 @@ async def _judge(
         (classification, classify_response), classify_ms = await _timed(
             classify(
                 deps.llm,
-                note,
+                prompt_note,
                 lead,
                 scope=scope,
                 settings=deps.settings,
@@ -799,7 +805,7 @@ async def _judge(
                 _timed(
                     detect_vagueness(
                         deps.llm,
-                        note,
+                        prompt_note,
                         note_type,
                         scope=scope,
                         config=config,
@@ -810,7 +816,7 @@ async def _judge(
                 _timed(
                     score_note(
                         deps.llm,
-                        note,
+                        prompt_note,
                         note_type,
                         scope=scope,
                         config=config,
@@ -965,6 +971,7 @@ async def _judge(
             vague_ms=vague_ms,
             score_ms=score_ms,
         ),
+        redaction=redaction,
         author_differs_from_subject=author_differs_from_subject,
     )
     return judgement
@@ -1098,9 +1105,13 @@ def _log_outcome(
     *,
     model_passes: int,
     timings: _Timings,
+    redaction: Redaction,
     author_differs_from_subject: bool | None = None,
 ) -> None:
     """One structured line per judgement.
+
+    `redacted_phone`, `redacted_email` and `redacted_id` (register item 59) are
+    counts of what the prompts did not see -- numbers, never the values.
 
     Fields only, via extra=, and every one of them is an identifier or a member
     of a fixed vocabulary. NEVER the note text, never the reasoning, never the
@@ -1164,6 +1175,7 @@ def _log_outcome(
                 "suppressed_detail": judgement.suppressed.detail_code.value,
                 "model_passes": model_passes,
                 **timings.fields(),
+                **redaction.fields(),
                 **author_field,
             },
         )
@@ -1185,6 +1197,7 @@ def _log_outcome(
             "attempt": judgement.decision.attempt,
             "model_passes": model_passes,
             **timings.fields(),
+            **redaction.fields(),
             **author_field,
         },
     )

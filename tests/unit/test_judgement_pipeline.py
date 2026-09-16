@@ -838,6 +838,61 @@ async def test_a_judgement_under_the_budget_still_reprompts(
     assert "reprompt_issued" in [x["message"] for x in json_capture()]
 
 
+# --- redaction of the text a model reads (register item 59) ----------------
+
+CONTACT_NOTE = (
+    "Called the client on +20 10 1234 5678, emailed buyer@example.com, "
+    "national id 29801011234567, viewing 2026-01-15 at 10:30 for 1250000."
+)
+
+
+async def test_the_prompts_read_the_redacted_note_and_the_key_the_original(
+    leads, operational, json_capture
+):
+    """Every variable half is redacted; the fingerprint and the outcome line are not."""
+    leads.notes[LEAD_ID] = [note(NOTE_ID, CONTACT_NOTE)]
+    llm = FakeLLM(*_happy_path())
+
+    await judge_note(
+        _scope(), _request(), resubmission=False, deps=_deps_with(llm, leads)
+    )
+
+    assert llm.call_count == 3
+    for prompt in llm.prompts:
+        assert "+20 10 1234 5678" not in prompt.text
+        assert "buyer@example.com" not in prompt.text
+        assert "29801011234567" not in prompt.text
+        assert "[PHONE]" in prompt.variable and "[EMAIL]" in prompt.variable
+        assert "[ID]" in prompt.variable
+        assert "2026-01-15 at 10:30 for 1250000" in prompt.variable
+        assert "[PHONE]" not in prompt.stable
+    [key] = _idem_keys(operational)
+    assert key.endswith(state.note_fingerprint(CONTACT_NOTE))
+    (line,) = [x for x in json_capture() if x["message"] == "judgement_completed"]
+    assert (line["redacted_phone"], line["redacted_email"], line["redacted_id"]) == (
+        1,
+        1,
+        1,
+    )
+    assert "buyer@example.com" not in json.dumps(json_capture())
+
+
+async def test_a_suppressed_line_carries_the_counts_too(
+    leads, operational, json_capture
+):
+    """The length gate reads the original, and its line still has the three counts."""
+    leads.notes[LEAD_ID] = [note(NOTE_ID, "ok 010-1234-5678")]
+
+    judgement = await judge_note(
+        _scope(), _request(), resubmission=False, deps=_deps_with(FakeLLM(), leads)
+    )
+
+    assert judgement.suppressed is not None
+    (line,) = [x for x in json_capture() if x["message"] == "judgement_suppressed"]
+    assert line["redacted_phone"] == 1
+    assert (line["redacted_email"], line["redacted_id"]) == (0, 0)
+
+
 # --- vague and scoring run concurrently (register item 14) ------------------
 
 
