@@ -33,6 +33,8 @@ decides what a salesperson is told about their own work:
                        exception message on the stream, or no line at all.
     middleware/inflight.py  load shedding. Wrong -> an unbounded queue, or
                        a slot that is never given back.
+    core/inflight.py  the counter load shedding reads. Wrong -> a count that
+                       drifts, shedding traffic the service could serve.
 
 A file matched by both a `**` pattern and its own exact pattern is checked
 against both and printed twice; the stricter floor governs. That is deliberate
@@ -110,6 +112,9 @@ _FLOORS: dict[str, float] = {
     # How every log line is written: extra= fields lifted, an exception reduced
     # to its type and frames. A gap is a line that ships a raw message, or none.
     "src/dodeal_ai/core/logging_config.py": 100,
+    # The in-flight counter itself (item 13): three methods whose every line is a
+    # slot taken, refused or given back. A gap is a count that can drift unseen.
+    "src/dodeal_ai/core/inflight.py": 100,
     # Load shedding (item 73): admit, refuse, and give the slot back in a finally.
     # 95 as item 113 sets it; the file measured 100 when the floor was added, so
     # the margin is headroom and not a known uncovered line.
