@@ -9,6 +9,10 @@ server that does not answer PING, or a URL that selects one of the service's own
 databases (db0 to db2) skips every test with a reason naming the variable. The
 reason carries an error TYPE and never the URL, which may hold a password.
 
+UNLESS DODEAL_REDIS_REAL_REQUIRED IS SET (register item 106): then each of those
+skips is a failure with the same reason. The CI job sets it, because a lane that
+skips there has proven nothing and would still go green. A test-only variable.
+
 NO CLIENT FACTORY IS PATCHED. The lane builds its own clients from the URL, so
 `get_cost_client` and `get_operational_client` never point at a live server and
 tests/test_hermetic_fakes.py has nothing to police here.
@@ -27,6 +31,7 @@ import os
 import pathlib
 import uuid
 from collections.abc import AsyncIterator
+from typing import NoReturn
 
 import pytest
 import pytest_asyncio
@@ -36,6 +41,9 @@ from redis import asyncio as redis_async
 from dodeal_ai.core.config import Settings
 
 URL_VAR = "DODEAL_REDIS_REAL_URL"
+# Any non-empty value turns every skip below into a failure; empty reads as
+# unset, the same rule URL_VAR follows.
+REQUIRED_VAR = "DODEAL_REDIS_REAL_REQUIRED"
 
 _LANE_DIR = pathlib.Path(__file__).parent
 
@@ -47,6 +55,14 @@ _SERVICE_DBS = frozenset({0, 1, 2})
 # must not change what the lane measures against, and a session fixture runs
 # before the root conftest supplies the signing key a validated build needs.
 _DEFAULTS = Settings.model_construct()
+
+
+def _unusable(reason: str, *, allow_module_level: bool = False) -> NoReturn:
+    """Skip the lane with `reason`, or fail it with the same reason when
+    DODEAL_REDIS_REAL_REQUIRED is set."""
+    if os.environ.get(REQUIRED_VAR):
+        pytest.fail(reason, pytrace=False)
+    pytest.skip(reason, allow_module_level=allow_module_level)
 
 
 @pytest.hookimpl(tryfirst=True)
@@ -70,7 +86,7 @@ async def real_redis() -> AsyncIterator[redis_async.Redis]:
     """
     url = os.environ.get(URL_VAR)
     if not url:
-        pytest.skip(
+        _unusable(
             "DODEAL_REDIS_REAL_URL not set; the real-Redis lane needs a live server",
             allow_module_level=True,
         )
@@ -84,7 +100,7 @@ async def real_redis() -> AsyncIterator[redis_async.Redis]:
     db = int(client.connection_pool.connection_kwargs.get("db", 0))
     if db in _SERVICE_DBS:
         await client.aclose()
-        pytest.skip(
+        _unusable(
             f"{URL_VAR} selects db{db}; the real-Redis lane refuses db0 to db2, "
             "the service's own stores"
         )
@@ -92,7 +108,7 @@ async def real_redis() -> AsyncIterator[redis_async.Redis]:
         await client.ping()
     except redis.RedisError as exc:
         await client.aclose()
-        pytest.skip(
+        _unusable(
             f"{URL_VAR} is set but PING failed ({type(exc).__name__}); "
             "the real-Redis lane needs a live server"
         )
