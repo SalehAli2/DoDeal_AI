@@ -39,11 +39,13 @@ would cost a full window of refusals -- worse than the defect it fixes.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
 from enum import Enum
 from functools import lru_cache
+from typing import Literal
 
 import redis
 
@@ -51,6 +53,10 @@ from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.redis import PoolExhausted
 
 _logger = logging.getLogger("dodeal_ai.breaker")
+
+# Which path gave the probe slot back, one fixed word per call site (item 122).
+# A closed set so the field can never carry an exception message or a key.
+type ProbeAbandonCause = Literal["pool", "never_returned", "cancelled", "error"]
 
 
 class BreakerOpen(redis.RedisError):
@@ -121,17 +127,21 @@ class CircuitBreaker:
                     # The store was never asked, so give the probe slot back
                     # instead of holding it. _opened_at stays elapsed, so the
                     # next call probes at once; re-stamping refuses them all.
-                    self._log_probe_abandoned()
+                    self._log_probe_abandoned("pool")
                     self._state = BreakerState.OPEN
                 raise
             self._record_failure()
             raise
-        except BaseException:
+        except BaseException as exc:
             # The probe did not answer the question (cancelled, or failed in
             # our own code). Not evidence either way: re-arm the window rather
             # than leave HALF_OPEN with nothing to move it.
             if self._state is BreakerState.HALF_OPEN:
-                self._log_probe_abandoned()
+                # A bug in our code must not read as a cancellation in the log.
+                cause: ProbeAbandonCause = (
+                    "cancelled" if isinstance(exc, asyncio.CancelledError) else "error"
+                )
+                self._log_probe_abandoned(cause)
                 self._open()
             raise
         self._record_success()
@@ -160,7 +170,7 @@ class CircuitBreaker:
         else:
             # HALF_OPEN, and its probe never came back. Stay HALF_OPEN: this
             # call is the probe now.
-            self._log_probe_abandoned()
+            self._log_probe_abandoned("never_returned")
         self._probe_started = now
 
     def _record_failure(self) -> None:
@@ -186,9 +196,12 @@ class CircuitBreaker:
         self._opened_at = self._clock()
         _logger.warning("breaker_opened", extra={"breaker": self._name})
 
-    def _log_probe_abandoned(self) -> None:
-        """One line per probe that did not answer, on either guard's path."""
-        _logger.warning("breaker_probe_abandoned", extra={"breaker": self._name})
+    def _log_probe_abandoned(self, cause: ProbeAbandonCause) -> None:
+        """One line per probe that did not answer, on either guard's path, with
+        the fixed word naming that path and nothing from the failure itself."""
+        _logger.warning(
+            "breaker_probe_abandoned", extra={"breaker": self._name, "cause": cause}
+        )
 
 
 def breaker_field(exc: BaseException) -> dict[str, str]:
