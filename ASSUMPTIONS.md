@@ -626,6 +626,27 @@ Ordered by what they release. Items 4.1–4.3 are the critical path.
   `units/structured_intelligence/pipeline.py` (`judge_note`,
   `judge_note_direct`).
 
+### 4.8 Is a CRM note id unique within a tenant and never reused? (Q22)
+- **Assumed:** a CRM note id is unique within a tenant and never reused, not
+  even after a delete. `[D]` at best: no document states it and nobody has
+  observed it. The question is Q22 in `docs/STATUS.md` §6, owed by the backend
+  and not yet asked.
+- **Three mechanisms rest on it:**
+  - the per-note attempt cap, key `attempt:{tenant}:{lead_id}:{note_id}`;
+  - the resubmission's reference to the first prompt's fingerprint, the
+    `attempt_fp:` key beside it (register item 33);
+  - the six-hour attempt TTL (`attempt_ttl_seconds`, 21600), which both keys
+    carry.
+- **If an id is reused:** the new note inherits the old note's spent allowance
+  and returns `attempt_cap`. Nothing in the logs tells the two notes apart. This
+  was seen on the fake CRM, whose ids reset on restart.
+- **Correction path:** if the backend says ids can be reused, the attempt keys
+  gain the note's `createdAt`, or a CRM-issued unique token, with the TTL
+  unchanged.
+- **Seam:** `units/structured_intelligence/state.py` (`_attempt_key`,
+  `_attempt_fingerprint_key`), `units/structured_intelligence/config.py`
+  (`attempt_ttl_seconds`).
+
 ---
 
 # 5. PENDING — awaiting a business or product answer
