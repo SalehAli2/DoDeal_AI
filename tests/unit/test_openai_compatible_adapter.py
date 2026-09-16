@@ -979,3 +979,49 @@ async def test_the_breaker_uses_the_redis_breaker_settings(
         breaker = _client(settings, GROQ_BASE_URL, http).breaker
     assert breaker._failure_threshold == 2
     assert breaker._open_seconds == 7.5
+
+
+# --- the provider's request id (register item 26) ----------------------------
+
+
+def _with_headers(headers: dict[str, str], **body: object) -> httpx.Response:
+    return httpx.Response(200, json=_ok_body(**body), headers=headers)
+
+
+@pytest.mark.parametrize(
+    ("headers", "expected"),
+    [
+        ({"x-request-id": "req_ABC-123"}, "req_ABC-123"),
+        ({"request-id": "req-xyz"}, "req-xyz"),
+        ({"x-request-id": "req-x", "request-id": "req-r"}, "req-x"),
+        ({"x-request-id": "bad id with spaces"}, "chatcmpl-abc123"),
+        ({"x-request-id": "a" * 129}, "chatcmpl-abc123"),
+        ({"x-request-id": "a" * 128}, "a" * 128),
+        ({"x-request-id": "evil;id=1"}, "chatcmpl-abc123"),
+        ({}, "chatcmpl-abc123"),
+    ],
+    ids=[
+        "x-request-id",
+        "request-id",
+        "x-wins",
+        "spaces-rejected",
+        "too-long",
+        "max-length",
+        "punctuation-rejected",
+        "body-fallback",
+    ],
+)
+async def test_the_request_id_comes_from_the_header_first(
+    monkeypatch: pytest.MonkeyPatch, headers: dict[str, str], expected: str
+) -> None:
+    """x-request-id, then request-id, then the body id, each only if well formed."""
+    recorder = Recorder(_with_headers(headers))
+    result = await _call(_settings(monkeypatch), GROQ_BASE_URL, recorder)
+    assert result.provider_request_id == expected
+
+
+async def test_a_malformed_body_id_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No usable header and a body id with unsafe characters is simply absent."""
+    recorder = Recorder(_with_headers({}, id="id with\nnewline"))
+    result = await _call(_settings(monkeypatch), GROQ_BASE_URL, recorder)
+    assert result.provider_request_id is None

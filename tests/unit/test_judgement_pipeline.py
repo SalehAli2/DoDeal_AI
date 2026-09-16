@@ -893,6 +893,74 @@ async def test_a_suppressed_line_carries_the_counts_too(
     assert (line["redacted_email"], line["redacted_id"]) == (0, 0)
 
 
+# --- provider request ids on the outcome line (register item 26) -----------
+
+
+async def test_the_outcome_line_carries_each_passs_provider_request_id(
+    leads, operational, json_capture
+):
+    """classify, vague and score each report the id of the response they used."""
+    llm = FakeLLM()
+    llm.script_for(
+        CLASSIFY_TEMPLATE,
+        json_response({"note_type": "discovery"}, provider_request_id="req-c"),
+    )
+    llm.script_for(
+        template_for(NoteType.DISCOVERY),
+        response(_vague_answer().text, provider_request_id="req-v"),
+    )
+    llm.script_for(
+        SCORE_TEMPLATE, response(_score_answer().text, provider_request_id="req-s")
+    )
+
+    await judge_note(
+        _scope(), _request(), resubmission=False, deps=_deps_with(llm, leads)
+    )
+
+    (line,) = [x for x in json_capture() if x["message"] == "judgement_completed"]
+    assert (
+        line["classify_provider_request_id"],
+        line["vague_provider_request_id"],
+        line["score_provider_request_id"],
+    ) == ("req-c", "req-v", "req-s")
+
+
+async def test_a_pass_that_did_not_run_has_a_null_request_id(
+    leads, operational, json_capture
+):
+    """A classifier suppression carries its one id; the other two are null."""
+    llm = FakeLLM(
+        json_response({"note_type": "system_event"}, provider_request_id="c1")
+    )
+
+    await judge_note(
+        _scope(), _request(), resubmission=False, deps=_deps_with(llm, leads)
+    )
+
+    (line,) = [x for x in json_capture() if x["message"] == "judgement_suppressed"]
+    assert line["classify_provider_request_id"] == "c1"
+    assert line["vague_provider_request_id"] is None
+    assert line["score_provider_request_id"] is None
+
+
+async def test_a_length_gated_line_has_three_null_request_ids(
+    leads, operational, json_capture
+):
+    """No model ran, so no id: null, never absent."""
+    leads.notes[LEAD_ID] = [note(NOTE_ID, "ok")]
+    await judge_note(
+        _scope(), _request(), resubmission=False, deps=_deps_with(FakeLLM(), leads)
+    )
+    (line,) = [x for x in json_capture() if x["message"] == "judgement_suppressed"]
+    assert [
+        line[f"{p}_provider_request_id"] for p in ("classify", "vague", "score")
+    ] == [
+        None,
+        None,
+        None,
+    ]
+
+
 # --- vague and scoring run concurrently (register item 14) ------------------
 
 

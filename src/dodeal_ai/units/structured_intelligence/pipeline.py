@@ -701,6 +701,7 @@ async def _judge(
             # take no time to classify, it was never classified.
             timings=_Timings(elapsed_ms=_ms_since(started)),
             redaction=redaction,
+            request_ids=_no_request_ids(),
             author_differs_from_subject=author_differs_from_subject,
         )
         return judgement
@@ -742,6 +743,9 @@ async def _judge(
         raise DuplicateRequestError()
 
     decision: Decision | None = None
+    # Register item 26: each pass's provider request id, null for a pass that
+    # did not run -- the handle for reconciling a call with the provider's bill.
+    request_ids = _no_request_ids()
     # None until the pass that fills each one actually runs, so a judgement that
     # stopped early carries null rather than a made-up zero.
     classify_ms: int | None = None
@@ -775,6 +779,9 @@ async def _judge(
             )
         )
         model_passes = 1
+        request_ids["classify_provider_request_id"] = (
+            classify_response.provider_request_id
+        )
 
         detail = suppression_for(classification.note_type)
         if detail is not None:
@@ -829,6 +836,12 @@ async def _judge(
 
             vague_output, vague_response = vague_result
             score_output, score_response = score_result
+            request_ids["vague_provider_request_id"] = (
+                vague_response.provider_request_id
+            )
+            request_ids["score_provider_request_id"] = (
+                score_response.provider_request_id
+            )
             analysis = NoteAnalysis(
                 note_type=note_type,
                 is_vague=vague_output.is_vague,
@@ -972,9 +985,19 @@ async def _judge(
             score_ms=score_ms,
         ),
         redaction=redaction,
+        request_ids=request_ids,
         author_differs_from_subject=author_differs_from_subject,
     )
     return judgement
+
+
+def _no_request_ids() -> dict[str, str | None]:
+    """The three per-pass request id fields, all null until a pass answers."""
+    return {
+        "classify_provider_request_id": None,
+        "vague_provider_request_id": None,
+        "score_provider_request_id": None,
+    }
 
 
 async def _existing_judgement(
@@ -1106,6 +1129,7 @@ def _log_outcome(
     model_passes: int,
     timings: _Timings,
     redaction: Redaction,
+    request_ids: dict[str, str | None],
     author_differs_from_subject: bool | None = None,
 ) -> None:
     """One structured line per judgement.
@@ -1176,6 +1200,7 @@ def _log_outcome(
                 "model_passes": model_passes,
                 **timings.fields(),
                 **redaction.fields(),
+                **request_ids,
                 **author_field,
             },
         )
@@ -1198,6 +1223,7 @@ def _log_outcome(
             "model_passes": model_passes,
             **timings.fields(),
             **redaction.fields(),
+            **request_ids,
             **author_field,
         },
     )

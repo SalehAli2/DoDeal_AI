@@ -32,6 +32,7 @@ WHAT THIS MODULE PROMISES, and what each promise is worth:
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Final
 
 import httpx
@@ -98,6 +99,11 @@ _FINISH_REASONS: Final[dict[str, FinishReason]] = {
 # and the difference between them is the provider's to explain, not ours to act
 # on. 403 is also what a key with the wrong scope returns.
 _AUTH_STATUSES: Final = frozenset({401, 403})
+
+# Register item 26: the provider's request id, from its response header first.
+# Only a short token of safe characters is kept, so it can go on a log line.
+_REQUEST_ID_HEADERS: Final = ("x-request-id", "request-id")
+_REQUEST_ID: Final = re.compile(r"[A-Za-z0-9_-]{1,128}")
 
 
 class OpenAICompatibleError(LLMProviderError):
@@ -370,7 +376,7 @@ class OpenAICompatibleClient:
                 finish_reason=_FINISH_REASONS.get(
                     choice["finish_reason"], FinishReason.OTHER
                 ),
-                provider_request_id=_optional_str(body.get("id")),
+                provider_request_id=_request_id(response, body),
             )
         except (KeyError, IndexError, TypeError, ValueError):
             # ValueError covers json.JSONDecodeError (non-JSON) and a token count
@@ -442,8 +448,12 @@ class OpenAICompatibleClient:
         )
 
 
-def _optional_str(value: object) -> str | None:
-    """The provider's request id when it sent a usable one. Absent, null or a
-    non-string is None rather than a failure: it is a reconciliation handle, not
-    part of the answer."""
-    return value if isinstance(value, str) else None
+def _request_id(response: httpx.Response, body: dict[str, Any]) -> str | None:
+    """The provider's request id: x-request-id, then request-id, then the body's
+    id, the first that is 1-128 of [A-Za-z0-9_-]. Anything else is None rather
+    than a failure: it is a reconciliation handle, not part of the answer."""
+    candidates = [response.headers.get(name) for name in _REQUEST_ID_HEADERS]
+    for value in (*candidates, body.get("id")):
+        if isinstance(value, str) and _REQUEST_ID.fullmatch(value):
+            return value
+    return None
