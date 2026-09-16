@@ -202,3 +202,34 @@ def test_ready_reports_llm_ok_once_a_client_is_built(llm_built, monkeypatch):
     assert response.status_code == 200
     assert response.json()["llm"] == "ok"
     get_settings.cache_clear()
+
+
+# --- the served app has no probe route (register item 93) --------------------
+
+
+def test_create_app_mounts_no_probe_route():
+    """A fresh app has the service routes and no /_probe path."""
+    from dodeal_ai.main import create_app
+
+    paths = set(create_app().openapi()["paths"])
+    assert not [p for p in paths if p.startswith("/_probe")]
+    assert {"/health", "/ready", "/api/v1/notes/judgements"} <= paths
+
+
+def test_the_probe_is_a_404_on_the_served_app():
+    """Over HTTP the served app does not answer the probe at all."""
+    from fastapi.testclient import TestClient
+
+    from dodeal_ai.main import app as served
+
+    assert TestClient(served).get("/_probe/protected").status_code == 404
+
+
+def test_the_test_helper_mounts_the_probe_on_its_own_app():
+    """The security suite's app has the probe, and is not the served app."""
+    from dodeal_ai.main import app as served
+    from tests.helpers.probe_app import probe_app
+
+    own = probe_app()
+    assert own is not served
+    assert "/_probe/protected" in own.openapi()["paths"]

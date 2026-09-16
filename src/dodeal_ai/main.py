@@ -6,7 +6,7 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from dodeal_ai.api.routes import _probe, judgements
+from dodeal_ai.api.routes import judgements
 from dodeal_ai.core.config import (
     REDIS_POOL_HEADROOM,
     ConfigError,
@@ -168,43 +168,10 @@ async def lifespan(app: FastAPI):
     await get_operational_client().aclose(close_connection_pool=True)
 
 
-app = FastAPI(title="DODEAL AI Intelligence Layer", lifespan=lifespan)
-
-# MIDDLEWARE ORDER, and it is the reverse of how it reads. `add_middleware`
-# INSERTS AT THE FRONT of the list, and the front of that list is the OUTERMOST
-# layer -- so the LAST call below is the first middleware a request meets.
-# Registered inflight, then request-id, then body-limit gives a request the
-# order: BODY LIMIT, then REQUEST ID, then INFLIGHT, then routing and the
-# gates. Each one is cheaper than the one under it and refuses before it.
-#
-# Load shedding, innermost of the two and before routing, the gate chain and
-# any body read: a refusal must cost a counter comparison and nothing more.
-app.add_middleware(InflightMiddleware)
-
-# Starlette always wraps user middleware inside its own outermost
-# ServerErrorMiddleware, so this runs inside that fail-closed boundary but
-# before routing/the gate chain -- see request_id.py's module docstring.
-app.add_middleware(RequestIDMiddleware)
-
-# OUTERMOST of the three, and this must stay the LAST add_middleware call:
-# bytes are refused before an id is minted, before a slot is taken and before
-# any gate runs (register item 87). Its 413 therefore carries request_id
-# "unknown" on the header path, which is the cost of refusing that early.
-app.add_middleware(BodyLimitMiddleware)
-
-app.include_router(_probe.router)
-app.include_router(judgements.router)
-
-
-@app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-register_error_handlers(app)
-
-
-@app.get("/ready")
 async def ready(request: Request):
     try:
         get_settings()
@@ -243,3 +210,41 @@ async def ready(request: Request):
         "redis": "ok" if cost_ready else "degraded",
         "operational": "ok" if operational_ready else "degraded",
     }
+
+
+def create_app() -> FastAPI:
+    """The service app: lifespan, three middlewares, the judgement routes,
+    /health and /ready. The gate-chain probe is NOT mounted (register item 93);
+    a test that needs it mounts api/routes/_probe.py on its own app."""
+    application = FastAPI(title="DODEAL AI Intelligence Layer", lifespan=lifespan)
+
+    # MIDDLEWARE ORDER, and it is the reverse of how it reads. `add_middleware`
+    # INSERTS AT THE FRONT of the list, and the front of that list is the
+    # OUTERMOST layer -- so the LAST call below is the first middleware a
+    # request meets. Registered inflight, then request-id, then body-limit gives
+    # a request the order: BODY LIMIT, then REQUEST ID, then INFLIGHT, then
+    # routing and the gates. Each is cheaper than the one under it.
+    #
+    # Load shedding, innermost of the two and before routing, the gate chain and
+    # any body read: a refusal must cost a counter comparison and nothing more.
+    application.add_middleware(InflightMiddleware)
+
+    # Starlette always wraps user middleware inside its own outermost
+    # ServerErrorMiddleware, so this runs inside that fail-closed boundary but
+    # before routing/the gate chain -- see request_id.py's module docstring.
+    application.add_middleware(RequestIDMiddleware)
+
+    # OUTERMOST of the three, and this must stay the LAST add_middleware call:
+    # bytes are refused before an id is minted, before a slot is taken and
+    # before any gate runs (register item 87). Its 413 therefore carries
+    # request_id "unknown" on the header path, the cost of refusing that early.
+    application.add_middleware(BodyLimitMiddleware)
+
+    application.include_router(judgements.router)
+    application.add_api_route("/health", health, methods=["GET"])
+    register_error_handlers(application)
+    application.add_api_route("/ready", ready, methods=["GET"])
+    return application
+
+
+app = create_app()
