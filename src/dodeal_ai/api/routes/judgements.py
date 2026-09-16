@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 
 from dodeal_ai.core.auth.dependencies import gate4_cost
 from dodeal_ai.core.config import Settings, get_settings
@@ -40,6 +40,7 @@ from dodeal_ai.units.structured_intelligence.pipeline import (
     PROMPT_SET_VERSION,
     RUBRIC_VERSION,
     JudgementDeps,
+    ReplayedJudgement,
     judge_note,
     judge_note_direct,
 )
@@ -51,6 +52,17 @@ from dodeal_ai.units.structured_intelligence.schemas import (
 )
 
 router = APIRouter(prefix="/api/v1", tags=["unit-a"])
+
+# Sent, with "true", only on a judgement answered from the idempotency store.
+REPLAY_HEADER = "Idempotent-Replay"
+
+
+def _answer(judgement: Judgement, response: Response) -> Judgement:
+    """The judgement as the route returns it, marked when it is a replay
+    (register items 1 and 2)."""
+    if isinstance(judgement, ReplayedJudgement):
+        response.headers[REPLAY_HEADER] = "true"
+    return judgement
 
 
 def _deps(
@@ -76,23 +88,26 @@ def _deps(
 @router.post("/notes/judgements")
 async def create_judgement(
     request: JudgementRequest,
+    response: Response,
     context: Annotated[RequestContext, Depends(gate4_cost)],
     leads: Annotated[LeadsClient, Depends(get_leads_client)],
     llm: Annotated[LLMClient, Depends(get_llm_client)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> Judgement:
     """Judge one already-saved note."""
-    return await judge_note(
+    judgement = await judge_note(
         context.scope(),
         request,
         resubmission=False,
         deps=_deps(context, leads, llm, settings),
     )
+    return _answer(judgement, response)
 
 
 @router.post("/notes/judgements/resubmission")
 async def create_resubmission_judgement(
     request: JudgementRequest,
+    response: Response,
     context: Annotated[RequestContext, Depends(gate4_cost)],
     leads: Annotated[LeadsClient, Depends(get_leads_client)],
     llm: Annotated[LLMClient, Depends(get_llm_client)],
@@ -108,17 +123,19 @@ async def create_resubmission_judgement(
     An edited note has a new fingerprint, so it is a NEW judgement rather than
     a 409: the idempotency key is per note text, not per note id.
     """
-    return await judge_note(
+    judgement = await judge_note(
         context.scope(),
         request,
         resubmission=True,
         deps=_deps(context, leads, llm, settings),
     )
+    return _answer(judgement, response)
 
 
 @router.post("/notes/judgements/direct")
 async def create_direct_judgement(
     request: DirectJudgementRequest,
+    response: Response,
     context: Annotated[RequestContext, Depends(gate4_cost)],
     llm: Annotated[LLMClient, Depends(get_llm_client)],
     settings: Annotated[Settings, Depends(get_settings)],
@@ -132,17 +149,19 @@ async def create_direct_judgement(
 
     No LeadsClient in the signature, deliberately -- there is nothing to fetch.
     """
-    return await judge_note_direct(
+    judgement = await judge_note_direct(
         context.scope(),
         request,
         resubmission=False,
         deps=_deps(context, None, llm, settings),
     )
+    return _answer(judgement, response)
 
 
 @router.post("/notes/judgements/direct/resubmission")
 async def create_direct_resubmission_judgement(
     request: DirectJudgementRequest,
+    response: Response,
     context: Annotated[RequestContext, Depends(gate4_cost)],
     llm: Annotated[LLMClient, Depends(get_llm_client)],
     settings: Annotated[Settings, Depends(get_settings)],
@@ -156,12 +175,13 @@ async def create_direct_resubmission_judgement(
     which on this route is the ordinary case, because the CRM sends the edited
     text itself.
     """
-    return await judge_note_direct(
+    judgement = await judge_note_direct(
         context.scope(),
         request,
         resubmission=True,
         deps=_deps(context, None, llm, settings),
     )
+    return _answer(judgement, response)
 
 
 @router.get("/meta/versions")

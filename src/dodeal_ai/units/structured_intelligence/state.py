@@ -35,6 +35,11 @@ fails closed. The confirm fails OPEN (idempotency_confirm_bypassed): a lost
 confirm leaves the short reservation to expire, and a duplicate after that is
 judged again, which costs money but is never wrong.
 
+A CONFIRMED KEY HOLDS THE VALIDATED JUDGEMENT (register items 1 and 2), as JSON,
+so a duplicate is answered from it with no model call. Reading it back fails
+closed like the reservation; a value that no longer validates is taken over by
+one script and judged again.
+
 EVERY call here runs inside `operational_breaker` (core/breaker.py). BreakerOpen
 is a RedisError, so a refusal takes the same branch: the two politeness guards
 bypass, and the reservation still 503s.
@@ -64,13 +69,9 @@ from dodeal_ai.core.redis import get_operational_client
 
 _logger = logging.getLogger("dodeal_ai.unit_a.state")
 
-# A reservation only has to EXIST; nothing ever reads its value back. A fixed
-# inert byte keeps note-derived content out of the store as well as the log.
+# What an in-flight reservation holds: a fixed inert byte, told apart from a
+# confirmed key's judgement JSON when a duplicate reads it back.
 _RESERVED = "1"
-# What a CONFIRMED key holds: as inert as _RESERVED, and different from it, so a
-# Redis console shows which of the two states a key is in. A seam for D3, which
-# will store the judgement itself here instead of this marker.
-_CONFIRMED = "done"
 
 # The TTL redis returns for a key that has no expiry set: the `-1` in the
 # prompt-slots script. The M4 edge: a key that survived without a TTL would
@@ -225,11 +226,13 @@ async def confirm_idempotency(
     note_id: int,
     fingerprint: str,
     *,
+    judgement_json: str,
     ttl: int,
     request_id: str,
 ) -> None:
-    """The judgement exists: keep the reservation for the long TTL.
+    """The judgement exists: store it under the key for the long TTL.
 
+    `judgement_json` is the validated judgement and nothing else (items 1, 2).
     SET XX EX, so this only ever REPLACES the reservation this request holds and
     never creates one. A key that has already expired stays gone -- writing it
     back would lock the note on the strength of a reservation nobody holds.
@@ -242,11 +245,78 @@ async def confirm_idempotency(
     key = _idempotency_key(tenant, note_id, fingerprint)
     try:
         await operational_breaker().call(
-            lambda: get_operational_client().set(key, _CONFIRMED, xx=True, ex=ttl)
+            lambda: get_operational_client().set(key, judgement_json, xx=True, ex=ttl)
         )
     except redis.RedisError as exc:
         # No key material in the line, as for the reservation beside it.
         _bypass("idempotency_confirm_bypassed", tenant, request_id, exc)
+
+
+async def read_confirmed_judgement(
+    tenant: str,
+    note_id: int,
+    fingerprint: str,
+    *,
+    request_id: str,
+) -> str | None:
+    """The stored judgement JSON a duplicate replays, or None while the key is
+    only reserved (or has gone). Untrusted until the caller validates it.
+
+    Fails CLOSED like the reservation: an unanswered read raises
+    IdempotencyUnavailableError rather than guess whether to judge.
+    """
+    key = _idempotency_key(tenant, note_id, fingerprint)
+    try:
+        raw = await operational_breaker().call(
+            lambda: get_operational_client().get(key)
+        )
+    except redis.RedisError as exc:
+        _bypass("idempotency_unavailable", tenant, request_id, exc)
+        raise IdempotencyUnavailableError() from None
+    if raw is None or raw == _RESERVED:
+        return None
+    assert isinstance(raw, str)  # decode_responses=True, as for the reference
+    return raw
+
+
+# KEYS[1] the idempotency key. ARGV: the value read, the reservation marker, the
+# short TTL. Replaces the value only if it is still the one read, so two
+# duplicates that met the same invalid judgement cannot both take it over.
+_TAKE_OVER_SCRIPT = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
+  return 1
+end
+return 0
+"""
+
+
+async def take_over_idempotency(
+    tenant: str,
+    note_id: int,
+    fingerprint: str,
+    *,
+    expected: str,
+    ttl: int,
+    request_id: str,
+) -> bool:
+    """Turn a stored value that no longer validates back into a reservation.
+
+    True if WE took it: the caller judges again. False if the value changed
+    since it was read: someone else has it, and the caller answers 409.
+    Fails CLOSED, as the reservation does.
+    """
+    key = _idempotency_key(tenant, note_id, fingerprint)
+    try:
+        taken = await operational_breaker().call(
+            lambda: get_operational_client().eval(
+                _TAKE_OVER_SCRIPT, 1, key, expected, _RESERVED, ttl
+            )
+        )
+    except redis.RedisError as exc:
+        _bypass("idempotency_unavailable", tenant, request_id, exc)
+        raise IdempotencyUnavailableError() from None
+    return int(taken) == 1
 
 
 # --- the attempt cap and the rate limit, taken together: fails OPEN ---------

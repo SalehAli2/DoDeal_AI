@@ -429,17 +429,62 @@ def test_a_long_single_token_note_is_still_thin(client, leads):
     assert r.json()["suppressed"]["detail_code"] == "note_too_short"
 
 
-def test_second_identical_request_is_409(client):
+def test_second_identical_request_is_a_replay(client, llm):
+    """Items 1 and 2: 200, the same body with this request's id, the replay header."""
     first = client.post(JUDGE, json=_body(), headers=_headers())
     assert first.status_code == 200
+    assert "Idempotent-Replay" not in first.headers
 
     second = client.post(JUDGE, json=_body(), headers=_headers())
-    assert second.status_code == 409
+    assert second.status_code == 200
+    assert second.headers["Idempotent-Replay"] == "true"
     assert second.json() == {
-        "detail": "Conflict",
-        "reason": "duplicate_request",
+        **first.json(),
         "request_id": second.headers["X-Request-ID"],
     }
+    assert second.json()["request_id"] != first.json()["request_id"]
+    assert llm.call_count == 3
+
+
+def test_a_request_meeting_an_in_flight_reservation_is_409(client, operational, llm):
+    """A key that is still only reserved is a 409, with no model call."""
+    key = state._idempotency_key("tenant-a", NOTE_ID, state.note_fingerprint(GOOD_NOTE))
+    operational.store[key] = state._RESERVED
+
+    r = client.post(JUDGE, json=_body(), headers=_headers())
+
+    assert r.status_code == 409
+    assert r.json() == {
+        "detail": "Conflict",
+        "reason": "duplicate_request",
+        "request_id": r.headers["X-Request-ID"],
+    }
+    assert llm.call_count == 0
+
+
+def test_an_invalid_stored_value_is_judged_again_over_http(
+    client, operational, llm, json_log
+):
+    """A stored value that does not validate is re-judged, and never logged."""
+    key = state._idempotency_key("tenant-a", NOTE_ID, state.note_fingerprint(GOOD_NOTE))
+    operational.store[key] = '{"clarification_prompt": "SENTINEL-replay-3b9a"}'
+
+    r = client.post(JUDGE, json=_body(), headers=_headers())
+
+    assert r.status_code == 200
+    assert "Idempotent-Replay" not in r.headers
+    assert llm.call_count == 3
+    assert "SENTINEL-replay-3b9a" not in json_log.getvalue()
+    assert [x for x in _lines(json_log) if x["message"] == "idempotency_replay_invalid"]
+
+
+def test_the_resubmission_route_replays_too(client, llm):
+    """The replay header is set on every judgement route that can replay."""
+    first = client.post(RESUBMIT, json=_body(), headers=_headers())
+    second = client.post(RESUBMIT, json=_body(), headers=_headers())
+    assert (first.status_code, second.status_code) == (200, 200)
+    assert second.headers["Idempotent-Replay"] == "true"
+    assert llm.call_count == 3
 
 
 def test_an_edited_note_is_a_new_judgement_not_a_duplicate(client, leads):

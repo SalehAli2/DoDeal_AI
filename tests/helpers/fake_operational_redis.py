@@ -11,9 +11,10 @@ issues -- SET (with NX/XX/EX), GET, DELETE and the prompt-slots EVAL -- and no
 more. A command the unit does not use is a command whose fake semantics nobody
 has checked against real Redis.
 
-EVAL mirrors the prompt-slots script against the same dict and records each
-call in `evals` as (script, keys, outcome); the real script runs in
-test_cost_lua.py. The outcome codes are imported from state.py, never retyped.
+EVAL mirrors the prompt-slots script and the idempotency take-over script
+against the same dict and records each call in `evals` as (script, keys,
+outcome); the real scripts run in test_cost_lua.py. The outcome codes are
+imported from state.py, never retyped.
 
 NO CLOCK. `ex` and the script's windows record a TTL in `ttls` and nothing ever
 counts it down, so a test asserting "the window was set to 3600" reads
@@ -36,6 +37,7 @@ from dodeal_ai.units.structured_intelligence.state import (
     _SLOTS_ALLOWED,
     _SLOTS_DENIED_BY_ATTEMPT,
     _SLOTS_DENIED_BY_RATE,
+    _TAKE_OVER_SCRIPT,
 )
 
 
@@ -98,6 +100,8 @@ class FakeOperationalRedis:
         """The prompt-slots script against the dict: [outcome, attempts, rate count],
         the attempt count AFTER a take and the rate count before it."""
         keys = tuple(str(k) for k in keys_and_args[:numkeys])
+        if script == _TAKE_OVER_SCRIPT:
+            return self._take_over(script, keys, keys_and_args[numkeys:])
         attempt_key, rate_key = keys
         self._guard("eval", attempt_key)
         cap, attempt_ttl, limit, rate_ttl = (
@@ -115,6 +119,21 @@ class FakeOperationalRedis:
             reply = [_SLOTS_ALLOWED, taken, rate]
         self.evals.append((script, keys, reply[0]))
         return reply
+
+    def _take_over(
+        self, script: str, keys: tuple[str, ...], args: tuple[object, ...]
+    ) -> int:
+        """The take-over script: replace the value with the reservation and its
+        TTL only if it is still the value the caller read."""
+        (key,) = keys
+        self._guard("eval", key)
+        expected, reserved, ttl = (str(arg) for arg in args)
+        taken = int(self.store.get(key) == expected)
+        if taken:
+            self.store[key] = reserved
+            self.ttls[key] = int(ttl)
+        self.evals.append((script, keys, taken))
+        return taken
 
     async def delete(self, *names: str) -> int:
         removed = 0

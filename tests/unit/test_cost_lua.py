@@ -38,6 +38,7 @@ from dodeal_ai.units.structured_intelligence.state import (
     _SLOTS_ALLOWED,
     _SLOTS_DENIED_BY_ATTEMPT,
     _SLOTS_DENIED_BY_RATE,
+    _TAKE_OVER_SCRIPT,
     _TAKE_PROMPT_SLOTS_SCRIPT,
 )
 
@@ -394,6 +395,36 @@ async def test_keys_without_a_ttl_gain_one_on_the_next_take(client):
 
     assert await client.ttl(_ATTEMPT_KEY) == _ATTEMPT_TTL
     assert await client.ttl(_RATE_KEY) == _WINDOW
+
+
+# --- the idempotency take-over (register items 1 and 2) ----------------------
+
+_IDEM_KEY = "idem:tenant-a:judge_note:10:" + "0" * 64
+
+
+async def test_the_take_over_replaces_the_value_it_read_with_a_reservation(client):
+    """The value still read becomes the reservation, with the short TTL."""
+    await client.set(_IDEM_KEY, "stale", ex=86400)
+    taken = await client.eval(_TAKE_OVER_SCRIPT, 1, _IDEM_KEY, "stale", "1", 100)
+    assert int(taken) == 1
+    assert await client.get(_IDEM_KEY) == "1"
+    assert await client.ttl(_IDEM_KEY) == 100
+
+
+async def test_the_take_over_leaves_a_changed_value_alone(client):
+    """A value someone else replaced since the read is not taken."""
+    await client.set(_IDEM_KEY, "newer", ex=86400)
+    taken = await client.eval(_TAKE_OVER_SCRIPT, 1, _IDEM_KEY, "stale", "1", 100)
+    assert int(taken) == 0
+    assert await client.get(_IDEM_KEY) == "newer"
+    assert await client.ttl(_IDEM_KEY) == 86400
+
+
+async def test_the_take_over_creates_no_missing_key(client):
+    """A key that expired is not recreated by a take-over."""
+    taken = await client.eval(_TAKE_OVER_SCRIPT, 1, _IDEM_KEY, "stale", "1", 100)
+    assert int(taken) == 0
+    assert await client.exists(_IDEM_KEY) == 0
 
 
 async def test_take_prompt_slots_end_to_end_on_real_lua(client, monkeypatch):

@@ -337,8 +337,9 @@ def test_a_note_judged_on_the_fetch_route_is_a_duplicate_on_the_direct_route(
         == 200
     )
     second = fetch_client.post(DIRECT, json=_direct_body(), headers=_headers())
-    assert second.status_code == 409
-    assert second.json()["reason"] == "duplicate_request"
+    assert second.status_code == 200
+    assert second.headers["Idempotent-Replay"] == "true"
+    assert llm.call_count == 3
 
 
 # --- the direct route's own behaviour ---------------------------------------
@@ -378,19 +379,29 @@ def test_a_direct_request_never_calls_the_leads_client(client, llm):
         assert get_leads_client not in _dependency_calls(path), path
 
 
-def test_a_second_identical_direct_request_is_409(client, llm):
+def test_a_second_identical_direct_request_is_a_replay(client, llm):
     _script(llm, judgements=2)
 
     first = client.post(DIRECT, json=_direct_body(), headers=_headers())
     assert first.status_code == 200
 
     second = client.post(DIRECT, json=_direct_body(), headers=_headers())
-    assert second.status_code == 409
+    assert second.status_code == 200
+    assert second.headers["Idempotent-Replay"] == "true"
     assert second.json() == {
-        "detail": "Conflict",
-        "reason": "duplicate_request",
+        **first.json(),
         "request_id": second.headers["X-Request-ID"],
     }
+    assert llm.call_count == 3
+
+
+def test_the_direct_resubmission_route_replays_too(client, llm):
+    _script(llm, judgements=2)
+    path = DIRECT + "/resubmission"
+    client.post(path, json=_direct_body(), headers=_headers())
+    second = client.post(path, json=_direct_body(), headers=_headers())
+    assert second.status_code == 200
+    assert second.headers["Idempotent-Replay"] == "true"
 
 
 def test_an_edited_text_is_a_new_judgement_not_a_duplicate(client, llm):

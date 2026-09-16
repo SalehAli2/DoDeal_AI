@@ -69,11 +69,13 @@ from dodeal_ai.units.structured_intelligence.classify import (
 from dodeal_ai.units.structured_intelligence.config import get_tenant_config
 from dodeal_ai.units.structured_intelligence.pipeline import (
     JudgementDeps,
+    ReplayedJudgement,
     judge_note,
     judge_note_direct,
 )
 from dodeal_ai.units.structured_intelligence.schemas import (
     DirectJudgementRequest,
+    Judgement,
     JudgementRequest,
     LeadContext,
     NoteType,
@@ -285,10 +287,93 @@ async def test_the_original_failure_is_not_replaced_by_the_release(
 # --- the stop points, straight through -------------------------------------
 
 
-async def test_a_duplicate_is_refused(deps, operational):
-    await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+async def test_a_duplicate_is_replayed_without_a_model_call(
+    deps, operational, json_capture
+):
+    """Items 1 and 2: the stored judgement comes back, the model is not asked."""
+    first = await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+    second = await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+
+    assert isinstance(second, ReplayedJudgement)
+    assert not isinstance(first, ReplayedJudgement)
+    assert second.model_dump() == first.model_dump()
+    assert deps.llm.call_count == 3
+    (line,) = [x for x in json_capture() if x["message"] == "judgement_replayed"]
+    assert (line["tenant"], line["request_id"]) == ("tenant-a", "req-1")
+
+
+def _stored_key() -> str:
+    return state._idempotency_key(
+        "tenant-a", NOTE_ID, state.note_fingerprint(GOOD_NOTE)
+    )
+
+
+async def test_a_duplicate_meeting_the_reservation_is_409(deps, operational):
+    """A key still reserved means the judgement is in flight: 409, no model call."""
+    operational.store[_stored_key()] = state._RESERVED
     with pytest.raises(DuplicateRequestError):
         await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+    assert deps.llm.call_count == 0
+
+
+async def test_an_invalid_stored_judgement_is_judged_again(
+    deps, operational, json_capture
+):
+    """A value that no longer validates is logged, taken over and judged again."""
+    sentinel = "SENTINEL-stored-value-7d1e"
+    operational.store[_stored_key()] = f'{{"reasoning": "{sentinel}"}}'
+
+    judgement = await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+
+    assert not isinstance(judgement, ReplayedJudgement)
+    assert deps.llm.call_count == 3
+    assert operational.store[_stored_key()] == judgement.model_dump_json()
+    (line,) = [
+        x for x in json_capture() if x["message"] == "idempotency_replay_invalid"
+    ]
+    assert line["reason_code"] == "idempotency_replay_invalid"
+    assert sentinel not in json.dumps(json_capture())
+
+
+async def test_a_lost_take_over_is_409(deps, operational, monkeypatch):
+    """The invalid value changed before the take-over: someone else has it."""
+    operational.store[_stored_key()] = state._RESERVED
+
+    async def _read_stale(*args, **kwargs):
+        return "not-json"
+
+    monkeypatch.setattr(state, "read_confirmed_judgement", _read_stale)
+
+    with pytest.raises(DuplicateRequestError):
+        await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+    assert deps.llm.call_count == 0
+
+
+async def test_a_stored_judgement_for_another_lead_is_409(deps, operational):
+    """A replay never answers a request for a different lead with this body."""
+    await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+    deps.leads.leads[LEAD_ID + 1] = lead(LEAD_ID + 1)
+    deps.leads.notes[LEAD_ID + 1] = [note(NOTE_ID, GOOD_NOTE)]
+
+    with pytest.raises(DuplicateRequestError):
+        await judge_note(
+            _scope(),
+            _request(lead_id=LEAD_ID + 1),
+            resubmission=False,
+            deps=deps,
+        )
+
+
+@pytest.mark.parametrize("command", ["get", "eval"])
+async def test_an_unanswered_duplicate_check_is_idempotency_unavailable(
+    deps, operational, command
+):
+    """Reading the stored value and taking it over both fail closed with 503."""
+    operational.store[_stored_key()] = "not-json"
+    operational.raise_on.add(command)
+    with pytest.raises(IdempotencyUnavailableResponse):
+        await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+    assert deps.llm.call_count == 0
 
 
 async def test_a_missing_note_is_note_not_found(deps, operational):
@@ -1592,16 +1677,19 @@ async def test_the_reservation_is_short_while_the_judgement_runs(leads, operatio
     assert (operational.store[key], operational.ttls[key]) == ("1", 100)
 
     llm.released.set()
-    await task
-    assert (operational.store[key], operational.ttls[key]) == ("done", LONG_TTL)
+    judgement = await task
+    assert (operational.store[key], operational.ttls[key]) == (
+        judgement.model_dump_json(),
+        LONG_TTL,
+    )
 
 
 @pytest.mark.parametrize("classified", ["discovery", "system_event"])
 async def test_a_judgement_confirms_the_reservation_for_the_long_ttl(
     classified, leads, operational
 ):
-    """Item 82 (c). Once the judgement exists the key holds "done" for the
-    tenant's long TTL -- a classifier suppression exists as much as a score
+    """Item 82 (c), items 1 and 2. Once the judgement exists the key holds it for
+    the tenant's long TTL -- a classifier suppression exists as much as a score
     does, so it confirms the same way."""
     script = (
         _happy_path(classified)
@@ -1617,18 +1705,34 @@ async def test_a_judgement_confirms_the_reservation_for_the_long_ttl(
     assert (judgement.suppressed is None) is (classified == "discovery")
 
     [key] = _idem_keys(operational)
-    assert (operational.store[key], operational.ttls[key]) == ("done", LONG_TTL)
+    assert (operational.store[key], operational.ttls[key]) == (
+        judgement.model_dump_json(),
+        LONG_TTL,
+    )
 
 
-async def test_a_confirmed_judgement_is_still_a_duplicate(deps, operational):
-    """Item 82 (f), from the other side: the confirm REPLACES the reservation,
-    so the second identical request still meets 409."""
-    await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+async def test_a_confirmed_judgement_is_replayed_with_this_request_id(
+    deps, operational
+):
+    """The replay is the stored body with the CURRENT request's id."""
+    first = await judge_note(_scope(), _request(), resubmission=False, deps=deps)
     [key] = _idem_keys(operational)
-    assert operational.store[key] == "done"
+    assert Judgement.model_validate_json(operational.store[key]) == first
 
-    with pytest.raises(DuplicateRequestError):
-        await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+    later = RequestContext(
+        tenant="tenant-a",
+        subject="42",
+        database="crm_tenant_a",
+        roles=(),
+        permissions=frozenset(),
+        request_id="req-2",
+    ).scope()
+    replay = await judge_note(later, _request(), resubmission=False, deps=deps)
+
+    assert replay.request_id == "req-2"
+    assert replay.model_dump(exclude={"request_id"}) == first.model_dump(
+        exclude={"request_id"}
+    )
 
 
 async def test_a_confirm_that_fails_still_returns_the_judgement(

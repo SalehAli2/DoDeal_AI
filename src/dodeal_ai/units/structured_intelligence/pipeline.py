@@ -18,7 +18,8 @@ the step after it costs:
       LeadsClient call is made at all)
   3. too thin, or too long?              -> suppressed, STOP. No reservation,
                                             no model call, nothing spent.
-  4. reserve idempotency, SHORT          409 duplicate / 503 unavailable
+  4. reserve idempotency, SHORT          409 duplicate / 503 unavailable;
+                                         a confirmed duplicate replays 200
   5. read the attempt count              (fail open; provisional, see step 8)
   6. token pre-flight                    429 token_budget_exceeded
   7. classify, THEN vague + score        three passes, two round-trips
@@ -104,6 +105,8 @@ from collections.abc import Awaitable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
+
+from pydantic import ValidationError
 
 from dodeal_ai.core.config import Settings
 from dodeal_ai.core.context import TenantScope
@@ -227,6 +230,12 @@ class JudgementDeps:
 # unpacked into a Lead and a LeadNote by judge_note_direct before the shared
 # function is entered, so nothing below this line knows which route it is on.
 _JudgementInput = JudgementRequest | DirectJudgementRequest
+
+
+class ReplayedJudgement(Judgement):
+    """A judgement answered from the idempotency store, not judged again
+    (register items 1 and 2). Same fields; the type is how the route knows to
+    send Idempotent-Replay: true."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -691,23 +700,38 @@ async def _judge(
 
     # --- reserve: the only thing between a double-submit and paying twice ---
     fingerprint = state.note_fingerprint(note.note)
+    # SHORT: the in-flight lifetime. The long one is the confirm's, at the end
+    # of the try below. Rounded UP, never down: a deadline under a quarter-second
+    # would otherwise give EX 0, which Redis refuses, and a refused reservation
+    # is a 503.
+    inflight_ttl = math.ceil(
+        deps.settings.judgement_deadline_seconds * IDEMPOTENCY_INFLIGHT_MULTIPLIER
+    )
+    replay: ReplayedJudgement | None = None
     try:
         claimed = await state.reserve_idempotency(
             scope.tenant,
             request.note_id,
             fingerprint,
-            # SHORT: the in-flight lifetime. The long one is the confirm's, at
-            # the end of the try below. Rounded UP, never down: a deadline
-            # under a quarter-second would otherwise give EX 0, which Redis
-            # refuses, and a refused reservation is a 503.
-            ttl=math.ceil(
-                deps.settings.judgement_deadline_seconds
-                * IDEMPOTENCY_INFLIGHT_MULTIPLIER
-            ),
+            ttl=inflight_ttl,
             request_id=scope.request_id,
         )
+        if not claimed:
+            claimed, replay = await _existing_judgement(
+                scope, request, fingerprint, ttl=inflight_ttl
+            )
     except state.IdempotencyUnavailableError:
         raise IdempotencyUnavailableResponse() from None
+    if replay is not None:
+        _logger.info(
+            "judgement_replayed",
+            extra={
+                "tenant": scope.tenant,
+                "request_id": scope.request_id,
+                **_Timings(elapsed_ms=_ms_since(started)).fields(),
+            },
+        )
+        return replay
     if not claimed:
         raise DuplicateRequestError()
 
@@ -876,6 +900,7 @@ async def _judge(
             scope.tenant,
             request.note_id,
             fingerprint,
+            judgement_json=judgement.model_dump_json(),
             ttl=config.idempotency_ttl_seconds,
             request_id=scope.request_id,
         )
@@ -933,6 +958,50 @@ async def _judge(
         author_differs_from_subject=author_differs_from_subject,
     )
     return judgement
+
+
+async def _existing_judgement(
+    scope: TenantScope,
+    request: _JudgementInput,
+    fingerprint: str,
+    *,
+    ttl: int,
+) -> tuple[bool, ReplayedJudgement | None]:
+    """What a request that lost the reservation gets: (claimed, replay).
+
+    A confirmed judgement for this note is replayed with THIS request's id. A
+    key still reserved, or one for another lead, is (False, None): 409. A stored
+    value that no longer validates is logged, taken over and judged again.
+    """
+    stored = await state.read_confirmed_judgement(
+        scope.tenant, request.note_id, fingerprint, request_id=scope.request_id
+    )
+    if stored is None:
+        return False, None
+    try:
+        replay = ReplayedJudgement.model_validate_json(stored)
+    except ValidationError:
+        # Never the value or pydantic's message: the value holds model output.
+        _logger.warning(
+            "idempotency_replay_invalid",
+            extra={
+                "reason_code": "idempotency_replay_invalid",
+                "tenant": scope.tenant,
+                "request_id": scope.request_id,
+            },
+        )
+        claimed = await state.take_over_idempotency(
+            scope.tenant,
+            request.note_id,
+            fingerprint,
+            expected=stored,
+            ttl=ttl,
+            request_id=scope.request_id,
+        )
+        return claimed, None
+    if (replay.note_id, replay.lead_id) != (request.note_id, request.lead_id):
+        return False, None
+    return False, replay.model_copy(update={"request_id": scope.request_id})
 
 
 async def _rate_limit_trip(

@@ -42,11 +42,11 @@ from dodeal_ai.units.structured_intelligence.schemas import (
     PromptWithheld,
 )
 from dodeal_ai.units.structured_intelligence.state import (
-    _CONFIRMED,
     _RESERVED,
     _SLOTS_ALLOWED,
     _SLOTS_DENIED_BY_ATTEMPT,
     _SLOTS_DENIED_BY_RATE,
+    _TAKE_OVER_SCRIPT,
     _TAKE_PROMPT_SLOTS_SCRIPT,
     _TTL_NO_EXPIRY,
     _attempt_key,
@@ -56,6 +56,10 @@ from dodeal_ai.units.structured_intelligence.state import (
 )
 
 pytestmark = [pytest.mark.redis_real, pytest.mark.asyncio(loop_scope="session")]
+
+# What a confirmed key holds since items 1 and 2: judgement JSON. Its content is
+# not what these SET XX tests are about, only that it replaces the reservation.
+_CONFIRMED = '{"note_id": 42}'
 
 _TENANT = "tenant-a"
 _SUBJECT = "user-1"
@@ -464,6 +468,43 @@ async def test_a_confirm_replaces_the_value_and_the_ttl(
     _assert_window(await real_redis.ttl(reservation_key), _LONG_TTL)
     duplicate = await real_redis.set(reservation_key, _RESERVED, nx=True, ex=_SHORT_TTL)
     assert duplicate is None
+
+
+async def test_the_take_over_replaces_only_the_value_it_read(
+    real_redis: redis_async.Redis, reservation_key: str
+) -> None:
+    """Counterparts: the take-over tests in test_cost_lua.py. A changed value is
+    left alone; the value read becomes the reservation with the short TTL."""
+    await real_redis.set(reservation_key, "stale", ex=_LONG_TTL)
+
+    refused = await real_redis.eval(
+        _TAKE_OVER_SCRIPT, 1, reservation_key, "other", _RESERVED, _SHORT_TTL
+    )
+    assert int(refused) == 0
+    assert await real_redis.get(reservation_key) == "stale"
+
+    taken = await real_redis.eval(
+        _TAKE_OVER_SCRIPT, 1, reservation_key, "stale", _RESERVED, _SHORT_TTL
+    )
+    assert int(taken) == 1
+    assert await real_redis.get(reservation_key) == _RESERVED
+    _assert_window(await real_redis.ttl(reservation_key), _SHORT_TTL)
+
+
+async def test_concurrent_take_overs_have_exactly_one_winner(
+    real_redis: redis_async.Redis, reservation_key: str
+) -> None:
+    """Ten duplicates that read the same invalid value: one takes it over."""
+    await real_redis.set(reservation_key, "stale", ex=_LONG_TTL)
+    results = await asyncio.gather(
+        *(
+            real_redis.eval(
+                _TAKE_OVER_SCRIPT, 1, reservation_key, "stale", _RESERVED, _SHORT_TTL
+            )
+            for _ in range(10)
+        )
+    )
+    assert sorted(int(r) for r in results) == [0] * 9 + [1]
 
 
 async def test_a_release_frees_the_note_for_a_new_reservation(

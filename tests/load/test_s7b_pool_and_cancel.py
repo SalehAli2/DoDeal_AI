@@ -23,7 +23,8 @@ from redis import asyncio as redis_async
 
 from dodeal_ai.core.breaker import BreakerState, operational_breaker
 from dodeal_ai.core.config import get_settings
-from dodeal_ai.units.structured_intelligence.state import _CONFIRMED, _RESERVED
+from dodeal_ai.units.structured_intelligence.schemas import Judgement
+from dodeal_ai.units.structured_intelligence.state import _RESERVED
 from tests.helpers.fake_llm import FakeLLM
 
 BURST = 64
@@ -146,6 +147,8 @@ async def test_s7b_a_burst_on_a_small_pool_under_latency_with_cancellations_leak
 
     assert operational_breaker().state is BreakerState.CLOSED
     assert sum(value == _RESERVED for value, _ in held.values()) == 0
-    assert [(value, ttl > CONFIRMED_TTL_FLOOR) for value, ttl in held.values()] == [
-        (_CONFIRMED, True)
-    ] * (BURST - CANCELLED)
+    # Register items 1 and 2: every confirmed key holds a judgement that validates.
+    assert [
+        (Judgement.model_validate_json(value).note_id > 0, ttl > CONFIRMED_TTL_FLOOR)
+        for value, ttl in held.values()
+    ] == [(True, True)] * (BURST - CANCELLED)

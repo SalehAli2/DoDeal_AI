@@ -20,9 +20,11 @@ from dodeal_ai.units.structured_intelligence.state import (
     note_fingerprint,
     read_attempt_fingerprint,
     read_attempts,
+    read_confirmed_judgement,
     read_rate_limit,
     release_idempotency,
     reserve_idempotency,
+    take_over_idempotency,
     take_prompt_slots,
     write_attempt_fingerprint,
 )
@@ -250,9 +252,18 @@ INFLIGHT_TTL = 100
 _FORMATTER_FIELDS = {"message", "timestamp", "level", "logger"}
 
 
+# A stand-in for the validated judgement JSON the pipeline stores (items 1, 2).
+JUDGEMENT_JSON = '{"note_id": 10}'
+
+
 async def _confirm() -> None:
     await confirm_idempotency(
-        TENANT, NOTE_ID, SENTINEL_FINGERPRINT, ttl=IDEM_TTL, request_id=REQUEST_ID
+        TENANT,
+        NOTE_ID,
+        SENTINEL_FINGERPRINT,
+        judgement_json=JUDGEMENT_JSON,
+        ttl=IDEM_TTL,
+        request_id=REQUEST_ID,
     )
 
 
@@ -267,8 +278,8 @@ async def test_confirm_replaces_the_reservation_with_the_long_ttl(
 
     await _confirm()
 
-    # "done", not "1": the two states are told apart in a console.
-    assert (fake.store[key], fake.ttls[key]) == ("done", IDEM_TTL)
+    # The judgement itself, not "1": a duplicate replays it (items 1 and 2).
+    assert (fake.store[key], fake.ttls[key]) == (JUDGEMENT_JSON, IDEM_TTL)
 
 
 async def test_confirm_uses_xx_and_never_creates_a_key(
@@ -292,6 +303,94 @@ async def test_a_confirmed_key_is_still_a_duplicate(fake: FakeOperationalRedis) 
         TENANT, NOTE_ID, SENTINEL_FINGERPRINT, ttl=INFLIGHT_TTL, request_id=REQUEST_ID
     )
     assert again is False
+
+
+# --- reading a confirmed judgement back, and taking over a bad one ----------
+
+
+async def _reserve() -> None:
+    await reserve_idempotency(
+        TENANT, NOTE_ID, SENTINEL_FINGERPRINT, ttl=INFLIGHT_TTL, request_id=REQUEST_ID
+    )
+
+
+async def _read() -> str | None:
+    return await read_confirmed_judgement(
+        TENANT, NOTE_ID, SENTINEL_FINGERPRINT, request_id=REQUEST_ID
+    )
+
+
+async def _take_over(expected: str) -> bool:
+    return await take_over_idempotency(
+        TENANT,
+        NOTE_ID,
+        SENTINEL_FINGERPRINT,
+        expected=expected,
+        ttl=INFLIGHT_TTL,
+        request_id=REQUEST_ID,
+    )
+
+
+async def test_a_confirmed_judgement_reads_back(fake: FakeOperationalRedis) -> None:
+    """The stored JSON comes back for the duplicate to replay."""
+    await _reserve()
+    await _confirm()
+    assert await _read() == JUDGEMENT_JSON
+
+
+async def test_a_reservation_still_in_flight_reads_as_none(
+    fake: FakeOperationalRedis,
+) -> None:
+    """A key that is only reserved has no judgement to replay."""
+    await _reserve()
+    assert await _read() is None
+
+
+async def test_a_missing_key_reads_as_none(fake: FakeOperationalRedis) -> None:
+    """A key that expired or was released has nothing to replay either."""
+    assert await _read() is None
+
+
+async def test_the_read_fails_closed_without_the_key_in_the_line(
+    failing, json_log
+) -> None:
+    """An unanswered read raises, unchained, and logs no key material."""
+    failing("get")
+    with pytest.raises(IdempotencyUnavailableError) as caught:
+        await _read()
+    assert caught.value.__cause__ is None and caught.value.__suppress_context__
+    assert SENTINEL_FINGERPRINT not in json_log.getvalue()
+    assert _lines(json_log)[-1]["message"] == "idempotency_unavailable"
+
+
+async def test_a_take_over_of_the_value_read_reserves_it_short(
+    fake: FakeOperationalRedis,
+) -> None:
+    """The unchanged value becomes the reservation marker with the short TTL."""
+    await _reserve()
+    [key] = fake.store
+    fake.store[key] = "stale"
+    assert await _take_over("stale") is True
+    assert (fake.store[key], fake.ttls[key]) == ("1", INFLIGHT_TTL)
+
+
+async def test_a_take_over_of_a_changed_value_is_refused(
+    fake: FakeOperationalRedis,
+) -> None:
+    """Someone replaced the value since the read: it is left as it is."""
+    await _reserve()
+    await _confirm()
+    [key] = fake.store
+    assert await _take_over("stale") is False
+    assert fake.store[key] == JUDGEMENT_JSON
+
+
+async def test_the_take_over_fails_closed(failing, json_log) -> None:
+    """An unanswered take-over raises rather than judge without a reservation."""
+    failing("eval")
+    with pytest.raises(IdempotencyUnavailableError):
+        await _take_over("stale")
+    assert SENTINEL_FINGERPRINT not in json_log.getvalue()
 
 
 async def test_confirm_fails_open_with_a_line_of_ids_only(failing, json_log) -> None:

@@ -16,20 +16,36 @@ S2_BURST = 15
 
 
 async def test_s1_two_identical_requests_at_once_are_one_judgement(lane):
-    """Two identical requests at the same instant give one 200 and one 409, with 3 model calls, not 6."""
+    """Two identical requests at once are one judgement and 3 model calls; a third afterwards is a 200 replay."""
     lead_id, note = lane.notes[0]
-    # Two judgements' worth: a lost reservation shows as 6 calls and two 200s,
-    # not as an exhausted script.
+    # Two judgements' worth: a lost reservation shows as 6 calls and two fresh
+    # 200s, not as an exhausted script.
     lane.script(judgements=2)
 
     responses = await asyncio.gather(
         lane.judge(lead_id, note.id), lane.judge(lead_id, note.id)
     )
 
-    assert sorted(r.status_code for r in responses) == [200, 409]
-    duplicate = next(r for r in responses if r.status_code == 409)
-    assert duplicate.json()["reason"] == "duplicate_request"
+    # Items 1 and 2: the loser meets the reservation (409) or, if the winner has
+    # already confirmed, its stored judgement (200 replay). Never a second judgement.
+    fresh = [r for r in responses if r.status_code == 200 and not _replayed(r)]
+    assert len(fresh) == 1
+    other = next(r for r in responses if r is not fresh[0])
+    assert other.status_code == 409 or _replayed(other)
+    if other.status_code == 409:
+        assert other.json()["reason"] == "duplicate_request"
+
+    replay = await lane.judge(lead_id, note.id)
+    assert replay.status_code == 200 and _replayed(replay)
+    assert replay.json() == {
+        **fresh[0].json(),
+        "request_id": replay.headers["X-Request-ID"],
+    }
     assert lane.llm.call_count == 3
+
+
+def _replayed(response) -> bool:
+    return response.headers.get("Idempotent-Replay") == "true"
 
 
 async def test_s2_fifteen_notes_from_one_subject_at_once_count_exactly_fifteen(lane):
