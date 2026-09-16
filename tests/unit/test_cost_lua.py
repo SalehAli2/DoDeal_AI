@@ -276,7 +276,7 @@ async def test_the_two_scripts_touch_disjoint_keys(client):
 
 # --- the prompt-slots script (db2): both guards checked and taken at once ------
 
-_ATTEMPT_KEY = "attempt:tenant-a:1656:10"
+_ATTEMPT_KEY = "attempt:tenant-a:10"
 _RATE_KEY = "ratelimit:tenant-a:42"
 _ATTEMPT_CAP = 1
 _ATTEMPT_TTL = 600
@@ -304,7 +304,7 @@ async def _take(
 
 
 def _note(note_id: int) -> str:
-    return f"attempt:tenant-a:1656:{note_id}"
+    return f"attempt:tenant-a:{note_id}"
 
 
 async def test_an_allowed_take_increments_both_counters(client):
@@ -404,7 +404,6 @@ async def test_take_prompt_slots_end_to_end_on_real_lua(client, monkeypatch):
     async def take(note_id: int):
         return await state.take_prompt_slots(
             "tenant-a",
-            1656,
             note_id,
             "42",
             attempt_cap=_ATTEMPT_CAP,

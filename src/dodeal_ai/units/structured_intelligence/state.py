@@ -124,12 +124,14 @@ def _rate_limit_key(tenant: str, subject: str) -> str:
     return f"ratelimit:{tenant}:{subject}"
 
 
-def _attempt_key(tenant: str, lead_id: int, note_id: int) -> str:
-    return f"attempt:{tenant}:{lead_id}:{note_id}"
+# Register item 118: the note alone, never the lead. A lead id is the caller's
+# to send, so a key that carried it gave every new lead id a fresh allowance.
+def _attempt_key(tenant: str, note_id: int) -> str:
+    return f"attempt:{tenant}:{note_id}"
 
 
-def _attempt_fingerprint_key(tenant: str, lead_id: int, note_id: int) -> str:
-    """Beside the attempt counter, same (tenant, lead, note), same TTL.
+def _attempt_fingerprint_key(tenant: str, note_id: int) -> str:
+    """Beside the attempt counter, same (tenant, note), same TTL.
 
     A SECOND KEY rather than a hash holding both. The two are written in the
     same breath and expire on the same TTL, so the only thing a hash would add
@@ -137,7 +139,7 @@ def _attempt_fingerprint_key(tenant: str, lead_id: int, note_id: int) -> str:
     turn the prompt-slots script's INCR on the counter into an HINCRBY. See the
     phase report for the full comparison.
     """
-    return f"attempt_fp:{tenant}:{lead_id}:{note_id}"
+    return f"attempt_fp:{tenant}:{note_id}"
 
 
 def _bypass(code: str, tenant: str, request_id: str, exc: BaseException) -> None:
@@ -289,7 +291,6 @@ def _prompt_slots_answer(reply: list[int]) -> tuple[int, bool, int]:
 
 async def take_prompt_slots(
     tenant: str,
-    lead_id: int,
     note_id: int,
     subject: str,
     *,
@@ -315,7 +316,7 @@ async def take_prompt_slots(
             lambda: get_operational_client().eval(
                 _TAKE_PROMPT_SLOTS_SCRIPT,
                 2,
-                _attempt_key(tenant, lead_id, note_id),
+                _attempt_key(tenant, note_id),
                 _rate_limit_key(tenant, subject),
                 attempt_cap,
                 attempt_ttl,
@@ -355,9 +356,7 @@ async def read_rate_limit(tenant: str, subject: str, *, request_id: str) -> int:
 # --- attempts: fails OPEN --------------------------------------------------
 
 
-async def read_attempts(
-    tenant: str, lead_id: int, note_id: int, *, request_id: str
-) -> int:
+async def read_attempts(tenant: str, note_id: int, *, request_id: str) -> int:
     """How many clarification prompts this note has already drawn.
 
     PROVISIONAL: it picks which trip take_prompt_slots makes, and that script
@@ -366,7 +365,7 @@ async def read_attempts(
     """
     try:
         raw = await operational_breaker().call(
-            lambda: get_operational_client().get(_attempt_key(tenant, lead_id, note_id))
+            lambda: get_operational_client().get(_attempt_key(tenant, note_id))
         )
     except redis.RedisError as exc:
         _bypass("attempt_counter_bypassed", tenant, request_id, exc)
@@ -379,7 +378,6 @@ async def read_attempts(
 
 async def write_attempt_fingerprint(
     tenant: str,
-    lead_id: int,
     note_id: int,
     fingerprint: str,
     *,
@@ -408,7 +406,7 @@ async def write_attempt_fingerprint(
     try:
         await operational_breaker().call(
             lambda: get_operational_client().set(
-                _attempt_fingerprint_key(tenant, lead_id, note_id),
+                _attempt_fingerprint_key(tenant, note_id),
                 fingerprint,
                 nx=True,
                 ex=ttl,
@@ -419,7 +417,7 @@ async def write_attempt_fingerprint(
 
 
 async def read_attempt_fingerprint(
-    tenant: str, lead_id: int, note_id: int, *, request_id: str
+    tenant: str, note_id: int, *, request_id: str
 ) -> str | None:
     """The note text we first prompted on for this note, or None.
 
@@ -432,7 +430,7 @@ async def read_attempt_fingerprint(
     try:
         raw = await operational_breaker().call(
             lambda: get_operational_client().get(
-                _attempt_fingerprint_key(tenant, lead_id, note_id)
+                _attempt_fingerprint_key(tenant, note_id)
             )
         )
     except redis.RedisError as exc:

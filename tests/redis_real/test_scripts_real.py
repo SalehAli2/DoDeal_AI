@@ -228,7 +228,6 @@ async def test_counting_a_request_leaves_the_token_counters_alone(
 
 # --- (c) the prompt-slots script: each check IS its increment ---------------
 
-_LEAD_ID = 1656
 _NOTE_ID = 10
 _ATTEMPT_CAP = 1
 _ATTEMPT_TTL = 600
@@ -242,7 +241,7 @@ def rate_key(key_prefix: str) -> str:
 
 @pytest.fixture
 def attempt_key(key_prefix: str) -> str:
-    return key_prefix + _attempt_key(_TENANT, _LEAD_ID, _NOTE_ID)
+    return key_prefix + _attempt_key(_TENANT, _NOTE_ID)
 
 
 async def _take(
@@ -271,7 +270,7 @@ async def test_the_rate_slots_run_out_across_notes_with_the_count_before(
     real_redis: redis_async.Redis, key_prefix: str, rate_key: str
 ) -> None:
     """Counterpart: test_the_rate_slots_run_out_across_notes."""
-    notes = [key_prefix + _attempt_key(_TENANT, _LEAD_ID, n) for n in (10, 11, 12, 13)]
+    notes = [key_prefix + _attempt_key(_TENANT, n) for n in (10, 11, 12, 13)]
     replies = [await _take(real_redis, note, rate_key) for note in notes]
 
     assert replies == [
@@ -357,7 +356,7 @@ async def test_concurrent_slots_are_taken_exactly_up_to_the_limit(
         *(
             _take(
                 real_redis,
-                key_prefix + _attempt_key(_TENANT, _LEAD_ID, note_id),
+                key_prefix + _attempt_key(_TENANT, note_id),
                 rate_key,
                 limit=limit,
             )

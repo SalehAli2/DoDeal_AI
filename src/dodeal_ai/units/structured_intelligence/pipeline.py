@@ -653,7 +653,6 @@ async def _judge(
         # for this note cannot also send. Fails OPEN (0).
         attempts = await state.read_attempts(
             scope.tenant,
-            request.lead_id,
             request.note_id,
             request_id=scope.request_id,
         )
@@ -767,7 +766,6 @@ async def _judge(
                         "original_note_fingerprint": (
                             await state.read_attempt_fingerprint(
                                 scope.tenant,
-                                request.lead_id,
                                 request.note_id,
                                 request_id=scope.request_id,
                             )
@@ -844,7 +842,6 @@ async def _judge(
         # counter it belongs to, at the one moment prompt_sent becomes true.
         await state.write_attempt_fingerprint(
             scope.tenant,
-            request.lead_id,
             request.note_id,
             fingerprint,
             ttl=config.attempt_ttl_seconds,
@@ -897,7 +894,6 @@ async def _rate_limit_trip(
     if provisional.prompt_sent:
         return await state.take_prompt_slots(
             scope.tenant,
-            request.lead_id,
             request.note_id,
             scope.subject,
             attempt_cap=config.clarification_cap,

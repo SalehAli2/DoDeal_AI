@@ -49,5 +49,5 @@ async def test_one_note_id_with_two_vague_texts_at_once_sends_one_prompt(lane):
     withheld = next(d for d in decisions if not d["prompt_sent"])
     assert withheld["prompt_withheld"] == "attempt_cap"
     operational = lane.stores.operational
-    assert await operational.get(_attempt_key(TENANT, lead_id, note.id)) == "1"
+    assert await operational.get(_attempt_key(TENANT, note.id)) == "1"
     assert await operational.get(_rate_limit_key(TENANT, str(SUBJECT))) == "1"

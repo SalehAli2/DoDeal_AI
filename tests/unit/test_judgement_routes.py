@@ -803,8 +803,8 @@ def test_a_provider_failure_releases_the_key_so_a_retry_works(client, llm, opera
 # question was actually asked.
 
 RATE_KEY = "ratelimit:tenant-a:42"
-ATTEMPT_KEY = f"attempt:tenant-a:{LEAD_ID}:{NOTE_ID}"
-ATTEMPT_FP_KEY = f"attempt_fp:tenant-a:{LEAD_ID}:{NOTE_ID}"
+ATTEMPT_KEY = f"attempt:tenant-a:{NOTE_ID}"
+ATTEMPT_FP_KEY = f"attempt_fp:tenant-a:{NOTE_ID}"
 
 
 def _idem_key(text: str = GOOD_NOTE) -> str:

@@ -365,10 +365,10 @@ async def test_the_resubmission_reference_never_reaches_a_log_line(
     )
 
     await state.write_attempt_fingerprint(
-        "tenant-a", 1656, 10, fingerprint, ttl=21600, request_id="req-sentinel"
+        "tenant-a", 10, fingerprint, ttl=21600, request_id="req-sentinel"
     )
     read = await state.read_attempt_fingerprint(
-        "tenant-a", 1656, 10, request_id="req-sentinel"
+        "tenant-a", 10, request_id="req-sentinel"
     )
 
     assert read is None  # fails OPEN, with no new bypass code

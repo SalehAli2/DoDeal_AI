@@ -344,7 +344,7 @@ async def test_a_judgement_that_lost_the_attempt_race_withholds_at_the_cap(
 ):
     """A step-5 read of 0 that another request has since overtaken ends in
     attempt_cap, with no rate slot taken and no reference written."""
-    attempt_key = f"attempt:tenant-a:{LEAD_ID}:{NOTE_ID}"
+    attempt_key = f"attempt:tenant-a:{NOTE_ID}"
 
     async def _read_before_the_winner_took(*args, **kwargs):
         # The winner's take lands between this read and the loser's take.
@@ -365,6 +365,29 @@ async def test_a_judgement_that_lost_the_attempt_race_withholds_at_the_cap(
     assert operational.store[attempt_key] == "1"
     assert not [key for key in operational.store if key.startswith("ratelimit:")]
     assert not [key for key in operational.store if key.startswith("attempt_fp:")]
+
+
+async def test_one_note_id_under_two_lead_ids_shares_one_attempt(deps, operational):
+    """Register item 118: a second lead id on the same note id meets attempt_cap."""
+    decisions = []
+    for lead_id, text in ((LEAD_ID, GOOD_NOTE), (LEAD_ID + 1, f"{GOOD_NOTE} Edited.")):
+        request = DirectJudgementRequest(
+            lead_id=lead_id,
+            note_id=NOTE_ID,
+            author_id=42,
+            note_text=text,
+            lead=LeadContext(leadType="buyer"),
+        )
+        judgement = await judge_note_direct(
+            _scope(), request, resubmission=False, deps=deps
+        )
+        assert judgement.decision is not None
+        decisions.append(judgement.decision)
+
+    assert [decision.prompt_sent for decision in decisions] == [True, False]
+    assert decisions[1].prompt_withheld is PromptWithheld.ATTEMPT_CAP
+    attempt_keys = [key for key in operational.store if key.startswith("attempt:")]
+    assert attempt_keys == [f"attempt:tenant-a:{NOTE_ID}"]
 
 
 async def test_a_backend_key_failure_is_backend_unavailable(deps, leads, operational):

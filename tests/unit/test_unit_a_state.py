@@ -31,7 +31,6 @@ from tests.helpers.fake_operational_redis import FakeOperationalRedis
 
 TENANT = "tenant-a"
 SUBJECT = "42"
-LEAD_ID = 1656
 NOTE_ID = 10
 REQUEST_ID = "req-1"
 
@@ -42,7 +41,7 @@ WINDOW = 3600
 LIMIT = 3
 CAP = 1
 ATTEMPT_TTL = 21600
-ATTEMPT_KEY = f"attempt:{TENANT}:{LEAD_ID}:{NOTE_ID}"
+ATTEMPT_KEY = f"attempt:{TENANT}:{NOTE_ID}"
 RATE_KEY = f"ratelimit:{TENANT}:{SUBJECT}"
 
 # Shaped like a real fingerprint: 64 hex chars. Bound to a NAME here and only
@@ -350,7 +349,6 @@ async def _take(
     """One take for this subject, at the default caps unless a case needs others."""
     return await take_prompt_slots(
         TENANT,
-        LEAD_ID,
         note_id,
         SUBJECT,
         attempt_cap=cap,
@@ -471,21 +469,21 @@ async def test_keys_with_no_ttl_get_one_on_the_next_take(
 
 
 async def test_attempts_start_at_zero(fake: FakeOperationalRedis) -> None:
-    assert await read_attempts(TENANT, LEAD_ID, NOTE_ID, request_id=REQUEST_ID) == 0
+    assert await read_attempts(TENANT, NOTE_ID, request_id=REQUEST_ID) == 0
 
 
 async def test_attempts_count_per_note(fake: FakeOperationalRedis) -> None:
     await _take()
-    assert await read_attempts(TENANT, LEAD_ID, NOTE_ID, request_id=REQUEST_ID) == 1
+    assert await read_attempts(TENANT, NOTE_ID, request_id=REQUEST_ID) == 1
     # A different note on the same lead is counted separately.
-    assert await read_attempts(TENANT, LEAD_ID, 11, request_id=REQUEST_ID) == 0
+    assert await read_attempts(TENANT, 11, request_id=REQUEST_ID) == 0
 
 
-async def test_attempt_key_carries_tenant_lead_and_note(
+async def test_attempt_key_carries_tenant_and_note(
     fake: FakeOperationalRedis,
 ) -> None:
     await _take()
-    assert f"attempt:{TENANT}:{LEAD_ID}:{NOTE_ID}" in fake.store
+    assert f"attempt:{TENANT}:{NOTE_ID}" in fake.store
 
 
 # --- the resubmission reference (register item 33) --------------------------
@@ -493,8 +491,7 @@ async def test_attempt_key_carries_tenant_lead_and_note(
 
 async def test_the_reference_starts_absent(fake: FakeOperationalRedis) -> None:
     assert (
-        await read_attempt_fingerprint(TENANT, LEAD_ID, NOTE_ID, request_id=REQUEST_ID)
-        is None
+        await read_attempt_fingerprint(TENANT, NOTE_ID, request_id=REQUEST_ID) is None
     )
 
 
@@ -503,14 +500,13 @@ async def test_the_reference_reads_back_what_was_written(
 ) -> None:
     await write_attempt_fingerprint(
         TENANT,
-        LEAD_ID,
         NOTE_ID,
         SENTINEL_FINGERPRINT,
         ttl=ATTEMPT_TTL,
         request_id=REQUEST_ID,
     )
     assert (
-        await read_attempt_fingerprint(TENANT, LEAD_ID, NOTE_ID, request_id=REQUEST_ID)
+        await read_attempt_fingerprint(TENANT, NOTE_ID, request_id=REQUEST_ID)
         == SENTINEL_FINGERPRINT
     )
 
@@ -524,15 +520,14 @@ async def test_the_reference_lives_beside_the_counter_on_the_same_ttl(
     await _take()
     await write_attempt_fingerprint(
         TENANT,
-        LEAD_ID,
         NOTE_ID,
         SENTINEL_FINGERPRINT,
         ttl=ATTEMPT_TTL,
         request_id=REQUEST_ID,
     )
 
-    counter = f"attempt:{TENANT}:{LEAD_ID}:{NOTE_ID}"
-    reference = f"attempt_fp:{TENANT}:{LEAD_ID}:{NOTE_ID}"
+    counter = f"attempt:{TENANT}:{NOTE_ID}"
+    reference = f"attempt_fp:{TENANT}:{NOTE_ID}"
     assert reference in fake.store
     assert fake.ttls[reference] == fake.ttls[counter] == ATTEMPT_TTL
 
@@ -546,42 +541,34 @@ async def test_the_reference_is_the_first_one_written(
     other = "a1" * 32
     await write_attempt_fingerprint(
         TENANT,
-        LEAD_ID,
         NOTE_ID,
         SENTINEL_FINGERPRINT,
         ttl=ATTEMPT_TTL,
         request_id=REQUEST_ID,
     )
     await write_attempt_fingerprint(
-        TENANT, LEAD_ID, NOTE_ID, other, ttl=ATTEMPT_TTL, request_id=REQUEST_ID
+        TENANT, NOTE_ID, other, ttl=ATTEMPT_TTL, request_id=REQUEST_ID
     )
     assert (
-        await read_attempt_fingerprint(TENANT, LEAD_ID, NOTE_ID, request_id=REQUEST_ID)
+        await read_attempt_fingerprint(TENANT, NOTE_ID, request_id=REQUEST_ID)
         == SENTINEL_FINGERPRINT
     )
 
 
-async def test_the_reference_is_scoped_per_tenant_lead_and_note(
+async def test_the_reference_is_scoped_per_tenant_and_note(
     fake: FakeOperationalRedis,
 ) -> None:
     await write_attempt_fingerprint(
         TENANT,
-        LEAD_ID,
         NOTE_ID,
         SENTINEL_FINGERPRINT,
         ttl=ATTEMPT_TTL,
         request_id=REQUEST_ID,
     )
-    assert f"attempt_fp:{TENANT}:{LEAD_ID}:{NOTE_ID}" in fake.store
-    for tenant, lead_id, note_id in (
-        ("tenant-b", LEAD_ID, NOTE_ID),
-        (TENANT, 1657, NOTE_ID),
-        (TENANT, LEAD_ID, 11),
-    ):
+    assert f"attempt_fp:{TENANT}:{NOTE_ID}" in fake.store
+    for tenant, note_id in (("tenant-b", NOTE_ID), (TENANT, 11)):
         assert (
-            await read_attempt_fingerprint(
-                tenant, lead_id, note_id, request_id=REQUEST_ID
-            )
+            await read_attempt_fingerprint(tenant, note_id, request_id=REQUEST_ID)
             is None
         )
 
@@ -593,15 +580,13 @@ async def test_the_reference_fails_open_on_both_sides(failing, json_log) -> None
 
     await write_attempt_fingerprint(
         TENANT,
-        LEAD_ID,
         NOTE_ID,
         SENTINEL_FINGERPRINT,
         ttl=ATTEMPT_TTL,
         request_id=REQUEST_ID,
     )
     assert (
-        await read_attempt_fingerprint(TENANT, LEAD_ID, NOTE_ID, request_id=REQUEST_ID)
-        is None
+        await read_attempt_fingerprint(TENANT, NOTE_ID, request_id=REQUEST_ID) is None
     )
 
     codes = [line["reason_code"] for line in _lines(json_log)]
@@ -616,13 +601,12 @@ async def test_no_reference_fingerprint_reaches_a_log_line(failing, json_log) ->
 
     await write_attempt_fingerprint(
         TENANT,
-        LEAD_ID,
         NOTE_ID,
         SENTINEL_FINGERPRINT,
         ttl=ATTEMPT_TTL,
         request_id=REQUEST_ID,
     )
-    await read_attempt_fingerprint(TENANT, LEAD_ID, NOTE_ID, request_id=REQUEST_ID)
+    await read_attempt_fingerprint(TENANT, NOTE_ID, request_id=REQUEST_ID)
 
     text = json_log.getvalue()
     assert SENTINEL_FINGERPRINT not in text
@@ -657,7 +641,7 @@ async def test_take_prompt_slots_fails_open_with_both_guards_lines(
 
 async def test_read_attempts_fails_open_with_a_log_line(failing, json_log) -> None:
     failing("get")
-    assert await read_attempts(TENANT, LEAD_ID, NOTE_ID, request_id=REQUEST_ID) == 0
+    assert await read_attempts(TENANT, NOTE_ID, request_id=REQUEST_ID) == 0
 
     assert _lines(json_log)[-1]["reason_code"] == "attempt_counter_bypassed"
 
@@ -683,7 +667,7 @@ async def test_the_three_policies_are_not_the_same(failing) -> None:
             TENANT, NOTE_ID, SENTINEL_FINGERPRINT, ttl=IDEM_TTL, request_id=REQUEST_ID
         )
     assert await read_rate_limit(TENANT, SUBJECT, request_id=REQUEST_ID) == 0
-    assert await read_attempts(TENANT, LEAD_ID, NOTE_ID, request_id=REQUEST_ID) == 0
+    assert await read_attempts(TENANT, NOTE_ID, request_id=REQUEST_ID) == 0
     assert await _take() == (0, True, 0)
 
 
