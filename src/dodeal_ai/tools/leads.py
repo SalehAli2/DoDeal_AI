@@ -21,7 +21,8 @@ Request flow, all three methods:
     retried or wrapped by the watchdog.
   - The response is validated against the confirmed schemas in
     dodeal_ai.schemas.lead. A list is validated ROW BY ROW: a bad row is
-    dropped and counted, never the page (register item 90).
+    dropped and counted, never the page (register item 90). A wrong response
+    shape is BackendEnvelopeInvalid, logged backend_envelope_invalid (F1).
   - The call is wrapped by the watchdog (timeout, fail closed), retrying once
     only on a connect error, a read timeout, a 5xx or a 429 (register item 89).
 
@@ -51,9 +52,10 @@ from dodeal_ai.core.config import Settings, get_settings
 from dodeal_ai.core.context import TenantScope
 from dodeal_ai.core.errors import BackendUnavailableError
 from dodeal_ai.core.resilience import ExternalCallError, call_with_watchdog
-from dodeal_ai.core.validation import validate_output
+from dodeal_ai.core.validation import OutputValidationError, validate_output
 from dodeal_ai.schemas.lead import Lead, LeadNote, LeadResponse, RowsEnvelope
 from dodeal_ai.tools.errors import (
+    BackendEnvelopeInvalid,
     BackendError,
     BackendForbidden,
     BackendNotFound,
@@ -177,7 +179,7 @@ class LeadsClient:
         """
         url = f"{self._base_url(scope.tenant)}/leads"
         raw = await self._get(url, GET_LEADS_LABEL, scope.tenant, deadline)
-        envelope = validate_output(RowsEnvelope, raw, label=GET_LEADS_LABEL)
+        envelope = _envelope(RowsEnvelope, raw, GET_LEADS_LABEL, scope.tenant)
         return _valid_rows(Lead, envelope.data, GET_LEADS_LABEL)
 
     async def get_lead(
@@ -186,7 +188,7 @@ class LeadsClient:
         """Fetch a single lead by id, scoped to the request's tenant."""
         url = f"{self._base_url(scope.tenant)}/leads/{lead_id}"
         raw = await self._get(url, GET_LEAD_LABEL, scope.tenant, deadline)
-        response = validate_output(LeadResponse, raw, label=GET_LEAD_LABEL)
+        response = _envelope(LeadResponse, raw, GET_LEAD_LABEL, scope.tenant)
         return response.data
 
     async def get_lead_notes(
@@ -196,8 +198,26 @@ class LeadsClient:
         result (a lead with no notes), not an error."""
         url = f"{self._base_url(scope.tenant)}/leads/{lead_id}/notes"
         raw = await self._get(url, GET_LEAD_NOTES_LABEL, scope.tenant, deadline)
-        envelope = validate_output(RowsEnvelope, raw, label=GET_LEAD_NOTES_LABEL)
+        envelope = _envelope(RowsEnvelope, raw, GET_LEAD_NOTES_LABEL, scope.tenant)
         return _valid_rows(LeadNote, envelope.data, GET_LEAD_NOTES_LABEL)
+
+
+def _envelope[M: BaseModel](schema: type[M], raw: object, label: str, tenant: str) -> M:
+    """The response in its documented shape, or BackendEnvelopeInvalid after one
+    backend_envelope_invalid line: tenant, label and a count, never a value."""
+    try:
+        return validate_output(schema, raw, label=label)
+    except OutputValidationError as exc:
+        _logger.warning(
+            "backend_envelope_invalid",
+            extra={
+                "reason_code": "backend_envelope_invalid",
+                "tenant": tenant,
+                "label": label,
+                "error_count": exc.error_count,
+            },
+        )
+        raise BackendEnvelopeInvalid(label, exc.errors) from None
 
 
 def _valid_rows[M: BaseModel](

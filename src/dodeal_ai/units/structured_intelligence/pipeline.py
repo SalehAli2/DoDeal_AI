@@ -132,6 +132,7 @@ from dodeal_ai.core.resilience import (
 )
 from dodeal_ai.schemas.lead import Lead, LeadNote
 from dodeal_ai.tools.errors import (
+    BackendEnvelopeInvalid,
     BackendForbidden,
     BackendNotFound,
     BackendRejected,
@@ -476,6 +477,7 @@ def _backend_errors(scope: TenantScope) -> Iterator[None]:
         BackendKeyError,
         BackendUnauthorized,
         BackendForbidden,
+        BackendEnvelopeInvalid,
     ) as exc:
         raise _backend_failure(scope, exc, BackendUnavailableError()) from None
 
@@ -488,6 +490,7 @@ _BACKEND_ERROR_KINDS: dict[type[Exception], str] = {
     BackendForbidden: "forbidden",
     BackendKeyError: "key_missing",
     ExternalCallError: "unavailable",
+    BackendEnvelopeInvalid: "envelope_invalid",
 }
 
 

@@ -19,8 +19,11 @@ import pytest
 
 from dodeal_ai.core.config import Settings
 from dodeal_ai.core.context import RequestContext, TenantScope
-from dodeal_ai.core.validation import OutputValidationError
-from dodeal_ai.tools.errors import BackendNotFound, BackendUnauthorized
+from dodeal_ai.tools.errors import (
+    BackendEnvelopeInvalid,
+    BackendNotFound,
+    BackendUnauthorized,
+)
 from dodeal_ai.tools.httpx_transport import HttpxTransport
 from dodeal_ai.tools.keys import SettingsKeyResolver
 from dodeal_ai.tools.leads import LeadsClient
@@ -106,7 +109,7 @@ async def test_empty_notes_list_is_not_an_error():
 
 async def test_malformed_response_fails_closed_through_real_http():
     client = _client(_settings())
-    with pytest.raises(OutputValidationError):
+    with pytest.raises(BackendEnvelopeInvalid):
         await client.get_lead(_scope(), 999)
 
 

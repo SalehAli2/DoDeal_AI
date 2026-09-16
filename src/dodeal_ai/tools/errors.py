@@ -59,6 +59,22 @@ class BackendRejected(BackendError):
     reason_code = "backend_rejected"
 
 
+class BackendEnvelopeInvalid(Exception):
+    """A 2xx whose JSON is not the response shape the CRM documents (register
+    item F1). `errors` holds (field path, pydantic error type) pairs, never a
+    value; str() is the fixed code."""
+
+    reason_code: ClassVar[str] = "backend_envelope_invalid"
+
+    def __init__(self, label: str, errors: tuple[tuple[str, str], ...]) -> None:
+        self.label = label
+        self.errors = errors
+        super().__init__(self.reason_code)
+
+    def __str__(self) -> str:
+        return self.reason_code
+
+
 def retry_after_seconds(value: str | None) -> float | None:
     """Retry-After in its delta-seconds form. The HTTP-date form, a negative
     number and junk all read as absent, so the caller falls back to jitter."""

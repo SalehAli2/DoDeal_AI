@@ -18,7 +18,7 @@ from dodeal_ai.core.config import Settings
 from dodeal_ai.core.context import RequestContext, TenantScope
 from dodeal_ai.core.errors import BackendUnavailableError, NoteNotFoundError
 from dodeal_ai.core.resilience import ExternalCallError
-from dodeal_ai.core.validation import OutputValidationError
+from dodeal_ai.tools.errors import BackendEnvelopeInvalid
 from dodeal_ai.tools.keys import BackendKeyError, SettingsKeyResolver
 from dodeal_ai.tools.leads import LeadsClient, get_leads_client
 from dodeal_ai.units.structured_intelligence.config import get_tenant_config
@@ -113,7 +113,7 @@ async def test_malformed_response_fails_closed():
     # Old shape / wrong wrapper must be rejected, not surfaced.
     transport = MockTransport({"success": True, "data": []})
     client = _client(transport)
-    with pytest.raises(OutputValidationError):
+    with pytest.raises(BackendEnvelopeInvalid):
         await client.get_leads(_scope())
 
 
@@ -136,7 +136,7 @@ async def test_get_lead_builds_id_url_and_returns_lead():
 async def test_get_lead_malformed_response_fails_closed():
     transport = MockTransport({"status": True})  # missing data
     client = _client(transport)
-    with pytest.raises(OutputValidationError):
+    with pytest.raises(BackendEnvelopeInvalid):
         await client.get_lead(_scope(), 7)
 
 
@@ -366,7 +366,7 @@ async def test_a_clean_page_logs_nothing(caplog):
 async def test_a_malformed_envelope_still_fails_closed():
     """Row tolerance does not extend to the envelope: no data list is an error."""
     transport = MockTransport({"status": True, "data": "not-a-list", "meta": _meta(0)})
-    with pytest.raises(OutputValidationError):
+    with pytest.raises(BackendEnvelopeInvalid):
         await _client(transport).get_lead_notes(_scope(), 7)
 
 
