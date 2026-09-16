@@ -197,6 +197,33 @@ def test_cross_domain_host_denied_with_invalid_host(client, json_log):
     )
 
 
+def test_one_verifier_per_settings_object(monkeypatch):
+    """Two requests build one verifier, and a new Settings object builds another."""
+    monkeypatch.setenv("DODEAL_JWT_SIGNING_KEY", tokens.TEST_SECRET)
+    get_settings.cache_clear()
+    built: list[Settings] = []
+
+    class _CountingVerifier(JwtVerifier):
+        def __init__(self, settings: Settings | None = None):
+            super().__init__(settings)
+            built.append(self.settings)
+
+    monkeypatch.setattr(auth_dependencies, "JwtVerifier", _CountingVerifier)
+    client = TestClient(app)
+    token = tokens.mint_token(subdomain="tenant-a", sub=42)
+    headers = {**_auth(token), **_host("tenant-a")}
+
+    for _ in range(2):
+        assert client.get("/_probe/protected", headers=headers).status_code == 200
+    assert len(built) == 1
+
+    get_settings.cache_clear()
+    assert client.get("/_probe/protected", headers=headers).status_code == 200
+    assert len(built) == 2
+    assert built[0] is not built[1]
+    assert built[1] is get_settings()
+
+
 def test_cost_cap_exceeded_is_generic_429_and_audited(client, monkeypatch, json_log):
     def _raise(*args, **kwargs):
         raise CostLimitError("tenant_quota_exceeded")

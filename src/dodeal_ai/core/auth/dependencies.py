@@ -39,7 +39,7 @@ from dodeal_ai.core.authz.permissions import (
     require_permission,
     resolve_permissions,
 )
-from dodeal_ai.core.config import get_settings
+from dodeal_ai.core.config import Settings, get_settings
 from dodeal_ai.core.context import RequestContext
 from dodeal_ai.core.cost.limiter import (
     CostLimitError,
@@ -47,12 +47,25 @@ from dodeal_ai.core.cost.limiter import (
 )
 from dodeal_ai.core.tenancy import TenantMismatchError, check_tenant
 
+# Register item 12: the verifier and the Settings object it was built from.
+# Matched by identity, so a new Settings (a cleared cache) builds a new one.
+_verifier_cache: tuple[Settings, JwtVerifier] | None = None
+
 
 def get_verifier() -> TokenVerifier:
     """The swap point. Today: JwtVerifier (reads Settings). When Q1 resolves,
     this returns a different TokenVerifier and nothing else changes. Overridable
-    in tests via app.dependency_overrides."""
-    return JwtVerifier()
+    in tests via app.dependency_overrides.
+
+    Built once per Settings object, not per request. FastAPI runs this in its
+    threadpool, so two first requests may each build one; either is correct."""
+    global _verifier_cache
+    settings = get_settings()
+    cached = _verifier_cache
+    if cached is None or cached[0] is not settings:
+        cached = (settings, JwtVerifier(settings))
+        _verifier_cache = cached
+    return cached[1]
 
 
 async def _bearer_token(
