@@ -92,7 +92,9 @@ class Settings(BaseSettings):
     # NEVER a real backend secret committed here.
     # HS256: the shared secret. RS256: the CRM's PUBLIC key (PEM). Field name kept for env
     # stability; it is the verification key.
-    jwt_signing_key: str
+    # SecretStr, so repr(settings) prints `**********` (register item 91). Read
+    # in exactly ONE place: JwtVerifier.verify, with .get_secret_value().
+    jwt_signing_key: SecretStr
 
     # --- Claim-name mapping: the ONE place (read by core/auth/claims.py) ---
     # Tymon JWT carries sub (user id) + subdomain (tenant) +
@@ -281,13 +283,14 @@ def _build_settings(**overrides) -> Settings:
     """
     try:
         return Settings(**overrides)
-    except (ValidationError, SettingsError) as exc:
+    except (ValidationError, SettingsError):
         # SettingsError, not ValidationError, is what a JSON field with
         # unparseable text raises (dd_api_keys, llm_profiles). Both mean the
-        # same thing here: the configuration is unusable.
+        # same thing here: the configuration is unusable. `from None`: a
+        # validation error quotes the rejected input, which can be a secret.
         raise ConfigError(
             "Missing or invalid required configuration; refusing to start."
-        ) from exc
+        ) from None
 
 
 @lru_cache

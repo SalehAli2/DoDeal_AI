@@ -248,7 +248,7 @@ def main() -> int:
     host = f"{tenant}.{settings.inbound_base_domain}"
     token = jwt.encode(
         _payload(args, settings, tenant),
-        settings.jwt_signing_key,
+        settings.jwt_signing_key.get_secret_value(),
         algorithm=settings.jwt_algorithm,
     )
 

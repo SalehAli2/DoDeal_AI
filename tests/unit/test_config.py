@@ -11,7 +11,7 @@ from dodeal_ai.core.config import ConfigError, get_settings
 def test_required_key_present_yields_defaults(monkeypatch):
     monkeypatch.setenv("DODEAL_JWT_SIGNING_KEY", "test-key-abc")
     s = get_settings()
-    assert s.jwt_signing_key == "test-key-abc"
+    assert s.jwt_signing_key.get_secret_value() == "test-key-abc"
     assert s.jwt_algorithm == "HS256"
 
 
@@ -154,3 +154,70 @@ def test_a_non_positive_judgement_deadline_is_refused(monkeypatch, value):
     monkeypatch.setenv("DODEAL_JUDGEMENT_DEADLINE_SECONDS", value)
     with pytest.raises(ConfigError):
         _build_settings(_env_file=None)
+
+
+# --- the signing key is a secret (register item 91) --------------------------
+
+# Bound to a NAME and only ever passed by name, so a traceback that quotes a test's
+# source line can never carry the value.
+SIGNING_KEY_SENTINEL = "SENTINEL-signing-key-7f3a9c"
+
+
+def test_the_signing_key_is_a_secret_absent_from_repr_and_str():
+    """The key is a SecretStr that repr and str both mask, and it still reads back."""
+    from dodeal_ai.core.config import Settings
+
+    settings = Settings(_env_file=None, jwt_signing_key=SIGNING_KEY_SENTINEL)
+
+    assert SIGNING_KEY_SENTINEL not in repr(settings)
+    assert SIGNING_KEY_SENTINEL not in str(settings)
+    assert isinstance(settings.jwt_signing_key, SecretStr)
+    assert settings.jwt_signing_key.get_secret_value() == SIGNING_KEY_SENTINEL
+
+
+def test_a_missing_signing_key_still_raises_config_error_unchained(monkeypatch):
+    """No key is still a ConfigError, raised from None so no validation error rides on it."""
+    from dodeal_ai.core.config import _build_settings
+
+    monkeypatch.delenv("DODEAL_JWT_SIGNING_KEY", raising=False)
+    with pytest.raises(ConfigError) as raised:
+        _build_settings(_env_file=None)
+
+    assert raised.value.__cause__ is None
+    assert raised.value.__suppress_context__ is True
+
+
+def test_a_config_error_carries_no_signing_key_value():
+    """A rejected signing key reaches neither the ConfigError's text nor its formatted traceback."""
+    import traceback
+
+    from dodeal_ai.core.config import _build_settings
+
+    # A list is not a string, so pydantic refuses it and quotes the input it saw.
+    with pytest.raises(ConfigError) as raised:
+        _build_settings(_env_file=None, jwt_signing_key=[SIGNING_KEY_SENTINEL])
+
+    formatted = "".join(traceback.format_exception(raised.value))
+    assert SIGNING_KEY_SENTINEL not in str(raised.value)
+    assert SIGNING_KEY_SENTINEL not in formatted
+    assert "ValidationError" not in formatted
+
+
+def test_the_signing_key_is_read_in_exactly_one_place_in_src():
+    """Every `jwt_signing_key.get_secret_value()` call under src/ is the one in verify.py."""
+    import ast
+    import pathlib
+
+    reads = []
+    for path in sorted(pathlib.Path("src").rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "get_secret_value"
+                and isinstance(node.func.value, ast.Attribute)
+                and node.func.value.attr == "jwt_signing_key"
+            ):
+                reads.append(path.as_posix())
+
+    assert reads == ["src/dodeal_ai/core/auth/verify.py"]
