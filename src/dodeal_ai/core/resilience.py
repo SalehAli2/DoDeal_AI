@@ -185,7 +185,7 @@ async def gather_or_cancel(*coros: Awaitable[Any]) -> tuple[Any, ...]:
     so this is a drop-in replacement at a call site that unpacks them.
 
     Generic in the two-argument form because that is what both callers need --
-    vague + score here, and the lead + notes fetches when register item 9 lands.
+    vague + score, and the lead + notes fetches (register item 9).
     The variadic overload keeps a third caller from being a signature change,
     at the cost of `Any` results it will have to narrow itself.
     """

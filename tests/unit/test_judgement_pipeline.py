@@ -434,6 +434,81 @@ async def test_a_stop_before_the_seam_spends_nothing(deps, operational):
     assert deps.llm.call_count == 0
 
 
+# --- the lead and its notes are fetched together (register item 9) ----------
+
+
+async def test_the_lead_and_notes_fetches_both_start_before_either_finishes(
+    deps, leads, operational, monkeypatch
+):
+    """Both backend reads have started before either one has returned."""
+    events: list[str] = []
+    real_get_lead, real_get_lead_notes = leads.get_lead, leads.get_lead_notes
+
+    async def _get_lead(*args, **kwargs):
+        events.append("lead started")
+        await asyncio.sleep(0)
+        events.append("lead finished")
+        return await real_get_lead(*args, **kwargs)
+
+    async def _get_lead_notes(*args, **kwargs):
+        events.append("notes started")
+        await asyncio.sleep(0)
+        events.append("notes finished")
+        return await real_get_lead_notes(*args, **kwargs)
+
+    monkeypatch.setattr(leads, "get_lead", _get_lead)
+    monkeypatch.setattr(leads, "get_lead_notes", _get_lead_notes)
+
+    await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+
+    assert sorted(events[:2]) == ["lead started", "notes started"]
+
+
+async def test_a_lead_failure_is_reported_over_a_notes_failure(
+    deps, leads, operational, json_capture
+):
+    """When both reads fail, the outcome line names the lead's error type."""
+    leads.raise_on["get_lead"] = BackendKeyError("tenant-a")
+    leads.raise_on["get_lead_notes"] = ExternalCallError(
+        "tool.get_lead_notes", RuntimeError()
+    )
+
+    with pytest.raises(BackendUnavailableError):
+        await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+
+    line = next(
+        x for x in json_capture() if x["message"] == "judgement_backend_unavailable"
+    )
+    assert line["error_type"] == "BackendKeyError"
+    assert [call.method for call in leads.calls] == ["get_lead", "get_lead_notes"]
+
+
+async def test_a_lead_failure_cancels_the_notes_fetch_in_flight(
+    deps, leads, operational, monkeypatch
+):
+    """A failed lead read cancels the notes read that is still waiting."""
+    never = asyncio.Event()
+    cancelled: list[str] = []
+
+    async def _held_get_lead_notes(*args, **kwargs):
+        try:
+            await never.wait()
+        except asyncio.CancelledError:
+            cancelled.append("notes")
+            raise
+
+    leads.raise_on["get_lead"] = ExternalCallError("tool.get_lead", RuntimeError())
+    monkeypatch.setattr(leads, "get_lead_notes", _held_get_lead_notes)
+
+    with pytest.raises(BackendUnavailableError):
+        await asyncio.wait_for(
+            judge_note(_scope(), _request(), resubmission=False, deps=deps),
+            SAFETY_SECONDS,
+        )
+
+    assert cancelled == ["notes"]
+
+
 # --- vague and scoring run concurrently (register item 14) ------------------
 
 

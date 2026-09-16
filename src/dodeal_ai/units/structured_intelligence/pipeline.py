@@ -12,6 +12,7 @@ the step after it costs:
 
   1. fetch the lead                      404 lead_not_found     (see H2 below)
   2. fetch page one of its notes, match  404 note_not_found
+     (1 and 2 start together, register item 9; the lead's error wins)
      (the direct route skips 1 and 2: the CRM sent the note, and no
       LeadsClient call is made at all)
   3. too thin, or too long?              -> suppressed, STOP. No reservation,
@@ -358,7 +359,7 @@ def _length_gate(
 async def _fetch_note(
     scope: TenantScope, request: JudgementRequest, deps: JudgementDeps
 ) -> tuple[Lead, LeadNote]:
-    """Fetch the lead, then find the note on page one of its notes.
+    """Fetch the lead and page one of its notes together, then find the note.
 
     Both come back. The lead is not fetched only to prove it exists: four of its
     fields are the classifier's context section, and the alternative -- fetching
@@ -388,8 +389,13 @@ async def _fetch_note(
     # grown a fetch, which is the one thing this route may not do.
     assert deps.leads is not None
     try:
-        lead = await deps.leads.get_lead(scope, request.lead_id)
-        notes = await deps.leads.get_lead_notes(scope, request.lead_id)
+        # Register item 9: both reads start together. The lead goes first, so it
+        # is the error reported when both have failed, and a failure of either
+        # cancels the other rather than leaving a backend call running.
+        lead, notes = await gather_or_cancel(
+            deps.leads.get_lead(scope, request.lead_id),
+            deps.leads.get_lead_notes(scope, request.lead_id),
+        )
     except (ExternalCallError, BackendKeyError) as exc:
         # The real reason is already in the log: the watchdog logged the failure
         # type, and BackendKeyError logged its fixed reason code. Nothing about
