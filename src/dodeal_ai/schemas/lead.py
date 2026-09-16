@@ -21,8 +21,8 @@ Every lead field except `id` may be null and is modelled as optional, per the
 integration guide. `bookedAmount`'s real type is unconfirmed, so it is `Any`:
 the corpus already holds "1,250,000", and nothing here reads it (register item
 90). `createdAt`/`updatedAt` are
-confirmed ISO-8601 with a timezone offset; kept as `str` for now rather than
-parsed to `datetime`, since nothing downstream needs them parsed yet.
+confirmed ISO-8601 with a timezone offset. The LEAD's two stay `str`; a NOTE's
+`createdAt` is an aware datetime (register item 32), naive read as UTC.
 
 Note fields are modelled more strictly than lead fields: only `author` is
 confirmed nullable (null if the original author's account was deleted); the
@@ -31,9 +31,10 @@ guide does not say the rest may be absent.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 
 
 class PageMeta(BaseModel):
@@ -114,7 +115,15 @@ class LeadNote(BaseModel):
     note: str
     author: str | None = None
     author_id: int
-    createdAt: str
+    createdAt: datetime
+
+    @field_validator("createdAt")
+    @classmethod
+    def _aware(cls, value: datetime) -> datetime:
+        """Always aware. ASSUMPTION[Q5]: a timestamp with no offset is UTC; the
+        CRM's internal clock is naive local, so a wrong guess shifts by the
+        offset and never fails. An empty or unparseable value still rejects."""
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
 class LeadNotesResponse(BaseModel):

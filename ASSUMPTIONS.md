@@ -544,6 +544,10 @@ Ordered by what they release. Items 4.1–4.3 are the critical path.
   `Z`**, so a naive-comparison backend fails visibly rather than quietly shifting
   everything by the offset.
 - **Seam:** the `since` kwarg in `tools/leads.py`, landing at step 4.
+- **Marker: `ASSUMPTION[Q5]`** (`schemas/lead.py`, `LeadNote.createdAt`). A note
+  timestamp with no offset is read as **UTC**. If wrong, every naive note time
+  is off by the CRM's offset; nothing reads it yet. Correction: the one
+  validator on `LeadNote`.
 
 ### 4.4 A notes index on the service surface `[ARCHITECTURAL]`
 - Notes across the tenant, filterable by date range and `author_id`, paged.

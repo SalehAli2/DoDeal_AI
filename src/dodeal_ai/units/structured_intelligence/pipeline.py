@@ -102,6 +102,7 @@ import math
 import time
 from collections.abc import Awaitable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from dodeal_ai.core.config import Settings
 from dodeal_ai.core.context import TenantScope
@@ -555,15 +556,9 @@ async def judge_note_direct(
                 note=request.note_text,
                 author=None,
                 author_id=request.author_id,
-                # Nothing reads createdAt today -- not the prompts, not the
-                # scoring, not the counters -- and the CRM is not asked for it,
-                # because a timestamp we do not use is a field that can be wrong
-                # for free. Register item 32 (aware datetime parsing) MUST guard
-                # this empty string: the day createdAt becomes a parsed
-                # datetime, a note that arrived on this route has no value to
-                # parse, and a parser that assumes one will raise on the direct
-                # route only.
-                createdAt="",
+                # The CRM sends this right after the save, so arrival time
+                # stands in for createdAt (item 32). Nothing reads it today.
+                createdAt=datetime.now(UTC),
             )
             return await _judge(
                 scope,

@@ -594,11 +594,12 @@ The repo-wide guards are not separate jobs — they are ordinary pytest tests an
 
 ### Provisional answers
 
-Five questions were answered provisionally so the unit could be built. Each is marked in the code with a greppable token, so the blast radius of a wrong answer is `grep -r "ASSUMPTION\[Qn\]" src/`.
+Six questions were answered provisionally so the unit could be built. Each is marked in the code with a greppable token, so the blast radius of a wrong answer is `grep -r "ASSUMPTION\[Qn\]" src/`.
 
 | # | Assumed | If wrong | Grep marker |
 | --- | --- | --- | --- |
 | **Q1** | The CRM forwards the **end user's JWT** and tenant Host, so the judgement route runs Gate 1 → Gate 2 → Gate 4 exactly as the probe route does. | The principal source swaps behind the D1 seam. `judge_note` takes a `TenantScope`, not a `RequestContext`, so the pipeline does not change — only what builds the scope. A service principal would collapse every salesperson into one rate-limit bucket; that is the first line to re-read. | `ASSUMPTION[Q1]` |
+| **Q5** | A note's `createdAt` with **no offset is UTC** (register item 32). | Every naive timestamp shifts by the CRM's UTC offset; nothing reads `createdAt` today, so nothing is wrong yet. The fix is one validator in `schemas/lead.py`. | `ASSUMPTION[Q5]` |
 | **Q6** | `/leads/{id}/notes` **may** return timeline events as well as notes, so `system_event` is a real note type: decided first, suppressed `not_scorable`, never vague-checked, never scored. | Nothing to undo — the type costs one enum member and a branch that never fires. We do not need the answer to be correct, only to know how often it happens. | `ASSUMPTION[Q6]` |
 | **Q7** | The JWT `sub` and a note's `author_id` are **different id spaces**, and nothing joins them. The rate limit keys on the verified `sub`; the judgement reports `author_id` as the backend gave it. | If they match, nothing breaks — the join simply becomes possible, which is what per-rep coaching over time would need. If they differ, the correction is a mapping table and it is the backend's to provide. | `ASSUMPTION[Q7]` |
 | **Q8** | The note being judged is on **page one** of the lead's notes (newest first, 25 per page), so one un-paged fetch finds it. | The note is matched **by id**, never by position, so a miss is a clean `404 note_not_found` — never the wrong note. The fix is query parameters in `tools/leads.py` at **step 4**, not a pipeline change. Watch for a rise in `note_not_found`. | `ASSUMPTION[Q8]` |
