@@ -81,6 +81,7 @@ def test_backend_keys_missing_logs_error_when_map_is_empty(monkeypatch, json_lin
     # logger -- which is the whole point of emitting it after configure_logging.
     assert found[0]["level"] == "ERROR"
     assert found[0]["logger"] == STARTUP_LOGGER
+    assert found[0]["event"] == EVENT  # register item 121
     get_settings.cache_clear()
 
 
@@ -138,6 +139,7 @@ def test_unset_provider_starts_the_app_and_says_so_loudly(monkeypatch, json_line
     assert found, "no llm_not_configured line reached the JSON stream"
     assert found[0]["level"] == "ERROR"
     assert found[0]["logger"] == STARTUP_LOGGER
+    assert found[0]["event"] == LLM_EVENT  # register item 121
     get_settings.cache_clear()
 
 
@@ -305,6 +307,7 @@ def test_http_backend_scheme_logs_an_error(monkeypatch, json_lines):
     assert found, "no backend_scheme_insecure line reached the JSON stream"
     assert found[0]["level"] == "ERROR"
     assert found[0]["logger"] == STARTUP_LOGGER
+    assert found[0]["event"] == SCHEME_EVENT  # register item 121
     get_settings.cache_clear()
 
 
@@ -381,6 +384,7 @@ def test_a_pool_below_the_inflight_cap_warns_once_with_both_numbers(
     assert len(found) == 1
     assert found[0]["level"] == "WARNING"
     assert found[0]["logger"] == STARTUP_LOGGER
+    assert found[0]["event"] == POOL_EVENT  # register item 121
     assert found[0]["pool"] == _REQUIRED_POOL - 1
     assert found[0]["required"] == _REQUIRED_POOL
     get_settings.cache_clear()

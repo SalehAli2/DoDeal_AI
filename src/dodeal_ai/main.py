@@ -64,7 +64,12 @@ async def lifespan(app: FastAPI):
         # have -- unformatted, and invisible to a collector that only parses the
         # JSON lines every other startup event uses. The loudest line in the
         # file was the one least likely to be seen.
-        logging.getLogger("dodeal_ai.startup").error("backend_keys_missing count=0")
+        #
+        # `event` on all four startup lines (register item 121): a collector
+        # filters on a field, and the messages stay exactly as they were.
+        logging.getLogger("dodeal_ai.startup").error(
+            "backend_keys_missing count=0", extra={"event": "backend_keys_missing"}
+        )
 
     if settings.backend_scheme == "http":
         # NOT a refusal, and never one: the demo needs http, so this is the
@@ -75,7 +80,8 @@ async def lifespan(app: FastAPI):
         logging.getLogger("dodeal_ai.startup").error(
             "backend_scheme_insecure -- every backend request puts that "
             "tenant's DD-API-KEY on the wire in clear. Treat as key "
-            "disclosure, not misconfiguration, unless this is the demo."
+            "disclosure, not misconfiguration, unless this is the demo.",
+            extra={"event": "backend_scheme_insecure"},
         )
 
     # An explicit pool below one connection per admitted request plus headroom
@@ -88,7 +94,11 @@ async def lifespan(app: FastAPI):
     ):
         logging.getLogger("dodeal_ai.startup").warning(
             "redis_pool_below_inflight",
-            extra={"pool": settings.redis_max_connections, "required": required_pool},
+            extra={
+                "event": "redis_pool_below_inflight",
+                "pool": settings.redis_max_connections,
+                "required": required_pool,
+            },
         )
 
     # ONE pooled client for every model call in the process. Built even when no
@@ -103,7 +113,9 @@ async def lifespan(app: FastAPI):
         # /ready answers 503 while this is None, so the pod starts and stays OUT
         # of rotation rather than joining it and 500ing every judgement.
         app.state.llm = None
-        logging.getLogger("dodeal_ai.startup").error("llm_not_configured")
+        logging.getLogger("dodeal_ai.startup").error(
+            "llm_not_configured", extra={"event": "llm_not_configured"}
+        )
     else:
         # Provider SET and anything else wrong -- no key, a provider with no
         # adapter, a profile that fails the sweep -- is a genuine ConfigError
