@@ -103,3 +103,11 @@ When executing this task and creating/modifying code files, you must output a "S
 
 Execute the task defensively, run necessary linter/type checks, and print this explainer upon completion.
 ---
+
+## Batch session defaults (lead, 17 Sep)
+- Foundation sessions carry up to five small items, one code commit each. AI sessions carry one item.
+- No backfill and no doc edits unless the prompt says docs. The lead writes docs at the end of the day.
+- Redis: the lead does not operate it. Check the compose Redis with `docker compose ps`, start it if needed and wait for PONG. If Docker is not running, stop and say "Open Docker Desktop, then rerun." Set `DODEAL_REDIS_REAL_URL=redis://localhost:6379/9` and `DODEAL_REDIS_REAL_REQUIRED=1` inside every lane command. Leave Redis running.
+- Run `redis_real` and `load` once at the end when a commit touched Redis, Lua, the pipeline or middleware. Repeat a run three times only for a new concurrency test. Run the Redis-off hermetic check only when `tests/conftest.py` changed.
+- One sabotage per item. Restore byte for byte and confirm with `git diff -- src/`.
+- Final message, at most 30 lines, in this order: shas with one line each; one suite line (passed/skipped/deselected, coverage, floors); one lane line; one sabotage line per item; disagreements; decisions for the lead; where to review (src/ files and functions). Then the explainer, at most 12 lines. Do not push.
