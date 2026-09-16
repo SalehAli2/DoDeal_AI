@@ -28,7 +28,7 @@ import logging
 import pytest
 from fastapi.testclient import TestClient
 
-from dodeal_ai.core.config import ConfigError, get_settings
+from dodeal_ai.core.config import REDIS_POOL_HEADROOM, ConfigError, get_settings
 from dodeal_ai.core.llm.profiles import PROFILE_UNIT_A_CLASSIFY
 from dodeal_ai.core.logging_config import JsonFormatter
 from dodeal_ai.main import LLM_CALLS_PER_JUDGEMENT, _llm_limits, app
@@ -305,4 +305,60 @@ def test_the_default_scheme_logs_nothing(monkeypatch, json_lines):
         "would pass vacuously"
     )
     assert _events(lines, SCHEME_EVENT) == []
+    get_settings.cache_clear()
+
+
+# --- an explicit Redis pool below the in-flight cap (register item 96) -------
+
+POOL_EVENT = "redis_pool_below_inflight"
+_INFLIGHT = 10
+_REQUIRED_POOL = _INFLIGHT + REDIS_POOL_HEADROOM
+
+
+def _pool_env(monkeypatch, pool: int | None) -> None:
+    """A fixed in-flight cap, and an explicit pool size or none."""
+    monkeypatch.setenv("DODEAL_JWT_SIGNING_KEY", "test-key")
+    monkeypatch.setenv("DODEAL_MAX_INFLIGHT", str(_INFLIGHT))
+    monkeypatch.delenv("DODEAL_REDIS_MAX_CONNECTIONS", raising=False)
+    if pool is not None:
+        monkeypatch.setenv("DODEAL_REDIS_MAX_CONNECTIONS", str(pool))
+    get_settings.cache_clear()
+
+
+def test_a_pool_below_the_inflight_cap_warns_once_with_both_numbers(
+    monkeypatch, json_lines
+):
+    """One WARNING on the startup logger carrying the pool and the size it needs."""
+    _pool_env(monkeypatch, _REQUIRED_POOL - 1)
+
+    with TestClient(app):
+        pass
+
+    found = _events(json_lines(), POOL_EVENT)
+    assert len(found) == 1
+    assert found[0]["level"] == "WARNING"
+    assert found[0]["logger"] == STARTUP_LOGGER
+    assert found[0]["pool"] == _REQUIRED_POOL - 1
+    assert found[0]["required"] == _REQUIRED_POOL
+    get_settings.cache_clear()
+
+
+@pytest.mark.parametrize(
+    "pool", [_REQUIRED_POOL, _REQUIRED_POOL + 1, None], ids=["equal", "above", "unset"]
+)
+def test_a_pool_at_or_above_the_cap_or_unset_logs_nothing(
+    monkeypatch, json_lines, pool
+):
+    """No line when the pool meets the cap or is derived from it."""
+    _pool_env(monkeypatch, pool)
+
+    with TestClient(app):
+        pass
+
+    # PROVE THE CHANNEL FIRST, as above: an empty capture passes vacuously.
+    logging.getLogger(STARTUP_LOGGER).warning("startup_probe_line count=0")
+
+    lines = json_lines()
+    assert _events(lines, "startup_probe_line")
+    assert _events(lines, POOL_EVENT) == []
     get_settings.cache_clear()

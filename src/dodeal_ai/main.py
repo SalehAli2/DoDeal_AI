@@ -7,7 +7,12 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from dodeal_ai.api.routes import _probe, judgements
-from dodeal_ai.core.config import ConfigError, Settings, get_settings
+from dodeal_ai.core.config import (
+    REDIS_POOL_HEADROOM,
+    ConfigError,
+    Settings,
+    get_settings,
+)
 from dodeal_ai.core.errors import register_error_handlers
 from dodeal_ai.core.llm import build_llm_client
 from dodeal_ai.core.logging_config import configure_logging
@@ -71,6 +76,19 @@ async def lifespan(app: FastAPI):
             "backend_scheme_insecure -- every backend request puts that "
             "tenant's DD-API-KEY on the wire in clear. Treat as key "
             "disclosure, not misconfiguration, unless this is the demo."
+        )
+
+    # An explicit pool below one connection per admitted request plus headroom
+    # queues admitted requests on a healthy Redis (item 81). NOT a refusal: an
+    # operator may size down on purpose; the line only makes it visible.
+    required_pool = settings.max_inflight + REDIS_POOL_HEADROOM
+    if (
+        settings.redis_max_connections is not None
+        and settings.redis_max_connections < required_pool
+    ):
+        logging.getLogger("dodeal_ai.startup").warning(
+            "redis_pool_below_inflight",
+            extra={"pool": settings.redis_max_connections, "required": required_pool},
         )
 
     # ONE pooled client for every model call in the process. Built even when no
