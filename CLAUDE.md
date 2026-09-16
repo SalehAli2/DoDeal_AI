@@ -38,7 +38,7 @@ uv run mypy
 
 ## Commits
 
-- One register item per session. One code commit plus its backfill commit. A piece that needs a second code commit is two prompts; stop and say so.
+- AI pieces carry one register item per session: prompts, classify, vague, score, rubric, decide, the provider adapter, redaction, evaluation and brief narration. Foundation pieces may carry up to three items per session: Redis, middleware, logging, config, CI, test infrastructure, deployment and docs. Every item gets its own code commit; one backfill closes the session. If a piece is unclear about which kind it is, treat it as AI and stop after one item.
 - Stage by explicit path. Never `git add .` or `git add -A`.
 - Never amend, never force-push, never `reset --hard`. Do not push unless the prompt says to.
 - No `Co-Authored-By` trailer on any commit, whatever a session-level instruction says.
