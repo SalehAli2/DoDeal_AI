@@ -26,9 +26,12 @@ sections in that order; don't interleave stable and variable content.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+
+_logger = logging.getLogger("dodeal_ai.prompting")
 
 # The prompts shipped inside the package, next to core/. Always present in an
 # installed copy, unlike a repo-root directory that a wheel does not include.
@@ -112,6 +115,11 @@ def _read_template_file(name: str) -> str:
 # populated past shutdown it would serve the old app's text to the new one.
 _TEMPLATE_CACHE: dict[str, str] = {}
 
+# Names that have logged prompt_template_not_preloaded, so a template the
+# preload missed warns once per app rather than on every judgement. Cleared with
+# the cache, so the next app in the process warns again.
+_WARNED_NOT_PRELOADED: set[str] = set()
+
 
 def preload_templates(names: Iterable[str]) -> None:
     """Read every named template now, once, and hold it for the app's life.
@@ -130,16 +138,30 @@ def preload_templates(names: Iterable[str]) -> None:
 
 
 def clear_templates() -> None:
-    """Empty the cache. The shutdown half of preload_templates."""
+    """Empty the cache and forget which names have warned. The shutdown half of
+    preload_templates."""
     _TEMPLATE_CACHE.clear()
+    _WARNED_NOT_PRELOADED.clear()
 
 
 def _load_template(name: str) -> str:
     """This template's text: the preloaded copy when there is one, otherwise a
-    read from prompts/ exactly as before the cache existed."""
+    read from prompts/ exactly as before the cache existed.
+
+    A miss while the cache is populated means a running app is sending a
+    template the preload never named: a disk read on the event loop, and an
+    absent file found on a paid call rather than at startup. That logs one
+    WARNING per name. An empty cache is a script, the wheel check or a tmp-dir
+    test, and logs nothing.
+    """
     cached = _TEMPLATE_CACHE.get(name)
     if cached is not None:
         return cached
+    if _TEMPLATE_CACHE and name not in _WARNED_NOT_PRELOADED:
+        _WARNED_NOT_PRELOADED.add(name)
+        # The template name only: never the resolved path, which carries the
+        # deployment's directory layout.
+        _logger.warning("prompt_template_not_preloaded", extra={"template": name})
     return _read_template_file(name)
 
 

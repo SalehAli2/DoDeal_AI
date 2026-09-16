@@ -10,6 +10,12 @@ everything outside a running app still reads from disk as it always did.
 
 from __future__ import annotations
 
+import ast
+import json
+import logging
+import re
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -19,6 +25,7 @@ from dodeal_ai.core.auth.verify import JwtVerifier
 from dodeal_ai.core.config import Settings, get_settings
 from dodeal_ai.core.cost import limiter as cost_limiter
 from dodeal_ai.core.llm import get_llm_client
+from dodeal_ai.core.logging_config import JsonFormatter
 from dodeal_ai.core.prompting import PromptError, build_prompt
 from dodeal_ai.main import app
 from dodeal_ai.tools.leads import get_leads_client
@@ -248,3 +255,86 @@ def test_a_preloaded_name_is_served_from_the_cache_not_the_file(
         assert prompting._load_template("t.txt") == "FIRST"
     finally:
         prompting.clear_templates()
+
+
+# --- a miss on a populated cache warns once per name (item 125) -------------
+
+NOT_PRELOADED = "prompt_template_not_preloaded"
+
+# A Unit A template name. Scanned in every string constant, docstrings
+# included, so a name built into a longer literal is still seen.
+_TEMPLATE_NAME = re.compile(r"structured_intelligence/[a-z_]+_v[0-9]+\.txt")
+_SRC = Path(__file__).resolve().parents[2] / "src" / "dodeal_ai"
+
+
+@pytest.fixture
+def two_templates(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    """A prompts directory holding `loaded.txt` and `missed.txt`, the cache emptied after."""
+    for name in ("loaded.txt", "missed.txt"):
+        (tmp_path / name).write_text(name.upper(), encoding="utf-8")
+    monkeypatch.setattr(prompting, "_prompts_dir", lambda: tmp_path)
+    yield tmp_path
+    prompting.clear_templates()
+
+
+def _not_preloaded(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.getMessage() == NOT_PRELOADED]
+
+
+def test_a_miss_on_a_populated_cache_warns_once_for_two_calls(
+    two_templates, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Two misses on one name log exactly one WARNING, carrying the template name and no path."""
+    prompting.preload_templates(["loaded.txt"])
+
+    with caplog.at_level(logging.WARNING, logger="dodeal_ai.prompting"):
+        assert prompting._load_template("missed.txt") == "MISSED.TXT"
+        assert prompting._load_template("missed.txt") == "MISSED.TXT"
+
+    records = _not_preloaded(caplog)
+    assert len(records) == 1
+    assert records[0].levelno == logging.WARNING
+    line = json.loads(JsonFormatter().format(records[0]))
+    assert set(line) == {"message", "template", "level", "logger", "timestamp"}
+    assert line["template"] == "missed.txt"
+
+
+def test_a_miss_on_an_empty_cache_logs_nothing(
+    two_templates, caplog: pytest.LogCaptureFixture
+) -> None:
+    """With nothing preloaded, as in a script or the wheel check, a disk read logs no WARNING."""
+    assert prompting._TEMPLATE_CACHE == {}
+
+    with caplog.at_level(logging.WARNING, logger="dodeal_ai.prompting"):
+        assert prompting._load_template("missed.txt") == "MISSED.TXT"
+
+    assert caplog.records == []
+
+
+def test_clear_templates_resets_the_once_per_name_memory(
+    two_templates, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A name that warned in one app warns again in the next, after clear_templates."""
+    with caplog.at_level(logging.WARNING, logger="dodeal_ai.prompting"):
+        prompting.preload_templates(["loaded.txt"])
+        prompting._load_template("missed.txt")
+        prompting.clear_templates()
+        prompting.preload_templates(["loaded.txt"])
+        prompting._load_template("missed.txt")
+
+    assert [r.template for r in _not_preloaded(caplog)] == ["missed.txt", "missed.txt"]
+
+
+def test_every_template_name_under_src_is_in_the_preload() -> None:
+    """Every Unit A template name written in a string literal under src/ is in UNIT_A_TEMPLATES."""
+    found: dict[str, list[str]] = {}
+    for path in sorted(_SRC.rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                for name in _TEMPLATE_NAME.findall(node.value):
+                    where = f"{path.relative_to(_SRC).as_posix()}:{node.lineno}"
+                    found.setdefault(name, []).append(where)
+
+    assert len(found) >= 9, found
+    not_preloaded = {n: w for n, w in found.items() if n not in UNIT_A_TEMPLATES}
+    assert not_preloaded == {}
