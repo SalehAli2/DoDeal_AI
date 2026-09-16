@@ -33,6 +33,9 @@ decides what a salesperson is told about their own work:
                        exception message on the stream, or no line at all.
     middleware/inflight.py  load shedding. Wrong -> an unbounded queue, or
                        a slot that is never given back.
+    tools/errors.py   typed CRM failures. Wrong -> a 404 reported as a 503.
+    core/llm/fallback.py  when a second provider is called. Wrong -> a paid
+                       call sent twice.
     core/inflight.py  the counter load shedding reads. Wrong -> a count that
                        drifts, shedding traffic the service could serve.
 
@@ -112,6 +115,13 @@ _FLOORS: dict[str, float] = {
     # How every log line is written: extra= fields lifted, an exception reduced
     # to its type and frames. A gap is a line that ships a raw message, or none.
     "src/dodeal_ai/core/logging_config.py": 100,
+    # The typed backend failures (items 89 and F1): which 4xx becomes which code,
+    # and the Retry-After parse. Pure classes and one function; a gap is a
+    # status the pipeline maps without a test behind it.
+    "src/dodeal_ai/tools/errors.py": 100,
+    # The fallback provider (item 21): the one rule for when a second paid call
+    # is allowed. A gap is a retry of a call that may already have been billed.
+    "src/dodeal_ai/core/llm/fallback.py": 100,
     # The in-flight counter itself (item 13): three methods whose every line is a
     # slot taken, refused or given back. A gap is a count that can drift unseen.
     "src/dodeal_ai/core/inflight.py": 100,
