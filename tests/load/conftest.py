@@ -75,7 +75,8 @@ OPERATIONAL_DB = 11
 
 TENANT = "tenant-a"
 SUBJECT = 42
-HOST = f"{TENANT}.dodealcrm.com"
+BASE_DOMAIN = "dodealcrm.com"
+HOST = f"{TENANT}.{BASE_DOMAIN}"
 JUDGE = "/api/v1/notes/judgements"
 DIRECT = "/api/v1/notes/judgements/direct"
 
