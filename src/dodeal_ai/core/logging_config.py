@@ -19,7 +19,7 @@ import sys
 from datetime import UTC, datetime
 
 from dodeal_ai.core.config import get_settings
-from dodeal_ai.core.log_safety import frames_only
+from dodeal_ai.core.log_safety import cause_frames_only, chained, frames_only
 
 # Every attribute a stock LogRecord carries. Anything ELSE on the record --
 # set via `extra=` on a logging call, or by a `logging.Filter` (e.g. a
@@ -88,6 +88,15 @@ class JsonFormatter(logging.Formatter):
                 payload["exc_type"] = f"{exc_class.__module__}.{exc_class.__name__}"
             if exc_value is not None:
                 payload["exc_frames"] = frames_only(exc_value)
+                # One level of chaining (register item 126): where the failure
+                # came FROM, as a class and frames, never as a message.
+                cause = chained(exc_value)
+                if cause is not None:
+                    cause_class = type(cause)
+                    payload["exc_cause_type"] = (
+                        f"{cause_class.__module__}.{cause_class.__name__}"
+                    )
+                    payload["exc_cause_frames"] = cause_frames_only(exc_value)
 
         # Applied last so nothing above can shadow these.
         payload["timestamp"] = datetime.fromtimestamp(

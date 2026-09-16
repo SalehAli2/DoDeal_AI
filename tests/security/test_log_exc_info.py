@@ -25,6 +25,7 @@ import logging
 import pytest
 from fastapi.testclient import TestClient
 
+from dodeal_ai.core.log_safety import cause_frames_only
 from dodeal_ai.core.logging_config import (
     _UVICORN_LOGGERS,
     JsonFormatter,
@@ -192,10 +193,8 @@ def test_a_uvicorn_error_line_carries_no_exception_message(capfd):
     assert "exc_info" not in line
 
 
-def test_a_chained_cause_contributes_neither_message_nor_frames(capfd):
-    # formatException walked __cause__ and printed BOTH messages; frames_only
-    # formats the outer traceback only, so the ValueError contributes nothing --
-    # not its message, not its class, not its frames.
+def test_a_chained_cause_contributes_its_class_and_frames_never_its_message(capfd):
+    """Register item 126: one level of cause as a class and frames; no message."""
     configure_logging()
     try:
         _raise_chained(SENTINEL_OUTER, SENTINEL_INNER)
@@ -206,8 +205,67 @@ def test_a_chained_cause_contributes_neither_message_nor_frames(capfd):
     assert SENTINEL_INNER not in out
     assert SENTINEL_OUTER not in out
     line = _lines(out)[-1]
-    assert "ValueError" not in json.dumps(line)
     assert line["exc_type"] == "builtins.RuntimeError"
+    assert line["exc_cause_type"] == "builtins.ValueError"
+    assert "_raise_chained" in line["exc_cause_frames"]
+
+
+def _deepest(message: str) -> None:
+    raise KeyError(message)
+
+
+def _middle(message: str) -> None:
+    try:
+        _deepest(message)
+    except KeyError as cause:
+        raise ValueError(message) from cause
+
+
+def _outer(message: str) -> None:
+    try:
+        _middle(message)
+    except ValueError as cause:
+        raise RuntimeError(message) from cause
+
+
+def _formatted(raiser, message: str) -> dict:
+    try:
+        raiser(message)
+    except Exception as exc:  # noqa: BLE001 - the shape under test is any exception
+        return _record((type(exc), exc, exc.__traceback__))
+    raise AssertionError("did not raise")
+
+
+def test_only_one_level_of_the_chain_is_formatted():
+    """The cause's frames are there; the cause's own cause is not walked."""
+    payload = _formatted(_outer, SENTINEL_INNER)
+    assert payload["exc_cause_type"] == "builtins.ValueError"
+    assert "_middle" in payload["exc_cause_frames"]
+    assert "_deepest" not in payload["exc_cause_frames"]
+    assert "KeyError" not in json.dumps(payload)
+    assert SENTINEL_INNER not in json.dumps(payload)
+
+
+def _implicit(message: str) -> None:
+    try:
+        raise LookupError(message)
+    except LookupError:
+        raise RuntimeError(message)
+
+
+def test_an_implicit_context_is_used_when_there_is_no_cause():
+    """Without `from`, the context is the one level shown."""
+    payload = _formatted(_implicit, SENTINEL_INNER)
+    assert payload["exc_cause_type"] == "builtins.LookupError"
+    assert "_implicit" in payload["exc_cause_frames"]
+    assert SENTINEL_INNER not in json.dumps(payload)
+
+
+def test_an_unchained_exception_has_no_cause_fields():
+    """No chain, no exc_cause_type and no exc_cause_frames."""
+    payload = _formatted(_deepest, SENTINEL_INNER)
+    assert "exc_cause_type" not in payload
+    assert "exc_cause_frames" not in payload
 
 
 def _record(exc_info: object) -> dict:
@@ -248,3 +306,30 @@ def test_a_bare_true_exc_info_is_ignored_without_raising():
     assert "exc_type" not in payload
     assert "exc_frames" not in payload
     assert payload["message"] == "boom"
+
+
+def test_cause_frames_only_is_none_without_a_chain():
+    """Nothing chained, nothing to format."""
+    try:
+        _deepest(SENTINEL_INNER)
+    except KeyError as exc:
+        assert cause_frames_only(exc) is None
+
+
+def test_cause_frames_only_prefers_the_cause_and_never_reads_a_message():
+    """An explicit cause wins over the context; the result holds frames only."""
+    try:
+        _deepest(SENTINEL_INNER)
+    except KeyError as caught:
+        cause = caught
+    try:
+        try:
+            _implicit(SENTINEL_OUTER)
+        except RuntimeError:
+            raise ValueError(SENTINEL_OUTER) from cause
+    except ValueError as exc:
+        frames = cause_frames_only(exc)
+
+    assert frames is not None and "_deepest" in frames
+    assert "_implicit" not in frames
+    assert SENTINEL_INNER not in frames and SENTINEL_OUTER not in frames
