@@ -13,7 +13,7 @@ the step after it costs:
   1. fetch the lead                      404 lead_not_found
   2. fetch page one of its notes, match  404 note_not_found
      (1 and 2 start together, register item 9; the lead's error always
-      wins, register item 89)
+      wins, register item 89; a note not found is re-read once, item 17)
      (the direct route skips 1 and 2: the CRM sent the note, and no
       LeadsClient call is made at all)
   3. too thin, or too long?              -> suppressed, STOP. No reservation,
@@ -100,7 +100,8 @@ import asyncio
 import logging
 import math
 import time
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -182,6 +183,12 @@ NO_MODEL = ""
 # that a killed worker does not lock the note for a day. PROVISIONAL, like the
 # deadline it multiplies; the load lane sets the two together.
 IDEMPOTENCY_INFLIGHT_MULTIPLIER = 4
+
+# Register item 17: a note missing from page one is read again once, this long
+# after the first read, for a save the CRM has not yet made visible to its
+# reads. Only when this much of the judgement deadline is left; else 404 at once.
+NOTE_REREAD_DELAY_SECONDS = 0.25
+NOTE_REREAD_MIN_REMAINING_SECONDS = 1.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -376,7 +383,7 @@ async def _fetch_note(
     request: JudgementRequest,
     deps: JudgementDeps,
     *,
-    deadline: float | None,
+    deadline: float,
 ) -> tuple[Lead, LeadNote]:
     """Fetch the lead and page one of its notes together, then find the note.
 
@@ -386,10 +393,10 @@ async def _fetch_note(
     the number of backend calls depend on the note type.
 
     ASSUMPTION[Q8]: the target note is on PAGE ONE (notes come back newest
-    first, 25 per page), so one un-paged fetch finds it. Nothing branches on
-    this -- there is no paging code to take a second path -- and if a note can
-    fall off page one, the fix is query parameters in tools/leads.py at step 4,
-    not a change here.
+    first, 25 per page), so an un-paged fetch finds it. A miss is read again
+    ONCE, after NOTE_REREAD_DELAY_SECONDS and only with a second of deadline
+    left (register item 17) -- the same page, never a second one; if a note can
+    fall off page one, the fix is query parameters in tools/leads.py.
 
     Design A: the note is matched BY ID, never taken by position. "The newest
     note" would judge whatever arrived most recently, which on a busy lead is
@@ -404,14 +411,49 @@ async def _fetch_note(
     # Only judge_note reaches this function, and only the fetch route reaches
     # judge_note -- so a None client here would mean the direct entry point had
     # grown a fetch, which is the one thing this route may not do.
-    assert deps.leads is not None
-    try:
+    leads = deps.leads
+    assert leads is not None
+    with _backend_errors(scope):
         # Register item 9: both reads start together. The lead's error is the
         # one raised whenever the lead fails, even if the notes failed first.
         lead, notes = await gather_first_wins(
-            deps.leads.get_lead(scope, request.lead_id, deadline=deadline),
-            deps.leads.get_lead_notes(scope, request.lead_id, deadline=deadline),
+            leads.get_lead(scope, request.lead_id, deadline=deadline),
+            leads.get_lead_notes(scope, request.lead_id, deadline=deadline),
         )
+    note = _matching(notes, request.note_id)
+    if note is None:
+        loop = asyncio.get_running_loop()
+        reread = deadline - loop.time() >= NOTE_REREAD_MIN_REMAINING_SECONDS
+        _logger.info(
+            "note_not_on_first_read",
+            extra={
+                "tenant": scope.tenant,
+                "request_id": scope.request_id,
+                "reread": reread,
+            },
+        )
+        if reread:
+            await asyncio.sleep(NOTE_REREAD_DELAY_SECONDS)
+            with _backend_errors(scope):
+                notes = await leads.get_lead_notes(
+                    scope, request.lead_id, deadline=deadline
+                )
+            note = _matching(notes, request.note_id)
+    if note is None:
+        raise NoteNotFoundError()
+    return lead, note
+
+
+def _matching(notes: list[LeadNote], note_id: int) -> LeadNote | None:
+    """The note with this id, matched by id and never by position (Design A)."""
+    return next((note for note in notes if note.id == note_id), None)
+
+
+@contextmanager
+def _backend_errors(scope: TenantScope) -> Iterator[None]:
+    """Every backend failure inside, as the enumerated error the CRM is told."""
+    try:
+        yield
     except BackendNotFound as exc:
         if exc.label == GET_LEAD_LABEL:
             raise _backend_failure(scope, exc, LeadNotFoundError()) from None
@@ -425,12 +467,6 @@ async def _fetch_note(
         BackendForbidden,
     ) as exc:
         raise _backend_failure(scope, exc, BackendUnavailableError()) from None
-
-    for note in notes:
-        if note.id == request.note_id:
-            return lead, note
-
-    raise NoteNotFoundError()
 
 
 def _backend_failure(
@@ -489,7 +525,9 @@ async def judge_note(
     # The deadline starts with the clock, so the two backend reads spend it too.
     try:
         async with asyncio.timeout(deps.settings.judgement_deadline_seconds) as budget:
-            lead, note = await _fetch_note(scope, request, deps, deadline=budget.when())
+            deadline = budget.when()
+            assert deadline is not None  # set: the timeout was given a delay
+            lead, note = await _fetch_note(scope, request, deps, deadline=deadline)
             return await _judge(
                 scope,
                 request,

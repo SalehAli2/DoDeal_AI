@@ -607,6 +607,108 @@ async def test_both_reads_are_handed_the_judgement_deadline(
     assert before + budget <= seen["lead"] <= loop.time() + budget
 
 
+# --- a note missing from the first read is read again once (item 17) --------
+
+
+def _notes_empty_first(leads, monkeypatch) -> list[float]:
+    """The first notes read comes back empty, later ones as stored; returns the
+    loop time of every notes read."""
+    real = leads.get_lead_notes
+    times: list[float] = []
+
+    async def _read(scope, lead_id, *, deadline=None):
+        times.append(asyncio.get_running_loop().time())
+        notes = await real(scope, lead_id)
+        return [] if len(times) == 1 else notes
+
+    monkeypatch.setattr(leads, "get_lead_notes", _read)
+    return times
+
+
+async def test_a_note_found_on_the_reread_is_judged(
+    deps, leads, operational, monkeypatch
+):
+    """The re-read finds the note after a 250 ms wait and the judgement goes ahead."""
+    times = _notes_empty_first(leads, monkeypatch)
+    waits: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def _recorded(delay: float) -> None:
+        waits.append(delay)
+        await real_sleep(0)
+
+    # The wait is recorded, not measured: a Windows loop may wake a timer up to
+    # one clock tick early, so an elapsed-time assertion would flake.
+    monkeypatch.setattr(pipeline_module.asyncio, "sleep", _recorded)
+
+    judgement = await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+
+    assert judgement.note_id == NOTE_ID and judgement.score is not None
+    assert len(times) == 2
+    assert waits == [pipeline_module.NOTE_REREAD_DELAY_SECONDS]
+    assert [c.method for c in leads.calls].count("get_lead") == 1
+
+
+async def test_a_note_missing_twice_is_note_not_found_after_one_reread(
+    deps, leads, operational, json_capture
+):
+    """Exactly one re-read, then 404, with nothing reserved and nothing spent."""
+    with pytest.raises(NoteNotFoundError):
+        await judge_note(_scope(), _request(note_id=999), resubmission=False, deps=deps)
+
+    assert [c.method for c in leads.calls] == [
+        "get_lead",
+        "get_lead_notes",
+        "get_lead_notes",
+    ]
+    assert operational.store == {}
+    assert deps.llm.call_count == 0
+    (line,) = [x for x in json_capture() if x["message"] == "note_not_on_first_read"]
+    assert line["reread"] is True
+    assert {"tenant", "request_id", "reread"} <= set(line)
+
+
+async def test_under_a_second_of_deadline_left_there_is_no_reread(
+    leads, operational, json_capture
+):
+    """With less than a second left the miss is 404 at once, one notes read."""
+    deps = _with_deadline(FakeLLM(), leads, 0.9)
+
+    with pytest.raises(NoteNotFoundError):
+        await judge_note(_scope(), _request(note_id=999), resubmission=False, deps=deps)
+
+    assert [c.method for c in leads.calls] == ["get_lead", "get_lead_notes"]
+    (line,) = [x for x in json_capture() if x["message"] == "note_not_on_first_read"]
+    assert line["reread"] is False
+
+
+async def test_a_reread_that_fails_is_backend_unavailable(
+    deps, leads, operational, monkeypatch
+):
+    """The re-read maps its failure like the first read does."""
+    times = _notes_empty_first(leads, monkeypatch)
+    real = leads.get_lead_notes
+
+    async def _second_fails(scope, lead_id, *, deadline=None):
+        notes = await real(scope, lead_id, deadline=deadline)
+        if len(times) == 2:
+            raise ExternalCallError("tool.get_lead_notes", RuntimeError())
+        return notes
+
+    monkeypatch.setattr(leads, "get_lead_notes", _second_fails)
+
+    with pytest.raises(BackendUnavailableError):
+        await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+    assert operational.store == {}
+
+
+async def test_a_found_note_is_never_reread(deps, leads, operational, json_capture):
+    """The happy path reads the notes once and logs no miss."""
+    await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+    assert [c.method for c in leads.calls] == ["get_lead", "get_lead_notes"]
+    assert not [x for x in json_capture() if x["message"] == "note_not_on_first_read"]
+
+
 # --- vague and scoring run concurrently (register item 14) ------------------
 
 
