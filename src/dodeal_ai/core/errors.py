@@ -92,6 +92,13 @@ class BackendUnavailableError(DodealError):
         super().__init__("backend_unavailable", 503)
 
 
+class BackendRejectedError(DodealError):
+    """The CRM refused a read with a 4xx we cannot act on (register item 89)."""
+
+    def __init__(self) -> None:
+        super().__init__("backend_rejected", 503)
+
+
 class ModelUnavailableError(DodealError):
     def __init__(self) -> None:
         super().__init__("model_unavailable", 503)

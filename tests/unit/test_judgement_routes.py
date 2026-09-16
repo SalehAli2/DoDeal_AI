@@ -26,6 +26,7 @@ from dodeal_ai.core.llm import (
 from dodeal_ai.core.logging_config import JsonFormatter
 from dodeal_ai.core.resilience import ExternalCallError
 from dodeal_ai.main import app
+from dodeal_ai.tools.errors import BackendNotFound, BackendRejected
 from dodeal_ai.tools.leads import get_leads_client
 from dodeal_ai.units.structured_intelligence import state
 from dodeal_ai.units.structured_intelligence.classify import (
@@ -336,16 +337,31 @@ def test_validation_failure_logs_types_not_values(client, json_log):
 # --- the pipeline's stop points --------------------------------------------
 
 
-def test_missing_lead_is_backend_unavailable_today(client, leads):
-    # H2: the watchdog collapses a backend 404 into ExternalCallError, which is
-    # indistinguishable from a 500 or a timeout. Reporting that as
-    # lead_not_found would tell the CRM a lead is missing when the backend is
-    # merely down, so it is 503 until typed backend errors land at step 4.
+def test_a_backend_outage_on_the_lead_is_backend_unavailable(client, leads):
+    """A lead read that outlived its retry is 503 backend_unavailable, never 404."""
     leads.raise_on["get_lead"] = ExternalCallError("tool.get_lead", RuntimeError())
     r = client.post(JUDGE, json=_body(), headers=_headers())
 
     assert r.status_code == 503
     assert r.json()["reason"] == "backend_unavailable"
+
+
+def test_a_missing_lead_is_404_lead_not_found(client, leads):
+    """Register item 89: the lead's own 404 reaches the CRM as lead_not_found."""
+    leads.raise_on["get_lead"] = BackendNotFound("tool.get_lead", 404)
+    r = client.post(JUDGE, json=_body(), headers=_headers())
+
+    assert r.status_code == 404
+    assert r.json()["reason"] == "lead_not_found"
+
+
+def test_a_rejected_read_is_503_backend_rejected(client, leads):
+    """Any other 4xx from the CRM is 503 backend_rejected."""
+    leads.raise_on["get_lead_notes"] = BackendRejected("tool.get_lead_notes", 400)
+    r = client.post(JUDGE, json=_body(), headers=_headers())
+
+    assert r.status_code == 503
+    assert r.json()["reason"] == "backend_rejected"
 
 
 def test_backend_failure_leaks_no_internal_detail(client, leads):

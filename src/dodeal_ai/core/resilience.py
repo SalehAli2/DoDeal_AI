@@ -32,6 +32,10 @@ from dodeal_ai.core.log_safety import safe_error_fields
 
 _logger = logging.getLogger("dodeal_ai.resilience")
 
+# A caller's retry rule: the seconds to wait before the one retry, or None to
+# fail closed on this failure with no retry (register item 89).
+type RetryDelay = Callable[[Exception], float | None]
+
 
 class ExternalCallError(Exception):
     """An external call failed after its timeout and (optional) single retry.
@@ -56,6 +60,8 @@ async def call_with_watchdog[T](
     label: str,
     timeout: float | None = None,
     retry: bool | None = None,
+    retry_delay: RetryDelay | None = None,
+    deadline: float | None = None,
 ) -> T:
     """Run `operation()` under a timeout, retrying once on failure/timeout.
 
@@ -64,6 +70,10 @@ async def call_with_watchdog[T](
       the retry — a coroutine object can only be awaited once.
     - label: short name for logs/errors (e.g. "llm.generate", "tool.get_lead").
     - timeout / retry: override config when given; else read from settings.
+    - retry_delay: None retries any failure at once. A rule returns the wait
+      before the retry, or None to fail closed on that failure.
+    - deadline: event-loop time (asyncio.timeout's when()). A retry whose wait
+      would end at or past it is not taken.
 
     Raises ExternalCallError if the operation fails after its allowed attempts.
     """
@@ -91,7 +101,22 @@ async def call_with_watchdog[T](
                     **safe_error_fields(exc),
                 },
             )
-            # loop continues to the retry if attempts remain
+            if attempt == attempts:
+                break
+            delay = 0.0 if retry_delay is None else retry_delay(exc)
+            if delay is None:
+                break
+            if (
+                deadline is not None
+                and asyncio.get_running_loop().time() + delay >= deadline
+            ):
+                _logger.warning(
+                    "external_call_retry_skipped",
+                    extra={"label": label, "reason_code": "deadline"},
+                )
+                break
+            if delay > 0:
+                await asyncio.sleep(delay)
 
     # All attempts exhausted -> fail closed.
     raise ExternalCallError(label, last_exc)  # type: ignore[arg-type]
@@ -123,7 +148,7 @@ def _first_exception(tasks: Sequence[asyncio.Task[Any]]) -> BaseException | None
     return None
 
 
-async def _cancel_and_drain(tasks: Sequence[asyncio.Task[Any]]) -> None:
+async def _cancel_and_drain(tasks: Sequence[asyncio.Future[Any]]) -> None:
     """Cancel every unfinished task and WAIT for each one to actually stop.
 
     The await is the point. `task.cancel()` only schedules a CancelledError
@@ -184,8 +209,8 @@ async def gather_or_cancel(*coros: Awaitable[Any]) -> tuple[Any, ...]:
     On success the results come back in ARGUMENT order, exactly as gather's do,
     so this is a drop-in replacement at a call site that unpacks them.
 
-    Generic in the two-argument form because that is what both callers need --
-    vague + score, and the lead + notes fetches (register item 9).
+    Generic in the two-argument form because that is what its caller needs --
+    vague + score. The lead + notes fetches use `gather_first_wins` below.
     The variadic overload keeps a third caller from being a signature change,
     at the cost of `Any` results it will have to narrow itself.
     """
@@ -203,3 +228,26 @@ async def gather_or_cancel(*coros: Awaitable[Any]) -> tuple[Any, ...]:
         return tuple(task.result() for task in tasks)
     finally:
         await _cancel_and_drain(tasks)
+
+
+async def gather_first_wins[T1, T2](
+    first: Awaitable[T1], second: Awaitable[T2]
+) -> tuple[T1, T2]:
+    """Run both at once; whenever `first` fails, ITS error is the one raised.
+
+    Register item 89: the lead's error wins over the notes' even when the notes
+    failed first, so a missing lead is 404 and not the notes' 503. A failure of
+    `first` cancels `second`; a failure of `second` waits for `first`.
+    """
+    tasks: list[asyncio.Future[Any]] = [
+        asyncio.ensure_future(first),
+        asyncio.ensure_future(second),
+    ]
+    try:
+        return await tasks[0], await tasks[1]
+    finally:
+        await _cancel_and_drain(tasks)
+        # A second failure nobody raised is still retrieved, or asyncio logs it.
+        for task in tasks:
+            if task.done() and not task.cancelled():
+                task.exception()

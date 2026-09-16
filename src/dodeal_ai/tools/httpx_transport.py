@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import httpx
 
+from dodeal_ai.tools.errors import BackendStatusError, retry_after_seconds
+
 
 class HttpxTransport:
     def __init__(self, timeout: float = 10.0):
@@ -17,5 +19,13 @@ class HttpxTransport:
     async def get_json(self, url: str, headers: dict[str, str]) -> object:
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             response = await client.get(url, headers=headers)
-            response.raise_for_status()
+            if not response.is_success:
+                # The status and Retry-After only: the body is the CRM's and may
+                # quote the request (register item 89).
+                raise BackendStatusError(
+                    response.status_code,
+                    retry_after=retry_after_seconds(
+                        response.headers.get("Retry-After")
+                    ),
+                )
             return response.json()

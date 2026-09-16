@@ -10,9 +10,10 @@ judging the same text differently.
 The order is not incidental; each step is placed where it is because of what
 the step after it costs:
 
-  1. fetch the lead                      404 lead_not_found     (see H2 below)
+  1. fetch the lead                      404 lead_not_found
   2. fetch page one of its notes, match  404 note_not_found
-     (1 and 2 start together, register item 9; the lead's error wins)
+     (1 and 2 start together, register item 9; the lead's error always
+      wins, register item 89)
      (the direct route skips 1 and 2: the CRM sent the note, and no
       LeadsClient call is made at all)
   3. too thin, or too long?              -> suppressed, STOP. No reservation,
@@ -106,18 +107,31 @@ from dodeal_ai.core.config import Settings
 from dodeal_ai.core.context import TenantScope
 from dodeal_ai.core.cost.limiter import token_preflight
 from dodeal_ai.core.errors import (
+    BackendRejectedError,
     BackendUnavailableError,
+    DodealError,
     DuplicateRequestError,
     IdempotencyUnavailableResponse,
     JudgementDeadlineExceeded,
+    LeadNotFoundError,
     NoteNotFoundError,
 )
 from dodeal_ai.core.inflight import current_inflight
 from dodeal_ai.core.llm import LLMClient, LLMResponse
-from dodeal_ai.core.resilience import ExternalCallError, gather_or_cancel
+from dodeal_ai.core.resilience import (
+    ExternalCallError,
+    gather_first_wins,
+    gather_or_cancel,
+)
 from dodeal_ai.schemas.lead import Lead, LeadNote
+from dodeal_ai.tools.errors import (
+    BackendForbidden,
+    BackendNotFound,
+    BackendRejected,
+    BackendUnauthorized,
+)
 from dodeal_ai.tools.keys import BackendKeyError
-from dodeal_ai.tools.leads import LeadsClient
+from dodeal_ai.tools.leads import GET_LEAD_LABEL, LeadsClient
 from dodeal_ai.units.structured_intelligence import state
 from dodeal_ai.units.structured_intelligence.classify import (
     CLASSIFY_LABEL,
@@ -357,7 +371,11 @@ def _length_gate(
 
 
 async def _fetch_note(
-    scope: TenantScope, request: JudgementRequest, deps: JudgementDeps
+    scope: TenantScope,
+    request: JudgementRequest,
+    deps: JudgementDeps,
+    *,
+    deadline: float | None,
 ) -> tuple[Lead, LeadNote]:
     """Fetch the lead and page one of its notes together, then find the note.
 
@@ -376,46 +394,59 @@ async def _fetch_note(
     note" would judge whatever arrived most recently, which on a busy lead is
     not the note the caller asked about.
 
-    H2 CAVEAT: the watchdog collapses every backend failure into
-    ExternalCallError, so a genuine 404 for a missing lead is indistinguishable
-    here from a 500 or a timeout, and both become 503 backend_unavailable. That
-    is why LeadNotFoundError is not raised from this function today -- inferring
-    "not found" from ExternalCallError would report a backend outage to the CRM
-    as a missing lead. Typed backend errors are step 4 (audit H2); when they
-    land, the 404 branch goes here and nothing else moves.
+    TYPED BACKEND ERRORS (register item 89, audit H2). The lead's 404 is 404
+    lead_not_found; any other 4xx, the notes' 404 included, is 503
+    backend_rejected; 401, 403, a missing key and a failure that outlived its
+    retry are 503 backend_unavailable. `deadline` is the loop time the
+    judgement ends at, so no retry is scheduled past it.
     """
     # Only judge_note reaches this function, and only the fetch route reaches
     # judge_note -- so a None client here would mean the direct entry point had
     # grown a fetch, which is the one thing this route may not do.
     assert deps.leads is not None
     try:
-        # Register item 9: both reads start together. The lead goes first, so it
-        # is the error reported when both have failed, and a failure of either
-        # cancels the other rather than leaving a backend call running.
-        lead, notes = await gather_or_cancel(
-            deps.leads.get_lead(scope, request.lead_id),
-            deps.leads.get_lead_notes(scope, request.lead_id),
+        # Register item 9: both reads start together. The lead's error is the
+        # one raised whenever the lead fails, even if the notes failed first.
+        lead, notes = await gather_first_wins(
+            deps.leads.get_lead(scope, request.lead_id, deadline=deadline),
+            deps.leads.get_lead_notes(scope, request.lead_id, deadline=deadline),
         )
-    except (ExternalCallError, BackendKeyError) as exc:
-        # The real reason is already in the log: the watchdog logged the failure
-        # type, and BackendKeyError logged its fixed reason code. Nothing about
-        # either is repeated to the caller.
-        _logger.warning(
-            "judgement_backend_unavailable",
-            extra={
-                "reason_code": "backend_unavailable",
-                "tenant": scope.tenant,
-                "request_id": scope.request_id,
-                "error_type": type(exc).__name__,
-            },
-        )
-        raise BackendUnavailableError() from None
+    except BackendNotFound as exc:
+        if exc.label == GET_LEAD_LABEL:
+            raise _backend_failure(scope, exc, LeadNotFoundError()) from None
+        raise _backend_failure(scope, exc, BackendRejectedError()) from None
+    except BackendRejected as exc:
+        raise _backend_failure(scope, exc, BackendRejectedError()) from None
+    except (
+        ExternalCallError,
+        BackendKeyError,
+        BackendUnauthorized,
+        BackendForbidden,
+    ) as exc:
+        raise _backend_failure(scope, exc, BackendUnavailableError()) from None
 
     for note in notes:
         if note.id == request.note_id:
             return lead, note
 
     raise NoteNotFoundError()
+
+
+def _backend_failure(
+    scope: TenantScope, exc: Exception, error: DodealError
+) -> DodealError:
+    """Log the fetch that failed and hand back the error to raise. The error
+    TYPE only: the watchdog and the tool layer already logged the rest."""
+    _logger.warning(
+        f"judgement_{error.reason_code}",
+        extra={
+            "reason_code": error.reason_code,
+            "tenant": scope.tenant,
+            "request_id": scope.request_id,
+            "error_type": type(exc).__name__,
+        },
+    )
+    return error
 
 
 async def judge_note(
@@ -456,8 +487,8 @@ async def judge_note(
     started = time.monotonic()
     # The deadline starts with the clock, so the two backend reads spend it too.
     try:
-        async with asyncio.timeout(deps.settings.judgement_deadline_seconds):
-            lead, note = await _fetch_note(scope, request, deps)
+        async with asyncio.timeout(deps.settings.judgement_deadline_seconds) as budget:
+            lead, note = await _fetch_note(scope, request, deps, deadline=budget.when())
             return await _judge(
                 scope,
                 request,

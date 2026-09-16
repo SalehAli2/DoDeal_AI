@@ -33,10 +33,12 @@ from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.context import RequestContext
 from dodeal_ai.core.cost import limiter
 from dodeal_ai.core.errors import (
+    BackendRejectedError,
     BackendUnavailableError,
     DuplicateRequestError,
     IdempotencyUnavailableResponse,
     JudgementDeadlineExceeded,
+    LeadNotFoundError,
     MalformedOutputError,
     ModelUnavailableError,
     NoteNotFoundError,
@@ -52,6 +54,12 @@ from dodeal_ai.core.llm.profiles import (
 from dodeal_ai.core.logging_config import JsonFormatter
 from dodeal_ai.core.prompting import AssembledPrompt, build_prompt
 from dodeal_ai.core.resilience import ExternalCallError
+from dodeal_ai.tools.errors import (
+    BackendForbidden,
+    BackendNotFound,
+    BackendRejected,
+    BackendUnauthorized,
+)
 from dodeal_ai.tools.keys import BackendKeyError
 from dodeal_ai.units.structured_intelligence import state
 from dodeal_ai.units.structured_intelligence.classify import (
@@ -507,6 +515,96 @@ async def test_a_lead_failure_cancels_the_notes_fetch_in_flight(
         )
 
     assert cancelled == ["notes"]
+
+
+# --- typed backend errors (register item 89) ---------------------------------
+
+
+async def test_a_lead_404_is_lead_not_found(deps, leads, operational, json_capture):
+    """The lead's 404 is 404 lead_not_found, and nothing is reserved."""
+    leads.raise_on["get_lead"] = BackendNotFound("tool.get_lead", 404)
+    with pytest.raises(LeadNotFoundError):
+        await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+    assert operational.store == {}
+    line = next(x for x in json_capture() if x["message"] == "judgement_lead_not_found")
+    assert line["error_type"] == "BackendNotFound"
+
+
+async def test_a_notes_404_is_backend_rejected(deps, leads, operational):
+    """Only the LEAD's 404 means a missing lead; the notes' 404 is backend_rejected."""
+    leads.raise_on["get_lead_notes"] = BackendNotFound("tool.get_lead_notes", 404)
+    with pytest.raises(BackendRejectedError):
+        await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+
+
+@pytest.mark.parametrize("method", ["get_lead", "get_lead_notes"])
+async def test_another_4xx_is_backend_rejected(deps, leads, operational, method):
+    """A 400-class refusal on either read is 503 backend_rejected."""
+    leads.raise_on[method] = BackendRejected(f"tool.{method}", 422)
+    with pytest.raises(BackendRejectedError):
+        await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [BackendUnauthorized("tool.get_lead", 401), BackendForbidden("tool.get_lead", 403)],
+)
+async def test_a_refused_key_is_backend_unavailable(deps, leads, operational, error):
+    """401 and 403 are ours to fix, so the caller sees backend_unavailable."""
+    leads.raise_on["get_lead"] = error
+    with pytest.raises(BackendUnavailableError):
+        await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+
+
+async def test_the_lead_error_wins_even_when_the_notes_failed_first(
+    deps, leads, operational, monkeypatch
+):
+    """A notes failure that lands first does not hide the lead's later 404."""
+    notes_failed = asyncio.Event()
+
+    async def _late_missing_lead(*args, **kwargs):
+        await notes_failed.wait()
+        raise BackendNotFound("tool.get_lead", 404)
+
+    async def _notes_fail_first(*args, **kwargs):
+        notes_failed.set()
+        raise ExternalCallError("tool.get_lead_notes", RuntimeError())
+
+    monkeypatch.setattr(leads, "get_lead", _late_missing_lead)
+    monkeypatch.setattr(leads, "get_lead_notes", _notes_fail_first)
+
+    with pytest.raises(LeadNotFoundError):
+        await asyncio.wait_for(
+            judge_note(_scope(), _request(), resubmission=False, deps=deps),
+            SAFETY_SECONDS,
+        )
+
+
+async def test_both_reads_are_handed_the_judgement_deadline(
+    deps, leads, operational, monkeypatch
+):
+    """The loop-time deadline reaches both reads, deadline_seconds from the start."""
+    seen: dict[str, float] = {}
+    real_lead, real_notes = leads.get_lead, leads.get_lead_notes
+
+    async def _lead(scope, lead_id, *, deadline):
+        seen["lead"] = deadline
+        return await real_lead(scope, lead_id)
+
+    async def _notes(scope, lead_id, *, deadline):
+        seen["notes"] = deadline
+        return await real_notes(scope, lead_id)
+
+    monkeypatch.setattr(leads, "get_lead", _lead)
+    monkeypatch.setattr(leads, "get_lead_notes", _notes)
+    loop = asyncio.get_running_loop()
+    before = loop.time()
+
+    await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+
+    budget = deps.settings.judgement_deadline_seconds
+    assert seen["lead"] == seen["notes"]
+    assert before + budget <= seen["lead"] <= loop.time() + budget
 
 
 # --- vague and scoring run concurrently (register item 14) ------------------

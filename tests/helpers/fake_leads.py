@@ -9,11 +9,8 @@ TenantScope, so mypy checks the substitution here (tests/helpers is in the mypy
 scope; tests/unit is not).
 
 IT FAILS THE WAY THE REAL CLIENT FAILS. `raise_on` maps a method name to the
-exception it should raise, and the exception a test reaches for is
-ExternalCallError -- because that is what LeadsClient actually raises for a
-missing lead today. The watchdog collapses 404, 500 and timeout into one type
-(audit H2, step 4), so a fake that raised a tidy "NotFound" would let the
-pipeline be written against a distinction the real client cannot make.
+exception it should raise: ExternalCallError for a failure that outlived its
+retry, or one of the typed 4xx errors in tools/errors.py (register item 89).
 
 The fake DOES record the scope it was called with, so a test can prove the
 tenant reaching the tool layer is the one the gates verified.
@@ -77,15 +74,21 @@ class FakeLeadsClient:
         if failure is not None:
             raise failure
 
-    async def get_leads(self, scope: TenantScope) -> list[Lead]:
+    async def get_leads(
+        self, scope: TenantScope, *, deadline: float | None = None
+    ) -> list[Lead]:
         self._record("get_leads", scope, None)
         return list(self.leads.values())
 
-    async def get_lead(self, scope: TenantScope, lead_id: int) -> Lead:
+    async def get_lead(
+        self, scope: TenantScope, lead_id: int, *, deadline: float | None = None
+    ) -> Lead:
         self._record("get_lead", scope, lead_id)
         return self.leads[lead_id]
 
-    async def get_lead_notes(self, scope: TenantScope, lead_id: int) -> list[LeadNote]:
+    async def get_lead_notes(
+        self, scope: TenantScope, lead_id: int, *, deadline: float | None = None
+    ) -> list[LeadNote]:
         self._record("get_lead_notes", scope, lead_id)
         return list(self.notes.get(lead_id, []))
 

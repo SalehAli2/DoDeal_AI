@@ -20,8 +20,8 @@ import pytest
 import dodeal_ai.tools.httpx_transport as httpx_transport_module
 from dodeal_ai.core.config import Settings
 from dodeal_ai.core.context import RequestContext, TenantScope
-from dodeal_ai.core.resilience import ExternalCallError
 from dodeal_ai.core.validation import OutputValidationError
+from dodeal_ai.tools.errors import BackendNotFound, BackendUnauthorized
 from dodeal_ai.tools.httpx_transport import HttpxTransport
 from dodeal_ai.tools.keys import SettingsKeyResolver
 from dodeal_ai.tools.leads import LeadsClient
@@ -110,9 +110,15 @@ async def test_malformed_response_fails_closed_through_real_http():
 
 async def test_wrong_dd_api_key_is_rejected_and_fails_closed(fake_backend):
     client = _client(_settings(dd_api_key="wrong-key"))
-    with pytest.raises(ExternalCallError):
+    with pytest.raises(BackendUnauthorized):
         await client.get_leads(_scope())
     assert fake_backend.last_dd_api_key == "wrong-key"
+
+
+async def test_an_unknown_lead_is_a_typed_404_through_real_http():
+    """Register item 89: the real transport carries the status to the typed error."""
+    with pytest.raises(BackendNotFound):
+        await _client(_settings()).get_lead(_scope(), 424242)
 
 
 async def test_fake_backend_returns_401_with_no_key_header_at_all(fake_backend):
