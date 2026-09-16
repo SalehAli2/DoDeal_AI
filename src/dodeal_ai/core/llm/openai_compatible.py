@@ -118,12 +118,16 @@ class OpenAICompatibleError(LLMProviderError):
         status: int | None,
         provider: str,
         trips_breaker: bool = False,
+        fallback_eligible: bool = False,
     ) -> None:
         super().__init__(reason, transient=transient)
         self.status = status
         self.provider = provider
         # True for the four failures the breaker counts (register item 20).
         self.trips_breaker = trips_breaker
+        # True when no response body came back: connect error, 429, 503 or an
+        # open breaker. The only failures a fallback may retry (register item 21).
+        self.fallback_eligible = fallback_eligible
 
 
 def _trips_breaker(exc: BaseException) -> bool:
@@ -240,6 +244,7 @@ class OpenAICompatibleClient:
                 transient=True,
                 status=None,
                 trips_breaker=True,
+                fallback_eligible=True,
             ) from None
         except httpx.HTTPError:
             # Connect/read/protocol failures. `from None` on purpose: the
@@ -255,7 +260,12 @@ class OpenAICompatibleClient:
 
     def _refused(self, name: str) -> OpenAICompatibleError:
         """What an open breaker raises: transient, no status, nothing sent."""
-        return self._error(LLMErrorReason.BREAKER_OPEN, transient=True, status=None)
+        return self._error(
+            LLMErrorReason.BREAKER_OPEN,
+            transient=True,
+            status=None,
+            fallback_eligible=True,
+        )
 
     def _timeout(self) -> httpx.Timeout:
         """The HTTP budget on connect, write and read; the pool wait is the
@@ -383,6 +393,7 @@ class OpenAICompatibleClient:
                 transient=True,
                 status=status,
                 trips_breaker=True,
+                fallback_eligible=True,
             )
         if status >= httpx.codes.INTERNAL_SERVER_ERROR:
             return self._error(
@@ -390,6 +401,7 @@ class OpenAICompatibleClient:
                 transient=True,
                 status=status,
                 trips_breaker=True,
+                fallback_eligible=status == httpx.codes.SERVICE_UNAVAILABLE,
             )
         if status == httpx.codes.BAD_REQUEST:
             return self._error(
@@ -407,6 +419,7 @@ class OpenAICompatibleClient:
         transient: bool,
         status: int | None,
         trips_breaker: bool = False,
+        fallback_eligible: bool = False,
     ) -> OpenAICompatibleError:
         """Build the exception AND log the failure in one place, so the two can
         never disagree about what a call did. Four content-free fields."""
@@ -425,6 +438,7 @@ class OpenAICompatibleClient:
             status=status,
             provider=self._provider,
             trips_breaker=trips_breaker,
+            fallback_eligible=fallback_eligible,
         )
 
 

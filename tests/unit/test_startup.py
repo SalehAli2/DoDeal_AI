@@ -31,6 +31,7 @@ from fastapi.testclient import TestClient
 
 from dodeal_ai.core import prompting
 from dodeal_ai.core.config import REDIS_POOL_HEADROOM, ConfigError, get_settings
+from dodeal_ai.core.llm import FallbackLLMClient
 from dodeal_ai.core.llm.profiles import PROFILE_UNIT_A_CLASSIFY
 from dodeal_ai.core.logging_config import JsonFormatter
 from dodeal_ai.main import (
@@ -160,6 +161,23 @@ def test_a_configured_provider_builds_one_client(monkeypatch):
     get_settings.cache_clear()
 
 
+def test_a_configured_fallback_is_built_at_startup(monkeypatch):
+    """Register item 21: lifespan builds the primary with its fallback behind it."""
+    _llm_env(
+        monkeypatch,
+        PROVIDER="groq",
+        MODEL="pinned-model",
+        API_KEY="k",
+        FALLBACK_PROVIDER="openai",
+        FALLBACK_MODEL="fallback-model",
+        FALLBACK_API_KEY="k2",
+    )
+
+    with TestClient(app):
+        assert isinstance(app.state.llm, FallbackLLMClient)
+    get_settings.cache_clear()
+
+
 def test_the_pooled_client_is_closed_on_shutdown(monkeypatch):
     """A client left open leaks sockets to a third party. Closing is asserted
     on the real object rather than a spy, so a future edit that closes the
@@ -250,8 +268,18 @@ def test_a_refused_llm_build_closes_the_crm_client(monkeypatch):
             "llm_provider_not_supported",
         ),
         ({"PROVIDER": "groq", "API_KEY": "k"}, "llm_not_configured"),
+        (
+            {
+                "PROVIDER": "groq",
+                "MODEL": "m",
+                "API_KEY": "k",
+                "FALLBACK_PROVIDER": "openai",
+                "FALLBACK_MODEL": "m",
+            },
+            "llm_fallback_api_key_missing",
+        ),
     ],
-    ids=["no-key", "no-adapter", "no-model"],
+    ids=["no-key", "no-adapter", "no-model", "fallback-no-key"],
 )
 def test_a_configured_but_broken_provider_refuses_to_start(monkeypatch, env, fragment):
     """Somebody MEANT to configure this and got it wrong. That is not a state to

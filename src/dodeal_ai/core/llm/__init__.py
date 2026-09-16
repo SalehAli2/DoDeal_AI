@@ -16,6 +16,7 @@ from dodeal_ai.core.llm.client import (
     LLMProviderError,
     LLMResponse,
 )
+from dodeal_ai.core.llm.fallback import FallbackLLMClient
 from dodeal_ai.core.llm.openai_compatible import (
     BASE_URLS,
     OpenAICompatibleClient,
@@ -23,6 +24,7 @@ from dodeal_ai.core.llm.openai_compatible import (
 )
 
 __all__ = [
+    "FallbackLLMClient",
     "FinishReason",
     "LLMClient",
     "LLMConfigurationError",
@@ -55,13 +57,32 @@ def build_llm_client(settings: Settings, http: httpx.AsyncClient) -> LLMClient:
         # The same failure, with the same fixed message, that get_llm_client
         # reports: the seam was asked for a model without being told which one.
         raise LLMConfigurationError()
+    primary = _build_one(settings, http, prefix="llm")
+    fallback_settings = _fallback_settings(settings)
+    if fallback_settings is None:
+        return primary
+    if not fallback_settings.llm_model:
+        raise ConfigError("llm_fallback_not_configured")
+    # Validated exactly like the primary (register item 21), on its own settings.
+    return FallbackLLMClient(
+        primary, _build_one(fallback_settings, http, prefix="llm_fallback")
+    )
+
+
+def _build_one(
+    settings: Settings, http: httpx.AsyncClient, *, prefix: str
+) -> OpenAICompatibleClient:
+    """One provider client from `settings`'s llm_* fields, or a ConfigError
+    whose code starts with `prefix` and names the provider, never a value."""
+    provider = settings.llm_provider
+    assert provider is not None  # both callers checked
     if provider not in BASE_URLS:
         # anthropic and gemini parse but have no adapter yet (gemini is 76.3).
         # Named rather than silently unsupported: a deployment that set this on
         # purpose deserves to be told which half is missing.
-        raise ConfigError(f"llm_provider_not_supported:{provider.value}")
+        raise ConfigError(f"{prefix}_provider_not_supported:{provider.value}")
     if settings.llm_api_key is None:
-        raise ConfigError(f"llm_api_key_missing:{provider.value}")
+        raise ConfigError(f"{prefix}_api_key_missing:{provider.value}")
     client = OpenAICompatibleClient(
         settings.llm_base_url or BASE_URLS[provider],
         settings.llm_model,
@@ -77,6 +98,33 @@ def build_llm_client(settings: Settings, http: httpx.AsyncClient) -> LLMClient:
     for name in settings.llm_profiles:
         client.validate_profile(name)
     return client
+
+
+def _fallback_settings(settings: Settings) -> Settings | None:
+    """The settings the fallback client is built from, or None for no fallback.
+
+    Its four fields stand in for the primary's, and the profile table is left
+    out: it names the primary's models. Any fallback field set without a
+    provider refuses to start rather than quietly leave no fallback.
+    """
+    provider = settings.llm_fallback_provider
+    if provider is None:
+        if (
+            settings.llm_fallback_model
+            or settings.llm_fallback_api_key is not None
+            or settings.llm_fallback_base_url is not None
+        ):
+            raise ConfigError("llm_fallback_provider_missing")
+        return None
+    return settings.model_copy(
+        update={
+            "llm_provider": provider,
+            "llm_model": settings.llm_fallback_model,
+            "llm_api_key": settings.llm_fallback_api_key,
+            "llm_base_url": settings.llm_fallback_base_url,
+            "llm_profiles": {},
+        }
+    )
 
 
 def get_llm_client(request: Request) -> LLMClient:

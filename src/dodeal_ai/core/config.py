@@ -177,6 +177,24 @@ class Settings(BaseSettings):
     # too low refuses a brief queue, too high hides a full pool inside the call.
     llm_pool_acquire_timeout_seconds: float = Field(default=1.0, gt=0)
 
+    # --- Fallback provider (register item 21), all optional -----------------
+    # The provider tried once when the primary gave no response body (connect
+    # error, 429, 503, breaker open). None = no fallback, the safe default; a
+    # half-configured fallback refuses to start rather than silently not exist.
+    llm_fallback_provider: LLMProvider | None = None
+    # The fallback's exact pinned model id, used for every task: the profile
+    # table is the primary's. Empty with a provider set refuses to start, as the
+    # primary's does; a wrong id costs a failed call only when the primary fails.
+    llm_fallback_model: str = ""
+    # The fallback provider's key. SecretStr, never logged; read only by the
+    # fallback client's header builder. Missing with a provider set refuses to
+    # start rather than send unauthenticated calls at the worst moment.
+    llm_fallback_api_key: SecretStr | None = None
+    # Proxy override for the fallback's base URL. None uses that provider's
+    # constant. A wrong value sends fallback prompts to the wrong host, so it is
+    # never logged and never carried on an exception, as for the primary.
+    llm_fallback_base_url: str | None = None
+
     # Redis connections. Two named connections so code never guesses which
     # instance it is using: a queue connection and a cost/quota connection.
     # Local Redis by default; real hosts come from DevOps later. Different
