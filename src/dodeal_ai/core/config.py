@@ -287,6 +287,12 @@ class Settings(BaseSettings):
     # "*" lets any client forge its address and scheme in every log line.
     forwarded_allow_ips: str = Field(default="127.0.0.1", min_length=1)
 
+    # --- Metrics (core/metrics.py, register item 22) ------------------------
+    # Whether GET /metrics answers. Off by default: the page is outside the gates,
+    # so it must be switched on only where the port is not public; on anywhere
+    # public, it tells anyone the service's traffic and failure rates.
+    metrics_enabled: bool = False
+
     # --- Logging (core/logging_config.py) ------------------------------
     # Effective level for the "dodeal_ai" logger tree (audit, error, cost,
     # resilience, validation, ...). Third-party libraries are unaffected --

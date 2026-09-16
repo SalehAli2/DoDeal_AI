@@ -64,6 +64,7 @@ import logging
 
 import redis
 
+from dodeal_ai.core import metrics
 from dodeal_ai.core.breaker import breaker_field, operational_breaker
 from dodeal_ai.core.redis import get_operational_client
 
@@ -147,6 +148,7 @@ def _bypass(code: str, tenant: str, request_id: str, exc: BaseException) -> None
     """One WARNING per bypassed call. Tenant and request_id only -- both are
     identifiers we already log at the gates, neither is note-derived -- plus
     `breaker: open` when the breaker refused rather than the store failing."""
+    metrics.BYPASSES.labels(event=code).inc()
     _logger.warning(
         code,
         extra={

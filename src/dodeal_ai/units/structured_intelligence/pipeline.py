@@ -108,6 +108,7 @@ from datetime import UTC, datetime
 
 from pydantic import ValidationError
 
+from dodeal_ai.core import metrics
 from dodeal_ai.core.config import Settings
 from dodeal_ai.core.context import TenantScope
 from dodeal_ai.core.cost.limiter import token_preflight
@@ -479,11 +480,23 @@ def _backend_errors(scope: TenantScope) -> Iterator[None]:
         raise _backend_failure(scope, exc, BackendUnavailableError()) from None
 
 
+# backend_errors_total{kind} (register item 22): one word per failure class.
+_BACKEND_ERROR_KINDS: dict[type[Exception], str] = {
+    BackendNotFound: "not_found",
+    BackendRejected: "rejected",
+    BackendUnauthorized: "unauthorized",
+    BackendForbidden: "forbidden",
+    BackendKeyError: "key_missing",
+    ExternalCallError: "unavailable",
+}
+
+
 def _backend_failure(
     scope: TenantScope, exc: Exception, error: DodealError
 ) -> DodealError:
     """Log the fetch that failed and hand back the error to raise. The error
     TYPE only: the watchdog and the tool layer already logged the rest."""
+    metrics.BACKEND_ERRORS.labels(kind=_BACKEND_ERROR_KINDS[type(exc)]).inc()
     _logger.warning(
         f"judgement_{error.reason_code}",
         extra={
@@ -532,6 +545,23 @@ async def judge_note(
     # elapsed_ms that began after them would be silent about the slowest thing
     # the fetch route does. time.monotonic, never a wall clock -- see _Timings.
     started = time.monotonic()
+    return await _metered(
+        started,
+        _judge_fetched(
+            scope, request, resubmission=resubmission, deps=deps, started=started
+        ),
+    )
+
+
+async def _judge_fetched(
+    scope: TenantScope,
+    request: JudgementRequest,
+    *,
+    resubmission: bool,
+    deps: JudgementDeps,
+    started: float,
+) -> Judgement:
+    """judge_note's body: the deadline, the fetch, then the shared steps."""
     # The deadline starts with the clock, so the two backend reads spend it too.
     try:
         async with asyncio.timeout(deps.settings.judgement_deadline_seconds) as budget:
@@ -588,6 +618,23 @@ async def judge_note_direct(
     # do. Comparing them is how "is the CRM's read surface the slow part?" gets
     # answered when it comes back.
     started = time.monotonic()
+    return await _metered(
+        started,
+        _judge_sent(
+            scope, request, resubmission=resubmission, deps=deps, started=started
+        ),
+    )
+
+
+async def _judge_sent(
+    scope: TenantScope,
+    request: DirectJudgementRequest,
+    *,
+    resubmission: bool,
+    deps: JudgementDeps,
+    started: float,
+) -> Judgement:
+    """judge_note_direct's body: the deadline, the note as sent, the shared steps."""
     # The same deadline as the fetch route, from the same point, so the two
     # routes' 503s mean the same thing.
     try:
@@ -621,6 +668,34 @@ async def judge_note_direct(
             )
     except TimeoutError:
         raise _deadline_exceeded(scope, started) from None
+
+
+async def _metered(started: float, judging: Awaitable[Judgement]) -> Judgement:
+    """Count the judgement's outcome and observe its duration (register item
+    22): completed, suppressed, replayed, a reason code, cancelled or error."""
+    try:
+        judgement = await judging
+    except DodealError as exc:
+        _observe(exc.reason_code, started)
+        raise
+    except BaseException as exc:
+        _observe(
+            "cancelled" if isinstance(exc, asyncio.CancelledError) else "error",
+            started,
+        )
+        raise
+    if isinstance(judgement, ReplayedJudgement):
+        _observe("replayed", started)
+    else:
+        _observe(
+            "suppressed" if judgement.suppressed is not None else "completed", started
+        )
+    return judgement
+
+
+def _observe(outcome: str, started: float) -> None:
+    metrics.JUDGEMENTS.labels(outcome=outcome).inc()
+    metrics.JUDGEMENT_SECONDS.observe(time.monotonic() - started)
 
 
 def _deadline_exceeded(scope: TenantScope, started: float) -> JudgementDeadlineExceeded:

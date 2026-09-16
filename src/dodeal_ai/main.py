@@ -4,9 +4,10 @@ from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from dodeal_ai.api.routes import judgements
+from dodeal_ai.core import metrics as service_metrics
 from dodeal_ai.core.config import (
     REDIS_POOL_HEADROOM,
     ConfigError,
@@ -225,6 +226,14 @@ async def ready(request: Request):
     }
 
 
+async def metrics() -> Response:
+    """The Prometheus page (register item 22), or 404 unless
+    DODEAL_METRICS_ENABLED. No gate: it carries no tenant and no note."""
+    if not get_settings().metrics_enabled:
+        return JSONResponse(status_code=404, content={"detail": "Not Found"})
+    return Response(service_metrics.render(), media_type=service_metrics.CONTENT_TYPE)
+
+
 def create_app() -> FastAPI:
     """The service app: lifespan, three middlewares, the judgement routes,
     /health and /ready. The gate-chain probe is NOT mounted (register item 93);
@@ -257,6 +266,9 @@ def create_app() -> FastAPI:
     application.add_api_route("/health", health, methods=["GET"])
     register_error_handlers(application)
     application.add_api_route("/ready", ready, methods=["GET"])
+    application.add_api_route(
+        "/metrics", metrics, methods=["GET"], include_in_schema=False
+    )
     return application
 
 

@@ -69,6 +69,7 @@ import redis
 # namespace, so a grep for it finds every module that touches a client.
 from redis import asyncio as redis_async
 
+from dodeal_ai.core import metrics
 from dodeal_ai.core.breaker import breaker_field, cost_breaker
 from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.context import TenantScope
@@ -152,6 +153,7 @@ async def enforce_cost(tenant: str, subject: str, amount: int = 1) -> None:
         # collector can filter on tenant without parsing the message. No
         # request_id: enforce_cost is called from Gate 4 and from workers and
         # never receives one.
+        metrics.BYPASSES.labels(event="cost_cap_bypassed").inc()
         _logger.warning(
             "cost_cap_bypassed",
             extra={
@@ -279,6 +281,7 @@ async def enforce_token_cost(
     except redis.RedisError as exc:
         # Fail open and say so. The tokens were spent whether or not we counted
         # them, so an uncounted charge is a hole in the meter, not in the bill.
+        metrics.BYPASSES.labels(event="token_charge_bypassed").inc()
         _logger.warning(
             "token_charge_bypassed",
             extra={
@@ -354,6 +357,7 @@ async def token_preflight(scope: TenantScope) -> bool:
             lambda: client.mget(tenant_key, user_key)
         )
     except redis.RedisError as exc:
+        metrics.BYPASSES.labels(event="token_preflight_bypassed").inc()
         _logger.warning(
             "token_preflight_bypassed",
             extra={

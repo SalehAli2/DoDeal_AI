@@ -123,6 +123,10 @@ def _app(*, gate: asyncio.Event | None = None) -> FastAPI:
     async def ready():
         return JSONResponse({"status": "ready"})
 
+    @app.get("/metrics")
+    async def metrics():
+        return JSONResponse({"status": "scraped"})
+
     return app
 
 

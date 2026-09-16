@@ -60,6 +60,7 @@ import logging
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from dodeal_ai.core import inflight as core_inflight
+from dodeal_ai.core import metrics
 from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.errors import LoadShed, dodeal_error_response
 
@@ -68,7 +69,7 @@ _logger = logging.getLogger("dodeal_ai.inflight")
 # Cheap, always-available, and killed by an outage of their own if they are
 # shed. Matched exactly: a path is not a prefix here, so `/healthz` or
 # `/health/../judgements` is counted like anything else.
-EXEMPT_PATHS = frozenset({"/health", "/ready"})
+EXEMPT_PATHS = frozenset({"/health", "/ready", "/metrics"})
 
 
 class InflightMiddleware:
@@ -117,6 +118,7 @@ class InflightMiddleware:
             # over. "unknown" if this is somehow reached without it, exactly as
             # the getattr default did.
             request_id = scope.get("state", {}).get("request_id", "unknown")
+            metrics.LOAD_SHED.inc()
             # The count, not the cap: the cap is in config and a reader can look
             # it up, whereas how many were actually in flight when the refusals
             # started is the number that says whether the cap is wrong.

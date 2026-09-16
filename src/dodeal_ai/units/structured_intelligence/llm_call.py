@@ -55,6 +55,7 @@ from collections.abc import Callable
 
 from pydantic import BaseModel
 
+from dodeal_ai.core import metrics
 from dodeal_ai.core.config import Settings
 from dodeal_ai.core.context import TenantScope
 from dodeal_ai.core.cost.limiter import enforce_token_cost
@@ -180,6 +181,9 @@ async def complete_once(
             fields["provider_reason"] = exc.cause.reason.value
             fields["provider_transient"] = exc.cause.transient
         _logger.warning("judgement_model_unavailable", extra=fields)
+        metrics.MODEL_CALLS.labels(
+            **{"pass": metrics.pass_name(label), "outcome": "unavailable"}
+        ).inc()
         raise ModelUnavailableError() from None
 
     # No usage reported means nothing to charge and nothing to say about it: a
@@ -301,8 +305,9 @@ async def call_model[M: BaseModel](
         max_output_tokens=max_output_tokens,
     )
     try:
-        return parse_output(response, schema, label, check=check), response
+        parsed = parse_output(response, schema, label, check=check)
     except OutputValidationError:
+        _count_call(label, "malformed")
         if not reprompt:
             _logger.warning(
                 "reprompt_withheld",
@@ -316,6 +321,9 @@ async def call_model[M: BaseModel](
             "reprompt_issued",
             extra={"reason_code": "reprompt_issued", "label": label},
         )
+    else:
+        _count_call(label, "ok")
+        return parsed, response
 
     second = await complete_once(
         client,
@@ -327,9 +335,19 @@ async def call_model[M: BaseModel](
         max_output_tokens=max_output_tokens,
     )
     try:
-        return parse_output(second, schema, label, check=check), second
+        parsed = parse_output(second, schema, label, check=check)
     except OutputValidationError:
+        _count_call(label, "malformed")
         # from None: the OutputValidationError is ours and safe, but chaining it
         # would print a second exception line wherever a traceback is formatted,
         # and the rule in this repo is that our error paths stay unchained.
         raise MalformedOutputError() from None
+    _count_call(label, "ok")
+    return parsed, second
+
+
+def _count_call(label: str, outcome: str) -> None:
+    """model_calls_total{pass, outcome} for one answered call (register item 22)."""
+    metrics.MODEL_CALLS.labels(
+        **{"pass": metrics.pass_name(label), "outcome": outcome}
+    ).inc()

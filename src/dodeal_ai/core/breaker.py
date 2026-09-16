@@ -52,6 +52,7 @@ from typing import Literal
 import redis
 
 from dodeal_ai.core.config import get_settings
+from dodeal_ai.core.metrics import track_breaker
 from dodeal_ai.core.redis import PoolExhausted
 
 _logger = logging.getLogger("dodeal_ai.breaker")
@@ -117,6 +118,8 @@ class CircuitBreaker:
         # When the current probe was admitted. Set on every entry to HALF_OPEN
         # and on every takeover, so HALF_OPEN is never without one.
         self._probe_started = 0.0
+        # breaker_state{breaker} reads this breaker on every scrape (item 22).
+        track_breaker(self)
 
     @property
     def name(self) -> str:
