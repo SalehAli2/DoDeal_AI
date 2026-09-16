@@ -109,7 +109,13 @@ async def lifespan(app: FastAPI):
         # adapter, a profile that fails the sweep -- is a genuine ConfigError
         # and refuses to start. Somebody meant to configure this and got it
         # wrong; that is not a state to serve traffic in (item 84).
-        app.state.llm = build_llm_client(settings, app.state.http)
+        try:
+            app.state.llm = build_llm_client(settings, app.state.http)
+        except BaseException:
+            # A refused startup never reaches the aclose() after `yield`, so the
+            # pool built above is closed here; bare `raise` keeps the original.
+            await app.state.http.aclose()
+            raise
     yield
     # Before the pools, because clearing a dict cannot fail: a cache that
     # outlived its app would serve this deployment's templates to the next one.

@@ -25,6 +25,7 @@ import io
 import json
 import logging
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -223,6 +224,27 @@ def test_a_bad_profile_refuses_to_start(monkeypatch):
     assert "llm_profile_provider_mismatch" in str(caught.value)
     # The provider is named; no value from the profile is interpolated.
     assert "claude-something" not in str(caught.value)
+    get_settings.cache_clear()
+
+
+def test_a_refused_llm_build_closes_the_pooled_client(monkeypatch):
+    """A refused build re-raises the same error and closes the pool it was handed."""
+    _llm_env(monkeypatch, PROVIDER="groq", MODEL="pinned-model", API_KEY="k")
+    refusal = ConfigError("llm_api_key_missing")
+    handed: list[httpx.AsyncClient] = []
+
+    def refuse(settings, http):
+        handed.append(http)
+        raise refusal
+
+    monkeypatch.setattr("dodeal_ai.main.build_llm_client", refuse)
+
+    with pytest.raises(ConfigError) as caught, TestClient(app):
+        pass
+
+    assert caught.value is refusal
+    assert len(handed) == 1
+    assert handed[0].is_closed
     get_settings.cache_clear()
 
 
