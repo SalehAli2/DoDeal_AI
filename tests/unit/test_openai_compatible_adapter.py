@@ -19,6 +19,7 @@ import httpx
 import pytest
 from pydantic import SecretStr
 
+from dodeal_ai.core.breaker import BreakerState
 from dodeal_ai.core.config import (
     ConfigError,
     LLMProvider,
@@ -839,3 +840,142 @@ def test_both_supported_providers_have_a_base_url() -> None:
     """Fail closed on a provider added to the enum without a URL beside it."""
     assert set(BASE_URLS) == {LLMProvider.GROQ, LLMProvider.OPENAI}
     assert all(url.startswith("https://") for url in BASE_URLS.values())
+
+
+# --- one circuit breaker per provider client (register item 20) --------------
+
+
+class Scripted:
+    """A handler answering each request with the next scripted response or error."""
+
+    def __init__(self, *outcomes: httpx.Response | Exception) -> None:
+        self._outcomes = list(outcomes)
+        self.calls = 0
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.calls += 1
+        outcome = self._outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+
+def _breaker_settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
+    monkeypatch.setenv("DODEAL_BREAKER_FAILURE_THRESHOLD", "2")
+    return _settings(monkeypatch)
+
+
+async def _calls(settings: Settings, handler: Scripted, n: int) -> list[object]:
+    """`n` calls on ONE client, each outcome or error kept in order."""
+    results: list[object] = []
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = _client(settings, GROQ_BASE_URL, http)
+        for _ in range(n):
+            try:
+                results.append(
+                    await client.complete(PROMPT, profile=PROFILE_UNIT_A_CLASSIFY)
+                )
+            except OpenAICompatibleError as exc:
+                results.append(exc)
+        results.append(client.breaker.state)
+    return results
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        httpx.ConnectError("refused"),
+        httpx.ReadTimeout("slow"),
+        httpx.ConnectTimeout("slow connect"),
+        httpx.Response(500, json={}),
+        httpx.Response(503, json={}),
+        httpx.Response(429, json={}),
+    ],
+    ids=["connect", "read-timeout", "connect-timeout", "500", "503", "429"],
+)
+async def test_a_counted_failure_opens_the_breaker_and_it_refuses_with_no_socket(
+    monkeypatch: pytest.MonkeyPatch, failure, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Two counted failures open it; the third call is breaker_open and sends nothing."""
+    handler = Scripted(failure, failure)
+    with caplog.at_level(logging.WARNING):
+        *errors, state = await _calls(_breaker_settings(monkeypatch), handler, 3)
+
+    assert handler.calls == 2
+    assert state is BreakerState.OPEN
+    refused = errors[2]
+    assert isinstance(refused, OpenAICompatibleError)
+    assert refused.reason is LLMErrorReason.BREAKER_OPEN
+    assert refused.transient is True and refused.status is None
+    assert str(refused) == "llm_provider_error:breaker_open"
+    opened = [r for r in caplog.records if r.getMessage() == "breaker_opened"]
+    assert [r.breaker for r in opened] == ["llm.groq"]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        httpx.Response(400, json={}),
+        httpx.Response(401, json={}),
+        httpx.Response(404, json={}),
+        httpx.Response(200, text="not json"),
+        httpx.ReadError("reset"),
+        httpx.PoolTimeout("pool"),
+    ],
+    ids=["400", "401", "404", "malformed-200", "read-error", "pool"],
+)
+async def test_an_uncounted_failure_never_opens_the_breaker(
+    monkeypatch: pytest.MonkeyPatch, failure
+) -> None:
+    """4xx, a malformed 200, other transport errors and our own pool do not count."""
+    handler = Scripted(*[failure] * 4)
+    *errors, state = await _calls(_breaker_settings(monkeypatch), handler, 4)
+
+    assert handler.calls == 4
+    assert state is BreakerState.CLOSED
+    assert all(e.reason is not LLMErrorReason.BREAKER_OPEN for e in errors)
+
+
+async def test_a_success_clears_the_consecutive_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failure, success, failure: never two in a row, never open."""
+    handler = Scripted(
+        httpx.Response(503, json={}),
+        httpx.Response(200, json=_ok_body()),
+        httpx.Response(503, json={}),
+    )
+    *_, state = await _calls(_breaker_settings(monkeypatch), handler, 3)
+    assert state is BreakerState.CLOSED
+
+
+async def test_each_client_has_its_own_breaker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A second client (the fallback's, item 21) is not refused by the first's."""
+    settings = _breaker_settings(monkeypatch)
+    handler = Scripted(
+        httpx.ConnectError("x"),
+        httpx.ConnectError("x"),
+        httpx.Response(200, json=_ok_body()),
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        first = _client(settings, GROQ_BASE_URL, http)
+        second = _client(settings, OPENAI_BASE_URL, http)
+        for _ in range(2):
+            with pytest.raises(OpenAICompatibleError):
+                await first.complete(PROMPT, profile=PROFILE_UNIT_A_CLASSIFY)
+        assert first.breaker is not second.breaker
+        assert first.breaker.state is BreakerState.OPEN
+        await second.complete(PROMPT, profile=PROFILE_UNIT_A_CLASSIFY)
+        assert second.breaker.state is BreakerState.CLOSED
+
+
+async def test_the_breaker_uses_the_redis_breaker_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Threshold and window come from DODEAL_BREAKER_*, not from new settings."""
+    monkeypatch.setenv("DODEAL_BREAKER_OPEN_SECONDS", "7.5")
+    settings = _breaker_settings(monkeypatch)
+    async with httpx.AsyncClient() as http:
+        breaker = _client(settings, GROQ_BASE_URL, http).breaker
+    assert breaker._failure_threshold == 2
+    assert breaker._open_seconds == 7.5

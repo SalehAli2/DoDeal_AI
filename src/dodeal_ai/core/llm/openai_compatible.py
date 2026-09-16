@@ -21,6 +21,9 @@ WHAT THIS MODULE PROMISES, and what each promise is worth:
     provider's side even when we saw a failure. One attempt per complete(); the
     watchdog wraps this with retry=False and a test asserts the transport is
     entered exactly once on every failure path.
+  - ONE CIRCUIT BREAKER PER CLIENT (register item 20), on the Redis breaker's
+    settings. Only a connect error, a timeout, a 5xx or a 429 counts; an open
+    breaker refuses with reason breaker_open before any socket is opened.
   - Exceptions carry the HTTP STATUS and the PROVIDER NAME and nothing else.
     Never the body, never a header, never the provider's message, never the base
     URL -- which can carry a credential when it is a proxy override.
@@ -34,6 +37,7 @@ from typing import Any, Final
 import httpx
 from pydantic import SecretStr
 
+from dodeal_ai.core.breaker import CircuitBreaker
 from dodeal_ai.core.config import ConfigError, LLMProvider, Settings
 from dodeal_ai.core.llm.client import (
     FinishReason,
@@ -113,10 +117,24 @@ class OpenAICompatibleError(LLMProviderError):
         transient: bool,
         status: int | None,
         provider: str,
+        trips_breaker: bool = False,
     ) -> None:
         super().__init__(reason, transient=transient)
         self.status = status
         self.provider = provider
+        # True for the four failures the breaker counts (register item 20).
+        self.trips_breaker = trips_breaker
+
+
+def _trips_breaker(exc: BaseException) -> bool:
+    return isinstance(exc, OpenAICompatibleError) and exc.trips_breaker
+
+
+def _never_reached_provider(exc: BaseException) -> bool:
+    return (
+        isinstance(exc, OpenAICompatibleError)
+        and exc.reason is LLMErrorReason.PROVIDER_POOL_EXHAUSTED
+    )
 
 
 def provider_name_for(base_url: str) -> str:
@@ -156,6 +174,19 @@ class OpenAICompatibleClient:
         self._http = http
         self._settings = settings
         self._provider = provider_name_for(base_url)
+        self._breaker = CircuitBreaker(
+            f"llm.{self._provider}",
+            failure_threshold=settings.breaker_failure_threshold,
+            open_seconds=settings.breaker_open_seconds,
+            counts=_trips_breaker,
+            uncounted=_never_reached_provider,
+            refusal=self._refused,
+        )
+
+    @property
+    def breaker(self) -> CircuitBreaker:
+        """This client's breaker, for readiness and metrics to read."""
+        return self._breaker
 
     # --- the one method on the seam ----------------------------------------
 
@@ -173,7 +204,12 @@ class OpenAICompatibleClient:
             else max_output_tokens
         )
         payload = self._body(prompt, resolved, task_ceiling)
+        response = await self._breaker.call(lambda: self._post(payload))
+        return self._parse(response)
 
+    async def _post(self, payload: dict[str, Any]) -> httpx.Response:
+        """The one HTTP call, its failures translated. A malformed 200 is parsed
+        outside, so an answering provider never counts against its breaker."""
         try:
             response = await self._http.post(
                 f"{self._base_url}{_COMPLETIONS_PATH}",
@@ -193,7 +229,17 @@ class OpenAICompatibleClient:
             # also raises, and which the watchdog could then not tell apart from
             # its own deadline.
             raise self._error(
-                LLMErrorReason.UNAVAILABLE, transient=True, status=None
+                LLMErrorReason.UNAVAILABLE,
+                transient=True,
+                status=None,
+                trips_breaker=True,
+            ) from None
+        except httpx.ConnectError:
+            raise self._error(
+                LLMErrorReason.UNAVAILABLE,
+                transient=True,
+                status=None,
+                trips_breaker=True,
             ) from None
         except httpx.HTTPError:
             # Connect/read/protocol failures. `from None` on purpose: the
@@ -205,7 +251,11 @@ class OpenAICompatibleClient:
 
         if response.status_code != httpx.codes.OK:
             raise self._status_error(response.status_code)
-        return self._parse(response)
+        return response
+
+    def _refused(self, name: str) -> OpenAICompatibleError:
+        """What an open breaker raises: transient, no status, nothing sent."""
+        return self._error(LLMErrorReason.BREAKER_OPEN, transient=True, status=None)
 
     def _timeout(self) -> httpx.Timeout:
         """The HTTP budget on connect, write and read; the pool wait is the
@@ -329,11 +379,17 @@ class OpenAICompatibleClient:
             return self._error(LLMErrorReason.AUTH, transient=False, status=status)
         if status == httpx.codes.TOO_MANY_REQUESTS:
             return self._error(
-                LLMErrorReason.RATE_LIMITED, transient=True, status=status
+                LLMErrorReason.RATE_LIMITED,
+                transient=True,
+                status=status,
+                trips_breaker=True,
             )
         if status >= httpx.codes.INTERNAL_SERVER_ERROR:
             return self._error(
-                LLMErrorReason.UNAVAILABLE, transient=True, status=status
+                LLMErrorReason.UNAVAILABLE,
+                transient=True,
+                status=status,
+                trips_breaker=True,
             )
         if status == httpx.codes.BAD_REQUEST:
             return self._error(
@@ -345,7 +401,12 @@ class OpenAICompatibleClient:
         return self._error(LLMErrorReason.UNKNOWN, transient=False, status=status)
 
     def _error(
-        self, reason: LLMErrorReason, *, transient: bool, status: int | None
+        self,
+        reason: LLMErrorReason,
+        *,
+        transient: bool,
+        status: int | None,
+        trips_breaker: bool = False,
     ) -> OpenAICompatibleError:
         """Build the exception AND log the failure in one place, so the two can
         never disagree about what a call did. Four content-free fields."""
@@ -359,7 +420,11 @@ class OpenAICompatibleClient:
             },
         )
         return OpenAICompatibleError(
-            reason, transient=transient, status=status, provider=self._provider
+            reason,
+            transient=transient,
+            status=status,
+            provider=self._provider,
+            trips_breaker=trips_breaker,
         )
 
 
