@@ -9,9 +9,9 @@ Rules:
 - A new item is added by the lead from a piece report, never by a session.
 - Status words: PENDING (designed, step named), OPEN (an answer is owed by a named party), DECIDED (a decision recorded, not built), NOTE (recorded, no action), RETRACTED, DONE.
 
-Carrying steps, in order (master section 15): 125, then 123, then the load lane 74 carrying 104, 106 and 96.
+Carrying steps, in order (master section 15): 104, 106, 96 with 122, then the load lane 74 with 114, 119 and 120.
 
-Last updated: 15 September 2026, at `77a2bbd`, from master ed3r9.
+Last updated: 16 September 2026, at `741b17a`, from master ed3r11.
 
 ## Items 1 to 13: code, in scope now
 
@@ -147,24 +147,43 @@ Last updated: 15 September 2026, at `77a2bbd`, from master ed3r9.
 | 105 | Policy-per-caller for fail-closed workers: a worker draining a backlog pauses on a cost or token guard failure instead of failing open | Step 14 (A6), with the first worker | OPEN | |
 | 106 | A CI job for the `redis_real` lane with a Redis service container | With 74 prep | OPEN | |
 
+## Items 107 to 114: added from master ed3r11, 16 September
+
+| # | Item | Carrying step | Status | Sha |
+|---|---|---|---|---|
+| 107 | Copy-of-previous-note mark-down on the fetch route, carried as a flag in the caller data, never as the previous text. Where: `pipeline.py`, `scoring.py` | A3 | OPEN | |
+| 108 | Candidate: structured prior context (count of prior notes, days since the last, its type, whether it had a next step, whether this note repeats it), never prior text. Where: `pipeline.py`, the caller-data half | Decided at A11 | CANDIDATE | |
+| 109 | HTTP budget as a strict share of the watchdog deadline (`_HTTP_TIMEOUT_SHARE = 0.9`). Where: `core/llm/openai_compatible.py` | 76.1a | DONE | `13ffdf9` |
+| 110 | `provider_reason` and `provider_transient` on `judgement_model_unavailable`. Where: `llm_call.py` | 76.1a | DONE | `13ffdf9` |
+| 111 | `.env.example` pinned to `Settings` by a test, both directions, key names only | 76.1b | DONE | `6dcd159` |
+| 112 | Provider pool exhaustion distinguishable from a slow provider (`httpx.PoolTimeout` today reads as UNAVAILABLE). Where: `core/llm/openai_compatible.py` | A9, with 16 | OPEN | |
+| 113 | Per-file coverage floors: `core/llm/openai_compatible.py` 100, `middleware/body_limit.py` 100, `core/logging_config.py` 100, `middleware/inflight.py` 95. None for `middleware/request_id.py` or `core/prompting.py`. Where: `scripts/check_coverage_floors.py` | The next floors touch | OPEN | |
+| 114 | Assert the pooled `httpx` client's `max_inflight x 2` multiplier against the pipeline's gathered passes. Where: `main.py`, `pipeline.py` | With 74 | OPEN | |
+
 ## Items 116 to 123: from the master, 15 September
 
 | # | Item | Carrying step | Status | Sha |
 |---|---|---|---|---|
 | 116 | The three output ceilings assume a non-reasoning model and nothing in the code says so. Where: `classify.py`, `vague.py`, `scoring.py`, `core/llm/profiles.py` | Decided at A11 with the model comparison | OPEN | |
-| 117 | No `ASSUMPTIONS.md` entry records that a CRM note id is unique and never reused; the attempt cap, the resubmission fingerprint (item 33) and the six-hour attempt TTL all rest on it. Where: `ASSUMPTIONS.md` and the backend ask list | The next docs commit, and the question to the backend | OPEN | |
+| 117 | No `ASSUMPTIONS.md` entry records that a CRM note id is unique and never reused; the attempt cap, the resubmission fingerprint (item 33) and the six-hour attempt TTL all rest on it. Where: `ASSUMPTIONS.md` and the backend ask list | The next docs commit, and the question to the backend | DONE (`ASSUMPTIONS.md` §4.8; the question is Q22 in STATUS §6, still UNASKED) | `741b17a` |
 | 118 | On the direct route `lead_id` comes from the body and is never checked against the note, so a wrong `lead_id` addresses a different attempt key. Where: `pipeline.py` | A3 fix batch | OPEN | |
 | 119 | The attempt counter is read before the three model calls and incremented after, so two concurrent requests for one note both read zero and both spend; the reservation keys on text, this keys on id. Where: `state.py`, `pipeline.py` | With item 74 | OPEN | |
 | 120 | A `redis_real` test that the attempt cap follows the id and not the text: text A then text B on one id without a flush expects `attempt_cap` with the counter at 1. Where: `tests/redis_real/` | With 119 | OPEN | |
 | 121 | An `event` field on the three startup log lines, all three together or none. Where: `main.py` | After the small fixes | OPEN | |
 | 122 | A `cause` field on `breaker_probe_abandoned` (`cancelled`, `never_returned`, `pool`), a field never a fourth name. Where: `core/breaker.py` | With item 96 at load-lane prep | OPEN | |
-| 123 | The elapsed test's fake clock holds a float from zero, so any realistic base reads 19 against `_ms_since`'s truncation; hold whole milliseconds and make the shim refuse any `time` attribute but `monotonic`. Where: the test module only | Own piece, before 74 | OPEN | |
+| 123 | The elapsed test's fake clock holds a float from zero, so any realistic base reads 19 against `_ms_since`'s truncation; hold whole milliseconds and make the shim refuse any `time` attribute but `monotonic`. Where: the test module only | Own piece, before 74 | DONE | `3edbd57` |
 
 ## Items 124 and 125: from Pieces 86 and 85, 15 September
 
 | # | Item | Carrying step | Status | Sha |
 |---|---|---|---|---|
 | 124 | `main.py` lifespan: if `build_llm_client` raises, `app.state.http` is never closed; wrap the two in a try that closes and re-raises | The next piece that touches `main.py` | OPEN | |
-| 125 | `core/prompting.py` logs one WARNING `prompt_template_not_preloaded` per name on a cache miss when the cache is populated, and a test scans `src/` for template names and asserts each is in `UNIT_A_TEMPLATES`. Where: `core/prompting.py`, `tests/` | Own half piece, after 88, before 74 | OPEN | |
+| 125 | `core/prompting.py` logs one WARNING `prompt_template_not_preloaded` per name on a cache miss when the cache is populated, and a test scans `src/` for template names and asserts each is in `UNIT_A_TEMPLATES`. Where: `core/prompting.py`, `tests/` | Own half piece, after 88, before 74 | DONE | `1935d01` |
+
+## Item 126: added from master ed3r11, 16 September
+
+| # | Item | Carrying step | Status | Sha |
+|---|---|---|---|---|
+| 126 | `exc_cause_frames`: one level of the chained cause's frames, frames only, never a message. Where: `core/log_safety.py` | A10, with 22 and 26 | OPEN | |
 
 Not applicable by decision: a dead-letter queue for Unit A; a jobs table; streaming; result caching beyond D3; prompt caching before a provider exists.

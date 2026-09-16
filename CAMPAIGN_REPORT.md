@@ -6330,3 +6330,209 @@ lane: 9 passed. The `redis_real` lane was not run — this piece touches no Redi
 | `docs/STATUS.md` | the Piece 88 row; the register-item section; suite line to 1288 and the three-run figures; header piece list |
 | `CAMPAIGN_REPORT.md` | this block |
 | `tests/security/test_log_exc_info.py` | new: 7 tests — the stdout-wide sentinel through the ASGI stack with `capfd`, `uvicorn.error` directly, the chained cause, the key swap, and the three record shapes |
+
+---
+
+## Batch F1: items 125, 123 and 117   STATUS: DONE `c2d4941` · `3edbd57` · `1935d01` · `741b17a`
+
+The first foundation batch. The first commit adds to `CLAUDE.md` the rule that allows a batch: a foundation
+piece may carry up to three register items, each in its own code commit, with one backfill closing the
+session. The three items follow, and the chain was green before every commit.
+
+**The F1 session's backfill stopped at its own guard, and nothing was written for it.** The prompt said to
+stop if any of the register numbers it was adding already existed. Item 115 did: its row sits in the
+"Items 80 to 96" table with the same step, status and sha as the prompt's row, but different wording. This
+block and the rest of the backfill were written in Piece F1b, whose prompt rules that 115's row stays where it
+is and is not added again.
+
+### Commits and suite numbers
+
+| Point | Commit | Passed | Skipped | Deselected | Coverage |
+| --- | --- | --- | --- | --- | --- |
+| Baseline | `a546614` | 1288 | 1 | 30 | 99.5885 % |
+| The rule | `c2d4941` docs(F1): foundation pieces may be batched | 1288 | 1 | 30 | 99.5885 % |
+| Item 123 | `3edbd57` test(123): the fake clock holds whole milliseconds and refuses other attributes | 1289 | 1 | 30 | 99.5885 % |
+| Item 125 | `1935d01` core(125): warn on a template cache miss once the cache is populated | 1293 | 1 | 30 | **99.5900 %** |
+| Item 117 | `741b17a` docs(117): a CRM note id is assumed unique and never reused | 1293 | 1 | 30 | 99.5900 % |
+
+All 15 coverage floors met at every commit; ruff, format and mypy clean at every commit. `core/prompting.py`
+is at 100 % (56 statements).
+
+### 125 — a template cache miss warns once the cache is populated   `1935d01`
+
+Piece 85 kept the disk fallback for a name the preload never cached, and that fallback was silent. In a
+running app a silent miss means two things: a disk read on the event loop, and a template missing from the
+image discovered on a paid call instead of at startup.
+
+- `_load_template` logs one WARNING `prompt_template_not_preloaded` when the name is not cached **and**
+  `_TEMPLATE_CACHE` is non-empty. It goes to a new logger, `dodeal_ai.prompting`, with one `extra=` field,
+  `template`. Then it reads from disk exactly as before.
+- **Once per name per app.** `_WARNED_NOT_PRELOADED` is a module-level set. `clear_templates()` empties it
+  along with the cache, so the next app in the same process warns again.
+- **An empty cache logs nothing.** That is a script, the wheel check or a tmp-dir test, all of which rely on
+  the fallback.
+- **The name only, never the resolved path**, which would carry the deployment's directory layout into a log
+  line.
+
+Four tests, added to `tests/unit/test_prompt_preload.py`:
+
+- (a) Two misses on one name against a populated cache log exactly one WARNING. The formatted line's keys are
+  exactly `message`, `template`, `level`, `logger`, `timestamp`.
+- (b) A miss against an empty cache logs nothing.
+- (c) After `clear_templates()`, the same name warns again.
+- (d) Every `.py` file under `src/dodeal_ai/` is parsed, and every string constant (docstrings included) is
+  searched for `structured_intelligence/[a-z_]+_v[0-9]+\.txt`. At least nine names must turn up, and each
+  must be in `UNIT_A_TEMPLATES`. Before the test was trusted, the scan was checked: it finds exactly nine,
+  one literal each.
+
+**Sabotage record**
+
+| Sabotage | Result |
+| --- | --- |
+| (a) the `_logger.warning` call removed from `core/prompting.py` | Tests (a) and (c) failed and the other 9 in the module passed, as the prompt predicted. Restored; md5 `9fd11fe65be0e26201cfe257b6508db8` before and after. |
+| (b) `SCORE_TEMPLATE` dropped from `UNIT_A_TEMPLATES` in `units/structured_intelligence/templates.py` | **4 tests failed, not the 2 predicted**. A full-suite run showed the same 4 and nothing else. See finding 1 below. Restored; md5 `a9e76f41114639d5cf6563f0ee12619b` before and after. |
+
+### 123 — the fake clock holds whole milliseconds and refuses other attributes   `3edbd57`
+
+Piece 102 put `test_elapsed_covers_more_than_any_single_pass` on a fake clock, `_FakeClock`, which replaces the
+pipeline module's `time` global. That clock had two weaknesses. It held a float, and `_ms_since` truncates, so
+20 ms at a realistic base reads 19. And its `__getattr__` delegated every other attribute to the real `time`
+module, so a second clock reading added to the pipeline would silently run on the real clock.
+
+- `_FakeClock` holds an integer `_ms` starting at 0 and has no constructor argument. `monotonic()` returns
+  `self._ms / 1000`. `advance` takes whole milliseconds, and the one caller passes `20`.
+- `__getattr__` raises `AttributeError` naming the attribute.
+- One new test, `test_the_fake_clock_refuses_any_attribute_but_monotonic`.
+- **Both assertions of the elapsed test are unchanged.**
+- The module ran 20 times in a row, 50 passed each time.
+
+The code comment gives the cause as the zero base rather than the float; see finding 2 below.
+
+**Sabotage record**
+
+| Sabotage | Result |
+| --- | --- |
+| the delegating `__getattr__` restored | `test_the_fake_clock_refuses_any_attribute_but_monotonic` failed with `DID NOT RAISE AttributeError`; the elapsed test still passed. Restored; md5 `648b1e686cb2ca3a5212f08a2ce49845` before and after. |
+
+### 117 — a CRM note id is assumed unique and never reused   `741b17a`
+
+Docs only. `ASSUMPTIONS.md` gains §4.8, and `docs/STATUS.md` §6 gains Q22.
+
+- **Assumed:** a CRM note id is unique within a tenant and never reused, not even after a delete.
+- **Three mechanisms rest on it:**
+  - the per-note attempt cap (`attempt:{tenant}:{lead_id}:{note_id}`);
+  - the resubmission's `attempt_fp:` reference (item 33);
+  - the six-hour `attempt_ttl_seconds` that both keys carry.
+- **What reuse does:** the new note inherits the old one's spent allowance and answers `attempt_cap`, and
+  nothing in the logs tells the two notes apart. This was seen on the fake CRM, whose ids reset on restart.
+- **Correction path:** the attempt keys gain the note's `createdAt` or a CRM-issued unique token, with the TTL
+  unchanged.
+- **Seams:** `state.py` (`_attempt_key`, `_attempt_fingerprint_key`) and `config.py`
+  (`attempt_ttl_seconds`). The key shapes were checked against `state.py:122` and `:134`, and the TTL against
+  `config.py:207`.
+
+**The tag.** The `ASSUMPTIONS.md` legend defines `[D]` as "a document states it", and no document states
+this. So the body says "`[D]` at best" and the §4.8 heading carries no tag.
+
+**The question is Q22**, owned by the backend, and it is still **UNASKED**. The register marks 117 DONE as a
+record. The question itself is owed by a person.
+
+No sabotage: this commit changes no code, and no guard was asked for.
+
+### The two recorded findings
+
+1. **Sabotage (b) failed 4 tests, not 2.** The prompt predicted test (d) and the existing nine-templates test.
+   Both failed:
+   - (d) named `score_v1.txt` at `scoring.py:52`;
+   - `test_the_tuple_names_the_nine_templates_that_ship` failed with `8 == 9`.
+
+   Two more failed, both following directly from the change:
+   - `test_a_full_judgement_reads_no_template_from_disk`: `score_v1.txt` was now read from disk;
+   - `test_startup_refuses_when_one_template_is_missing`: the template it removes is `score_v1.txt`, so with
+     that name out of the tuple, startup no longer refused.
+
+   The last one is worth knowing: that startup test depends on which template the tuple names.
+2. **Item 123's cause is the base, not the float.** The register gives the cause as "holds a float from zero".
+   But whole milliseconds alone do not fix the 19. From a base of 1,000,000, `_ms / 1000` gives 1000.0 and
+   1000.02, the difference is 0.019999…, and `_ms_since` truncates it to 19. The reading is exact because the
+   clock starts at zero with no base to set, and the code comment says that rather than crediting the integer.
+
+### The backfill, Piece F1b
+
+Docs only. It changes `docs/register.md`, `docs/STATUS.md`, `README.md` and this block. Each change and its
+reasons:
+
+- **`docs/register.md`:**
+  - 125, 123 and 117 are marked DONE with their shas. 117's status adds that Q22 is still UNASKED, so a
+    reader of the register does not take the backend question as asked.
+  - The header now reads `741b17a` / ed3r11, and the step order is the one left behind.
+  - Rows 107 to 114 and 126 are copied exactly from the prompt, in number order. Both need a section header.
+    The existing headers each name a source, and I cannot confirm a source for these beyond the prompt. So
+    both read "added from master ed3r11, 16 September": 107 to 114 in a new section after 106, and 126 in a
+    new section after 125.
+  - Item 115's row is left where it is.
+- **`docs/STATUS.md`:**
+  - A §1 row for each of the four commits, the rule commit included.
+  - The suite line.
+  - The "Last updated" header, which would otherwise have stopped at Piece 88.
+  - A "Register items closed in Batch F1" section. The prompt did not name it, but `CLAUDE.md` asks for the
+    register item rows, and every piece since L has one.
+- **`README.md`:** the `core/prompting.py` row gains the WARNING, its logger and its field. The README's other
+  event tables cover the token budget and the breaker only. None of them claims to list every event, so no
+  other line became wrong.
+
+**The chain before the backfill commit:** 1293 passed, 1 skipped, 30 deselected, 99.59 %, with
+`core/prompting.py` at 100 % (56 statements). ruff, format and mypy clean; all 15 coverage floors met. The
+three sabotaged files still hash to the md5 values F1 recorded after each restore (`test_judgement_pipeline.py`
+`648b1e68…`, `core/prompting.py` `9fd11fe6…`, `templates.py` `a9e76f41…`), which confirms from the tree itself
+that no sabotage survived. No sabotage in F1b: it changes no code.
+
+**Disagreements between the F1b prompt and the tree.**
+
+1. **`.env.example` is not modified.** The prompt says it "shows as modified", and the F1 report said it was
+   still modified. At `741b17a`, `git status` lists only the untracked `docs/audit/` and `docs/campaign/`,
+   and `git ls-files -v` gives the file the plain `H` flag, not assume-unchanged. The file was not read,
+   staged or restored.
+2. **CANDIDATE is not a register status word.** Row 108 uses it, and the register's rules line lists PENDING,
+   OPEN, DECIDED, NOTE, RETRACTED and DONE. The row went in as written, and the rules line was not changed.
+3. **Rows 109 to 114 and 126 agree with the tree:**
+   - `_HTTP_TIMEOUT_SHARE: Final = 0.9` at `core/llm/openai_compatible.py:77`;
+   - `provider_reason` and `provider_transient` at `llm_call.py:180-181`;
+   - `tests/test_env_example_matches_settings.py` exists;
+   - `LLM_CALLS_PER_JUDGEMENT = 2` at `main.py:31`;
+   - no `PoolTimeout` handling anywhere under `src/`;
+   - no `exc_cause_frames` yet.
+
+   Rows 107 and 108 name no symbol that can be checked.
+
+### For the lead
+
+1. **Owed by a person:**
+   - Q22, the note-id question, to the backend. It is UNASKED.
+   - The STATUS row "`.env.example` has been modified-unstaged in the working tree throughout the campaign"
+     (§1, "Open items carried out of Unit A Project 1") is now stale if the file is clean. It was left alone
+     because `.env.example` is out of this piece's scope. It needs your ruling.
+2. **Conservative choices F1 made:**
+   - **Test (d) scans docstrings too.** It reads every string constant, not only whole literals. A docstring
+     that names a retired template will fail it and need rewording. A name built with an f-string is not seen,
+     and the runtime WARNING covers that case.
+   - **The warned set has no lock.** On the event loop it cannot race. Under threads, the worst case is a
+     duplicate line.
+3. **Floors:** none added. `core/prompting.py` is at 100 %, and item 113 already says it gets no floor.
+4. **`.env.example` rows:** none. No setting was added in F1 or F1b.
+5. **The register's status words:** rule on CANDIDATE, either adding it to the rules line or changing row
+   108's status.
+
+### Files
+
+| File | Change |
+| --- | --- |
+| `CLAUDE.md` | `c2d4941`: the "Commits" rule's first bullet replaced with the AI/foundation split |
+| `src/dodeal_ai/core/prompting.py` | `1935d01`: the module logger, `_WARNED_NOT_PRELOADED`, the warn-once branch in `_load_template`, `clear_templates` clearing both |
+| `ASSUMPTIONS.md` | `741b17a`: §4.8 |
+| `docs/STATUS.md` | `741b17a`: the Q22 row in §6. Backfill: the four §1 rows, the suite line, the header, the Batch F1 register section |
+| `docs/register.md` | backfill: 125, 123, 117 DONE; header; step order; rows 107 to 114 and 126 |
+| `README.md` | backfill: the `core/prompting.py` row |
+| `CAMPAIGN_REPORT.md` | backfill: this block |
+| `test_judgement_pipeline.py` | `3edbd57`: `_FakeClock` on whole milliseconds and refusing other attributes; one new test |
+| `test_prompt_preload.py` | `1935d01`: four new tests, (a) to (d) |
