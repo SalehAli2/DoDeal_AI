@@ -188,13 +188,14 @@ def operational_url(stores: Stores) -> str:
     return stores.operational_url
 
 
-@pytest.fixture
-def usable_notes() -> list[tuple[int, LeadNote]]:
-    """One note per lead from the vendored corpus that passes the length gate, as
-    (lead_id, note), in the corpus's own lead order."""
-    config = get_tenant_config(TENANT)
+def notes_passing_gate(
+    leads: FakeLeadsClient, tenant: str, *, one_per_lead: bool
+) -> list[tuple[int, LeadNote]]:
+    """The notes in `leads` that pass `tenant`'s length gate, as (lead_id, note), in
+    the corpus's own order; the first per lead only when `one_per_lead`."""
+    config = get_tenant_config(tenant)
     found = []
-    for lead_id, notes in load_fixture_client().notes.items():
+    for lead_id, notes in leads.notes.items():
         for note in notes:
             text = note.note.strip()
             if (
@@ -202,8 +203,23 @@ def usable_notes() -> list[tuple[int, LeadNote]]:
                 and len(text.split()) >= config.min_note_tokens
             ):
                 found.append((lead_id, note))
-                break
+                if one_per_lead:
+                    break
     return found
+
+
+@pytest.fixture
+def usable_notes() -> list[tuple[int, LeadNote]]:
+    """One note per lead from the vendored corpus that passes the length gate, as
+    (lead_id, note), in the corpus's own lead order."""
+    return notes_passing_gate(load_fixture_client(), TENANT, one_per_lead=True)
+
+
+@pytest.fixture
+def every_usable_note() -> list[tuple[int, LeadNote]]:
+    """Every note from the vendored corpus that passes the length gate, for a burst
+    wider than the corpus has leads."""
+    return notes_passing_gate(load_fixture_client(), TENANT, one_per_lead=False)
 
 
 def _headers() -> dict[str, str]:
