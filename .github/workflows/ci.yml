@@ -107,3 +107,11 @@ jobs:
           DODEAL_REDIS_REAL_URL: redis://localhost:6379/9
           DODEAL_REDIS_REAL_REQUIRED: "1"
         run: uv run pytest -m redis_real --no-cov -rs
+
+      # Register item 74: the served app under bursts, on the same server. The
+      # lane takes db 10 and db 11 from this URL and flushes only those two.
+      - name: Load lane
+        env:
+          DODEAL_REDIS_REAL_URL: redis://localhost:6379/9
+          DODEAL_REDIS_REAL_REQUIRED: "1"
+        run: uv run pytest -m load --no-cov -rs

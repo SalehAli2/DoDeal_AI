@@ -23,10 +23,11 @@ packages = ["src/dodeal_ai"]
 [tool.pytest.ini_options]
   pythonpath = ["."]
   asyncio_mode = "auto"
-  addopts = "--cov=src/dodeal_ai --cov-report=term-missing --cov-report=json -m \"not integration and not redis_real\""
+  addopts = "--cov=src/dodeal_ai --cov-report=term-missing --cov-report=json -m \"not integration and not redis_real and not load\""
   markers = [
     "integration: starts a local ASGI-backed fake HTTP server; excluded from the default run (pytest -m integration to run it).",
     "redis_real: needs a REAL Redis server on the configured URL; excluded from the default run (pytest -m redis_real to run it). The hermetic lane is fakeredis[lua] -- see tests/unit/test_cost_lua.py. Carried by every test under tests/redis_real/.",
+    "load: the whole app in process under concurrent bursts, on a REAL Redis (db 10 cost, db 11 operational, on the DODEAL_REDIS_REAL_URL server, flushed per test); excluded from the default run (pytest -m load --no-cov to run it). Carried by every test under tests/load/.",
     "eval: runs the whole vendored note corpus through the pipeline against FakeLLM. STRUCTURAL only -- it asserts every note yields a Judgement or a Suppressed state and never an exception, not that any judgement is good. Included in the default run: it is hermetic and fast, and a corpus note that crashes the pipeline should break CI. The real-model quality eval is tests/eval/test_quality_eval.py and is skipped unless DODEAL_EVAL_REAL=1.",
   ]
 
