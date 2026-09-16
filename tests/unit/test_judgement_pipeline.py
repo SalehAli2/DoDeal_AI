@@ -867,22 +867,35 @@ class _FakeClock:
     Substituted for the module's `time` global rather than for `time.monotonic`
     itself, because that attribute is shared with asyncio's event loop: a clock
     that jumps twenty milliseconds under the loop's own scheduling is a second
-    source of flakiness in place of the first. Everything other than
-    `monotonic` is delegated to the real module, so the patch narrows to the
-    one reading under test.
+    source of flakiness in place of the first. Every other attribute raises:
+    the pipeline reads only `monotonic`, and a second reading must fail loudly
+    rather than run on the real clock.
     """
 
     def __init__(self) -> None:
-        self._now = 0.0
+        # Whole milliseconds from zero, with no base to set: `_ms_since`
+        # truncates, and 20 ms read from a float sum or a large base (1000.0)
+        # comes back as 19.
+        self._ms = 0
 
     def monotonic(self) -> float:
-        return self._now
+        return self._ms / 1000
 
-    def advance(self, seconds: float) -> None:
-        self._now += seconds
+    def advance(self, ms: int) -> None:
+        self._ms += ms
 
     def __getattr__(self, name: str):
-        return getattr(time, name)
+        raise AttributeError(
+            f"_FakeClock has no {name!r}; the pipeline reads monotonic"
+        )
+
+
+def test_the_fake_clock_refuses_any_attribute_but_monotonic() -> None:
+    """Reading any other `time` attribute through the fake clock raises AttributeError."""
+    clock = _FakeClock()
+
+    with pytest.raises(AttributeError, match="'time'"):
+        _ = clock.time
 
 
 async def test_elapsed_covers_more_than_any_single_pass(
@@ -906,7 +919,7 @@ async def test_elapsed_covers_more_than_any_single_pass(
     real_get_lead = leads.get_lead
 
     async def _slow_get_lead(*args, **kwargs):
-        clock.advance(0.02)
+        clock.advance(20)
         return await real_get_lead(*args, **kwargs)
 
     monkeypatch.setattr(leads, "get_lead", _slow_get_lead)
