@@ -253,6 +253,7 @@ async def score_note(
     scope: TenantScope,
     config: TenantConfig,
     settings: Settings,
+    reprompt: bool = True,
 ) -> tuple[ScoreOutput, LLMResponse]:
     """One model call, or two if the first answer is malformed. Returns the
     validated marks -- already bounded against this tenant's weights by the
@@ -268,4 +269,5 @@ async def score_note(
         profile=PROFILE_UNIT_A_SCORE,
         max_output_tokens=SCORE_MAX_OUTPUT_TOKENS,
         check=marks_check(note_type, config),
+        reprompt=reprompt,
     )

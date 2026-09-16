@@ -253,10 +253,14 @@ async def call_model[M: BaseModel](
     profile: str,
     max_output_tokens: int,
     check: Callable[[M], None] | None = None,
+    reprompt: bool = True,
 ) -> tuple[M, LLMResponse]:
     """Send a prompt, validate the answer, and on a malformed one send it ONCE
     more with a stricter tail. Returns the validated output beside the raw
     response of whichever call produced it.
+
+    `reprompt=False` is a judgement near its token budget (register item 61):
+    a malformed first answer is 503 malformed_output with no second call.
 
     The response comes back too, and not just the parsed model, for one reason:
     `LLMResponse.model` is what the provider REPORTED it ran, and that string is
@@ -299,6 +303,12 @@ async def call_model[M: BaseModel](
     try:
         return parse_output(response, schema, label, check=check), response
     except OutputValidationError:
+        if not reprompt:
+            _logger.warning(
+                "reprompt_withheld",
+                extra={"reason_code": "token_budget_degraded", "label": label},
+            )
+            raise MalformedOutputError() from None
         # The label and nothing else. Which output failed is operational; WHAT
         # it said is untrusted text shaped by a note we did not write.
         # `output_validation_failed` has already recorded the error types.

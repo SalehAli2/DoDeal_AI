@@ -753,12 +753,20 @@ async def _judge(
 
         # The token budget, read before the first thing that costs money. Over
         # budget is 429 token_budget_exceeded and releases the reservation
-        # below like any other non-200 after reserving.
-        await token_preflight(scope)
+        # below like any other non-200 after reserving. Near it, no pass may
+        # reprompt (register item 61).
+        reprompt = not await token_preflight(scope)
 
         # --- classify: the first thing that costs money ---------------------
         (classification, classify_response), classify_ms = await _timed(
-            classify(deps.llm, note, lead, scope=scope, settings=deps.settings)
+            classify(
+                deps.llm,
+                note,
+                lead,
+                scope=scope,
+                settings=deps.settings,
+                reprompt=reprompt,
+            )
         )
         model_passes = 1
 
@@ -796,6 +804,7 @@ async def _judge(
                         scope=scope,
                         config=config,
                         settings=deps.settings,
+                        reprompt=reprompt,
                     )
                 ),
                 _timed(
@@ -806,6 +815,7 @@ async def _judge(
                         scope=scope,
                         config=config,
                         settings=deps.settings,
+                        reprompt=reprompt,
                     )
                 ),
             )

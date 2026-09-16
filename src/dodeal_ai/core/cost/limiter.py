@@ -324,9 +324,13 @@ async def enforce_token_cost(
     )
 
 
-async def token_preflight(scope: TenantScope) -> None:
+async def token_preflight(scope: TenantScope) -> bool:
     """Refuse a judgement whose tenant or user is already at its token budget,
     BEFORE the first model call is placed.
+
+    Returns True when either total is at or above cost_token_warning_ratio of
+    its limit (register item 61): the judgement runs DEGRADED, with no reprompt,
+    and one token_budget_degraded line says so. False otherwise, and on a bypass.
 
     READ-ONLY, always: MGET of the two token keys and nothing else. The charge
     is enforce_token_cost's, after a response is in hand; a pre-flight that
@@ -359,13 +363,36 @@ async def token_preflight(scope: TenantScope) -> None:
                 **breaker_field(exc),
             },
         )
-        return
+        return False
 
     # A key that has never been charged, or whose window expired, reads None.
-    if int(tenant_raw or 0) >= settings.cost_tokens_per_tenant_limit:
+    tenant_total, user_total = int(tenant_raw or 0), int(user_raw or 0)
+    if tenant_total >= settings.cost_tokens_per_tenant_limit:
         raise TokenBudgetExceeded()
-    if int(user_raw or 0) >= settings.cost_tokens_per_user_limit:
+    if user_total >= settings.cost_tokens_per_user_limit:
         raise TokenBudgetExceeded()
+
+    ratio = settings.cost_token_warning_ratio
+    near = [
+        name
+        for name, total, limit in (
+            ("tenant", tenant_total, settings.cost_tokens_per_tenant_limit),
+            ("user", user_total, settings.cost_tokens_per_user_limit),
+        )
+        if total >= limit * ratio
+    ]
+    if not near:
+        return False
+    _logger.warning(
+        "token_budget_degraded",
+        extra={
+            "reason_code": "token_budget_degraded",
+            "budgets": ",".join(near),
+            "tenant": scope.tenant,
+            "request_id": scope.request_id,
+        },
+    )
+    return True
 
 
 async def get_usage(tenant: str, subject: str) -> tuple[int, int]:

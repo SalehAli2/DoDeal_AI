@@ -110,6 +110,7 @@ async def classify(
     *,
     scope: TenantScope,
     settings: Settings,
+    reprompt: bool = True,
 ) -> tuple[ClassificationOutput, LLMResponse]:
     """One model call, or two if the first answer is malformed. Returns the
     validated answer and the raw response, whose `model` is stamped on the
@@ -123,6 +124,7 @@ async def classify(
         settings=settings,
         profile=PROFILE_UNIT_A_CLASSIFY,
         max_output_tokens=CLASSIFY_MAX_OUTPUT_TOKENS,
+        reprompt=reprompt,
     )
 
 

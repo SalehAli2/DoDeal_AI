@@ -794,6 +794,50 @@ async def test_a_found_note_is_never_reread(deps, leads, operational, json_captu
     assert not [x for x in json_capture() if x["message"] == "note_not_on_first_read"]
 
 
+# --- no reprompt near the token budget (register item 61) -------------------
+
+
+@pytest.mark.parametrize("malformed_pass", ["classify", "score"])
+async def test_a_degraded_judgement_503s_on_a_malformed_first_answer(
+    monkeypatch, leads, operational, cost, json_capture, malformed_pass
+):
+    """Near the budget a malformed answer is 503 malformed_output, never a reprompt."""
+    monkeypatch.setenv("DODEAL_COST_TOKENS_PER_USER_LIMIT", "1000")
+    get_settings.cache_clear()
+    cost.store["tokens:user:tenant-a:42"] = 900
+    if malformed_pass == "classify":
+        llm = FakeLLM(response("not json"), *_happy_path())
+    else:
+        llm = FakeLLM()
+        llm.script_for(CLASSIFY_TEMPLATE, _classified("discovery"))
+        llm.script_for(template_for(NoteType.DISCOVERY), _vague_answer())
+        llm.script_for(SCORE_TEMPLATE, response("not json"), _score_answer())
+
+    with pytest.raises(MalformedOutputError):
+        await judge_note(
+            _scope(), _request(), resubmission=False, deps=_deps_with(llm, leads)
+        )
+
+    messages = [x["message"] for x in json_capture()]
+    assert "reprompt_issued" not in messages
+    assert messages.count("token_budget_degraded") == 1
+    assert "reprompt_withheld" in messages
+    assert llm.call_count == (1 if malformed_pass == "classify" else 3)
+    assert operational.store == {}
+
+
+async def test_a_judgement_under_the_budget_still_reprompts(
+    leads, operational, json_capture
+):
+    """Away from the budget the one reprompt is unchanged."""
+    llm = FakeLLM(response("not json"), *_happy_path())
+    judgement = await judge_note(
+        _scope(), _request(), resubmission=False, deps=_deps_with(llm, leads)
+    )
+    assert judgement.score is not None
+    assert "reprompt_issued" in [x["message"] for x in json_capture()]
+
+
 # --- vague and scoring run concurrently (register item 14) ------------------
 
 
