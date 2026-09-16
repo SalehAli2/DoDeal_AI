@@ -44,10 +44,12 @@ from collections.abc import Callable
 from typing import Protocol
 
 import httpx
+from fastapi import Request
 from pydantic import BaseModel, ValidationError
 
 from dodeal_ai.core.config import Settings, get_settings
 from dodeal_ai.core.context import TenantScope
+from dodeal_ai.core.errors import BackendUnavailableError
 from dodeal_ai.core.resilience import ExternalCallError, call_with_watchdog
 from dodeal_ai.core.validation import validate_output
 from dodeal_ai.schemas.lead import Lead, LeadNote, LeadResponse, RowsEnvelope
@@ -253,15 +255,14 @@ def _typed_failure(cause: Exception, label: str, tenant: str) -> BackendError | 
     return error
 
 
-def get_leads_client() -> LeadsClient:
-    """FastAPI dependency. Same shape as get_verifier() and get_key_resolver():
-    tests override it at the route via app.dependency_overrides, never by
-    patching a module global.
+def get_leads_client(request: Request) -> LeadsClient:
+    """FastAPI dependency: a client over the ONE pooled CRM AsyncClient the
+    lifespan built (register item 4, audit M1). Tests override it at the route.
 
-    Builds a fresh client (and so a fresh AsyncClient per call, inside
-    HttpxTransport) each time. That is audit finding M1, planned for step 4
-    along with a lifespan-owned pooled AsyncClient; pooling it here would mean
-    inventing connection lifecycle ownership in a phase that is only wiring the
-    seam.
+    No client on app.state means the lifespan did not run: 503
+    backend_unavailable, never a private pool built here.
     """
-    return LeadsClient(HttpxTransport(), get_key_resolver(), get_settings())
+    http: httpx.AsyncClient | None = getattr(request.app.state, "crm_http", None)
+    if http is None:
+        raise BackendUnavailableError()
+    return LeadsClient(HttpxTransport(http), get_key_resolver(), get_settings())

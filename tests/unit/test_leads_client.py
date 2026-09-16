@@ -4,14 +4,19 @@ malformed one."""
 
 from __future__ import annotations
 
+import ast
 import logging
+import pathlib
+from types import SimpleNamespace
 
+import httpx
 import pytest
 from pydantic import ValidationError
+from starlette.requests import Request
 
 from dodeal_ai.core.config import Settings
 from dodeal_ai.core.context import RequestContext, TenantScope
-from dodeal_ai.core.errors import NoteNotFoundError
+from dodeal_ai.core.errors import BackendUnavailableError, NoteNotFoundError
 from dodeal_ai.core.resilience import ExternalCallError
 from dodeal_ai.core.validation import OutputValidationError
 from dodeal_ai.tools.keys import BackendKeyError, SettingsKeyResolver
@@ -211,17 +216,39 @@ async def test_missing_key_is_not_wrapped_by_the_watchdog():
         pytest.fail("expected BackendKeyError")
 
 
-def test_the_factory_builds_a_client_from_settings():
-    # The FastAPI dependency. Tests override it at the route rather than
-    # calling it, so without this the production wiring is never executed.
-    client = get_leads_client()
-    assert isinstance(client, LeadsClient)
+def _request_on(state: object) -> Request:
+    """A bare request whose app carries `state`, as the lifespan leaves it."""
+    return Request({"type": "http", "app": SimpleNamespace(state=state)})
 
 
-def test_the_factory_is_not_a_singleton():
-    # Audit M1: a fresh AsyncClient per call, until step 4 gives the transport
-    # a lifespan-owned pool. Asserted so the change is deliberate when it lands.
-    assert get_leads_client() is not get_leads_client()
+async def test_the_factory_wraps_the_lifespan_crm_client():
+    """Register item 4: every request's client shares the ONE pooled AsyncClient."""
+    async with httpx.AsyncClient() as http:
+        state = SimpleNamespace(crm_http=http)
+        first = get_leads_client(_request_on(state))
+        second = get_leads_client(_request_on(state))
+    assert isinstance(first, LeadsClient)
+    assert first._transport._client is http  # type: ignore[attr-defined]
+    assert second._transport._client is http  # type: ignore[attr-defined]
+
+
+def test_the_factory_refuses_without_a_lifespan_client():
+    """No pooled client on app.state is 503 backend_unavailable, never a new pool."""
+    with pytest.raises(BackendUnavailableError):
+        get_leads_client(_request_on(SimpleNamespace()))
+
+
+def test_the_transport_holds_no_number_of_its_own():
+    """The timeout and the limits live on the lifespan client, from Settings."""
+    source = pathlib.Path("src/dodeal_ai/tools/httpx_transport.py")
+    literals = [
+        node.value
+        for node in ast.walk(ast.parse(source.read_text(encoding="utf-8")))
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, (int, float))
+        and not isinstance(node.value, bool)
+    ]
+    assert literals == []
 
 
 # --- DODEAL_BACKEND_SCHEME (register item 78, demo only) --------------------

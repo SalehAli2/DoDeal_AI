@@ -17,7 +17,6 @@ from __future__ import annotations
 import httpx
 import pytest
 
-import dodeal_ai.tools.httpx_transport as httpx_transport_module
 from dodeal_ai.core.config import Settings
 from dodeal_ai.core.context import RequestContext, TenantScope
 from dodeal_ai.core.validation import OutputValidationError
@@ -35,18 +34,20 @@ def fake_backend() -> FakeBackend:
     return FakeBackend()
 
 
+_HTTP: httpx.AsyncClient | None = None
+
+
 @pytest.fixture(autouse=True)
-def _route_httpx_to_fake_backend(monkeypatch, fake_backend: FakeBackend):
-    """The ONLY thing patched: which transport httpx.AsyncClient uses. Every
-    line HttpxTransport.get_json() runs is the real, unmodified production
-    code path."""
-
-    class _ASGIAsyncClient(httpx.AsyncClient):
-        def __init__(self, *args, **kwargs):
-            kwargs["transport"] = httpx.ASGITransport(app=fake_backend.app)
-            super().__init__(*args, **kwargs)
-
-    monkeypatch.setattr(httpx_transport_module.httpx, "AsyncClient", _ASGIAsyncClient)
+async def _route_httpx_to_fake_backend(fake_backend: FakeBackend):
+    """The ONLY thing faked: the AsyncClient's transport. Every line
+    HttpxTransport.get_json() runs is the real, unmodified production path."""
+    global _HTTP
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=fake_backend.app)
+    ) as http:
+        _HTTP = http
+        yield
+    _HTTP = None
 
 
 def _settings(dd_api_key: str = EXPECTED_API_KEY, tenant: str = "tenant-a") -> Settings:
@@ -59,7 +60,8 @@ def _settings(dd_api_key: str = EXPECTED_API_KEY, tenant: str = "tenant-a") -> S
 
 
 def _client(settings: Settings) -> LeadsClient:
-    return LeadsClient(HttpxTransport(), SettingsKeyResolver(settings), settings)
+    assert _HTTP is not None
+    return LeadsClient(HttpxTransport(_HTTP), SettingsKeyResolver(settings), settings)
 
 
 def _scope(tenant: str = "tenant-a") -> TenantScope:

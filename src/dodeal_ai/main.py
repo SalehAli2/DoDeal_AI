@@ -35,6 +35,10 @@ from dodeal_ai.units.structured_intelligence.templates import UNIT_A_TEMPLATES
 # pool wait into a model timeout and a 503.
 LLM_CALLS_PER_JUDGEMENT = 2
 
+# Backend reads one judgement has in flight at once: the lead and its notes,
+# fetched together (register item 9). The CRM pool is sized on it (item 4).
+BACKEND_CALLS_PER_JUDGEMENT = 2
+
 
 def _llm_limits(settings: Settings) -> httpx.Limits:
     """Pool bounds derived from max_inflight, the way core/redis.py derives its
@@ -43,6 +47,16 @@ def _llm_limits(settings: Settings) -> httpx.Limits:
     re-handshake TLS under exactly the load it was widened for."""
     ceiling = settings.max_inflight * LLM_CALLS_PER_JUDGEMENT
     return httpx.Limits(max_connections=ceiling, max_keepalive_connections=ceiling)
+
+
+def _crm_client(settings: Settings) -> httpx.AsyncClient:
+    """The ONE CRM client (register item 4): pooled per admitted judgement's two
+    reads, timed out by external_call_timeout_seconds, never a literal."""
+    ceiling = settings.max_inflight * BACKEND_CALLS_PER_JUDGEMENT
+    return httpx.AsyncClient(
+        limits=httpx.Limits(max_connections=ceiling, max_keepalive_connections=ceiling),
+        timeout=httpx.Timeout(settings.external_call_timeout_seconds),
+    )
 
 
 @asynccontextmanager
@@ -106,6 +120,8 @@ async def lifespan(app: FastAPI):
     # unconditionally below keeps shutdown symmetrical -- the same argument the
     # Redis aclose() calls are made on.
     app.state.http = httpx.AsyncClient(limits=_llm_limits(settings))
+    # The CRM's pool, beside the model's and closed on the same two paths.
+    app.state.crm_http = _crm_client(settings)
     if settings.llm_provider is None:
         # PERMISSIVE, for the same reason as backend_keys_missing above and in
         # the same shape: no provider is provisioned yet (Step 0), and a service
@@ -129,6 +145,7 @@ async def lifespan(app: FastAPI):
             # order; bare `raise` keeps the original error.
             clear_templates()
             await app.state.http.aclose()
+            await app.state.crm_http.aclose()
             raise
     yield
     # Before the pools, because clearing a dict cannot fail: a cache that
@@ -137,6 +154,7 @@ async def lifespan(app: FastAPI):
     # The model pool first, before the Redis pools: it is the one holding
     # sockets to a third party, and a client left unclosed leaks them.
     await app.state.http.aclose()
+    await app.state.crm_http.aclose()
     # Release the connection pools on shutdown. Building a client opens no
     # socket, so constructing one here only to close it costs nothing, and
     # closing unconditionally keeps shutdown symmetrical whether or not the app

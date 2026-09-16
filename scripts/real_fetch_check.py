@@ -46,6 +46,7 @@ from dodeal_ai.core.config import Settings, get_settings
 from dodeal_ai.core.context import TenantScope
 from dodeal_ai.core.resilience import ExternalCallError
 from dodeal_ai.core.validation import OutputValidationError
+from dodeal_ai.tools.errors import BackendError
 from dodeal_ai.tools.httpx_transport import HttpxTransport
 from dodeal_ai.tools.keys import SettingsKeyResolver, TenantKeyResolver
 from dodeal_ai.tools.leads import LeadsClient
@@ -220,7 +221,6 @@ async def _run(tenant: str, live: bool) -> int:
     _guard_against_accidental_live_call(settings, live)
 
     scope = _build_scope(tenant)
-    client = LeadsClient(HttpxTransport(), key_resolver, settings)
     # Built from the same two settings LeadsClient._base_url reads, scheme
     # included: a printed URL that disagrees with the call it describes is
     # worse than no printed URL at all.
@@ -242,7 +242,15 @@ async def _run(tenant: str, live: bool) -> int:
     print()
 
     try:
-        leads = await client.get_leads(scope)
+        # One client for the one call, with the service's own timeout.
+        async with httpx.AsyncClient(
+            timeout=settings.external_call_timeout_seconds
+        ) as http:
+            client = LeadsClient(HttpxTransport(http), key_resolver, settings)
+            leads = await client.get_leads(scope)
+    except BackendError as exc:
+        print(f"FAILED: the backend refused the call ({exc.reason_code}).")
+        return 1
     except ExternalCallError as exc:
         _report_external_call_error(exc)
         if not live:

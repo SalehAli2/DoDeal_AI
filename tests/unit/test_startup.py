@@ -33,7 +33,12 @@ from dodeal_ai.core import prompting
 from dodeal_ai.core.config import REDIS_POOL_HEADROOM, ConfigError, get_settings
 from dodeal_ai.core.llm.profiles import PROFILE_UNIT_A_CLASSIFY
 from dodeal_ai.core.logging_config import JsonFormatter
-from dodeal_ai.main import LLM_CALLS_PER_JUDGEMENT, _llm_limits, app
+from dodeal_ai.main import (
+    BACKEND_CALLS_PER_JUDGEMENT,
+    LLM_CALLS_PER_JUDGEMENT,
+    _llm_limits,
+    app,
+)
 
 STARTUP_LOGGER = "dodeal_ai.startup"
 EVENT = "backend_keys_missing"
@@ -179,6 +184,60 @@ def test_the_pool_is_sized_from_max_inflight(monkeypatch):
 
     assert limits.max_connections == 7 * LLM_CALLS_PER_JUDGEMENT
     assert limits.max_keepalive_connections == limits.max_connections
+    get_settings.cache_clear()
+
+
+# --- the one CRM client lifespan owns (register item 4) ---------------------
+
+
+def test_one_crm_client_is_built_and_closed_on_shutdown(monkeypatch):
+    """The CRM pool is built once for the app and closed when it stops."""
+    _llm_env(monkeypatch)
+
+    with TestClient(app):
+        crm = app.state.crm_http
+        assert isinstance(crm, httpx.AsyncClient)
+        assert crm is not app.state.http
+        assert not crm.is_closed
+
+    assert crm.is_closed
+    get_settings.cache_clear()
+
+
+def test_the_crm_client_is_sized_and_timed_from_settings(monkeypatch):
+    """Limits are max_inflight * 2 and every timeout is external_call_timeout."""
+    _llm_env(monkeypatch)
+    monkeypatch.setenv("DODEAL_MAX_INFLIGHT", "7")
+    monkeypatch.setenv("DODEAL_EXTERNAL_CALL_TIMEOUT_SECONDS", "3.5")
+    get_settings.cache_clear()
+
+    with TestClient(app):
+        crm = app.state.crm_http
+        pool = crm._transport._pool
+
+    assert BACKEND_CALLS_PER_JUDGEMENT == 2
+    assert pool._max_connections == 7 * BACKEND_CALLS_PER_JUDGEMENT
+    assert pool._max_keepalive_connections == 7 * BACKEND_CALLS_PER_JUDGEMENT
+    assert crm.timeout == httpx.Timeout(3.5)
+    get_settings.cache_clear()
+
+
+def test_a_refused_llm_build_closes_the_crm_client(monkeypatch):
+    """A refused startup closes the CRM pool as well as the model's."""
+    _llm_env(monkeypatch, PROVIDER="groq", MODEL="pinned-model", API_KEY="k")
+    handed: list[httpx.AsyncClient] = []
+
+    def refuse(settings, http):
+        handed.append(app.state.crm_http)
+        raise ConfigError("llm_api_key_missing")
+
+    monkeypatch.setattr("dodeal_ai.main.build_llm_client", refuse)
+
+    with pytest.raises(ConfigError), TestClient(app):
+        pass
+
+    assert len(handed) == 1
+    assert handed[0].is_closed
     get_settings.cache_clear()
 
 
