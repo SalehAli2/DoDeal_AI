@@ -25,6 +25,14 @@ decides what a salesperson is told about their own work:
       ... /decide.py   whether we interrupt a salesperson to ask a question,
                        and what the CRM is advised to do. Wrong -> nagging, or
                        silence where a note needed a question.
+    core/llm/openai_compatible.py  the paid call. Wrong -> a retry, or a
+                       provider's message in an exception.
+    middleware/body_limit.py  the byte check before every gate. Wrong -> an
+                       unbounded body read on behalf of anyone.
+    core/logging_config.py  how every log line is written. Wrong -> a raw
+                       exception message on the stream, or no line at all.
+    middleware/inflight.py  load shedding. Wrong -> an unbounded queue, or
+                       a slot that is never given back.
 
 A file matched by both a `**` pattern and its own exact pattern is checked
 against both and printed twice; the stricter floor governs. That is deliberate
@@ -88,6 +96,21 @@ _FLOORS: dict[str, float] = {
     # no I/O, no clock, no model -- so every branch is reachable and a gap here
     # is a wrong decision shipped silently.
     "src/dodeal_ai/units/structured_intelligence/decide.py": 100,
+    # Register item 113, four deny-path files. The adapter every paid call goes
+    # through: no retry, and an exception carries a status and a provider name
+    # only. Its failure paths run on a fake transport, so a gap is an untested one.
+    "src/dodeal_ai/core/llm/openai_compatible.py": 100,
+    # The byte check before every gate (item 87). Plain ASGI, so the header path
+    # and the streamed path both run without a server; a gap is a body read in
+    # full for a caller we were always going to refuse.
+    "src/dodeal_ai/middleware/body_limit.py": 100,
+    # How every log line is written: extra= fields lifted, an exception reduced
+    # to its type and frames. A gap is a line that ships a raw message, or none.
+    "src/dodeal_ai/core/logging_config.py": 100,
+    # Load shedding (item 73): admit, refuse, and give the slot back in a finally.
+    # 95 as item 113 sets it; the file measured 100 when the floor was added, so
+    # the margin is headroom and not a known uncovered line.
+    "src/dodeal_ai/middleware/inflight.py": 95,
 }
 
 
