@@ -26,6 +26,10 @@ from dodeal_ai.core.redis import (
 from dodeal_ai.middleware.body_limit import BodyLimitMiddleware
 from dodeal_ai.middleware.inflight import InflightMiddleware
 from dodeal_ai.middleware.request_id import RequestIDMiddleware
+from dodeal_ai.units.structured_intelligence.config import (
+    clear_tenant_configs,
+    load_tenant_configs,
+)
 from dodeal_ai.units.structured_intelligence.templates import UNIT_A_TEMPLATES
 
 # Model calls one judgement can have in flight AT ONCE: classify runs alone,
@@ -68,6 +72,13 @@ async def lifespan(app: FastAPI):
     # here, not on the first paid call days later. Read once for the app's life
     # so no judgement makes a disk read on the event loop (register item 85).
     preload_templates(UNIT_A_TEMPLATES)
+    # Register item 97: every tenant file validated before any socket exists.
+    if settings.tenant_config_dir is not None:
+        try:
+            load_tenant_configs(settings.tenant_config_dir)
+        except BaseException:
+            clear_templates()
+            raise
     if not settings.dd_api_keys:
         # Not fail-closed: the gate chain and /ready must work before a key is
         # provisioned (Step 0). Loud so a deployment with no backend keys at
@@ -144,6 +155,7 @@ async def lifespan(app: FastAPI):
             # preloaded templates and the pool are released here, in shutdown's
             # order; bare `raise` keeps the original error.
             clear_templates()
+            clear_tenant_configs()
             await app.state.http.aclose()
             await app.state.crm_http.aclose()
             raise
@@ -151,6 +163,7 @@ async def lifespan(app: FastAPI):
     # Before the pools, because clearing a dict cannot fail: a cache that
     # outlived its app would serve this deployment's templates to the next one.
     clear_templates()
+    clear_tenant_configs()
     # The model pool first, before the Redis pools: it is the one holding
     # sockets to a third party, and a client left unclosed leaks them.
     await app.state.http.aclose()

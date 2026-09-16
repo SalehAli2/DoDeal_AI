@@ -14,10 +14,11 @@ changing the prompt version. So:
     the model was asked to do, and every past judgement would become
     incomparable in a way no version stamp records.
 
-TODAY there is no per-tenant store: get_tenant_config() returns ONE frozen
-default for every tenant, and the signature takes the tenant so that adding a
-store later changes this module and nothing else. `config_version` is stamped
-on every judgement, so when a real store lands, judgements made under the
+THE PER-TENANT FILES (register item 97). With DODEAL_TENANT_CONFIG_DIR set,
+each `<tenant>.json` there is validated into a TenantConfig at startup, over
+the default, with `config_version` required. An invalid file refuses startup
+naming the tenant, never the path. A tenant with no file gets the default.
+`config_version` is stamped on every judgement, so judgements made under the
 default remain identifiable and are never rescored.
 
 The values are placeholders in the same sense as the cost caps in core/config.py
@@ -31,12 +32,20 @@ a tenant's intent is recorded on the judgement rather than inferred later.
 
 from __future__ import annotations
 
+import dataclasses
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
 from types import MappingProxyType
 
+from pydantic import BaseModel, ConfigDict, Field
+
+from dodeal_ai.core.auth.claims import normalise_tenant_label
+from dodeal_ai.core.config import ConfigError
 from dodeal_ai.units.structured_intelligence.schemas import (
+    MAX_NOTE_TEXT_CHARS,
     Band,
     ComponentName,
     MissingComponent,
@@ -211,14 +220,106 @@ _DEFAULT_CONFIG = TenantConfig(
 )
 
 
-def get_tenant_config(tenant: str) -> TenantConfig:
-    """This tenant's rubric and limits.
+class TenantConfigFile(BaseModel):
+    """One `<tenant>.json`: the numbers a tenant may set, over the default.
 
-    Returns the SAME frozen default instance for every tenant today -- there is
-    no per-tenant store, and inventing one before the business can populate it
-    would be a store full of guesses. The parameter is present so that the day a
-    store exists, this function body is the only thing that changes: no caller
-    signature moves, and no call site starts needing a tenant it did not already
-    have.
+    The per-type rubric maps and the Q13 business-line switch are not here: they
+    change what a component MEANS, not how it is weighted, and stay code.
     """
-    return _DEFAULT_CONFIG
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    config_version: str = Field(min_length=1)
+    weights: dict[ComponentName, int] | None = None
+    band_boundaries: list[tuple[Band, int]] | None = None
+    accept_threshold: int | None = Field(default=None, ge=0, le=100)
+    flag_threshold: int | None = Field(default=None, ge=0, le=100)
+    min_note_chars: int | None = Field(default=None, ge=1)
+    min_note_tokens: int | None = Field(default=None, ge=1)
+    max_note_chars: int | None = Field(default=None, ge=1, le=MAX_NOTE_TEXT_CHARS)
+    clarification_cap: int | None = Field(default=None, ge=0)
+    rate_limit_per_hour: int | None = Field(default=None, ge=0)
+    rate_limit_window_seconds: int | None = Field(default=None, gt=0)
+    attempt_ttl_seconds: int | None = Field(default=None, gt=0)
+    idempotency_ttl_seconds: int | None = Field(default=None, gt=0)
+    enforcement_mode: EnforcementMode | None = None
+
+    def build(self) -> TenantConfig:
+        """This file over the default, checked as a whole."""
+        updates = {
+            name: value
+            for name, value in self.model_dump(exclude_none=True).items()
+            if name not in {"weights", "band_boundaries"}
+        }
+        if self.weights is not None:
+            updates["weights"] = MappingProxyType(dict(self.weights))
+        if self.band_boundaries is not None:
+            updates["band_boundaries"] = tuple(self.band_boundaries)
+        config = dataclasses.replace(_DEFAULT_CONFIG, **updates)
+        _check(config)
+        return config
+
+
+def _check(config: TenantConfig) -> None:
+    """The invariants the default holds, held by every tenant's config too.
+    Raises ValueError with a fixed message; the caller names the tenant."""
+    if set(config.weights) != set(ComponentName) or any(
+        weight < 0 for weight in config.weights.values()
+    ):
+        raise ValueError("weights")
+    if sum(config.weights.values()) != 100:
+        raise ValueError("weights_sum")
+    bands = [band for band, _ in config.band_boundaries]
+    uppers = [upper for _, upper in config.band_boundaries]
+    ascending = uppers == sorted(set(uppers)) and uppers[0] >= 0
+    if bands != list(Band) or not ascending or uppers[-1] != 100:
+        raise ValueError("band_boundaries")
+    if not config.flag_threshold < config.accept_threshold:
+        raise ValueError("thresholds")
+    if not config.min_note_chars < config.max_note_chars:
+        raise ValueError("note_bounds")
+
+
+# Tenant -> its validated config, filled once at startup by load_tenant_configs.
+# Empty means every tenant reads the default.
+_LOADED: dict[str, TenantConfig] = {}
+
+
+def load_tenant_configs(directory: Path) -> None:
+    """Validate every `<tenant>.json` in `directory` and install them all.
+
+    All or nothing: the first invalid file raises ConfigError naming its tenant
+    (never the path, never a value), and nothing is installed. Read at startup
+    only, so no judgement reads the disk.
+    """
+    if not directory.is_dir():
+        raise ConfigError("tenant_config_dir_unreadable")
+    files = sorted(directory.glob("*.json"))
+    loaded: dict[str, TenantConfig] = {}
+    for path in files:
+        tenant = path.stem
+        if normalise_tenant_label(tenant) != tenant:
+            raise ConfigError("tenant_config_invalid_name")
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            loaded[tenant] = TenantConfigFile.model_validate(raw).build()
+        except (OSError, ValueError):
+            # Bad JSON, a failed field and a broken invariant are all ValueError;
+            # `from None`, because pydantic's error quotes the rejected value.
+            raise ConfigError(f"tenant_config_invalid:{tenant}") from None
+    _LOADED.clear()
+    _LOADED.update(loaded)
+
+
+def clear_tenant_configs() -> None:
+    """Back to the default for every tenant: the shutdown half of the load."""
+    _LOADED.clear()
+
+
+def get_tenant_config(tenant: str) -> TenantConfig:
+    """This tenant's rubric and limits: its validated file, else the default.
+
+    The pipeline's config is chosen here by the request's tenant (register item
+    97), the same tenant the scope carries.
+    """
+    return _LOADED.get(tenant, _DEFAULT_CONFIG)
