@@ -1,5 +1,6 @@
-"""Register item 97: `<tenant>.json` files validated into TenantConfig at
-startup, over the default; an invalid one refuses startup naming the tenant."""
+"""Register item 97 (loader in core since F2): each `<tenant>.json` has a section
+per unit; Unit A's `unit_a` section is validated into TenantConfig at startup,
+over the default, and an invalid one refuses startup naming the tenant."""
 
 from __future__ import annotations
 
@@ -14,12 +15,16 @@ from dodeal_ai.core import prompting
 from dodeal_ai.core.auth.dependencies import get_verifier
 from dodeal_ai.core.auth.verify import JwtVerifier
 from dodeal_ai.core.config import ConfigError, Settings, get_settings
-from dodeal_ai.main import app
-from dodeal_ai.units.structured_intelligence.config import (
-    EnforcementMode,
+from dodeal_ai.core.tenant_config import (
     clear_tenant_configs,
-    get_tenant_config,
     load_tenant_configs,
+    tenant_section,
+)
+from dodeal_ai.main import TENANT_CONFIG_SECTIONS, app
+from dodeal_ai.units.structured_intelligence.config import (
+    UNIT_A_SECTION,
+    EnforcementMode,
+    get_tenant_config,
 )
 from dodeal_ai.units.structured_intelligence.schemas import Band, ComponentName
 from tests.helpers import tokens
@@ -34,17 +39,28 @@ def _cleared() -> Iterator[None]:
     clear_tenant_configs()
 
 
-def _write(directory: Path, tenant: str, body: object) -> Path:
+def _write_file(directory: Path, tenant: str, content: object) -> Path:
+    """The whole file: a string as written, anything else as JSON."""
     path = directory / f"{tenant}.json"
     path.write_text(
-        body if isinstance(body, str) else json.dumps(body), encoding="utf-8"
+        content if isinstance(content, str) else json.dumps(content), encoding="utf-8"
     )
     return path
 
 
+def _write(directory: Path, tenant: str, body: object) -> Path:
+    """`body` as the file's `unit_a` section; a string is the whole file."""
+    content = body if isinstance(body, str) else {UNIT_A_SECTION: body}
+    return _write_file(directory, tenant, content)
+
+
+def _load(directory: Path) -> None:
+    load_tenant_configs(directory, TENANT_CONFIG_SECTIONS)
+
+
 def _refusal(directory: Path) -> str:
     with pytest.raises(ConfigError) as caught:
-        load_tenant_configs(directory)
+        _load(directory)
     assert caught.value.__cause__ is None
     assert str(directory) not in str(caught.value)
     return str(caught.value)
@@ -76,7 +92,7 @@ def test_a_valid_file_overrides_the_default_for_its_tenant_only(tmp_path):
         },
     )
 
-    load_tenant_configs(tmp_path)
+    _load(tmp_path)
 
     config = get_tenant_config("tenant-a")
     assert config.config_version == "tenant-a-cfg-1"
@@ -92,7 +108,7 @@ def test_a_valid_file_overrides_the_default_for_its_tenant_only(tmp_path):
 def test_a_minimal_file_is_only_its_version(tmp_path):
     """config_version alone is a valid file: every number stays the default's."""
     _write(tmp_path, "tenant-a", {"config_version": "tenant-a-cfg-2"})
-    load_tenant_configs(tmp_path)
+    _load(tmp_path)
     config = get_tenant_config("tenant-a")
     assert config.config_version == "tenant-a-cfg-2"
     assert config.weights == DEFAULT.weights
@@ -105,7 +121,7 @@ def test_the_weights_stay_immutable(tmp_path):
         "tenant-a",
         {"config_version": "v", "weights": dict(DEFAULT.weights)},
     )
-    load_tenant_configs(tmp_path)
+    _load(tmp_path)
     with pytest.raises(TypeError):
         get_tenant_config("tenant-a").weights[ComponentName.CLARITY] = 0  # type: ignore[index]
 
@@ -230,7 +246,7 @@ def test_a_missing_directory_refuses_without_its_path(tmp_path):
 def test_other_files_are_ignored(tmp_path):
     """Only `*.json` is a tenant file."""
     (tmp_path / "README.txt").write_text("not a config", encoding="utf-8")
-    load_tenant_configs(tmp_path)
+    _load(tmp_path)
     assert get_tenant_config("tenant-a") is DEFAULT
 
 
@@ -272,7 +288,7 @@ def test_an_invalid_file_refuses_startup_and_leaves_no_templates(monkeypatch, tm
 def test_the_route_picks_the_config_by_the_requests_tenant(monkeypatch, tmp_path):
     """tenant-a's request is stamped with its file's version; tenant-b's with the default."""
     _write(tmp_path, "tenant-a", {"config_version": "tenant-a-cfg-1"})
-    load_tenant_configs(tmp_path)
+    _load(tmp_path)
     monkeypatch.setenv("DODEAL_JWT_SIGNING_KEY", tokens.TEST_SECRET)
     get_settings.cache_clear()
     verifier = JwtVerifier(
@@ -305,3 +321,56 @@ def test_the_route_picks_the_config_by_the_requests_tenant(monkeypatch, tmp_path
         "tenant-a": "tenant-a-cfg-1",
         "tenant-b": DEFAULT.config_version,
     }
+
+
+# --- one file, a section per unit (F2) ------------------------------------------
+
+
+def test_an_unknown_section_is_ignored(tmp_path):
+    """A section no unit parses is skipped, whatever it holds; unit_a still loads."""
+    _write_file(
+        tmp_path,
+        "tenant-a",
+        {
+            "unit_b": {"anything": [1, "two", None], "config_version": 3},
+            UNIT_A_SECTION: {"config_version": "tenant-a-cfg-3"},
+        },
+    )
+    _load(tmp_path)
+    assert get_tenant_config("tenant-a").config_version == "tenant-a-cfg-3"
+    assert tenant_section("tenant-a", "unit_b") is None
+
+
+def test_a_missing_unit_a_section_uses_the_default(tmp_path):
+    """A file with no unit_a section is valid, and Unit A reads the default."""
+    _write_file(tmp_path, "tenant-a", {"unit_b": {"threshold": "not ours"}})
+    _load(tmp_path)
+    assert get_tenant_config("tenant-a") is DEFAULT
+    assert tenant_section("tenant-a", UNIT_A_SECTION) is None
+
+
+@pytest.mark.parametrize(
+    "content",
+    [["unit_a"], {UNIT_A_SECTION: 5}, {UNIT_A_SECTION: None}, "null"],
+    ids=["top-level-list", "section-number", "section-null", "json-null"],
+)
+def test_a_file_or_section_that_is_not_an_object_refuses(tmp_path, content):
+    """The file is one object, and Unit A's section is one object."""
+    _write_file(tmp_path, "tenant-a", content)
+    assert _refusal(tmp_path) == "tenant_config_invalid:tenant-a"
+
+
+def test_core_hands_each_section_to_its_own_parser(tmp_path):
+    """The loader knows no schema: a registered parser gets exactly its section."""
+    seen: list[object] = []
+
+    def _unit_b(raw: object) -> str:
+        seen.append(raw)
+        return "parsed-b"
+
+    _write_file(tmp_path, "tenant-a", {"unit_b": {"k": 1}, "unit_c": {"k": 2}})
+    load_tenant_configs(tmp_path, {"unit_b": _unit_b})
+
+    assert seen == [{"k": 1}]
+    assert tenant_section("tenant-a", "unit_b") == "parsed-b"
+    assert tenant_section("tenant-b", "unit_b") is None

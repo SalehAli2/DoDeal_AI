@@ -14,10 +14,10 @@ changing the prompt version. So:
     the model was asked to do, and every past judgement would become
     incomparable in a way no version stamp records.
 
-THE PER-TENANT FILES (register item 97). With DODEAL_TENANT_CONFIG_DIR set,
-each `<tenant>.json` there is validated into a TenantConfig at startup, over
-the default, with `config_version` required. An invalid file refuses startup
-naming the tenant, never the path. A tenant with no file gets the default.
+THE PER-TENANT FILES (register item 97). core/tenant_config.py loads each
+`<tenant>.json` at startup; this unit's `unit_a` section is validated into a
+TenantConfig over the default, with `config_version` required. A tenant with
+no file, or no `unit_a` section, gets the default.
 `config_version` is stamped on every judgement, so judgements made under the
 default remain identifiable and are never rescored.
 
@@ -33,17 +33,14 @@ a tenant's intent is recorded on the judgement rather than inferred later.
 from __future__ import annotations
 
 import dataclasses
-import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
-from pathlib import Path
 from types import MappingProxyType
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from dodeal_ai.core.auth.claims import normalise_tenant_label
-from dodeal_ai.core.config import ConfigError
+from dodeal_ai.core.tenant_config import tenant_section
 from dodeal_ai.units.structured_intelligence.schemas import (
     MAX_NOTE_TEXT_CHARS,
     Band,
@@ -220,8 +217,12 @@ _DEFAULT_CONFIG = TenantConfig(
 )
 
 
+# This unit's section name in a `<tenant>.json` (core/tenant_config.py).
+UNIT_A_SECTION = "unit_a"
+
+
 class TenantConfigFile(BaseModel):
-    """One `<tenant>.json`: the numbers a tenant may set, over the default.
+    """A tenant's `unit_a` section: the numbers it may set, over the default.
 
     The per-type rubric maps and the Q13 business-line switch are not here: they
     change what a component MEANS, not how it is weighted, and stay code.
@@ -280,46 +281,17 @@ def _check(config: TenantConfig) -> None:
         raise ValueError("note_bounds")
 
 
-# Tenant -> its validated config, filled once at startup by load_tenant_configs.
-# Empty means every tenant reads the default.
-_LOADED: dict[str, TenantConfig] = {}
-
-
-def load_tenant_configs(directory: Path) -> None:
-    """Validate every `<tenant>.json` in `directory` and install them all.
-
-    All or nothing: the first invalid file raises ConfigError naming its tenant
-    (never the path, never a value), and nothing is installed. Read at startup
-    only, so no judgement reads the disk.
-    """
-    if not directory.is_dir():
-        raise ConfigError("tenant_config_dir_unreadable")
-    files = sorted(directory.glob("*.json"))
-    loaded: dict[str, TenantConfig] = {}
-    for path in files:
-        tenant = path.stem
-        if normalise_tenant_label(tenant) != tenant:
-            raise ConfigError("tenant_config_invalid_name")
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-            loaded[tenant] = TenantConfigFile.model_validate(raw).build()
-        except (OSError, ValueError):
-            # Bad JSON, a failed field and a broken invariant are all ValueError;
-            # `from None`, because pydantic's error quotes the rejected value.
-            raise ConfigError(f"tenant_config_invalid:{tenant}") from None
-    _LOADED.clear()
-    _LOADED.update(loaded)
-
-
-def clear_tenant_configs() -> None:
-    """Back to the default for every tenant: the shutdown half of the load."""
-    _LOADED.clear()
+def parse_unit_a_section(raw: object) -> TenantConfig:
+    """The `unit_a` section as a TenantConfig, or ValueError: a failed field
+    (pydantic's ValidationError) or a broken invariant (_check)."""
+    return TenantConfigFile.model_validate(raw).build()
 
 
 def get_tenant_config(tenant: str) -> TenantConfig:
-    """This tenant's rubric and limits: its validated file, else the default.
+    """This tenant's rubric and limits: its `unit_a` section, else the default.
 
     The pipeline's config is chosen here by the request's tenant (register item
     97), the same tenant the scope carries.
     """
-    return _LOADED.get(tenant, _DEFAULT_CONFIG)
+    section = tenant_section(tenant, UNIT_A_SECTION)
+    return section if isinstance(section, TenantConfig) else _DEFAULT_CONFIG

@@ -24,12 +24,13 @@ from dodeal_ai.core.redis import (
     get_cost_client,
     get_operational_client,
 )
+from dodeal_ai.core.tenant_config import clear_tenant_configs, load_tenant_configs
 from dodeal_ai.middleware.body_limit import BodyLimitMiddleware
 from dodeal_ai.middleware.inflight import InflightMiddleware
 from dodeal_ai.middleware.request_id import RequestIDMiddleware
 from dodeal_ai.units.structured_intelligence.config import (
-    clear_tenant_configs,
-    load_tenant_configs,
+    UNIT_A_SECTION,
+    parse_unit_a_section,
 )
 from dodeal_ai.units.structured_intelligence.templates import UNIT_A_TEMPLATES
 
@@ -39,6 +40,9 @@ from dodeal_ai.units.structured_intelligence.templates import UNIT_A_TEMPLATES
 # second gathered pass queue for a connection INSIDE its own timeout, turning a
 # pool wait into a model timeout and a 503.
 LLM_CALLS_PER_JUDGEMENT = 2
+
+# Every unit's section in a `<tenant>.json` and the parser that validates it (F2).
+TENANT_CONFIG_SECTIONS = {UNIT_A_SECTION: parse_unit_a_section}
 
 # Backend reads one judgement has in flight at once: the lead and its notes,
 # fetched together (register item 9). The CRM pool is sized on it (item 4).
@@ -76,7 +80,7 @@ async def lifespan(app: FastAPI):
     # Register item 97: every tenant file validated before any socket exists.
     if settings.tenant_config_dir is not None:
         try:
-            load_tenant_configs(settings.tenant_config_dir)
+            load_tenant_configs(settings.tenant_config_dir, TENANT_CONFIG_SECTIONS)
         except BaseException:
             clear_templates()
             raise

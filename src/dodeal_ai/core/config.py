@@ -137,9 +137,9 @@ class Settings(BaseSettings):
     # Where versioned prompt files are read from. None = the copies shipped inside the package
     # (src/dodeal_ai/prompts). Set only for local prompt iteration; production uses the package.
     prompts_dir: Path | None = None
-    # Where per-tenant rubric files live, one `<tenant>.json` each (register item
-    # 97). None = every tenant uses the built-in default. A wrong directory or an
-    # invalid file refuses startup, naming the tenant, never the path.
+    # Where per-tenant config files live: one `<tenant>.json` each, a section per
+    # unit (register item 97). None = every unit's default for every tenant. A
+    # wrong directory or an invalid file refuses startup, naming the tenant.
     tenant_config_dir: Path | None = None
     # --- Watchdog: timeout + retry policy for external calls (§6) -----------
     # Placeholder values; tune per real LLM/tool latency later.
