@@ -8,7 +8,18 @@ RUN uv sync --locked --no-dev --no-editable
 
 FROM python:3.12-slim
 WORKDIR /app
+# Register item 94: the service never runs as root. A fixed numeric id, so an
+# orchestrator's runAsNonRoot check can verify it without reading /etc/passwd.
+RUN groupadd --system --gid 10001 app \
+    && useradd --system --uid 10001 --gid app --no-create-home app
 COPY --from=build /app/.venv /app/.venv
 ENV PATH="/app/.venv/bin:$PATH"
+USER 10001:10001
 EXPOSE 8000
-CMD ["uvicorn", "dodeal_ai.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# /health answers without Redis, a model or a backend; stdlib only, no curl.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD ["python", "-c", "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status == 200 else 1)"]
+# uvicorn with --proxy-headers, --forwarded-allow-ips from DODEAL_FORWARDED_ALLOW_IPS
+# and a 30 s graceful shutdown on SIGTERM (src/dodeal_ai/serve.py).
+STOPSIGNAL SIGTERM
+CMD ["python", "-m", "dodeal_ai.serve"]

@@ -281,6 +281,12 @@ class Settings(BaseSettings):
     # Above the CRM's timeout, the CRM abandons requests we go on to finish.
     judgement_deadline_seconds: float = Field(default=25.0, gt=0)
 
+    # --- Serving behind a proxy (serve.py, register item 94) ---------------
+    # The proxies whose X-Forwarded-For/-Proto uvicorn believes (comma list).
+    # Loopback only by default, so no forwarded header is trusted by accident;
+    # "*" lets any client forge its address and scheme in every log line.
+    forwarded_allow_ips: str = Field(default="127.0.0.1", min_length=1)
+
     # --- Logging (core/logging_config.py) ------------------------------
     # Effective level for the "dodeal_ai" logger tree (audit, error, cost,
     # resilience, validation, ...). Third-party libraries are unaffected --
