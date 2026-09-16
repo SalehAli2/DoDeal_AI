@@ -478,6 +478,28 @@ def test_a_note_over_the_hard_ceiling_is_422_invalid_request(client, llm, operat
     assert llm.call_count == 0
 
 
+@pytest.mark.parametrize("value", [0, -1])
+@pytest.mark.parametrize("field", ["lead_id", "note_id", "author_id"])
+@pytest.mark.parametrize("path", [DIRECT, DIRECT_RESUBMIT])
+def test_an_id_below_one_on_the_direct_routes_is_422_without_echo(
+    client, llm, operational, path, field, value
+):
+    """An id of 0 or -1 is a 422 whose body carries neither the field name nor the value, and nothing is reserved or called."""
+    r = client.post(path, json=_direct_body(**{field: value}), headers=_headers())
+
+    assert r.status_code == 422
+    request_id = r.headers["X-Request-ID"]
+    assert r.json() == {
+        "detail": "Unprocessable Entity",
+        "reason": "invalid_request",
+        "request_id": request_id,
+    }
+    assert field not in r.text
+    assert str(value) not in r.text.replace(request_id, "")
+    assert operational.store == {}
+    assert llm.call_count == 0
+
+
 def test_an_extra_field_is_422_invalid_request(client):
     r = client.post(
         DIRECT,

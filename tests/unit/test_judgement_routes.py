@@ -297,6 +297,28 @@ def test_a_non_integer_id_is_invalid_request(client):
     assert r.json()["reason"] == "invalid_request"
 
 
+@pytest.mark.parametrize("value", [0, -1])
+@pytest.mark.parametrize("field", ["lead_id", "note_id"])
+@pytest.mark.parametrize("path", [JUDGE, RESUBMIT])
+def test_an_id_below_one_on_the_fetch_routes_is_422_without_echo(
+    client, leads, llm, path, field, value
+):
+    """An id of 0 or -1 is a 422 whose body carries neither the field name nor the value, and nothing is fetched."""
+    r = client.post(path, json={**_body(), field: value}, headers=_headers())
+
+    assert r.status_code == 422
+    request_id = r.headers["X-Request-ID"]
+    assert r.json() == {
+        "detail": "Unprocessable Entity",
+        "reason": "invalid_request",
+        "request_id": request_id,
+    }
+    assert field not in r.text
+    assert str(value) not in r.text.replace(request_id, "")
+    assert leads.calls == []
+    assert llm.call_count == 0
+
+
 def test_validation_failure_logs_types_not_values(client, json_log):
     secret = "SENTINEL-0501234567"
     client.post(JUDGE, json={**_body(), "note": secret}, headers=_headers())

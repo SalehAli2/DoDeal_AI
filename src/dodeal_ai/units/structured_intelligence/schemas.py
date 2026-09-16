@@ -202,8 +202,10 @@ class JudgementRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    lead_id: int
-    note_id: int
+    # ge=1 on every id (register item 10): 0 or a negative id is a 422
+    # invalid_request, never a fetch, a reservation or a counter key.
+    lead_id: int = Field(ge=1)
+    note_id: int = Field(ge=1)
 
 
 # The hard ceiling on note text in a request body. A REQUEST-SIZE bound, not a
@@ -260,9 +262,10 @@ class DirectJudgementRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    lead_id: int
-    note_id: int
-    author_id: int
+    # ge=1 on every id, as on JudgementRequest (register item 10).
+    lead_id: int = Field(ge=1)
+    note_id: int = Field(ge=1)
+    author_id: int = Field(ge=1)
     note_text: str = Field(max_length=MAX_NOTE_TEXT_CHARS)
     lead: LeadContext
 
