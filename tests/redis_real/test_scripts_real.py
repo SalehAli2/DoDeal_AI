@@ -99,24 +99,31 @@ async def test_the_cost_window_is_set_on_create_and_only_on_create(
         assert await real_redis.ttl(key) <= _WINDOW
 
 
-async def test_a_cost_key_without_a_ttl_never_gains_one(
+async def test_a_cost_key_without_a_ttl_gains_the_window(
     real_redis: redis_async.Redis, cost_keys: tuple[str, str]
 ) -> None:
-    """Counterpart: test_a_pre_existing_key_without_a_ttl_never_gains_one.
+    """Counterpart: test_a_pre_existing_key_without_a_ttl_gains_the_window."""
+    for key in cost_keys:
+        await real_redis.set(key, 1)
+        assert await real_redis.ttl(key) == _TTL_NO_EXPIRY
 
-    Audit M4, pinned as it behaves TODAY, as its counterpart pins it: the request
-    script sets EXPIRE only on create, so a counter that exists without a window
-    keeps counting forever. The M4 fix changes this test and its counterpart in
-    the same commit.
-    """
-    tenant_key, user_key = cost_keys
-    await real_redis.set(tenant_key, 1)
-    assert await real_redis.ttl(tenant_key) == _TTL_NO_EXPIRY
+    await _incr_both_with_window(real_redis, *cost_keys, 1, _WINDOW)
 
-    await _incr_both_with_window(real_redis, tenant_key, user_key, 1, _WINDOW)
+    for key in cost_keys:
+        assert 0 < await real_redis.ttl(key) <= _WINDOW
 
-    assert await real_redis.ttl(tenant_key) == _TTL_NO_EXPIRY
-    _assert_window(await real_redis.ttl(user_key))
+
+async def test_a_cost_key_with_a_ttl_keeps_it(
+    real_redis: redis_async.Redis, cost_keys: tuple[str, str]
+) -> None:
+    """Counterpart: test_a_pre_existing_key_with_a_ttl_keeps_it."""
+    for key in cost_keys:
+        await real_redis.set(key, 1, ex=_WINDOW)
+
+    await _incr_both_with_window(real_redis, *cost_keys, 1, _WINDOW * 100)
+
+    for key in cost_keys:
+        assert 0 < await real_redis.ttl(key) <= _WINDOW
 
 
 # --- (b) the token script, and the line between the two ---------------------
@@ -148,19 +155,31 @@ async def test_the_token_window_is_set_on_create_and_only_on_create(
         assert await real_redis.ttl(key) <= _WINDOW
 
 
-async def test_a_token_key_without_a_ttl_never_gains_one(
+async def test_a_token_key_without_a_ttl_gains_the_window(
     real_redis: redis_async.Redis, token_keys: tuple[str, str]
 ) -> None:
-    """No hermetic counterpart. test_cost_lua.py pins M4 on the request script
-    only; the token script has the same EXISTS-then-EXPIRE shape and, as this
-    shows, the same edge. Pinned as it behaves today, like the request script."""
-    tenant_key, user_key = token_keys
-    await real_redis.set(tenant_key, 1)
+    """Counterpart: test_a_token_counter_without_a_ttl_gains_the_window."""
+    for key in token_keys:
+        await real_redis.set(key, 1)
+        assert await real_redis.ttl(key) == _TTL_NO_EXPIRY
 
-    await _add_tokens_with_window(real_redis, tenant_key, user_key, 120, _WINDOW)
+    await _add_tokens_with_window(real_redis, *token_keys, 120, _WINDOW)
 
-    assert await real_redis.ttl(tenant_key) == _TTL_NO_EXPIRY
-    _assert_window(await real_redis.ttl(user_key))
+    for key in token_keys:
+        assert 0 < await real_redis.ttl(key) <= _WINDOW
+
+
+async def test_a_token_key_with_a_ttl_keeps_it(
+    real_redis: redis_async.Redis, token_keys: tuple[str, str]
+) -> None:
+    """Counterpart: test_a_token_counter_with_a_ttl_keeps_it."""
+    for key in token_keys:
+        await real_redis.set(key, 1, ex=_WINDOW)
+
+    await _add_tokens_with_window(real_redis, *token_keys, 120, _WINDOW * 100)
+
+    for key in token_keys:
+        assert 0 < await real_redis.ttl(key) <= _WINDOW
 
 
 async def test_charging_tokens_leaves_the_request_counters_alone(

@@ -153,11 +153,11 @@ async def _incr_with_window(client: redis_async.Redis, key: str, ttl: int) -> in
     """INCR, then set the window's expiry when the key is NEW or has no TTL.
 
     The `or` short-circuits, so a brand-new key costs one INCR and one EXPIRE
-    and never calls TTL. The TTL == -1 branch is audit finding M4 carried over
-    to db2: the cost limiter's Lua sets EXPIRE only on create, so a key that
-    somehow exists without a TTL never expires. Here that key would pin a
-    note's attempt count forever, silently withholding every future
-    clarification prompt. The rate limit's own script carries the same guard.
+    and never calls TTL. The TTL == -1 branch is audit finding M4, which the
+    cost limiter's Lua carries too: without it a key that somehow exists
+    without a TTL never expires. Here that key would pin a note's attempt
+    count forever, silently withholding every future clarification prompt.
+    The rate limit's own script carries the same guard.
     """
     count = int(await client.incr(key))
     if count == 1 or int(await client.ttl(key)) == _TTL_NO_EXPIRY:

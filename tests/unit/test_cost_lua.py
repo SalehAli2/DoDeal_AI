@@ -105,16 +105,27 @@ async def test_a_later_increment_does_not_refresh_the_window(client):
     assert await client.ttl(_USER_KEY) <= _WINDOW
 
 
-async def test_a_pre_existing_key_without_a_ttl_never_gains_one(client):
-    """Audit M4, pinned as it behaves TODAY: a counter that exists without a
-    window keeps counting forever, and the script will not repair it."""
+async def test_a_pre_existing_key_without_a_ttl_gains_the_window(client):
+    """Audit M4, repaired: a counter found with no TTL gets the window on the next call."""
     await client.set(_TENANT_KEY, 1)
+    await client.set(_USER_KEY, 1)
     assert await client.ttl(_TENANT_KEY) == -1
 
     await _incr_both_with_window(client, _TENANT_KEY, _USER_KEY, 1, _WINDOW)
 
-    assert await client.ttl(_TENANT_KEY) == -1
+    assert await client.ttl(_TENANT_KEY) == _WINDOW
     assert await client.ttl(_USER_KEY) == _WINDOW
+
+
+async def test_a_pre_existing_key_with_a_ttl_keeps_it(client):
+    """A counter that already has a window is not reset by the M4 repair."""
+    await client.set(_TENANT_KEY, 1, ex=_WINDOW)
+    await client.set(_USER_KEY, 1, ex=_WINDOW)
+
+    await _incr_both_with_window(client, _TENANT_KEY, _USER_KEY, 1, _WINDOW * 100)
+
+    assert 0 < await client.ttl(_TENANT_KEY) <= _WINDOW
+    assert 0 < await client.ttl(_USER_KEY) <= _WINDOW
 
 
 def test_the_script_itself_makes_no_limit_decision():
@@ -206,6 +217,32 @@ async def test_a_later_token_charge_does_not_refresh_the_window(client):
 
     assert await client.ttl(_TOKEN_TENANT_KEY) <= _WINDOW
     assert await client.ttl(_TOKEN_USER_KEY) <= _WINDOW
+
+
+async def test_a_token_counter_without_a_ttl_gains_the_window(client):
+    """Audit M4, repaired: a token counter found with no TTL gets the window on the next charge."""
+    await client.set(_TOKEN_TENANT_KEY, 1)
+    await client.set(_TOKEN_USER_KEY, 1)
+
+    await _add_tokens_with_window(
+        client, _TOKEN_TENANT_KEY, _TOKEN_USER_KEY, 120, _WINDOW
+    )
+
+    assert await client.ttl(_TOKEN_TENANT_KEY) == _WINDOW
+    assert await client.ttl(_TOKEN_USER_KEY) == _WINDOW
+
+
+async def test_a_token_counter_with_a_ttl_keeps_it(client):
+    """A token counter that already has a window is not reset by the M4 repair."""
+    await client.set(_TOKEN_TENANT_KEY, 1, ex=_WINDOW)
+    await client.set(_TOKEN_USER_KEY, 1, ex=_WINDOW)
+
+    await _add_tokens_with_window(
+        client, _TOKEN_TENANT_KEY, _TOKEN_USER_KEY, 120, _WINDOW * 100
+    )
+
+    assert 0 < await client.ttl(_TOKEN_TENANT_KEY) <= _WINDOW
+    assert 0 < await client.ttl(_TOKEN_USER_KEY) <= _WINDOW
 
 
 def test_the_token_script_makes_no_limit_decision():

@@ -15,21 +15,23 @@ Failure policy differs from the security gates on purpose:
 Atomicity: the tenant and user counters are incremented together in one Redis
 Lua script execution (EVAL). Redis runs a script atomically, start to finish,
 with no other command interleaving -- so the two counters always move
-together: either both are incremented (and, on first creation, expiry is set
-on both), or -- on any Redis failure -- neither is, and the request falls
-through to the fail-open path above. There is no window where one counter
-moved and the other didn't.
+together: either both are incremented (and, on creation or on a key with no
+TTL, expiry is set), or -- on any Redis failure -- neither is, and the request
+falls through to the fail-open path above. There is no window where one
+counter moved and the other didn't.
 
 `amount` is the token/spend hook: callers pass how much this request cost
 (defaulting to 1 for a plain per-request count) and the script increments
 both counters by that amount in the same atomic step.
 
 Counters use atomic INCRBY so concurrent requests cannot corrupt the count,
-and EXPIRE so each counter resets per window -- set only the moment a counter
-is created (checked via EXISTS inside the script, not by comparing the
+and EXPIRE so each counter resets per window -- set the moment a counter is
+created (checked via EXISTS inside the script, not by comparing the
 post-increment value, so this is correct for any `amount`, not just
-amount=1). The gate runs after auth and tenancy, because it needs the tenant
-and user identity from the request context.
+amount=1), and on a counter found with no TTL (audit M4), which would otherwise
+count forever. A running window is never refreshed. The gate runs after auth
+and tenancy, because it needs the tenant and user identity from the request
+context.
 
 get_usage() is a separate, read-only path (MGET, no increment) for reporting
 current usage without affecting it.
@@ -85,20 +87,19 @@ class CostLimitError(Exception):
         super().__init__(reason_code)
 
 
-# Increments both counters by ARGV[1] and, only for a counter that did not
-# exist before this call, sets its expiry to ARGV[2]. Runs as one atomic
-# Redis script execution: both counters always move together, or (on
-# failure) neither does.
+# Increments both counters by ARGV[1] and sets a counter's expiry to ARGV[2]
+# when it is new or has no TTL (audit M4, the shape of _TAKE_RATE_LIMIT_SCRIPT).
+# One atomic execution: both counters move together, or (on failure) neither.
 _INCR_BOTH_SCRIPT = """
 local tenant_existed = redis.call('EXISTS', KEYS[1])
 local tenant_count = redis.call('INCRBY', KEYS[1], ARGV[1])
-if tenant_existed == 0 then
+if tenant_existed == 0 or redis.call('TTL', KEYS[1]) == -1 then
   redis.call('EXPIRE', KEYS[1], ARGV[2])
 end
 
 local user_existed = redis.call('EXISTS', KEYS[2])
 local user_count = redis.call('INCRBY', KEYS[2], ARGV[1])
-if user_existed == 0 then
+if user_existed == 0 or redis.call('TTL', KEYS[2]) == -1 then
   redis.call('EXPIRE', KEYS[2], ARGV[2])
 end
 
@@ -171,18 +172,17 @@ async def enforce_cost(tenant: str, subject: str, amount: int = 1) -> None:
 #
 # A SECOND script, deliberately a separate constant with the same shape rather
 # than the request script reused: the two count different quantities on
-# disjoint keys, and an edit aimed at one (the M4 TTL repair is still owed on
-# the request counters) must not silently change the other.
+# disjoint keys, and an edit aimed at one must not silently change the other.
 _ADD_TOKENS_SCRIPT = """
 local tenant_existed = redis.call('EXISTS', KEYS[1])
 local tenant_total = redis.call('INCRBY', KEYS[1], ARGV[1])
-if tenant_existed == 0 then
+if tenant_existed == 0 or redis.call('TTL', KEYS[1]) == -1 then
   redis.call('EXPIRE', KEYS[1], ARGV[2])
 end
 
 local user_existed = redis.call('EXISTS', KEYS[2])
 local user_total = redis.call('INCRBY', KEYS[2], ARGV[1])
-if user_existed == 0 then
+if user_existed == 0 or redis.call('TTL', KEYS[2]) == -1 then
   redis.call('EXPIRE', KEYS[2], ARGV[2])
 end
 
