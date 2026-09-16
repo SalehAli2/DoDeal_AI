@@ -69,6 +69,7 @@ from dodeal_ai.units.structured_intelligence.schemas import (
     JudgementRequest,
     LeadContext,
     NoteType,
+    PromptWithheld,
     SuppressedDetail,
 )
 from dodeal_ai.units.structured_intelligence.scoring import (
@@ -333,6 +334,37 @@ async def test_a_breaker_that_opens_mid_judgement_bypasses_the_rate_limit(
     assert [c for c, _ in operational.commands] == ["set", "get"]
     bypass = next(x for x in json_capture() if x["message"] == "rate_limit_bypassed")
     assert bypass["breaker"] == "open"
+
+
+# --- one question per note, race-safe (register item 119) -------------------
+
+
+async def test_a_judgement_that_lost_the_attempt_race_withholds_at_the_cap(
+    monkeypatch, deps, operational
+):
+    """A step-5 read of 0 that another request has since overtaken ends in
+    attempt_cap, with no rate slot taken and no reference written."""
+    attempt_key = f"attempt:tenant-a:{LEAD_ID}:{NOTE_ID}"
+
+    async def _read_before_the_winner_took(*args, **kwargs):
+        # The winner's take lands between this read and the loser's take.
+        operational.store[attempt_key] = "1"
+        return 0
+
+    monkeypatch.setattr(state, "read_attempts", _read_before_the_winner_took)
+
+    judgement = await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+
+    assert judgement.decision is not None
+    assert judgement.decision.prompt_sent is False
+    assert judgement.decision.prompt_withheld is PromptWithheld.ATTEMPT_CAP
+    assert judgement.decision.attempt == 1
+    assert [outcome for _, _, outcome in operational.evals] == [
+        state._SLOTS_DENIED_BY_ATTEMPT
+    ]
+    assert operational.store[attempt_key] == "1"
+    assert not [key for key in operational.store if key.startswith("ratelimit:")]
+    assert not [key for key in operational.store if key.startswith("attempt_fp:")]
 
 
 async def test_a_backend_key_failure_is_backend_unavailable(deps, leads, operational):

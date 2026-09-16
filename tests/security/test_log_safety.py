@@ -731,7 +731,7 @@ def test_direct_unexpected_error_500_logs_no_note_text(
     # formatted and logged frames-only, and the frames run through the pipeline
     # while it is holding the note -- so this is the path where a `%r` of a
     # local, or a chained message, would take the whole body with it.
-    monkeypatch.setattr(state, "take_rate_limit", _raise_boom)
+    monkeypatch.setattr(state, "take_prompt_slots", _raise_boom)
 
     r = direct_client.post(
         DIRECT,
@@ -792,7 +792,7 @@ def test_direct_model_failure_503_logs_no_lead_project(direct_client, root_log_c
 def test_direct_unexpected_error_500_logs_no_lead_project(
     direct_client, root_log_capture, monkeypatch
 ):
-    monkeypatch.setattr(state, "take_rate_limit", _raise_boom)
+    monkeypatch.setattr(state, "take_prompt_slots", _raise_boom)
 
     r = direct_client.post(
         DIRECT,

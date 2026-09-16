@@ -17,14 +17,15 @@ the step after it costs:
   3. too thin, or too long?              -> suppressed, STOP. No reservation,
                                             no model call, nothing spent.
   4. reserve idempotency, SHORT          409 duplicate / 503 unavailable
-  5. read the attempt count              (fail open)
+  5. read the attempt count              (fail open; provisional, see step 8)
   6. token pre-flight                    429 token_budget_exceeded
   7. classify, THEN vague + score        three passes, two round-trips
-  8. compute, decide -- and the rate     ONE db2 trip, and only when it can
-     limit in the same breath            change the answer (fail open)
+  8. compute, decide -- and the attempt  ONE db2 trip, and only when it can
+     cap and rate limit in one breath    change the answer (fail open)
   9. confirm the reservation, LONG       the judgement exists (fail open);
                                          a classifier suppression confirms too
- 10. increment the attempt counter ONLY if a prompt was actually sent
+ 10. record the prompted note's          ONLY if a prompt was actually sent
+     fingerprint
 
 A PASS IS NOT A CALL. Each of the three passes is one validated model call, and
 a malformed answer buys that pass one reprompt (llm_call.call_model) -- so the
@@ -47,19 +48,15 @@ raises: the request has already failed, and an abandoned pass whose answer
 comes back malformed would spend a reprompt on a judgement nobody will ever
 receive (register item 63).
 
-WHY THE ATTEMPT COUNTER MOVES LAST, AND ONLY SOMETIMES. Step 10 runs after the
-judgement exists and outside the release-on-error block, because by then the
-request has been answered: the note was fetched, three calls were paid for, and
-a decision was made. An unreachable db2 at that moment must not undo any of
-that, so the increment fails open (state.py) AND sits where a raise could not
-reach the release path. And it moves only when a prompt was ACTUALLY SENT --
-a counter that advanced on a withheld prompt would rate-limit a salesperson for
-questions they never received.
-
-THE RATE LIMIT MOVES AT STEP 8 INSTEAD, because taking its slot is how it is
-checked (register item 27, state.take_rate_limit): a separate check and
-increment could both see "one under the cap". It fails open inside state.py, so
-it cannot raise into the release path from inside the try.
+WHY BOTH COUNTERS MOVE AT STEP 8, IN ONE SCRIPT (register items 27 and 119).
+Taking a slot is how each guard is checked (state.take_prompt_slots): a
+separate check and increment could both see "one under the cap". The step 5
+read is only provisional -- two requests for one note both read 0 -- so the
+script checks the attempt cap again as it takes, and the request that lost the
+race reads back the cap and reports attempt_cap. Both move only when a prompt
+would be SENT; a counter that advanced on a withheld prompt would limit a
+salesperson for questions they never received. The trip fails open inside
+state.py, so it cannot raise into the release path from inside the try.
 
 WHY THIS ORDER, at the two places it matters:
 
@@ -651,9 +648,9 @@ async def _judge(
     vague_ms: int | None = None
     score_ms: int | None = None
     try:
-        # Read HERE, before anything is spent, so a concurrent request cannot
-        # change this judgement's answer halfway through. Fails OPEN (0). The
-        # rate limit is not read here: it is one trip at step 8.
+        # Read HERE, before anything is spent: it picks step 8's trip, and that
+        # trip's script re-checks the cap as it takes, so a concurrent request
+        # for this note cannot also send. Fails OPEN (0).
         attempts = await state.read_attempts(
             scope.tenant,
             request.lead_id,
@@ -732,9 +729,9 @@ async def _judge(
             )
             score = compute_score(score_output.marks, note_type, config)
             # decide() is PURE, so it is asked twice: once with the window
-            # assumed open, whose answer says which db2 trip (if any) the rate
-            # limit owes, and once with what the store actually said.
-            rate_allowed, rate_count = await _rate_limit_trip(
+            # assumed open, whose answer says which db2 trip (if any) the two
+            # guards owe, and once with what the store actually said.
+            attempts, rate_allowed, rate_count = await _rate_limit_trip(
                 decide(
                     score,
                     analysis,
@@ -745,6 +742,8 @@ async def _judge(
                     resubmission=resubmission,
                 ),
                 scope,
+                request,
+                attempts=attempts,
                 config=config,
             )
             decision = decide(
@@ -827,27 +826,20 @@ async def _judge(
         )
         raise
 
-    # --- step 10: the attempt counter, only for a prompt that is actually sent
+    # --- step 10: the resubmission reference, only for a prompt actually sent
     #
     # OUTSIDE the try, deliberately. The judgement exists: the note was
     # fetched, three calls were paid for, a decision was made. A db2 outage now
     # must not release the reservation and turn an answered request into a 503,
-    # so these calls are placed where a raise could not reach the release path
-    # -- as well as failing open inside state.py. Both guards, because one of
+    # so this call is placed where a raise could not reach the release path --
+    # as well as failing open inside state.py. Both guards, because one of
     # them is a promise another module keeps.
     #
     # decision is None on every suppressed judgement, so a suppressed note
-    # never moves a counter -- and neither does a resubmission, which withholds
-    # its prompt by policy and so never reaches prompt_sent. The rate limit is
-    # not here: its slot was claimed at step 8, by the check itself.
+    # never writes one -- and neither does a resubmission, which withholds its
+    # prompt by policy and so never reaches prompt_sent. Neither counter is
+    # here: both were taken at step 8, by the check itself.
     if decision is not None and decision.prompt_sent:
-        await state.increment_attempts(
-            scope.tenant,
-            request.lead_id,
-            request.note_id,
-            ttl=config.attempt_ttl_seconds,
-            request_id=scope.request_id,
-        )
         # Register item 33: the note we are prompting on, recorded beside the
         # counter it belongs to, at the one moment prompt_sent becomes true.
         await state.write_attempt_fingerprint(
@@ -863,7 +855,7 @@ async def _judge(
         scope,
         judgement,
         model_passes=model_passes,
-        # Read LAST, after the counters: elapsed_ms is what the caller waited
+        # Read LAST, after the reference: elapsed_ms is what the caller waited
         # for, and the caller was still waiting through step 10.
         timings=_Timings(
             elapsed_ms=_ms_since(started),
@@ -877,34 +869,53 @@ async def _judge(
 
 
 async def _rate_limit_trip(
-    provisional: Decision, scope: TenantScope, *, config: TenantConfig
-) -> tuple[bool, int]:
-    """The ONE db2 trip this judgement's rate limit takes, or none at all.
+    provisional: Decision,
+    scope: TenantScope,
+    request: _JudgementInput,
+    *,
+    attempts: int,
+    config: TenantConfig,
+) -> tuple[int, bool, int]:
+    """The ONE db2 trip this judgement's two prompt guards take, or none at all.
 
-    `provisional` is decide() with the window assumed open, so the documented
-    order (resubmission, attempt cap, rate limit, nothing to ask) picks the trip
-    and no condition is restated here:
+    `provisional` is decide() with the window assumed open and `attempts` as read
+    at step 5, so the documented order (resubmission, attempt cap, rate limit,
+    nothing to ask) picks the trip and no condition is restated here:
 
-      a prompt would be sent   TAKE a slot -- this IS the increment.
-      nothing to ask           READ only, so an exhausted window still reports
-                               `rate_limited` ahead of `nothing_to_ask`.
+      a prompt would be sent   TAKE the note's attempt and the subject's slot
+                               together -- this IS both increments, and a
+                               request that lost the note's attempt gets the cap.
+      nothing to ask           READ the rate limit only, so an exhausted window
+                               still reports `rate_limited` ahead of
+                               `nothing_to_ask`.
       anything else            NO call (resubmission, attempt cap, accept_silent).
+
+    Returns (attempts, rate_allowed, rate_count) for the second decide().
     """
     # ASSUMPTION[Q7]: keyed on scope.subject -- who is ASKING -- not on the
     # note's author_id; the person we would pester is the one making the request.
     if provisional.prompt_sent:
-        return await state.take_rate_limit(
+        return await state.take_prompt_slots(
             scope.tenant,
+            request.lead_id,
+            request.note_id,
             scope.subject,
-            limit=config.rate_limit_per_hour,
-            ttl=config.rate_limit_window_seconds,
+            attempt_cap=config.clarification_cap,
+            attempt_ttl=config.attempt_ttl_seconds,
+            rate_limit=config.rate_limit_per_hour,
+            rate_ttl=config.rate_limit_window_seconds,
+            attempts_read=attempts,
             request_id=scope.request_id,
         )
     if provisional.prompt_withheld is PromptWithheld.NOTHING_TO_ASK:
-        return True, await state.read_rate_limit(
-            scope.tenant, scope.subject, request_id=scope.request_id
+        return (
+            attempts,
+            True,
+            await state.read_rate_limit(
+                scope.tenant, scope.subject, request_id=scope.request_id
+            ),
         )
-    return True, 0
+    return attempts, True, 0
 
 
 def _check_one_model_answered(

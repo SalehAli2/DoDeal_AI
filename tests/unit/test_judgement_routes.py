@@ -894,8 +894,11 @@ def test_a_burst_of_four_sends_three_prompts_and_rate_limits_the_fourth(
         withheld.append(body["decision"]["prompt_withheld"])
 
     assert withheld == [None, None, None, "rate_limited"]
-    assert [allowed for _, _, allowed in operational.evals] == [True, True, True, False]
-    assert {key for _, key, _ in operational.evals} == {RATE_KEY}
+    assert [outcome for _, _, outcome in operational.evals] == [
+        *[state._SLOTS_ALLOWED] * 3,
+        state._SLOTS_DENIED_BY_RATE,
+    ]
+    assert {keys[1] for _, keys, _ in operational.evals} == {RATE_KEY}
     # Three prompts sent, three counted: the refused fourth left it alone.
     assert operational.store[RATE_KEY] == "3"
 
@@ -1022,10 +1025,10 @@ def test_a_fair_but_not_vague_note_withholds_because_there_is_nothing_to_ask(
 def test_the_counter_store_being_down_bypasses_it_without_failing_the_request(
     client, operational, json_log
 ):
-    # Every command the counters use is broken (the attempt read and increment,
-    # the rate limit's script). They fail open: the prompt is sent, nothing is
+    # Every command the counters use is broken (the attempt read and the
+    # prompt-slots script). They fail open: the prompt is sent, nothing is
     # counted, and a politeness guard being down never 503s the judgement.
-    operational.raise_on.update({"get", "incr", "eval"})
+    operational.raise_on.update({"get", "eval"})
 
     r = client.post(JUDGE, json=_body(), headers=_headers())
 

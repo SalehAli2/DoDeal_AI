@@ -88,7 +88,7 @@ class CostLimitError(Exception):
 
 
 # Increments both counters by ARGV[1] and sets a counter's expiry to ARGV[2]
-# when it is new or has no TTL (audit M4, the shape of _TAKE_RATE_LIMIT_SCRIPT).
+# when it is new or has no TTL (audit M4, the shape of _TAKE_PROMPT_SLOTS_SCRIPT).
 # One atomic execution: both counters move together, or (on failure) neither.
 _INCR_BOTH_SCRIPT = """
 local tenant_existed = redis.call('EXISTS', KEYS[1])
