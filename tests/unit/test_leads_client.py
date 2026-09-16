@@ -4,15 +4,22 @@ malformed one."""
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 from pydantic import ValidationError
 
 from dodeal_ai.core.config import Settings
 from dodeal_ai.core.context import RequestContext, TenantScope
+from dodeal_ai.core.errors import NoteNotFoundError
 from dodeal_ai.core.resilience import ExternalCallError
 from dodeal_ai.core.validation import OutputValidationError
 from dodeal_ai.tools.keys import BackendKeyError, SettingsKeyResolver
 from dodeal_ai.tools.leads import LeadsClient, get_leads_client
+from dodeal_ai.units.structured_intelligence.config import get_tenant_config
+from dodeal_ai.units.structured_intelligence.pipeline import JudgementDeps, judge_note
+from dodeal_ai.units.structured_intelligence.schemas import JudgementRequest
+from tests.helpers.fake_llm import FakeLLM
 
 
 def _settings() -> Settings:
@@ -264,3 +271,110 @@ def test_a_scheme_that_is_neither_https_nor_http_is_refused_at_construction():
             jwt_signing_key="test-key",
             backend_scheme="ftp",
         )
+
+
+# --- row-by-row validation (register item 90) --------------------------------
+
+SENTINEL = "SENTINEL-row-value-9f3c"
+
+
+def _note_row(note_id: int, **overrides: object) -> dict:
+    row = {
+        "id": note_id,
+        "note": f"Note {note_id}.",
+        "author": None,
+        "author_id": 10,
+        "createdAt": "2026-01-01T10:00:00+00:00",
+    }
+    row.update(overrides)
+    return row
+
+
+def _rejected_rows(caplog) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.getMessage() == "backend_rejected_rows"]
+
+
+async def test_a_bad_note_row_is_dropped_and_the_rest_kept_in_order(caplog):
+    """One invalid row costs that row: the others come back in page order."""
+    rows = [_note_row(1), _note_row(2, author_id=SENTINEL), _note_row(3)]
+    transport = MockTransport(_notes_body(rows))
+    with caplog.at_level(logging.WARNING, logger="dodeal_ai.tools"):
+        notes = await _client(transport).get_lead_notes(_scope(), 7)
+    assert [n.id for n in notes] == [1, 3]
+    (record,) = _rejected_rows(caplog)
+    assert record.count == 1
+    assert record.endpoint == "tool.get_lead_notes"
+
+
+async def test_a_bad_lead_row_is_dropped_and_counted(caplog):
+    """The lead list is validated per row the same way."""
+    rows = [{"id": 1}, {"id": SENTINEL}, {"name": "no id"}, {"id": 4}]
+    transport = MockTransport(_list_body(rows))
+    with caplog.at_level(logging.WARNING, logger="dodeal_ai.tools"):
+        leads = await _client(transport).get_leads(_scope())
+    assert [lead.id for lead in leads] == [1, 4]
+    (record,) = _rejected_rows(caplog)
+    assert record.count == 2
+    assert record.endpoint == "tool.get_leads"
+
+
+async def test_the_dropped_row_line_carries_no_value(caplog):
+    """No field of a rejected row reaches any log record."""
+    rows = [_note_row(1, note=SENTINEL, author_id=SENTINEL)]
+    transport = MockTransport(_notes_body(rows))
+    with caplog.at_level(logging.DEBUG):
+        assert await _client(transport).get_lead_notes(_scope(), 7) == []
+    assert SENTINEL not in caplog.text
+    assert all(SENTINEL not in str(r.__dict__) for r in caplog.records)
+
+
+async def test_a_clean_page_logs_nothing(caplog):
+    """No dropped rows, no line."""
+    transport = MockTransport(_notes_body([_note_row(1)]))
+    with caplog.at_level(logging.WARNING, logger="dodeal_ai.tools"):
+        await _client(transport).get_lead_notes(_scope(), 7)
+    assert _rejected_rows(caplog) == []
+
+
+async def test_a_malformed_envelope_still_fails_closed():
+    """Row tolerance does not extend to the envelope: no data list is an error."""
+    transport = MockTransport({"status": True, "data": "not-a-list", "meta": _meta(0)})
+    with pytest.raises(OutputValidationError):
+        await _client(transport).get_lead_notes(_scope(), 7)
+
+
+async def test_a_string_booked_amount_is_accepted():
+    """bookedAmount is Any: a formatted string no longer rejects the lead."""
+    transport = MockTransport(_lead_body({"id": 7, "bookedAmount": "1,250,000"}))
+    lead = await _client(transport).get_lead(_scope(), 7)
+    assert lead.bookedAmount == "1,250,000"
+
+
+async def test_the_requested_notes_invalid_row_is_note_not_found():
+    """Through the pipeline: the requested note's bad row is 404, nothing reserved."""
+    rows = [_note_row(10, createdAt=None), _note_row(11)]
+
+    class _Pages:
+        calls = 0
+
+        async def get_json(self, url: str, headers: dict[str, str]) -> object:
+            self.calls += 1
+            if url.endswith("/notes"):
+                return _notes_body(rows)
+            return _lead_body({"id": 7})
+
+    llm = FakeLLM()
+    deps = JudgementDeps(
+        leads=_client(_Pages()),  # type: ignore[arg-type]
+        llm=llm,
+        config=get_tenant_config("tenant-a"),
+        settings=_settings(),
+    )
+    with pytest.raises(NoteNotFoundError):
+        await judge_note(
+            _scope(),
+            JudgementRequest(lead_id=7, note_id=10),
+            resubmission=False,
+            deps=deps,
+        )
+    assert llm.call_count == 0

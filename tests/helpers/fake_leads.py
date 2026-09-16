@@ -135,16 +135,10 @@ def load_fixture_client(path: Path = FIXTURE_PATH) -> FakeLeadsClient:
     here. It is not what `GET /leads/{id}/notes` returns, and folding it into
     `notes` would silently grow the 127-note corpus the campaign counts.
 
-    ONE LEAD IN THE CORPUS DOES NOT VALIDATE. Lead 1661 carries
-    `bookedAmount: "1,250,000"` -- a formatted string where the schema says
-    `float | None`, and `schemas/lead.py` says in as many words that this
-    field's real type is UNCONFIRMED. The loader skips it and counts it rather
-    than doing either of the two things that would hide it: coercing the string
-    (which would invent a parse rule -- comma as a thousands separator, not the
-    decimal comma half the world writes -- for a field nobody has confirmed) or
-    relaxing `Lead` (src/ is not this piece's to change). The count is pinned in
-    tests/unit/test_fake_crm_fixture.py, so a second bad lead fails a test
-    instead of vanishing. See CAMPAIGN_REPORT.md, Piece I.1, for the lead.
+    A LEAD THAT DOES NOT VALIDATE IS SKIPPED AND COUNTED. Since register item
+    90 made `bookedAmount` `Any`, lead 1661's `"1,250,000"` loads and the count
+    is zero; it is pinned in tests/unit/test_fake_crm_fixture.py, so a bad lead
+    fails a test instead of vanishing.
 
     A skipped lead does NOT cost its notes. The two live under different
     top-level keys, and 1661 has none in any case; dropping notes over an

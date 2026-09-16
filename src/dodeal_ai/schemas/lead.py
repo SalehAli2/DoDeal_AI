@@ -18,8 +18,9 @@ confirmed its data is frequently incomplete and may grow new fields; this is
 an external response the service does not control.
 
 Every lead field except `id` may be null and is modelled as optional, per the
-integration guide. `bookedAmount`'s real type is unconfirmed (modelled as an
-optional float; the backend may send null). `createdAt`/`updatedAt` are
+integration guide. `bookedAmount`'s real type is unconfirmed, so it is `Any`:
+the corpus already holds "1,250,000", and nothing here reads it (register item
+90). `createdAt`/`updatedAt` are
 confirmed ISO-8601 with a timezone offset; kept as `str` for now rather than
 parsed to `datetime`, since nothing downstream needs them parsed yet.
 
@@ -29,6 +30,8 @@ guide does not say the rest may be absent.
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
@@ -63,9 +66,20 @@ class Lead(BaseModel):
     country: str | None = None
     assignedToManager: int | None = None
     assignedToSales: int | None = None
-    bookedAmount: float | None = None
+    bookedAmount: Any = None
     createdAt: str | None = None
     updatedAt: str | None = None
+
+
+class RowsEnvelope(BaseModel):
+    """The list envelope with its rows still raw. LeadsClient validates each row
+    on its own, so one bad row costs that row and not the page (item 90)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    status: bool
+    data: list[object]
+    meta: PageMeta
 
 
 class LeadListResponse(BaseModel):

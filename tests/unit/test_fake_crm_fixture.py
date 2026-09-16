@@ -7,11 +7,10 @@ pinned here. Regenerating the fixture with a different seed, or with more or
 fewer records, fails THIS test with the old and new numbers side by side --
 rather than quietly changing what an eval pass means somewhere downstream.
 
-`skipped_invalid_leads` is pinned for the opposite reason. The loader tolerates
-exactly one record the `Lead` schema rejects (lead 1661's string
-`bookedAmount`); a SECOND rejected lead would be a new disagreement between the
-corpus and the schemas, and the point of pinning the number is that it cannot
-arrive silently.
+`skipped_invalid_leads` is pinned for the opposite reason. Since register item
+90 made `bookedAmount` `Any`, every lead in the corpus validates; a rejected
+lead would be a new disagreement between the corpus and the schemas, and the
+point of pinning the number is that it cannot arrive silently.
 
 The per-note assertion is the shape tripwire. Every note is loaded through
 `LeadNote`, which requires a non-null `note`, `id`, `author_id` and
@@ -28,7 +27,7 @@ from tests.helpers.fake_leads import load_fixture_client
 # only together with the fixture, and say why in the same commit.
 SEED = "fake-dodeal-crm-seed-1"
 LEADS_IN_FILE = 1448
-SKIPPED_INVALID_LEADS = 1  # lead 1661, bookedAmount "1,250,000"
+SKIPPED_INVALID_LEADS = 0  # lead 1661's "1,250,000" loads since item 90
 LEAD_COUNT = LEADS_IN_FILE - SKIPPED_INVALID_LEADS
 NOTE_COUNT = 127
 
@@ -44,8 +43,8 @@ def test_fixture_lead_count_is_pinned():
 
 
 def test_skipped_invalid_lead_count_is_pinned():
-    # Not "some leads are bad, never mind" -- exactly one is, and the loader
-    # says so out loud. Two would fail here.
+    # Not "some leads are bad, never mind" -- none is, and the loader says so
+    # out loud. One would fail here.
     client = load_fixture_client()
     assert client.skipped_invalid_leads == SKIPPED_INVALID_LEADS
 

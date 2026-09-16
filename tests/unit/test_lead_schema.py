@@ -62,6 +62,14 @@ def test_lead_tolerates_null_booked_amount():
     assert result.data[0].bookedAmount is None
 
 
+def test_lead_accepts_any_booked_amount():
+    """Register item 90: bookedAmount's type is unconfirmed, so any value loads."""
+    for value in ("1,250,000", 1500, {"amount": 1}):
+        payload = _response_payload([_lead_payload(id=1, bookedAmount=value)])
+        result = validate_output(LeadListResponse, payload, label="tool.get_leads")
+        assert result.data[0].bookedAmount == value
+
+
 def test_lead_requires_id():
     bad = {"name": "No ID"}  # missing id
     with pytest.raises(OutputValidationError):
