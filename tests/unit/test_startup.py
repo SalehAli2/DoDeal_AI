@@ -29,6 +29,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from dodeal_ai.core import prompting
 from dodeal_ai.core.config import REDIS_POOL_HEADROOM, ConfigError, get_settings
 from dodeal_ai.core.llm.profiles import PROFILE_UNIT_A_CLASSIFY
 from dodeal_ai.core.logging_config import JsonFormatter
@@ -245,6 +246,26 @@ def test_a_refused_llm_build_closes_the_pooled_client(monkeypatch):
     assert caught.value is refusal
     assert len(handed) == 1
     assert handed[0].is_closed
+    get_settings.cache_clear()
+
+
+def test_a_refused_llm_build_clears_the_template_cache(monkeypatch):
+    """A refused build leaves no preloaded template behind for the next app."""
+    _llm_env(monkeypatch, PROVIDER="groq", MODEL="pinned-model", API_KEY="k")
+    cache_at_build: list[int] = []
+
+    def refuse(settings, http):
+        cache_at_build.append(len(prompting._TEMPLATE_CACHE))
+        raise ConfigError("llm_api_key_missing")
+
+    monkeypatch.setattr("dodeal_ai.main.build_llm_client", refuse)
+
+    with pytest.raises(ConfigError), TestClient(app):
+        pass
+
+    # Populated when the build ran, so an empty cache below was cleared, not skipped.
+    assert cache_at_build and cache_at_build[0] > 0
+    assert prompting._TEMPLATE_CACHE == {}
     get_settings.cache_clear()
 
 

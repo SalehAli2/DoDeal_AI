@@ -112,8 +112,10 @@ async def lifespan(app: FastAPI):
         try:
             app.state.llm = build_llm_client(settings, app.state.http)
         except BaseException:
-            # A refused startup never reaches the aclose() after `yield`, so the
-            # pool built above is closed here; bare `raise` keeps the original.
+            # A refused startup never reaches the cleanup after `yield`, so the
+            # preloaded templates and the pool are released here, in shutdown's
+            # order; bare `raise` keeps the original error.
+            clear_templates()
             await app.state.http.aclose()
             raise
     yield
