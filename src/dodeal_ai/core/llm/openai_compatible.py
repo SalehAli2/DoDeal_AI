@@ -179,8 +179,14 @@ class OpenAICompatibleClient:
                 f"{self._base_url}{_COMPLETIONS_PATH}",
                 json=payload,
                 headers=self._headers(),
-                timeout=httpx.Timeout(self._http_timeout_seconds()),
+                timeout=self._timeout(),
             )
+        except httpx.PoolTimeout:
+            # Register items 112 and 16: no free pooled connection. Nothing was
+            # sent, so it is named for the pool and never read as a timeout.
+            raise self._error(
+                LLMErrorReason.PROVIDER_POOL_EXHAUSTED, transient=True, status=None
+            ) from None
         except httpx.TimeoutException:
             # Catch-list 55: a timeout leaves here as the seam's transient
             # exception, NEVER as a builtin TimeoutError -- which asyncio.wait_for
@@ -200,6 +206,13 @@ class OpenAICompatibleClient:
         if response.status_code != httpx.codes.OK:
             raise self._status_error(response.status_code)
         return self._parse(response)
+
+    def _timeout(self) -> httpx.Timeout:
+        """The HTTP budget on connect, write and read; the pool wait is the
+        acquire setting, and never longer than that budget."""
+        budget = self._http_timeout_seconds()
+        pool = min(self._settings.llm_pool_acquire_timeout_seconds, budget)
+        return httpx.Timeout(budget, pool=pool)
 
     def _http_timeout_seconds(self) -> float:
         """The HTTP budget: inside the watchdog deadline, never equal to it.

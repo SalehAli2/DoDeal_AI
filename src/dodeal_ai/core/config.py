@@ -172,6 +172,10 @@ class Settings(BaseSettings):
     # a proxy in front. A wrong value sends every prompt to the wrong host, so
     # it is never logged and never carried on an exception.
     llm_base_url: str | None = None
+    # How long a model call waits for a free connection in the pooled client
+    # (register item 112). 1.0 s fails a burst fast as provider_pool_exhausted;
+    # too low refuses a brief queue, too high hides a full pool inside the call.
+    llm_pool_acquire_timeout_seconds: float = Field(default=1.0, gt=0)
 
     # Redis connections. Two named connections so code never guesses which
     # instance it is using: a queue connection and a cost/quota connection.

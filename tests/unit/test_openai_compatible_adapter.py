@@ -317,11 +317,61 @@ async def test_http_timeout_is_strictly_inside_the_watchdog_deadline(
     sent = recorder.requests[0].extensions["timeout"]
     assert sent["read"] < settings.llm_timeout_seconds
     assert sent["read"] == pytest.approx(60.0 * _HTTP_TIMEOUT_SHARE)
-    # Every phase, not just read: a hang during connect or while waiting on the
-    # pool has to lose the same race.
+    # Every phase but the pool, which waits for the acquire setting (item 112).
     assert sorted(sent) == ["connect", "pool", "read", "write"]
-    for phase, value in sent.items():
-        assert value == pytest.approx(60.0 * _HTTP_TIMEOUT_SHARE), phase
+    for phase in ("connect", "read", "write"):
+        assert sent[phase] == pytest.approx(60.0 * _HTTP_TIMEOUT_SHARE), phase
+    assert sent["pool"] == settings.llm_pool_acquire_timeout_seconds == 1.0
+
+
+@BOTH_URLS
+async def test_the_pool_wait_is_the_acquire_setting(
+    monkeypatch: pytest.MonkeyPatch, base_url: str
+) -> None:
+    """DODEAL_LLM_POOL_ACQUIRE_TIMEOUT_SECONDS reaches the pool phase alone."""
+    monkeypatch.setenv("DODEAL_LLM_POOL_ACQUIRE_TIMEOUT_SECONDS", "0.25")
+    settings = _settings(monkeypatch)
+    recorder = Recorder(httpx.Response(200, json=_ok_body()))
+    await _call(settings, base_url, recorder)
+    sent = recorder.requests[0].extensions["timeout"]
+    assert sent["pool"] == 0.25
+    assert sent["read"] == pytest.approx(
+        settings.llm_timeout_seconds * _HTTP_TIMEOUT_SHARE
+    )
+
+
+@BOTH_URLS
+async def test_the_pool_wait_never_outlasts_the_http_budget(
+    monkeypatch: pytest.MonkeyPatch, base_url: str
+) -> None:
+    """A pool setting above the HTTP budget is capped, so httpx still loses first."""
+    settings = _settings(monkeypatch, TIMEOUT_SECONDS="0.5")
+    recorder = Recorder(httpx.Response(200, json=_ok_body()))
+    await _call(settings, base_url, recorder)
+    sent = recorder.requests[0].extensions["timeout"]
+    assert sent["pool"] == pytest.approx(0.5 * _HTTP_TIMEOUT_SHARE)
+
+
+@BOTH_URLS
+async def test_a_pool_timeout_is_provider_pool_exhausted_not_a_timeout(
+    monkeypatch: pytest.MonkeyPatch, base_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Register item 112: an exhausted pool has its own reason, and is transient."""
+    recorder = Recorder(raises=httpx.PoolTimeout("no connection"))
+    with (
+        caplog.at_level(logging.WARNING, logger="dodeal_ai.llm.openai_compatible"),
+        pytest.raises(OpenAICompatibleError) as caught,
+    ):
+        await _call(_settings(monkeypatch), base_url, recorder)
+    assert caught.value.reason is LLMErrorReason.PROVIDER_POOL_EXHAUSTED
+    assert caught.value.reason is not LLMErrorReason.UNAVAILABLE
+    assert caught.value.transient is True
+    assert caught.value.status is None
+    assert str(caught.value) == "llm_provider_error:provider_pool_exhausted"
+    (record,) = [
+        r for r in caplog.records if r.getMessage() == "llm_provider_call_failed"
+    ]
+    assert record.reason_code == "provider_pool_exhausted"
 
 
 @BOTH_URLS
