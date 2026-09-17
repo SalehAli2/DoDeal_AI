@@ -420,7 +420,9 @@ async def test_a_refused_take_writes_nothing(client):
     """Whichever guard refuses -- attempt, hourly or daily -- no counter moves."""
     await client.set(_RATE_DAY_KEY, _RATE_LIMIT_DAY)
 
-    assert await _take(client) == [_SLOTS_DENIED_BY_RATE, 0, _RATE_LIMIT_DAY]
+    # The third value is the HOURLY count on every denial path, not whichever
+    # guard refused: decide() compares it against rate_limit_per_hour.
+    assert await _take(client) == [_SLOTS_DENIED_BY_RATE, 0, 0]
     assert await client.exists(_ATTEMPT_KEY) == 0
     assert await client.exists(_RATE_KEY) == 0
     assert await client.get(_RATE_DAY_KEY) == str(_RATE_LIMIT_DAY)

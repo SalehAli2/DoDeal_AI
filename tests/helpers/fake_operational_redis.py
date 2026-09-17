@@ -115,7 +115,10 @@ class FakeOperationalRedis:
         elif rate >= limit:
             reply = [_SLOTS_DENIED_BY_RATE, attempts, rate]
         elif rate_day >= limit_day:
-            reply = [_SLOTS_DENIED_BY_RATE, attempts, rate_day]
+            # The third value is the HOURLY count on every denial path, as the
+            # real script returns it: decide() compares it against
+            # rate_limit_per_hour, never against the daily cap.
+            reply = [_SLOTS_DENIED_BY_RATE, attempts, rate]
         else:
             taken = self._take(attempt_key, attempt_ttl)
             self._take(rate_key, rate_ttl)

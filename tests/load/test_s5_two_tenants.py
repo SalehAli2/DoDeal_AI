@@ -87,7 +87,7 @@ def _parse_key(key: str) -> tuple[str, str, frozenset[str]]:
     elif namespace == "idem":
         tenant, _operation, note_id, _fingerprint = rest
         ids = [note_id]
-    elif namespace in ("ratelimit", "attempt", "attempt_fp"):
+    elif namespace in ("ratelimit", "ratelimit_day", "attempt", "attempt_fp"):
         tenant, *ids = rest
     else:
         pytest.fail(f"a key in a namespace this test does not know: {namespace}")

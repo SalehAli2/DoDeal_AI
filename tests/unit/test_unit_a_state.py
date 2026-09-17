@@ -592,7 +592,9 @@ async def test_a_refused_take_writes_nothing(fake: FakeOperationalRedis) -> None
     """Whichever guard refuses, no counter moves at all -- all three or none."""
     fake.store[RATE_DAY_KEY] = str(DAY_LIMIT)
 
-    assert await _take() == (0, False, DAY_LIMIT)
+    # The third value is the HOURLY count on every denial path, not whichever
+    # guard refused: decide() compares it against rate_limit_per_hour.
+    assert await _take() == (0, False, 0)
     assert fake.store == {RATE_DAY_KEY: str(DAY_LIMIT)}
     assert fake.ttls == {}
 

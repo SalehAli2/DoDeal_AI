@@ -347,7 +347,10 @@ if rate >= tonumber(ARGV[3]) then
 end
 local rate_day = tonumber(redis.call('GET', KEYS[3]) or '0')
 if rate_day >= tonumber(ARGV[5]) then
-  return {1, attempts, rate_day}
+  -- The third value is always the HOURLY count, on every path: decide()
+  -- compares it against rate_limit_per_hour. The daily guard denies with the
+  -- same `rate_limited` reason and does not change what this slot means.
+  return {1, attempts, rate}
 end
 local taken = redis.call('INCR', KEYS[1])
 if taken == 1 or redis.call('TTL', KEYS[1]) == -1 then
