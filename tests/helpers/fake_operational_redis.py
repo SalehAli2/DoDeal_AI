@@ -102,20 +102,24 @@ class FakeOperationalRedis:
         keys = tuple(str(k) for k in keys_and_args[:numkeys])
         if script == _TAKE_OVER_SCRIPT:
             return self._take_over(script, keys, keys_and_args[numkeys:])
-        attempt_key, rate_key = keys
+        attempt_key, rate_key, rate_day_key = keys
         self._guard("eval", attempt_key)
-        cap, attempt_ttl, limit, rate_ttl = (
+        cap, attempt_ttl, limit, rate_ttl, limit_day, rate_ttl_day = (
             int(str(arg)) for arg in keys_and_args[numkeys:]
         )
         attempts = int(self.store.get(attempt_key, "0"))
         rate = int(self.store.get(rate_key, "0"))
+        rate_day = int(self.store.get(rate_day_key, "0"))
         if attempts >= cap:
             reply = [_SLOTS_DENIED_BY_ATTEMPT, attempts, 0]
         elif rate >= limit:
             reply = [_SLOTS_DENIED_BY_RATE, attempts, rate]
+        elif rate_day >= limit_day:
+            reply = [_SLOTS_DENIED_BY_RATE, attempts, rate_day]
         else:
             taken = self._take(attempt_key, attempt_ttl)
             self._take(rate_key, rate_ttl)
+            self._take(rate_day_key, rate_ttl_day)
             reply = [_SLOTS_ALLOWED, taken, rate]
         self.evals.append((script, keys, reply[0]))
         return reply

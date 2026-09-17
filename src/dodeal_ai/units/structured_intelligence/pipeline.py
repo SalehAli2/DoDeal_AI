@@ -190,6 +190,11 @@ NO_MODEL = ""
 # deadline it multiplies; the load lane sets the two together.
 IDEMPOTENCY_INFLIGHT_MULTIPLIER = 4
 
+# The daily rate-limit key's window (register item 66): a calendar day, fixed
+# here rather than on TenantConfig. Only the CAP varies per tenant; a shorter
+# window here would let a subject clear the daily cap before the day is over.
+RATE_LIMIT_DAY_WINDOW_SECONDS = 86400
+
 # Register item 17: a note missing from page one is read again once, this long
 # after the first read, for a save the CRM has not yet made visible to its
 # reads. Only when this much of the judgement deadline is left; else 404 at once.
@@ -1157,6 +1162,8 @@ async def _rate_limit_trip(
             attempt_ttl=config.attempt_ttl_seconds,
             rate_limit=config.rate_limit_per_hour,
             rate_ttl=config.rate_limit_window_seconds,
+            rate_limit_day=config.rate_limit_per_day,
+            rate_ttl_day=RATE_LIMIT_DAY_WINDOW_SECONDS,
             attempts_read=attempts,
             request_id=scope.request_id,
         )

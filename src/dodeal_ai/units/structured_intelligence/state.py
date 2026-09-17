@@ -126,6 +126,12 @@ def _rate_limit_key(tenant: str, subject: str) -> str:
     return f"ratelimit:{tenant}:{subject}"
 
 
+# Register item 66: the daily ceiling on the same subject, a separate key so it
+# keeps its own window instead of sharing (and resetting) the hourly one.
+def _rate_limit_day_key(tenant: str, subject: str) -> str:
+    return f"ratelimit_day:{tenant}:{subject}"
+
+
 # Register item 118: the note alone, never the lead. A lead id is the caller's
 # to send, so a key that carried it gave every new lead id a fresh allowance.
 def _attempt_key(tenant: str, note_id: int) -> str:
@@ -324,9 +330,12 @@ async def take_over_idempotency(
 # --- the attempt cap and the rate limit, taken together: fails OPEN ---------
 
 
-# KEYS[1] the note's attempt counter, KEYS[2] the subject's rate limit. ARGV:
-# attempt cap, attempt TTL, rate limit, rate window. A refusal writes nothing; a
-# take INCRs both and sets a window on a key that is new or has none (audit M4).
+# KEYS[1] the note's attempt counter, KEYS[2] the subject's hourly rate limit,
+# KEYS[3] the subject's daily rate limit (register item 66). ARGV: attempt cap,
+# attempt TTL, hourly limit, hourly window, daily limit, daily window. A refusal
+# writes nothing; a take INCRs all three and sets a window on a key that is new
+# or has none (audit M4). The daily check runs after the hourly one and denies
+# with the SAME outcome code -- one withheld reason, `rate_limited`, for either.
 _TAKE_PROMPT_SLOTS_SCRIPT = """
 local attempts = tonumber(redis.call('GET', KEYS[1]) or '0')
 if attempts >= tonumber(ARGV[1]) then
@@ -336,6 +345,10 @@ local rate = tonumber(redis.call('GET', KEYS[2]) or '0')
 if rate >= tonumber(ARGV[3]) then
   return {1, attempts, rate}
 end
+local rate_day = tonumber(redis.call('GET', KEYS[3]) or '0')
+if rate_day >= tonumber(ARGV[5]) then
+  return {1, attempts, rate_day}
+end
 local taken = redis.call('INCR', KEYS[1])
 if taken == 1 or redis.call('TTL', KEYS[1]) == -1 then
   redis.call('EXPIRE', KEYS[1], ARGV[2])
@@ -343,6 +356,10 @@ end
 local rate_taken = redis.call('INCR', KEYS[2])
 if rate_taken == 1 or redis.call('TTL', KEYS[2]) == -1 then
   redis.call('EXPIRE', KEYS[2], ARGV[4])
+end
+local rate_day_taken = redis.call('INCR', KEYS[3])
+if rate_day_taken == 1 or redis.call('TTL', KEYS[3]) == -1 then
+  redis.call('EXPIRE', KEYS[3], ARGV[6])
 end
 return {2, taken, rate}
 """
@@ -370,15 +387,22 @@ async def take_prompt_slots(
     attempt_ttl: int,
     rate_limit: int,
     rate_ttl: int,
+    rate_limit_day: int,
+    rate_ttl_day: int,
     attempts_read: int,
     request_id: str,
 ) -> tuple[int, bool, int]:
     """Claim this note's next attempt and this subject's next prompt, or neither.
 
-    The only writer of both counters, called only where a prompt would be sent,
-    in one round trip (register item 119). Returns (attempts, rate_allowed,
-    rate_count), both counts BEFORE this call. A request that lost the race for
-    the note's attempt gets the stored count back, so decide() says attempt_cap.
+    The only writer of the three counters, called only where a prompt would be
+    sent, in one round trip (register items 66 and 119). Returns (attempts,
+    rate_allowed, rate_count), both counts BEFORE this call. A request that lost
+    the race for the note's attempt gets the stored count back, so decide() says
+    attempt_cap.
+
+    `rate_limit`/`rate_ttl` are the hourly guard, `rate_limit_day`/`rate_ttl_day`
+    the daily one beside it (register item 66); either denies with the same
+    `rate_limited` reason, so the caller need not tell them apart.
 
     Fails OPEN at (attempts_read, True, 0) -- the attempts read before the model
     ran, and an open window -- with both guards' own bypass codes.
@@ -387,13 +411,16 @@ async def take_prompt_slots(
         reply = await operational_breaker().call(
             lambda: get_operational_client().eval(
                 _TAKE_PROMPT_SLOTS_SCRIPT,
-                2,
+                3,
                 _attempt_key(tenant, note_id),
                 _rate_limit_key(tenant, subject),
+                _rate_limit_day_key(tenant, subject),
                 attempt_cap,
                 attempt_ttl,
                 rate_limit,
                 rate_ttl,
+                rate_limit_day,
+                rate_ttl_day,
             )
         )
     except redis.RedisError as exc:

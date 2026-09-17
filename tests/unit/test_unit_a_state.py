@@ -45,6 +45,11 @@ CAP = 1
 ATTEMPT_TTL = 21600
 ATTEMPT_KEY = f"attempt:{TENANT}:{NOTE_ID}"
 RATE_KEY = f"ratelimit:{TENANT}:{SUBJECT}"
+# Register item 66: the daily ceiling beside the hourly one. 10 is
+# TenantConfig's default; DAY_WINDOW is the fixed 86400s pipeline.py passes.
+DAY_LIMIT = 10
+DAY_WINDOW = 86400
+RATE_DAY_KEY = f"ratelimit_day:{TENANT}:{SUBJECT}"
 
 # Shaped like a real fingerprint: 64 hex chars. Bound to a NAME here and only
 # ever passed by name, never written as a literal on a line that could end up
@@ -443,6 +448,8 @@ async def _take(
     note_id: int = NOTE_ID,
     *,
     cap: int = CAP,
+    limit: int = LIMIT,
+    limit_day: int = DAY_LIMIT,
     attempts_read: int = 0,
 ) -> tuple[int, bool, int]:
     """One take for this subject, at the default caps unless a case needs others."""
@@ -452,8 +459,10 @@ async def _take(
         SUBJECT,
         attempt_cap=cap,
         attempt_ttl=ATTEMPT_TTL,
-        rate_limit=LIMIT,
+        rate_limit=limit,
         rate_ttl=WINDOW,
+        rate_limit_day=limit_day,
+        rate_ttl_day=DAY_WINDOW,
         attempts_read=attempts_read,
         request_id=REQUEST_ID,
     )
@@ -462,9 +471,18 @@ async def _take(
 async def test_a_take_counts_one_attempt_and_one_rate_slot(
     fake: FakeOperationalRedis,
 ) -> None:
-    """An allowed take moves both counters by one."""
+    """An allowed take moves all three counters by one (item 66: hourly and
+    daily rate slots taken together with the attempt)."""
     assert await _take() == (0, True, 0)
-    assert (fake.store[ATTEMPT_KEY], fake.store[RATE_KEY]) == ("1", "1")
+    assert (
+        fake.store[ATTEMPT_KEY],
+        fake.store[RATE_KEY],
+        fake.store[RATE_DAY_KEY],
+    ) == (
+        "1",
+        "1",
+        "1",
+    )
 
 
 async def test_rate_limit_counts_prompts_sent(fake: FakeOperationalRedis) -> None:
@@ -517,7 +535,11 @@ async def test_a_second_take_on_one_note_gets_the_cap_back(
 
 async def test_both_windows_are_set_on_create(fake: FakeOperationalRedis) -> None:
     await _take()
-    assert (fake.ttls[ATTEMPT_KEY], fake.ttls[RATE_KEY]) == (ATTEMPT_TTL, WINDOW)
+    assert (fake.ttls[ATTEMPT_KEY], fake.ttls[RATE_KEY], fake.ttls[RATE_DAY_KEY]) == (
+        ATTEMPT_TTL,
+        WINDOW,
+        DAY_WINDOW,
+    )
 
 
 async def test_rate_limit_is_keyed_on_the_subject_and_the_tenant(
@@ -540,6 +562,39 @@ async def test_a_later_take_does_not_reset_either_window(
     await _take(cap=2)
     # A sliding window would let a busy user never hit the cap.
     assert (fake.ttls[ATTEMPT_KEY], fake.ttls[RATE_KEY]) == (60, 60)
+
+
+async def test_the_fourth_take_in_an_hour_is_withheld(
+    fake: FakeOperationalRedis,
+) -> None:
+    """Register item 66: the hourly cap still denies on its own, day cap wide open."""
+    replies = [await _take(n, cap=99, limit_day=999) for n in (10, 11, 12, 13)]
+    assert [rate_allowed for _, rate_allowed, _ in replies] == [
+        True,
+        True,
+        True,
+        False,
+    ]
+    assert fake.store[RATE_KEY] == str(LIMIT)
+    assert fake.store.get(RATE_DAY_KEY) == "3"  # the three allowed takes only
+
+
+async def test_the_eleventh_take_in_a_day_is_withheld(
+    fake: FakeOperationalRedis,
+) -> None:
+    """Register item 66: the daily cap denies once the hourly one is wide open."""
+    replies = [await _take(n, cap=99, limit=999) for n in range(10, 21)]
+    assert [rate_allowed for _, rate_allowed, _ in replies] == [True] * 10 + [False]
+    assert fake.store[RATE_DAY_KEY] == str(DAY_LIMIT)
+
+
+async def test_a_refused_take_writes_nothing(fake: FakeOperationalRedis) -> None:
+    """Whichever guard refuses, no counter moves at all -- all three or none."""
+    fake.store[RATE_DAY_KEY] = str(DAY_LIMIT)
+
+    assert await _take() == (0, False, DAY_LIMIT)
+    assert fake.store == {RATE_DAY_KEY: str(DAY_LIMIT)}
+    assert fake.ttls == {}
 
 
 async def test_one_take_is_one_round_trip(fake: FakeOperationalRedis) -> None:

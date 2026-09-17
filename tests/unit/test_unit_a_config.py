@@ -191,6 +191,7 @@ def test_thin_evidence_bounds(config: TenantConfig) -> None:
 def test_caps_and_windows(config: TenantConfig) -> None:
     assert config.clarification_cap == 1
     assert config.rate_limit_per_hour == 3
+    assert config.rate_limit_per_day == 10
     assert config.rate_limit_window_seconds == 3600
 
 

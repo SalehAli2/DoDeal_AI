@@ -171,6 +171,11 @@ class TenantConfig:
 
     clarification_cap: int
     rate_limit_per_hour: int
+    # Register item 66: a second ceiling on the same guard, its own window (a
+    # calendar day, fixed in pipeline.py -- only the cap is per-tenant). Catches
+    # a subject who stays just under the hourly cap all day; a value of 0 would
+    # withhold every prompt regardless of the hourly count.
+    rate_limit_per_day: int
     rate_limit_window_seconds: int
 
     attempt_ttl_seconds: int
@@ -209,6 +214,7 @@ _DEFAULT_CONFIG = TenantConfig(
     max_note_chars=2000,  # provisional -- the real sample's longest note is 340
     clarification_cap=1,
     rate_limit_per_hour=3,
+    rate_limit_per_day=10,
     rate_limit_window_seconds=3600,
     attempt_ttl_seconds=21600,  # 6h
     idempotency_ttl_seconds=86400,  # 24h
@@ -240,6 +246,7 @@ class TenantConfigFile(BaseModel):
     max_note_chars: int | None = Field(default=None, ge=1, le=MAX_NOTE_TEXT_CHARS)
     clarification_cap: int | None = Field(default=None, ge=0)
     rate_limit_per_hour: int | None = Field(default=None, ge=0)
+    rate_limit_per_day: int | None = Field(default=None, ge=0)
     rate_limit_window_seconds: int | None = Field(default=None, gt=0)
     attempt_ttl_seconds: int | None = Field(default=None, gt=0)
     idempotency_ttl_seconds: int | None = Field(default=None, gt=0)

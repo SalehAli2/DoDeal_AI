@@ -33,6 +33,7 @@ from dodeal_ai.units.structured_intelligence.config import get_tenant_config
 from dodeal_ai.units.structured_intelligence.decide import decide
 from dodeal_ai.units.structured_intelligence.pipeline import (
     IDEMPOTENCY_INFLIGHT_MULTIPLIER,
+    RATE_LIMIT_DAY_WINDOW_SECONDS,
 )
 from dodeal_ai.units.structured_intelligence.schemas import (
     Decision,
@@ -52,6 +53,7 @@ from dodeal_ai.units.structured_intelligence.state import (
     _attempt_key,
     _idempotency_key,
     _prompt_slots_answer,
+    _rate_limit_day_key,
     _rate_limit_key,
 )
 
@@ -236,11 +238,20 @@ _NOTE_ID = 10
 _ATTEMPT_CAP = 1
 _ATTEMPT_TTL = 600
 _RATE_LIMIT = 3
+# Register item 66: the daily ceiling beside the hourly one. Kept high in most
+# tests here so the hourly guard is the one being exercised.
+_RATE_LIMIT_DAY = 10
+_WINDOW_DAY = 86400
 
 
 @pytest.fixture
 def rate_key(key_prefix: str) -> str:
     return key_prefix + _rate_limit_key(_TENANT, _SUBJECT)
+
+
+@pytest.fixture
+def rate_day_key(key_prefix: str) -> str:
+    return key_prefix + _rate_limit_day_key(_TENANT, _SUBJECT)
 
 
 @pytest.fixture
@@ -252,30 +263,36 @@ async def _take(
     client: redis_async.Redis,
     attempt_key: str,
     rate_key: str,
+    rate_day_key: str,
     *,
     cap: int = _ATTEMPT_CAP,
     limit: int = _RATE_LIMIT,
     window: int = _WINDOW,
+    limit_day: int = _RATE_LIMIT_DAY,
+    window_day: int = _WINDOW_DAY,
 ) -> list[int]:
     """One raw execution of the imported script: [outcome, attempts, rate count]."""
     return await client.eval(
         _TAKE_PROMPT_SLOTS_SCRIPT,
-        2,
+        3,
         attempt_key,
         rate_key,
+        rate_day_key,
         cap,
         _ATTEMPT_TTL,
         limit,
         window,
+        limit_day,
+        window_day,
     )
 
 
 async def test_the_rate_slots_run_out_across_notes_with_the_count_before(
-    real_redis: redis_async.Redis, key_prefix: str, rate_key: str
+    real_redis: redis_async.Redis, key_prefix: str, rate_key: str, rate_day_key: str
 ) -> None:
     """Counterpart: test_the_rate_slots_run_out_across_notes."""
     notes = [key_prefix + _attempt_key(_TENANT, n) for n in (10, 11, 12, 13)]
-    replies = [await _take(real_redis, note, rate_key) for note in notes]
+    replies = [await _take(real_redis, note, rate_key, rate_day_key) for note in notes]
 
     assert replies == [
         [_SLOTS_ALLOWED, 1, 0],
@@ -288,64 +305,72 @@ async def test_the_rate_slots_run_out_across_notes_with_the_count_before(
 
 
 async def test_the_attempt_cap_denies_and_leaves_the_rate_key_untouched(
-    real_redis: redis_async.Redis, attempt_key: str, rate_key: str
+    real_redis: redis_async.Redis, attempt_key: str, rate_key: str, rate_day_key: str
 ) -> None:
     """Counterpart: the same name."""
     await real_redis.set(attempt_key, _ATTEMPT_CAP)
 
-    assert await _take(real_redis, attempt_key, rate_key) == [
+    assert await _take(real_redis, attempt_key, rate_key, rate_day_key) == [
         _SLOTS_DENIED_BY_ATTEMPT,
         _ATTEMPT_CAP,
         0,
     ]
     assert await real_redis.exists(rate_key) == 0
+    assert await real_redis.exists(rate_day_key) == 0
     assert await real_redis.ttl(attempt_key) == _TTL_NO_EXPIRY
 
 
 async def test_the_rate_limit_denies_and_leaves_the_attempt_key_untouched(
-    real_redis: redis_async.Redis, attempt_key: str, rate_key: str
+    real_redis: redis_async.Redis, attempt_key: str, rate_key: str, rate_day_key: str
 ) -> None:
     """Counterpart: the same name."""
     await real_redis.set(rate_key, _RATE_LIMIT)
 
-    assert await _take(real_redis, attempt_key, rate_key) == [
+    assert await _take(real_redis, attempt_key, rate_key, rate_day_key) == [
         _SLOTS_DENIED_BY_RATE,
         0,
         _RATE_LIMIT,
     ]
     assert await real_redis.exists(attempt_key) == 0
+    assert await real_redis.exists(rate_day_key) == 0
     assert await real_redis.ttl(rate_key) == _TTL_NO_EXPIRY
 
 
 async def test_both_windows_are_set_on_create_and_only_on_create(
-    real_redis: redis_async.Redis, attempt_key: str, rate_key: str
+    real_redis: redis_async.Redis, attempt_key: str, rate_key: str, rate_day_key: str
 ) -> None:
     """Counterparts: test_both_windows_are_set_when_the_counters_are_created,
     test_a_later_take_does_not_refresh_either_window."""
-    await _take(real_redis, attempt_key, rate_key, cap=2)
+    await _take(real_redis, attempt_key, rate_key, rate_day_key, cap=2)
     _assert_window(await real_redis.ttl(attempt_key), _ATTEMPT_TTL)
     _assert_window(await real_redis.ttl(rate_key))
+    _assert_window(await real_redis.ttl(rate_day_key), _WINDOW_DAY)
 
-    await _take(real_redis, attempt_key, rate_key, cap=2, window=_WINDOW * 100)
+    await _take(
+        real_redis, attempt_key, rate_key, rate_day_key, cap=2, window=_WINDOW * 100
+    )
     assert await real_redis.ttl(attempt_key) <= _ATTEMPT_TTL
     assert await real_redis.ttl(rate_key) <= _WINDOW
+    assert await real_redis.ttl(rate_day_key) <= _WINDOW_DAY
 
 
 async def test_keys_without_a_ttl_gain_one_on_the_next_take(
-    real_redis: redis_async.Redis, attempt_key: str, rate_key: str
+    real_redis: redis_async.Redis, attempt_key: str, rate_key: str, rate_day_key: str
 ) -> None:
-    """Counterpart: the same name. Audit M4, repaired for both keys."""
+    """Counterpart: the same name. Audit M4, repaired for all three keys."""
     await real_redis.set(attempt_key, 1)
     await real_redis.set(rate_key, 1)
+    await real_redis.set(rate_day_key, 1)
 
-    await _take(real_redis, attempt_key, rate_key, cap=2)
+    await _take(real_redis, attempt_key, rate_key, rate_day_key, cap=2)
 
     _assert_window(await real_redis.ttl(attempt_key), _ATTEMPT_TTL)
     _assert_window(await real_redis.ttl(rate_key))
+    _assert_window(await real_redis.ttl(rate_day_key), _WINDOW_DAY)
 
 
 async def test_concurrent_slots_are_taken_exactly_up_to_the_limit(
-    real_redis: redis_async.Redis, key_prefix: str, rate_key: str
+    real_redis: redis_async.Redis, key_prefix: str, rate_key: str, rate_day_key: str
 ) -> None:
     """No hermetic counterpart: fakeredis runs in-process, so nothing there is
     ever concurrent. Here the gathered EVALs, each on its own note, reach one
@@ -362,6 +387,7 @@ async def test_concurrent_slots_are_taken_exactly_up_to_the_limit(
                 real_redis,
                 key_prefix + _attempt_key(_TENANT, note_id),
                 rate_key,
+                rate_day_key,
                 limit=limit,
             )
             for note_id in range(limit + 5)
@@ -376,13 +402,13 @@ async def test_concurrent_slots_are_taken_exactly_up_to_the_limit(
 
 
 async def test_concurrent_takes_on_one_note_have_exactly_one_winner(
-    real_redis: redis_async.Redis, attempt_key: str, rate_key: str
+    real_redis: redis_async.Redis, attempt_key: str, rate_key: str, rate_day_key: str
 ) -> None:
     """No hermetic counterpart. Register item 119's claim: ten takes for one note
     reaching the server at once send one question, and the other nine read the cap
     back without taking a rate slot."""
     replies = await asyncio.gather(
-        *(_take(real_redis, attempt_key, rate_key) for _ in range(10))
+        *(_take(real_redis, attempt_key, rate_key, rate_day_key) for _ in range(10))
     )
 
     outcomes = [outcome for outcome, _, _ in replies]
@@ -535,7 +561,7 @@ _ANALYSIS = NoteAnalysis(
 
 
 async def _judge_prompt(
-    client: redis_async.Redis, attempt_key: str, rate_key: str
+    client: redis_async.Redis, attempt_key: str, rate_key: str, rate_day_key: str
 ) -> Decision:
     """One judgement's prompt decision, in the pipeline's order: step 5 reads the
     attempts, a provisional decide picks the trip, step 8 takes both slots only
@@ -557,19 +583,26 @@ async def _judge_prompt(
         return _decide(read, True, 0)
     reply = await client.eval(
         _TAKE_PROMPT_SLOTS_SCRIPT,
-        2,
+        3,
         attempt_key,
         rate_key,
+        rate_day_key,
         _CONFIG.clarification_cap,
         _CONFIG.attempt_ttl_seconds,
         _CONFIG.rate_limit_per_hour,
         _CONFIG.rate_limit_window_seconds,
+        _CONFIG.rate_limit_per_day,
+        RATE_LIMIT_DAY_WINDOW_SECONDS,
     )
     return _decide(*_prompt_slots_answer(reply))
 
 
 async def test_text_a_then_text_b_on_one_note_withholds_the_second_at_the_cap(
-    real_redis: redis_async.Redis, key_prefix: str, attempt_key: str, rate_key: str
+    real_redis: redis_async.Redis,
+    key_prefix: str,
+    attempt_key: str,
+    rate_key: str,
+    rate_day_key: str,
 ) -> None:
     """No hermetic counterpart at this depth. Text B is a new fingerprint, so its
     reservation is claimed rather than refused, and with no flush between the two
@@ -580,7 +613,9 @@ async def test_text_a_then_text_b_on_one_note_withholds_the_second_at_the_cap(
         reservation = key_prefix + _idempotency_key(_TENANT, _NOTE_ID, digest)
         claimed = await real_redis.set(reservation, _RESERVED, nx=True, ex=_SHORT_TTL)
         assert claimed is True
-        decisions.append(await _judge_prompt(real_redis, attempt_key, rate_key))
+        decisions.append(
+            await _judge_prompt(real_redis, attempt_key, rate_key, rate_day_key)
+        )
 
     assert [d.prompt_sent for d in decisions] == [True, False]
     assert decisions[1].prompt_withheld is PromptWithheld.ATTEMPT_CAP

@@ -279,9 +279,14 @@ async def test_the_two_scripts_touch_disjoint_keys(client):
 
 _ATTEMPT_KEY = "attempt:tenant-a:10"
 _RATE_KEY = "ratelimit:tenant-a:42"
+_RATE_DAY_KEY = "ratelimit_day:tenant-a:42"
 _ATTEMPT_CAP = 1
 _ATTEMPT_TTL = 600
 _RATE_LIMIT = 3
+# Register item 66: the daily ceiling beside the hourly one. 10 is TenantConfig's
+# default; kept high in most tests below so the hourly guard is what is exercised.
+_RATE_LIMIT_DAY = 10
+_WINDOW_DAY = 86400
 
 
 async def _take(
@@ -289,18 +294,24 @@ async def _take(
     attempt_key: str = _ATTEMPT_KEY,
     *,
     cap: int = _ATTEMPT_CAP,
+    limit: int = _RATE_LIMIT,
     window: int = _WINDOW,
+    limit_day: int = _RATE_LIMIT_DAY,
+    window_day: int = _WINDOW_DAY,
 ):
     """One raw execution of the imported script: [outcome, attempts, rate count]."""
     return await client.eval(
         _TAKE_PROMPT_SLOTS_SCRIPT,
-        2,
+        3,
         attempt_key,
         _RATE_KEY,
+        _RATE_DAY_KEY,
         cap,
         _ATTEMPT_TTL,
-        _RATE_LIMIT,
+        limit,
         window,
+        limit_day,
+        window_day,
     )
 
 
@@ -374,6 +385,45 @@ async def test_both_windows_are_set_when_the_counters_are_created(client):
 
     assert await client.ttl(_ATTEMPT_KEY) == _ATTEMPT_TTL
     assert await client.ttl(_RATE_KEY) == _WINDOW
+    assert await client.ttl(_RATE_DAY_KEY) == _WINDOW_DAY
+
+
+# --- register item 66: the daily rate limit beside the hourly one -----------
+
+
+async def test_the_fourth_take_in_an_hour_is_withheld(client):
+    """The hourly cap denies on its own with the day cap wide open."""
+    replies = [
+        await _take(client, _note(n), cap=99, limit_day=999) for n in (10, 11, 12, 13)
+    ]
+
+    assert [reply[0] for reply in replies] == [
+        _SLOTS_ALLOWED,
+        _SLOTS_ALLOWED,
+        _SLOTS_ALLOWED,
+        _SLOTS_DENIED_BY_RATE,
+    ]
+    assert await client.get(_RATE_KEY) == str(_RATE_LIMIT)
+
+
+async def test_the_eleventh_take_in_a_day_is_withheld(client):
+    """The daily cap denies once the hourly one is wide open."""
+    replies = [await _take(client, _note(n), cap=99, limit=999) for n in range(10, 21)]
+
+    assert [reply[0] for reply in replies] == [_SLOTS_ALLOWED] * 10 + [
+        _SLOTS_DENIED_BY_RATE
+    ]
+    assert await client.get(_RATE_DAY_KEY) == str(_RATE_LIMIT_DAY)
+
+
+async def test_a_refused_take_writes_nothing(client):
+    """Whichever guard refuses -- attempt, hourly or daily -- no counter moves."""
+    await client.set(_RATE_DAY_KEY, _RATE_LIMIT_DAY)
+
+    assert await _take(client) == [_SLOTS_DENIED_BY_RATE, 0, _RATE_LIMIT_DAY]
+    assert await client.exists(_ATTEMPT_KEY) == 0
+    assert await client.exists(_RATE_KEY) == 0
+    assert await client.get(_RATE_DAY_KEY) == str(_RATE_LIMIT_DAY)
 
 
 async def test_a_later_take_does_not_refresh_either_window(client):
@@ -441,6 +491,8 @@ async def test_take_prompt_slots_end_to_end_on_real_lua(client, monkeypatch):
             attempt_ttl=_ATTEMPT_TTL,
             rate_limit=_RATE_LIMIT,
             rate_ttl=_WINDOW,
+            rate_limit_day=_RATE_LIMIT_DAY,
+            rate_ttl_day=_WINDOW_DAY,
             attempts_read=0,
             request_id="req-1",
         )
