@@ -427,9 +427,18 @@ def test_a_thin_note_is_suppressed_without_reserving_anything(client, llm, opera
     assert r.json()["suppressed"] == {
         "reason": "insufficient_evidence",
         "detail_code": "note_too_short",
+        # Register item 64: the fixed question, capped like a model one --
+        # both routes behave the same.
+        "clarification_prompt": (
+            "What happened, what did the client say, and what is the next "
+            "step with a date?"
+        ),
+        "prompt_withheld": None,
     }
     assert r.json()["score"] is None and r.json()["decision"] is None
-    assert operational.store == {}  # nothing reserved
+    # No JUDGEMENT is reserved; the fixed question's own attempt/rate slots
+    # are a separate store, and do move.
+    assert not any(key.startswith("idem:") for key in operational.store)
     assert llm.call_count == 0  # nothing spent
 
 
@@ -451,6 +460,8 @@ def test_a_note_over_the_soft_limit_is_suppressed_without_reserving(
     assert r.json()["suppressed"] == {
         "reason": "not_scorable",
         "detail_code": "note_too_long",
+        "clarification_prompt": None,
+        "prompt_withheld": None,
     }
     assert r.json()["score"] is None and r.json()["decision"] is None
     # No model ran, so nothing is stamped as having run one.

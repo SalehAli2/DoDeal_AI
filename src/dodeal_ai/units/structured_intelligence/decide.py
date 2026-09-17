@@ -60,7 +60,7 @@ def _action(total: int, config: TenantConfig) -> DecisionAction:
     return DecisionAction.PROMPT_CLARIFICATION
 
 
-def _withheld(
+def withheld_reason(
     analysis: NoteAnalysis,
     *,
     attempts: int,
@@ -74,6 +74,11 @@ def _withheld(
     Written as four separate `if`s rather than an `all()` because the ORDER is
     the contract: a chained boolean would give the same answer to "may we ask?"
     and no answer at all to "why not?".
+
+    Public (not `_`-prefixed): `decide()` below is the caller for a SCORED
+    judgement, and the length gate's fixed question (register item 64) is the
+    other -- it has no NoteScore to build a Decision from, only the four
+    conditions this function alone decides.
     """
     if resubmission:
         return PromptWithheld.RESUBMISSION
@@ -128,7 +133,7 @@ def decide(
         withheld: PromptWithheld | None = None
         prompt_sent = False
     else:
-        withheld = _withheld(
+        withheld = withheld_reason(
             analysis,
             attempts=attempts,
             rate_allowed=rate_allowed,

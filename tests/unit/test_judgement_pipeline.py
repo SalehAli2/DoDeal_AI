@@ -961,6 +961,101 @@ async def test_a_length_gated_line_has_three_null_request_ids(
     ]
 
 
+# --- register item 64: the length gate's fixed question ---------------------
+
+
+async def test_a_short_english_note_gets_the_fixed_english_question(
+    leads, operational
+) -> None:
+    leads.notes[LEAD_ID] = [note(NOTE_ID, "ok")]
+
+    judgement = await judge_note(
+        _scope(), _request(), resubmission=False, deps=_deps_with(FakeLLM(), leads)
+    )
+
+    assert judgement.suppressed is not None
+    assert (
+        judgement.suppressed.clarification_prompt
+        == pipeline_module._FIXED_CLARIFICATION_PROMPT_EN
+    )
+    assert judgement.suppressed.prompt_withheld is None
+    assert operational.store[f"attempt:tenant-a:{NOTE_ID}"] == "1"
+
+
+async def test_a_short_arabic_note_gets_the_fixed_arabic_question(
+    leads, operational
+) -> None:
+    leads.notes[LEAD_ID] = [note(NOTE_ID, "لا")]
+
+    judgement = await judge_note(
+        _scope(), _request(), resubmission=False, deps=_deps_with(FakeLLM(), leads)
+    )
+
+    assert judgement.suppressed is not None
+    assert (
+        judgement.suppressed.clarification_prompt
+        == pipeline_module._FIXED_CLARIFICATION_PROMPT_AR
+    )
+
+
+async def test_a_short_note_spends_zero_model_calls_and_takes_one_slot(
+    leads, operational
+) -> None:
+    leads.notes[LEAD_ID] = [note(NOTE_ID, "ok")]
+    llm = FakeLLM()
+
+    await judge_note(
+        _scope(), _request(), resubmission=False, deps=_deps_with(llm, leads)
+    )
+
+    assert llm.call_count == 0
+    assert [outcome for _, _, outcome in operational.evals] == [state._SLOTS_ALLOWED]
+
+
+async def test_a_second_short_note_on_the_same_note_id_is_withheld_attempt_cap(
+    leads, operational
+) -> None:
+    leads.notes[LEAD_ID] = [note(NOTE_ID, "ok")]
+    deps = _deps_with(FakeLLM(), leads)
+
+    first = await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+    second = await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+
+    assert first.suppressed is not None and first.suppressed.prompt_withheld is None
+    assert second.suppressed is not None
+    assert second.suppressed.prompt_withheld is PromptWithheld.ATTEMPT_CAP
+    assert second.suppressed.clarification_prompt is not None
+
+
+async def test_a_too_long_note_gets_no_question(leads, operational) -> None:
+    leads.notes[LEAD_ID] = [note(NOTE_ID, "x " * 2000)]
+
+    judgement = await judge_note(
+        _scope(), _request(), resubmission=False, deps=_deps_with(FakeLLM(), leads)
+    )
+
+    assert judgement.suppressed is not None
+    assert judgement.suppressed.detail_code is SuppressedDetail.NOTE_TOO_LONG
+    assert judgement.suppressed.clarification_prompt is None
+    assert judgement.suppressed.prompt_withheld is None
+    assert operational.store == {}
+
+
+async def test_a_short_note_resubmission_withholds_without_taking_a_slot(
+    leads, operational
+) -> None:
+    leads.notes[LEAD_ID] = [note(NOTE_ID, "ok")]
+
+    judgement = await judge_note(
+        _scope(), _request(), resubmission=True, deps=_deps_with(FakeLLM(), leads)
+    )
+
+    assert judgement.suppressed is not None
+    assert judgement.suppressed.prompt_withheld is PromptWithheld.RESUBMISSION
+    assert judgement.suppressed.clarification_prompt is not None
+    assert operational.store == {}
+
+
 # --- vague and scoring run concurrently (register item 14) ------------------
 
 

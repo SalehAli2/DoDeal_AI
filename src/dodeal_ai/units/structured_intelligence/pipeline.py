@@ -17,7 +17,10 @@ the step after it costs:
      (the direct route skips 1 and 2: the CRM sent the note, and no
       LeadsClient call is made at all)
   3. too thin, or too long?              -> suppressed, STOP. No reservation,
-                                            no model call, nothing spent.
+                                            no model call, nothing spent. A
+                                            too-thin note still takes its
+                                            prompt slots for a FIXED question
+                                            (item 64) -- capped, never charged.
   4. reserve idempotency, SHORT          409 duplicate / 503 unavailable;
                                          a confirmed duplicate replays 200
   5. read the attempt count              (fail open; provisional, see step 8)
@@ -100,6 +103,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import re
 import time
 from collections.abc import Awaitable, Iterator
 from contextlib import contextmanager
@@ -147,7 +151,7 @@ from dodeal_ai.units.structured_intelligence.classify import (
     suppression_for,
 )
 from dodeal_ai.units.structured_intelligence.config import TenantConfig
-from dodeal_ai.units.structured_intelligence.decide import decide
+from dodeal_ai.units.structured_intelligence.decide import decide, withheld_reason
 from dodeal_ai.units.structured_intelligence.schemas import (
     Decision,
     DirectJudgementRequest,
@@ -194,6 +198,28 @@ IDEMPOTENCY_INFLIGHT_MULTIPLIER = 4
 # here rather than on TenantConfig. Only the CAP varies per tenant; a shorter
 # window here would let a subject clear the daily cap before the day is over.
 RATE_LIMIT_DAY_WINDOW_SECONDS = 86400
+
+# Register item 64: a note below the length floor still gets a question, with
+# no model call to write one. Matched on any Arabic-script letter in the note's
+# OWN text (never the redacted copy, which is what the length gate itself
+# reads) rather than a full language model, since this is a two-way switch.
+_ARABIC_SCRIPT_PATTERN = re.compile("[؀-ۿ]")
+_FIXED_CLARIFICATION_PROMPT_AR = (
+    "ماذا حدث، وماذا قال العميل، وما الخطوة التالية مع موعدها؟"
+)
+_FIXED_CLARIFICATION_PROMPT_EN = (
+    "What happened, what did the client say, and what is the next step with a date?"
+)
+
+
+def _fixed_clarification_prompt(text: str) -> str:
+    """The length gate's fixed question, in the note's own script."""
+    return (
+        _FIXED_CLARIFICATION_PROMPT_AR
+        if _ARABIC_SCRIPT_PATTERN.search(text)
+        else _FIXED_CLARIFICATION_PROMPT_EN
+    )
+
 
 # Register item 17: a note missing from page one is read again once, this long
 # after the first read, for a save the CRM has not yet made visible to its
@@ -335,6 +361,8 @@ def _suppressed(
     config: TenantConfig,
     analysis: NoteAnalysis | None = None,
     model_version: str = NO_MODEL,
+    clarification_prompt: str | None = None,
+    prompt_withheld: PromptWithheld | None = None,
 ) -> Judgement:
     """Build a suppressed judgement: score and decision are null, never zero.
 
@@ -347,6 +375,10 @@ def _suppressed(
     while a system_event was refused BY a classifier and carries what that
     classifier reported. Both are suppressed; only one cost money, and the
     stamp is the only place that difference survives.
+
+    `clarification_prompt`/`prompt_withheld` (register item 64) are null for
+    every suppression except a note below the length floor, which carries a
+    fixed question instead of a model-written one.
     """
     return Judgement(
         note_id=request.note_id,
@@ -355,7 +387,12 @@ def _suppressed(
         analysis=analysis or NoteAnalysis(),
         score=None,
         decision=None,
-        suppressed=Suppressed(reason=reason, detail_code=detail),
+        suppressed=Suppressed(
+            reason=reason,
+            detail_code=detail,
+            clarification_prompt=clarification_prompt,
+            prompt_withheld=prompt_withheld,
+        ),
         versions=_versions(config, model_version),
         request_id=scope.request_id,
     )
@@ -393,6 +430,57 @@ def _length_gate(
     if len(text) > config.max_note_chars:
         return (SuppressedReason.NOT_SCORABLE, SuppressedDetail.NOTE_TOO_LONG)
     return None
+
+
+async def _fixed_question(
+    scope: TenantScope,
+    request: _JudgementInput,
+    note: LeadNote,
+    detail: SuppressedDetail,
+    *,
+    config: TenantConfig,
+    resubmission: bool,
+) -> tuple[str | None, PromptWithheld | None]:
+    """Register item 64: the length gate's fixed question, for a too-short note
+    only -- a too-long note (NOTE_TOO_LONG) gets neither field.
+
+    No model wrote this question, but it is still capped like one would be: it
+    takes the note's attempt slot and the subject's hourly and daily rate slots
+    in the SAME trip a model question takes (state.take_prompt_slots), so a
+    salesperson cannot be asked more often for writing a thin note than for
+    writing a vague one. A resubmission withholds outright, the same reason a
+    scored judgement's resubmission does, and touches no counter.
+    """
+    if detail is not SuppressedDetail.NOTE_TOO_SHORT:
+        return None, None
+    prompt = _fixed_clarification_prompt(note.note)
+    if resubmission:
+        return prompt, PromptWithheld.RESUBMISSION
+    attempts = await state.read_attempts(
+        scope.tenant, request.note_id, request_id=scope.request_id
+    )
+    attempts, rate_allowed, rate_count = await state.take_prompt_slots(
+        scope.tenant,
+        request.note_id,
+        scope.subject,
+        attempt_cap=config.clarification_cap,
+        attempt_ttl=config.attempt_ttl_seconds,
+        rate_limit=config.rate_limit_per_hour,
+        rate_ttl=config.rate_limit_window_seconds,
+        rate_limit_day=config.rate_limit_per_day,
+        rate_ttl_day=RATE_LIMIT_DAY_WINDOW_SECONDS,
+        attempts_read=attempts,
+        request_id=scope.request_id,
+    )
+    withheld = withheld_reason(
+        NoteAnalysis(clarification_prompt=prompt),
+        attempts=attempts,
+        rate_allowed=rate_allowed,
+        rate_count=rate_count,
+        config=config,
+        resubmission=False,
+    )
+    return prompt, withheld
 
 
 async def _fetch_note(
@@ -768,6 +856,14 @@ async def _judge(
     gated = _length_gate(note, config)
     if gated is not None:
         gate_reason, gate_detail = gated
+        clarification_prompt, prompt_withheld = await _fixed_question(
+            scope,
+            request,
+            note,
+            gate_detail,
+            config=config,
+            resubmission=resubmission,
+        )
         judgement = _suppressed(
             scope,
             request,
@@ -775,6 +871,8 @@ async def _judge(
             reason=gate_reason,
             detail=gate_detail,
             config=config,
+            clarification_prompt=clarification_prompt,
+            prompt_withheld=prompt_withheld,
         )
         _log_outcome(
             scope,

@@ -396,10 +396,20 @@ class NoteScore(BaseModel):
 
 
 class Suppressed(BaseModel):
-    """Why this judgement carries no score."""
+    """Why this judgement carries no score.
+
+    `clarification_prompt` and `prompt_withheld` (register item 64) are for the
+    ONE suppression that still asks something: a note below the length floor
+    carries a fixed question, no model involved, since there is nothing to
+    classify or score. Both are null for every other suppression -- a
+    too-long note and a classifier suppression (system_event, unclassifiable)
+    have no question to ask at all.
+    """
 
     reason: SuppressedReason
     detail_code: SuppressedDetail
+    clarification_prompt: str | None = None
+    prompt_withheld: PromptWithheld | None = None
 
 
 class Decision(BaseModel):

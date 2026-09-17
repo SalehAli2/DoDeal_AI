@@ -405,12 +405,19 @@ def test_a_thin_note_is_suppressed_without_reserving_anything(
     assert body["suppressed"] == {
         "reason": "insufficient_evidence",
         "detail_code": "note_too_short",
+        # Register item 64: a fixed question, no model, still capped like one.
+        "clarification_prompt": (
+            "What happened, what did the client say, and what is the next "
+            "step with a date?"
+        ),
+        "prompt_withheld": None,
     }
     assert body["score"] is None
     assert body["decision"] is None
-    # Nothing reserved: the salesperson can fix the note and resubmit at once
-    # instead of being told 409 for the next 24 hours.
-    assert operational.store == {}
+    # No JUDGEMENT is reserved: the salesperson can fix the note and resubmit
+    # at once instead of being told 409 for the next 24 hours. The fixed
+    # question's own attempt/rate slots are a separate store, and do move.
+    assert not any(key.startswith("idem:") for key in operational.store)
     # And nothing spent: the check is before the reservation and before the
     # first thing that costs money.
     assert llm.call_count == 0
@@ -679,6 +686,8 @@ def test_a_system_event_is_suppressed_after_one_call(client, llm, operational):
     assert body["suppressed"] == {
         "reason": "not_scorable",
         "detail_code": "system_event",
+        "clarification_prompt": None,
+        "prompt_withheld": None,
     }
     assert body["score"] is None and body["decision"] is None
     assert body["analysis"]["note_type"] == "system_event"
@@ -693,6 +702,8 @@ def test_an_unclassifiable_note_is_suppressed_after_one_call(client, llm):
     assert r.json()["suppressed"] == {
         "reason": "not_scorable",
         "detail_code": "unclassifiable",
+        "clarification_prompt": None,
+        "prompt_withheld": None,
     }
     assert r.json()["analysis"]["note_type"] == "unclassifiable"
     assert llm.call_count == 1
