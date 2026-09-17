@@ -211,9 +211,19 @@ def test_the_weights_stay_immutable(tmp_path):
     ],
 )
 def test_an_invalid_file_refuses_naming_the_tenant(tmp_path, body):
-    """Every broken file is one ConfigError naming the tenant, never the path."""
+    """Every broken file is one ConfigError naming the tenant, never the path.
+
+    Register item 128: a failure INSIDE unit_a's own section parser also names
+    the section. `bad-json` fails before any section is even looked at (the
+    file itself will not parse), so it stays tenant-only.
+    """
     _write(tmp_path, "tenant-a", body)
-    assert _refusal(tmp_path) == "tenant_config_invalid:tenant-a"
+    expected = (
+        "tenant_config_invalid:tenant-a"
+        if body == "{not json"
+        else "tenant_config_invalid:tenant-a:unit_a"
+    )
+    assert _refusal(tmp_path) == expected
     assert get_tenant_config("tenant-a") is DEFAULT
 
 
@@ -221,7 +231,7 @@ def test_one_invalid_file_installs_nothing(tmp_path):
     """All or nothing: a valid tenant is not loaded beside an invalid one."""
     _write(tmp_path, "tenant-a", {"config_version": "a"})
     _write(tmp_path, "tenant-b", {"accept_threshold": 1})
-    assert _refusal(tmp_path) == "tenant_config_invalid:tenant-b"
+    assert _refusal(tmp_path) == "tenant_config_invalid:tenant-b:unit_a"
     assert get_tenant_config("tenant-a") is DEFAULT
 
 
@@ -279,7 +289,7 @@ def test_an_invalid_file_refuses_startup_and_leaves_no_templates(monkeypatch, tm
     with pytest.raises(ConfigError) as caught, TestClient(app):
         pass
 
-    assert str(caught.value) == "tenant_config_invalid:tenant-a"
+    assert str(caught.value) == "tenant_config_invalid:tenant-a:unit_a"
     assert str(tmp_path) not in str(caught.value)
     assert prompting._TEMPLATE_CACHE == {}
     get_settings.cache_clear()
@@ -350,14 +360,22 @@ def test_a_missing_unit_a_section_uses_the_default(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "content",
-    [["unit_a"], {UNIT_A_SECTION: 5}, {UNIT_A_SECTION: None}, "null"],
+    "content,expected",
+    [
+        (["unit_a"], "tenant_config_invalid:tenant-a"),
+        ({UNIT_A_SECTION: 5}, "tenant_config_invalid:tenant-a:unit_a"),
+        ({UNIT_A_SECTION: None}, "tenant_config_invalid:tenant-a:unit_a"),
+        ("null", "tenant_config_invalid:tenant-a"),
+    ],
     ids=["top-level-list", "section-number", "section-null", "json-null"],
 )
-def test_a_file_or_section_that_is_not_an_object_refuses(tmp_path, content):
-    """The file is one object, and Unit A's section is one object."""
+def test_a_file_or_section_that_is_not_an_object_refuses(tmp_path, content, expected):
+    """The file is one object, and Unit A's section is one object. A section
+    that fails ITS OWN parse names the section too (register item 128); the
+    whole file failing to be an object at all does not, since no section was
+    ever reached."""
     _write_file(tmp_path, "tenant-a", content)
-    assert _refusal(tmp_path) == "tenant_config_invalid:tenant-a"
+    assert _refusal(tmp_path) == expected
 
 
 def test_core_hands_each_section_to_its_own_parser(tmp_path):
@@ -374,3 +392,25 @@ def test_core_hands_each_section_to_its_own_parser(tmp_path):
     assert seen == [{"k": 1}]
     assert tenant_section("tenant-a", "unit_b") == "parsed-b"
     assert tenant_section("tenant-b", "unit_b") is None
+
+
+def test_a_non_valueerror_from_a_parser_still_refuses_named(tmp_path):
+    """Register item 128: the catch is not narrowed to ValueError. A parser
+    raising something else entirely -- here TypeError, carrying a value that
+    must never reach the message -- still refuses startup naming the tenant
+    and the section, never the path and never the value."""
+    bad_value = "SENTINEL-bad-value-91fa"
+
+    def _unit_b(raw: object) -> str:
+        raise TypeError(f"unexpected shape: {raw}")
+
+    _write_file(tmp_path, "tenant-a", {"unit_b": bad_value})
+
+    with pytest.raises(ConfigError) as caught:
+        load_tenant_configs(tmp_path, {"unit_b": _unit_b})
+
+    message = str(caught.value)
+    assert message == "tenant_config_invalid:tenant-a:unit_b"
+    assert caught.value.__cause__ is None
+    assert str(tmp_path) not in message
+    assert bad_value not in message

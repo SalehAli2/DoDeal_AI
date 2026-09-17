@@ -7,7 +7,10 @@ ignored, and a missing section leaves that unit on its own default.
 
 Core knows no unit's schema: the lifespan hands in the parsers, and a unit reads
 back only its own parsed section. An invalid file refuses startup naming the
-tenant, never the path and never a value, and nothing is installed.
+tenant, never the path and never a value, and nothing is installed. A section
+parser's own failure -- whatever exception it raises, not only ValueError --
+names the tenant AND the section (register item 128), so a broken unit_a file
+never reads as an unnamed crash.
 """
 
 from __future__ import annotations
@@ -47,13 +50,19 @@ def load_tenant_configs(directory: Path, parsers: Mapping[str, SectionParser]) -
             raise invalid from None
         if not isinstance(raw, dict):
             raise invalid
-        try:
-            loaded[tenant] = {
-                name: parse(raw[name]) for name, parse in parsers.items() if name in raw
-            }
-        except ValueError:
-            # `from None`: a parser's ValidationError quotes the rejected value.
-            raise invalid from None
+        parsed: dict[str, object] = {}
+        for name, parse in parsers.items():
+            if name not in raw:
+                continue
+            try:
+                parsed[name] = parse(raw[name])
+            except Exception:  # noqa: BLE001 - register item 128: any parser failure
+                # A section parser's error can be anything it likes (pydantic's
+                # ValidationError included). `from None`: whatever it raised can
+                # quote the rejected value, and never the path, so it must not
+                # chain into this one either.
+                raise ConfigError(f"tenant_config_invalid:{tenant}:{name}") from None
+        loaded[tenant] = parsed
     _LOADED.clear()
     _LOADED.update(loaded)
 
