@@ -55,6 +55,7 @@ from collections.abc import Callable
 
 from pydantic import BaseModel
 
+from dodeal_ai.core import metrics
 from dodeal_ai.core.config import Settings
 from dodeal_ai.core.context import TenantScope
 from dodeal_ai.core.cost.limiter import enforce_token_cost
@@ -180,6 +181,9 @@ async def complete_once(
             fields["provider_reason"] = exc.cause.reason.value
             fields["provider_transient"] = exc.cause.transient
         _logger.warning("judgement_model_unavailable", extra=fields)
+        metrics.MODEL_CALLS.labels(
+            **{"pass": metrics.pass_name(label), "outcome": "unavailable"}
+        ).inc()
         raise ModelUnavailableError() from None
 
     # No usage reported means nothing to charge and nothing to say about it: a
@@ -253,10 +257,14 @@ async def call_model[M: BaseModel](
     profile: str,
     max_output_tokens: int,
     check: Callable[[M], None] | None = None,
+    reprompt: bool = True,
 ) -> tuple[M, LLMResponse]:
     """Send a prompt, validate the answer, and on a malformed one send it ONCE
     more with a stricter tail. Returns the validated output beside the raw
     response of whichever call produced it.
+
+    `reprompt=False` is a judgement near its token budget (register item 61):
+    a malformed first answer is 503 malformed_output with no second call.
 
     The response comes back too, and not just the parsed model, for one reason:
     `LLMResponse.model` is what the provider REPORTED it ran, and that string is
@@ -297,8 +305,15 @@ async def call_model[M: BaseModel](
         max_output_tokens=max_output_tokens,
     )
     try:
-        return parse_output(response, schema, label, check=check), response
+        parsed = parse_output(response, schema, label, check=check)
     except OutputValidationError:
+        _count_call(label, "malformed")
+        if not reprompt:
+            _logger.warning(
+                "reprompt_withheld",
+                extra={"reason_code": "token_budget_degraded", "label": label},
+            )
+            raise MalformedOutputError() from None
         # The label and nothing else. Which output failed is operational; WHAT
         # it said is untrusted text shaped by a note we did not write.
         # `output_validation_failed` has already recorded the error types.
@@ -306,6 +321,9 @@ async def call_model[M: BaseModel](
             "reprompt_issued",
             extra={"reason_code": "reprompt_issued", "label": label},
         )
+    else:
+        _count_call(label, "ok")
+        return parsed, response
 
     second = await complete_once(
         client,
@@ -317,9 +335,19 @@ async def call_model[M: BaseModel](
         max_output_tokens=max_output_tokens,
     )
     try:
-        return parse_output(second, schema, label, check=check), second
+        parsed = parse_output(second, schema, label, check=check)
     except OutputValidationError:
+        _count_call(label, "malformed")
         # from None: the OutputValidationError is ours and safe, but chaining it
         # would print a second exception line wherever a traceback is formatted,
         # and the rule in this repo is that our error paths stay unchained.
         raise MalformedOutputError() from None
+    _count_call(label, "ok")
+    return parsed, second
+
+
+def _count_call(label: str, outcome: str) -> None:
+    """model_calls_total{pass, outcome} for one answered call (register item 22)."""
+    metrics.MODEL_CALLS.labels(
+        **{"pass": metrics.pass_name(label), "outcome": outcome}
+    ).inc()

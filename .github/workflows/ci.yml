@@ -30,6 +30,10 @@ jobs:
       - name: Type check (mypy)
         run: uv run mypy
 
+      # The layer rule (register item 13): the contracts are in pyproject.toml.
+      - name: Import layers (import-linter)
+        run: uv run lint-imports
+
       - name: Tests (with coverage gate)
         run: uv run pytest
 
@@ -71,3 +75,47 @@ jobs:
       # instead of passing silently. No continue-on-error, no --ignore-vuln.
       - name: Dependency audit
         run: uv export --format requirements-txt --no-emit-project -o audit.txt && uv run pip-audit --strict --desc -r audit.txt
+
+  # A SEPARATE job, beside `checks` and `audit` (register item 106): the one run
+  # of the Lua scripts and SET NX/XX on a real server. REQUIRED turns the lane's
+  # skips into failures, so a service that never came up cannot pass green.
+  redis_real:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7.4-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      # db 9: the lane refuses db0 to db2, the service's own stores.
+      - name: Real-Redis lane
+        env:
+          DODEAL_REDIS_REAL_URL: redis://localhost:6379/9
+          DODEAL_REDIS_REAL_REQUIRED: "1"
+        run: uv run pytest -m redis_real --no-cov -rs
+
+      # Register item 74: the served app under bursts, on the same server. The
+      # lane takes db 10 and db 11 from this URL and flushes only those two.
+      - name: Load lane
+        env:
+          DODEAL_REDIS_REAL_URL: redis://localhost:6379/9
+          DODEAL_REDIS_REAL_REQUIRED: "1"
+        run: uv run pytest -m load --no-cov -rs

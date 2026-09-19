@@ -15,21 +15,23 @@ Failure policy differs from the security gates on purpose:
 Atomicity: the tenant and user counters are incremented together in one Redis
 Lua script execution (EVAL). Redis runs a script atomically, start to finish,
 with no other command interleaving -- so the two counters always move
-together: either both are incremented (and, on first creation, expiry is set
-on both), or -- on any Redis failure -- neither is, and the request falls
-through to the fail-open path above. There is no window where one counter
-moved and the other didn't.
+together: either both are incremented (and, on creation or on a key with no
+TTL, expiry is set), or -- on any Redis failure -- neither is, and the request
+falls through to the fail-open path above. There is no window where one
+counter moved and the other didn't.
 
 `amount` is the token/spend hook: callers pass how much this request cost
 (defaulting to 1 for a plain per-request count) and the script increments
 both counters by that amount in the same atomic step.
 
 Counters use atomic INCRBY so concurrent requests cannot corrupt the count,
-and EXPIRE so each counter resets per window -- set only the moment a counter
-is created (checked via EXISTS inside the script, not by comparing the
+and EXPIRE so each counter resets per window -- set the moment a counter is
+created (checked via EXISTS inside the script, not by comparing the
 post-increment value, so this is correct for any `amount`, not just
-amount=1). The gate runs after auth and tenancy, because it needs the tenant
-and user identity from the request context.
+amount=1), and on a counter found with no TTL (audit M4), which would otherwise
+count forever. A running window is never refreshed. The gate runs after auth
+and tenancy, because it needs the tenant and user identity from the request
+context.
 
 get_usage() is a separate, read-only path (MGET, no increment) for reporting
 current usage without affecting it.
@@ -67,6 +69,7 @@ import redis
 # namespace, so a grep for it finds every module that touches a client.
 from redis import asyncio as redis_async
 
+from dodeal_ai.core import metrics
 from dodeal_ai.core.breaker import breaker_field, cost_breaker
 from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.context import TenantScope
@@ -85,20 +88,19 @@ class CostLimitError(Exception):
         super().__init__(reason_code)
 
 
-# Increments both counters by ARGV[1] and, only for a counter that did not
-# exist before this call, sets its expiry to ARGV[2]. Runs as one atomic
-# Redis script execution: both counters always move together, or (on
-# failure) neither does.
+# Increments both counters by ARGV[1] and sets a counter's expiry to ARGV[2]
+# when it is new or has no TTL (audit M4, the shape of _TAKE_PROMPT_SLOTS_SCRIPT).
+# One atomic execution: both counters move together, or (on failure) neither.
 _INCR_BOTH_SCRIPT = """
 local tenant_existed = redis.call('EXISTS', KEYS[1])
 local tenant_count = redis.call('INCRBY', KEYS[1], ARGV[1])
-if tenant_existed == 0 then
+if tenant_existed == 0 or redis.call('TTL', KEYS[1]) == -1 then
   redis.call('EXPIRE', KEYS[1], ARGV[2])
 end
 
 local user_existed = redis.call('EXISTS', KEYS[2])
 local user_count = redis.call('INCRBY', KEYS[2], ARGV[1])
-if user_existed == 0 then
+if user_existed == 0 or redis.call('TTL', KEYS[2]) == -1 then
   redis.call('EXPIRE', KEYS[2], ARGV[2])
 end
 
@@ -151,6 +153,7 @@ async def enforce_cost(tenant: str, subject: str, amount: int = 1) -> None:
         # collector can filter on tenant without parsing the message. No
         # request_id: enforce_cost is called from Gate 4 and from workers and
         # never receives one.
+        metrics.BYPASSES.labels(event="cost_cap_bypassed").inc()
         _logger.warning(
             "cost_cap_bypassed",
             extra={
@@ -171,18 +174,17 @@ async def enforce_cost(tenant: str, subject: str, amount: int = 1) -> None:
 #
 # A SECOND script, deliberately a separate constant with the same shape rather
 # than the request script reused: the two count different quantities on
-# disjoint keys, and an edit aimed at one (the M4 TTL repair is still owed on
-# the request counters) must not silently change the other.
+# disjoint keys, and an edit aimed at one must not silently change the other.
 _ADD_TOKENS_SCRIPT = """
 local tenant_existed = redis.call('EXISTS', KEYS[1])
 local tenant_total = redis.call('INCRBY', KEYS[1], ARGV[1])
-if tenant_existed == 0 then
+if tenant_existed == 0 or redis.call('TTL', KEYS[1]) == -1 then
   redis.call('EXPIRE', KEYS[1], ARGV[2])
 end
 
 local user_existed = redis.call('EXISTS', KEYS[2])
 local user_total = redis.call('INCRBY', KEYS[2], ARGV[1])
-if user_existed == 0 then
+if user_existed == 0 or redis.call('TTL', KEYS[2]) == -1 then
   redis.call('EXPIRE', KEYS[2], ARGV[2])
 end
 
@@ -279,6 +281,7 @@ async def enforce_token_cost(
     except redis.RedisError as exc:
         # Fail open and say so. The tokens were spent whether or not we counted
         # them, so an uncounted charge is a hole in the meter, not in the bill.
+        metrics.BYPASSES.labels(event="token_charge_bypassed").inc()
         _logger.warning(
             "token_charge_bypassed",
             extra={
@@ -324,9 +327,13 @@ async def enforce_token_cost(
     )
 
 
-async def token_preflight(scope: TenantScope) -> None:
+async def token_preflight(scope: TenantScope) -> bool:
     """Refuse a judgement whose tenant or user is already at its token budget,
     BEFORE the first model call is placed.
+
+    Returns True when either total is at or above cost_token_warning_ratio of
+    its limit (register item 61): the judgement runs DEGRADED, with no reprompt,
+    and one token_budget_degraded line says so. False otherwise, and on a bypass.
 
     READ-ONLY, always: MGET of the two token keys and nothing else. The charge
     is enforce_token_cost's, after a response is in hand; a pre-flight that
@@ -350,6 +357,7 @@ async def token_preflight(scope: TenantScope) -> None:
             lambda: client.mget(tenant_key, user_key)
         )
     except redis.RedisError as exc:
+        metrics.BYPASSES.labels(event="token_preflight_bypassed").inc()
         _logger.warning(
             "token_preflight_bypassed",
             extra={
@@ -359,13 +367,36 @@ async def token_preflight(scope: TenantScope) -> None:
                 **breaker_field(exc),
             },
         )
-        return
+        return False
 
     # A key that has never been charged, or whose window expired, reads None.
-    if int(tenant_raw or 0) >= settings.cost_tokens_per_tenant_limit:
+    tenant_total, user_total = int(tenant_raw or 0), int(user_raw or 0)
+    if tenant_total >= settings.cost_tokens_per_tenant_limit:
         raise TokenBudgetExceeded()
-    if int(user_raw or 0) >= settings.cost_tokens_per_user_limit:
+    if user_total >= settings.cost_tokens_per_user_limit:
         raise TokenBudgetExceeded()
+
+    ratio = settings.cost_token_warning_ratio
+    near = [
+        name
+        for name, total, limit in (
+            ("tenant", tenant_total, settings.cost_tokens_per_tenant_limit),
+            ("user", user_total, settings.cost_tokens_per_user_limit),
+        )
+        if total >= limit * ratio
+    ]
+    if not near:
+        return False
+    _logger.warning(
+        "token_budget_degraded",
+        extra={
+            "reason_code": "token_budget_degraded",
+            "budgets": ",".join(near),
+            "tenant": scope.tenant,
+            "request_id": scope.request_id,
+        },
+    )
+    return True
 
 
 async def get_usage(tenant: str, subject: str) -> tuple[int, int]:

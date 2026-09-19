@@ -1,4 +1,4 @@
-"""Circuit breaker for the two Redis connections.
+"""Circuit breaker for the two Redis connections, and for each model provider.
 
 After `failure_threshold` consecutive failures a breaker OPENS and refuses calls
 for `open_seconds` without touching a socket; then ONE probe decides whether it
@@ -6,7 +6,9 @@ closes or opens again.
 
 BreakerOpen IS a redis.RedisError, so every existing RedisError handler keeps
 its policy: the money guards fail open, the reservation still fails closed.
-Redis only -- the provider half (A9) is not here.
+A provider client (register item 20) builds its own breaker with its own three
+hooks -- what counts, what is no evidence, what a refusal raises -- and the
+Redis defaults below are unchanged.
 
 A PROBE THAT DOES NOT ANSWER CANNOT WEDGE IT (register item 80). HALF_OPEN
 refuses every caller but the probe, so a probe that never reports back would
@@ -39,18 +41,25 @@ would cost a full window of refusals -- worse than the defect it fixes.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
 from enum import Enum
 from functools import lru_cache
+from typing import Literal
 
 import redis
 
 from dodeal_ai.core.config import get_settings
+from dodeal_ai.core.metrics import track_breaker
 from dodeal_ai.core.redis import PoolExhausted
 
 _logger = logging.getLogger("dodeal_ai.breaker")
+
+# Which path gave the probe slot back, one fixed word per call site (item 122).
+# A closed set so the field can never carry an exception message or a key.
+type ProbeAbandonCause = Literal["pool", "never_returned", "cancelled", "error"]
 
 
 class BreakerOpen(redis.RedisError):
@@ -67,9 +76,21 @@ class BreakerState(Enum):
     HALF_OPEN = "half_open"
 
 
+def _is_store_failure(exc: BaseException) -> bool:
+    return isinstance(exc, redis.RedisError)
+
+
+def _is_pool_refusal(exc: BaseException) -> bool:
+    return isinstance(exc, PoolExhausted)
+
+
 class CircuitBreaker:
     """One connection's breaker. No lock: every transition runs in synchronous
-    code between awaits, so on one event loop no two calls interleave inside it."""
+    code between awaits, so on one event loop no two calls interleave inside it.
+
+    `counts` says which failures are evidence the dependency is down,
+    `uncounted` which never reached it (our own pool), and `refusal` builds what
+    an open breaker raises. The defaults are the Redis ones."""
 
     def __init__(
         self,
@@ -78,10 +99,16 @@ class CircuitBreaker:
         failure_threshold: int,
         open_seconds: float,
         clock: Callable[[], float] = time.monotonic,
+        counts: Callable[[BaseException], bool] = _is_store_failure,
+        uncounted: Callable[[BaseException], bool] = _is_pool_refusal,
+        refusal: Callable[[str], Exception] = BreakerOpen,
     ) -> None:
         self._name = name
         self._failure_threshold = failure_threshold
         self._open_seconds = open_seconds
+        self._counts = counts
+        self._uncounted = uncounted
+        self._refusal = refusal
         # Monotonic, never wall time: a clock step must not hold a breaker open
         # for hours or reopen it early.
         self._clock = clock
@@ -91,6 +118,8 @@ class CircuitBreaker:
         # When the current probe was admitted. Set on every entry to HALF_OPEN
         # and on every takeover, so HALF_OPEN is never without one.
         self._probe_started = 0.0
+        # breaker_state{breaker} reads this breaker on every scrape (item 22).
+        track_breaker(self)
 
     @property
     def name(self) -> str:
@@ -115,23 +144,27 @@ class CircuitBreaker:
         self._admit()
         try:
             result = await factory()
-        except redis.RedisError as exc:
-            if isinstance(exc, PoolExhausted):
+        except BaseException as exc:
+            if self._uncounted(exc):
                 if self._state is BreakerState.HALF_OPEN:
                     # The store was never asked, so give the probe slot back
                     # instead of holding it. _opened_at stays elapsed, so the
                     # next call probes at once; re-stamping refuses them all.
-                    self._log_probe_abandoned()
+                    self._log_probe_abandoned("pool")
                     self._state = BreakerState.OPEN
                 raise
-            self._record_failure()
-            raise
-        except BaseException:
+            if self._counts(exc):
+                self._record_failure()
+                raise
             # The probe did not answer the question (cancelled, or failed in
             # our own code). Not evidence either way: re-arm the window rather
             # than leave HALF_OPEN with nothing to move it.
             if self._state is BreakerState.HALF_OPEN:
-                self._log_probe_abandoned()
+                # A bug in our code must not read as a cancellation in the log.
+                cause: ProbeAbandonCause = (
+                    "cancelled" if isinstance(exc, asyncio.CancelledError) else "error"
+                )
+                self._log_probe_abandoned(cause)
                 self._open()
             raise
         self._record_success()
@@ -152,15 +185,15 @@ class CircuitBreaker:
         now = self._clock()
         if self._state is BreakerState.OPEN:
             if now - self._opened_at < self._open_seconds:
-                raise BreakerOpen(self._name)
+                raise self._refusal(self._name)
             self._state = BreakerState.HALF_OPEN
         elif now - self._probe_started < self._open_seconds:
             # HALF_OPEN, and its probe is still inside the window.
-            raise BreakerOpen(self._name)
+            raise self._refusal(self._name)
         else:
             # HALF_OPEN, and its probe never came back. Stay HALF_OPEN: this
             # call is the probe now.
-            self._log_probe_abandoned()
+            self._log_probe_abandoned("never_returned")
         self._probe_started = now
 
     def _record_failure(self) -> None:
@@ -186,9 +219,12 @@ class CircuitBreaker:
         self._opened_at = self._clock()
         _logger.warning("breaker_opened", extra={"breaker": self._name})
 
-    def _log_probe_abandoned(self) -> None:
-        """One line per probe that did not answer, on either guard's path."""
-        _logger.warning("breaker_probe_abandoned", extra={"breaker": self._name})
+    def _log_probe_abandoned(self, cause: ProbeAbandonCause) -> None:
+        """One line per probe that did not answer, on either guard's path, with
+        the fixed word naming that path and nothing from the failure itself."""
+        _logger.warning(
+            "breaker_probe_abandoned", extra={"breaker": self._name, "cause": cause}
+        )
 
 
 def breaker_field(exc: BaseException) -> dict[str, str]:

@@ -78,7 +78,9 @@ class JwtVerifier:
         try:
             return jwt.decode(
                 token,
-                s.jwt_signing_key,
+                # The ONLY read of the signing key in src/ (register item 91):
+                # plaintext for this call alone, never held or logged.
+                s.jwt_signing_key.get_secret_value(),
                 algorithms=[s.jwt_algorithm],
                 leeway=s.jwt_leeway_seconds,
                 options={

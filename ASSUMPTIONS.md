@@ -268,7 +268,7 @@ version against three endpoints."
 | --- | --- |
 | **Versioning** | Every output records prompt, model, rubric/formula and config version. Past outputs are never recomputed when rules change. |
 | **Configuration** | Weights, thresholds and catalogues live in our configuration, per tenant, read at runtime. **Not yet business-changeable** — no reachable config store. State that plainly rather than letting it read as "administrator-changeable". |
-| **Logging** | Client responses are generic, from a fixed enumerated set with no interpolation. Raw note text and model output are never logged. Exceptions from outside this codebase are logged by type only; our own carry fixed-vocabulary messages. Tracebacks are frames-only, unchained. `OutputValidationError` never holds the pydantic error or the input. Enforced by `tests/security/test_log_safety.py`. |
+| **Logging** | Client responses are generic, from a fixed enumerated set with no interpolation. Raw note text and model output are never logged. Exceptions from outside this codebase are logged by type only; our own carry fixed-vocabulary messages. Tracebacks are frames-only, unchained — and since register item 88 that holds for a record logged with `exc_info` by ANY logger in the process, including uvicorn's and starlette's: `JsonFormatter` emits `exc_type` and `exc_frames` and never the message. `OutputValidationError` never holds the pydantic error or the input. Enforced by `tests/security/test_log_safety.py` and `tests/security/test_log_exc_info.py`. |
 | **Never invent** | If budget was not discussed, the field stays empty. A wrong figure is more damaging than a blank one. |
 | **Salary firewall** | Nothing this unit produces is written into a performance, rating, target or salary record. Currently guaranteed by having no write access at all — it must survive the day that changes. |
 
@@ -544,6 +544,10 @@ Ordered by what they release. Items 4.1–4.3 are the critical path.
   `Z`**, so a naive-comparison backend fails visibly rather than quietly shifting
   everything by the offset.
 - **Seam:** the `since` kwarg in `tools/leads.py`, landing at step 4.
+- **Marker: `ASSUMPTION[Q5]`** (`schemas/lead.py`, `LeadNote.createdAt`). A note
+  timestamp with no offset is read as **UTC**. If wrong, every naive note time
+  is off by the CRM's offset; nothing reads it yet. Correction: the one
+  validator on `LeadNote`.
 
 ### 4.4 A notes index on the service surface `[ARCHITECTURAL]`
 - Notes across the tenant, filterable by date range and `author_id`, paged.
@@ -625,6 +629,27 @@ Ordered by what they release. Items 4.1–4.3 are the critical path.
 - **Seam:** `core/config.py` (`judgement_deadline_seconds`),
   `units/structured_intelligence/pipeline.py` (`judge_note`,
   `judge_note_direct`).
+
+### 4.8 Is a CRM note id unique within a tenant and never reused? (Q22)
+- **Assumed:** a CRM note id is unique within a tenant and never reused, not
+  even after a delete. `[D]` at best: no document states it and nobody has
+  observed it. The question is Q22 in `docs/STATUS.md` §6, owed by the backend
+  and not yet asked.
+- **Three mechanisms rest on it:**
+  - the per-note attempt cap, key `attempt:{tenant}:{lead_id}:{note_id}`;
+  - the resubmission's reference to the first prompt's fingerprint, the
+    `attempt_fp:` key beside it (register item 33);
+  - the six-hour attempt TTL (`attempt_ttl_seconds`, 21600), which both keys
+    carry.
+- **If an id is reused:** the new note inherits the old note's spent allowance
+  and returns `attempt_cap`. Nothing in the logs tells the two notes apart. This
+  was seen on the fake CRM, whose ids reset on restart.
+- **Correction path:** if the backend says ids can be reused, the attempt keys
+  gain the note's `createdAt`, or a CRM-issued unique token, with the TTL
+  unchanged.
+- **Seam:** `units/structured_intelligence/state.py` (`_attempt_key`,
+  `_attempt_fingerprint_key`), `units/structured_intelligence/config.py`
+  (`attempt_ttl_seconds`).
 
 ---
 
@@ -1062,7 +1087,7 @@ discovered at build time.
 - **Seam:** `core/auth/verify.py`, `core/config.py`.
 
 ### 8.10 Log safety — content cannot reach a log line
-- The rule (§3.3) is enforced by code in three places, not by discipline:
+- The rule (§3.3) is enforced by code in four places, not by discipline:
   - `core/log_safety.py::safe_error_fields()` returns `error_type` and
     `error_module` for ANY exception, and the message (`error`) **only when the
     class is defined under `dodeal_ai.`** — because our own exceptions build
@@ -1077,6 +1102,15 @@ discovered at build time.
     — never the `ValidationError`, its messages, or `input_value`. Chaining it
     would carry the rejected content into any traceback formatted downstream.
     Deliberate: do not "restore" the chain.
+  - `core/logging_config.py::JsonFormatter.format()` calls `frames_only` itself
+    (register item 88), so the rule holds for records this codebase never
+    wrote: a library, uvicorn's error logger or starlette's
+    `ServerErrorMiddleware` logging with `exc_info=True` through our root
+    handler yields `exc_type` and `exc_frames` and no message. It was
+    `self.formatException`, which printed `str(exc)` and the whole
+    `__cause__`/`__context__` chain. The `exc_info` KEY IS GONE — a collector
+    query on it matches nothing. `record.exc_text` is never read: the stdlib
+    caches the message-bearing text there when a record is formatted twice.
 - The JSON formatter never parses a message. Structured fields reach the output
   one way only — `extra=` attributes merged at the top level. An earlier version
   unpacked a message that was itself JSON, so any line beginning with `{` could
@@ -1084,6 +1118,9 @@ discovered at build time.
 - Sentinel tests in `tests/security/test_log_safety.py` fail if raw content
   reaches a line. They bind the sentinel on a non-raising line, so the traceback
   frame's own source text cannot be mistaken for a leak.
+  `tests/security/test_log_exc_info.py` makes the same claim about the BYTES ON
+  STDOUT, with `capfd` under the real `configure_logging()`, so a line written
+  by a logger outside this package is captured too.
 - **Seam:** `core/log_safety.py`, `core/validation.py`, `core/logging_config.py`.
 
 ### 8.11 Unit A Project 1 — built against FakeLLM and the fake CRM, nothing `[V]`
@@ -1137,18 +1174,11 @@ discovered at build time.
 
 # 10. DEFERRED
 
-### 10.1 Input size limit — home undecided
-- Built once as ASGI middleware, removed after a regression (forced eager config
-  load; middleware-ordering conflict).
-- Re-add **last**, alone, run the full suite immediately, watch the
-  error/chain/audit tests. Read the cap **lazily** — never call `get_settings()`
-  in middleware `__init__`.
-- **The in-app limit is not coming back.** The edge limit is DevOps's (Q21), and
-  a byte cap belongs where bytes are first accepted, not one layer inside the
-  app that has already read them. **Load shedding is a different guard** — a
-  count of requests in flight, not a size of one — and it lives in
-  `middleware/inflight.py` (Piece L, register item 73), where it does obey the
-  lazy-read rule this section wrote down.
+### 10.1 Input size limit: in the app, outermost (register item 87)
+- Built once as a Starlette base-class middleware and removed: it read settings in its constructor, which forced config to load at import time, and it fought the middleware order.
+- Re-added as a pure ASGI middleware, outermost, after Piece 86 made the other two pure ASGI. The cap is `DODEAL_MAX_REQUEST_BODY_BYTES` (64 kB), read lazily per request, never in `__init__`. A `content-length` over the cap is refused before the body is read; a streamed body is counted and refused at the byte it passes the cap. 413 `payload_too_large`.
+- This does not replace the edge limit (item 43, DevOps). Bytes should be refused where they are first accepted; the in-app cap is the bound that holds when the edge has none.
+- Load shedding is a different guard, a count of requests, not a size of one: `middleware/inflight.py`, item 73.
 
 ### 10.2 Per-unit prompt-injection hardening
 - **Built:** the injection-resistant prompt builder and its structural tests.

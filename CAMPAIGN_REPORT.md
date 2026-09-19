@@ -5499,3 +5499,1040 @@ on an injected clock and touches no socket, no pool and no Lua.
 | `docs/register.md` | item 95 to DONE; header sha; 102 dropped from the step order |
 | `docs/STATUS.md` | the Piece 95 row; the register-item section; suite line to 1233 / 99.51%; header piece list |
 | `CAMPAIGN_REPORT.md` | this block |
+
+## Piece 85: the prompt templates are read once at startup   STATUS: DONE `f3e3788`
+
+**Register item 85, closed.** *"Preload all nine prompt templates at startup; a missing file fails startup."*
+Two files under `src/` changed and one was added: `core/prompting.py`, `main.py`, and
+`units/structured_intelligence/templates.py`.
+
+### What was actually wrong
+
+`_load_template` read from disk on every call, and `build_prompt` and `with_tail` each call it:
+
+```python
+def _load_template(name: str) -> str:
+    path = _prompts_dir() / name
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise PromptError(f"prompt template not found: {name}") from exc
+```
+
+Two costs, and the second is the expensive one.
+
+**A blocking read on the event loop, three to six times per judgement.** `_prompts_dir()` also builds
+`Settings` on each of them. This service is one loop (`tests/test_no_sync_clients.py` exists to say so): a
+read that blocks does not slow the request that made it, it stops every request in the process. Three reads on
+the happy path — classify, vague, score — and up to six when both gathered passes are reprompted, since the
+tail is a fourth template and `with_tail` re-reads it each time.
+
+**A missing template was discovered on the first paid call.** A deployment whose image lost
+`vague_won_lost_v1.txt` started, passed `/ready`, answered `/health`, served every judgement whose note was
+not a `won_lost` — and then, on one that was, raised `PromptError` **after** classification had already been
+bought and charged. The fault is in the image, and it was being reported as a runtime failure of one note
+type.
+
+### The change
+
+`core/prompting.py` gains the cache and the two functions that bracket its life, and the disk read is
+extracted into the one site both go through:
+
+```python
+_TEMPLATE_CACHE: dict[str, str] = {}
+
+
+def preload_templates(names: Iterable[str]) -> None:
+    loaded = {name: _read_template_file(name) for name in names}
+    _TEMPLATE_CACHE.update(loaded)
+
+
+def clear_templates() -> None:
+    _TEMPLATE_CACHE.clear()
+
+
+def _load_template(name: str) -> str:
+    cached = _TEMPLATE_CACHE.get(name)
+    if cached is not None:
+        return cached
+    return _read_template_file(name)
+```
+
+Four properties, each of which is the point:
+
+1. **The fallback is deliberate, not a leftover.** An uncached name reads from disk exactly as it did before
+   the cache existed. That is what keeps `scripts/verify_wheel.py`, `tests/unit/test_assembled_prompt.py`,
+   `tests/unit/test_prompting.py` and `FakeLLM.script_for` — none of which runs inside a lifespan — working
+   with no change at all, and it is what lets a test point `_prompts_dir` at a `tmp_path` and still read what
+   it wrote. A cache that raised on a miss would have made this piece a rewrite of four test modules.
+2. **The preload is all-or-nothing.** `loaded` is a local mapping published only once every name resolved, so
+   the first missing file raises with `_TEMPLATE_CACHE` still empty. Without that, a caller that caught the
+   `PromptError` — a test, a script, anything embedding the app — would carry on against eight templates the
+   app never had.
+3. **The refusal names the template, not the path.** `prompt template not found:
+   structured_intelligence/score_v1.txt`, and nothing else. That string reaches a log line, and the resolved
+   path carries the deployment's directory layout with it. A test asserts `str(tmp_path)` is absent.
+4. **`_read_template_file` is one function so a test can count reads by patching one name.** Patching
+   `Path.read_text` globally would count pytest's own reads of source files and prove nothing about this
+   module.
+
+`main.py` places the preload **first**, and the clear **first** on the way out:
+
+```python
+    settings = get_settings()
+    configure_logging()
+    # FIRST, before any socket or pool exists: a missing template must refuse
+    # here, not on the first paid call days later. ...
+    preload_templates(UNIT_A_TEMPLATES)
+```
+
+Before `app.state.http`, which is the reason this piece adds no unclosed resource: the refusal happens while
+the process still owns nothing. After `configure_logging()`, so anything that does log during startup logs in
+the JSON shape a collector parses (audit §6.9, the same argument as `backend_keys_missing`). And the ordering
+choice on shutdown — `clear_templates()` before the three `aclose()` calls — is made on failure, not on
+tidiness: clearing a dict cannot raise, so it is the one shutdown step that cannot be skipped by an earlier
+one failing.
+
+**The nine are named by the unit, not by core.** `units/structured_intelligence/templates.py`:
+
+```python
+VAGUE_CHECKED_TYPES: tuple[NoteType, ...] = tuple(
+    note_type for note_type in NoteType if note_type is not NoteType.SYSTEM_EVENT
+)
+
+UNIT_A_TEMPLATES: tuple[str, ...] = (
+    CLASSIFY_TEMPLATE,
+    *(template_for(note_type) for note_type in VAGUE_CHECKED_TYPES),
+    SCORE_TEMPLATE,
+    REPROMPT_TAIL_TEMPLATE,
+)
+```
+
+`core/prompting.py` knows how to read a template and has never known which ones exist; nine hardcoded
+filenames there would be a second place to edit every time this unit grows a pass. Every entry is the
+**constant the calling module already passes to `build_prompt`**, never a retyped string, so a renamed file
+cannot leave a template that is sent out of the preload — which would be the worst outcome available here: a
+disk read back on a paid call, silently, with every test still green.
+
+The six vague names come from iterating `NoteType` and dropping `SYSTEM_EVENT` (the classifier suppresses it
+before pass two), so an eighth note type joins the preload the moment it is added, and a type with no template
+is a `PromptError` at **import** rather than a `KeyError` on a judgement.
+
+### The guard
+
+Seven tests in `tests/unit/test_prompt_preload.py`:
+
+- **Startup refuses.** A `tmp_path` holding eight of the nine, `_prompts_dir` patched to it, entering the
+  lifespan raises `PromptError`; the message names `structured_intelligence/score_v1.txt` and does not
+  contain the directory.
+- **A refused startup leaves no half-filled cache.** `_TEMPLATE_CACHE == {}` after a caught failure.
+- **The tuple is the nine that ship.** Nine entries, nine distinct, every one a real file under
+  `src/dodeal_ai/prompts/`. This is the test that catches the renamed-constant case the tuple is built to
+  prevent.
+- **Zero reads.** A lifespan that actually ran, a full judgement on the fetch route against `FakeLLM` with a
+  malformed vague answer so the reprompt fires — four model calls, five prompts assembled — and the read
+  counter, installed *after* startup, is empty.
+- **The cache does not outlive the app.** Populated inside the lifespan, `== {}` after it, and
+  `_load_template` then reads the disk again (the counter increments).
+- **The fallback still reads disk with no app started**, and **a preloaded name is served from the cache**
+  even after the file under it changes.
+
+`tests/unit/test_assembled_prompt.py` and `tests/unit/test_prompting.py` pass unchanged, which is the fallback
+being proven by the tests that were already there.
+
+### Sabotage
+
+**(a) `_load_template` skips the cache lookup** (the body reduced to `return _read_template_file(name)`):
+
+```
+FAILED tests/unit/test_prompt_preload.py::test_a_full_judgement_reads_no_template_from_disk
+FAILED tests/unit/test_prompt_preload.py::test_a_preloaded_name_is_served_from_the_cache_not_the_file
+2 failed, 5 passed
+```
+
+`assert read_counter == []` failed with five reads, and the second test read `SECOND` where the cache holds
+`FIRST`. Restored byte for byte.
+
+**(b) `preload_templates` swallows the missing-file error.** The read site wraps `OSError` in `PromptError`
+before `preload_templates` ever sees it, so the sabotage is the `except PromptError: continue` that a
+swallow would actually look like here:
+
+```
+FAILED tests/unit/test_prompt_preload.py::test_startup_refuses_when_one_template_is_missing
+FAILED tests/unit/test_prompt_preload.py::test_a_refused_startup_leaves_no_half_filled_cache
+2 failed, 5 passed
+```
+
+`Failed: DID NOT RAISE PromptError` — the app came up on eight templates. Restored byte for byte.
+
+### For the lead
+
+1. **`UNIT_A_TEMPLATES` lives in a new `units/structured_intelligence/templates.py`, not in the package
+   `__init__.py`.** That file is deliberately empty (its own docstring says so), and filling it would make
+   importing **any** module in the package — `state`, which the root `tests/conftest.py` imports — drag in
+   `classify`, `vague`, `scoring` and `llm_call` with it, and put the package `__init__` in a position to
+   import a submodule that imports the package. A separate module leaves the import graph exactly as it was.
+2. **`core/prompting.py` gained no per-file coverage floor.** It now holds a cache with a fallback branch,
+   which is an argument for one; it is not on a deny path or a scoring path, which is the argument the
+   existing list is built on. It measures **100%** at this head. Not added — floors are the lead's.
+3. **The lifespan's existing order is untouched and still leaves `app.state.http` unclosed if
+   `build_llm_client` raises.** This piece's step runs *before* the client exists, so it adds no instance of
+   that; it does not close it either. Worth its own decision.
+4. **The preload runs before `backend_keys_missing` and `backend_scheme_insecure` are logged**, as the brief
+   specified ("immediately after `configure_logging()`"). A deployment missing both a template and its backend
+   keys therefore refuses without the keys line. That is the right trade — a refusal is a refusal — but it is
+   a visible consequence of the ordering, so it is recorded here rather than assumed.
+5. **`docs/register.md` lists item 85's carrying step as "A9a, with 76"**, while the step-order line at the top
+   of the same file reads "95, 85, 86, 87, 88 ..." and this piece carried 85 alone. The column is stale
+   against the order line; nothing was changed but the status and sha.
+6. **No `.env.example` row is owed and no setting changed.** `DODEAL_PROMPTS_DIR` already exists and its
+   behaviour is unchanged — it still overrides the location, and the override is now read once at startup
+   rather than on every call.
+7. **`ASSUMPTIONS.md` is untouched.** §8.5 (`AssembledPrompt`) and §8.6 (packaging, and
+   `DODEAL_PROMPTS_DIR` "overrides the prompt location for local iteration only") are both still true
+   word for word after this piece. Nothing in that file described the per-call read.
+
+### Files
+
+| File | Change |
+| --- | --- |
+| `src/dodeal_ai/core/prompting.py` | `_read_template_file` extracted as the one disk read; `_TEMPLATE_CACHE`, `preload_templates`, `clear_templates`; `_load_template` reads the cache first |
+| `src/dodeal_ai/main.py` | `preload_templates(UNIT_A_TEMPLATES)` immediately after `configure_logging()` and before `app.state.http`; `clear_templates()` first after `yield`; two imports |
+| `src/dodeal_ai/units/structured_intelligence/templates.py` | new: `VAGUE_CHECKED_TYPES` and `UNIT_A_TEMPLATES`, built from the four constants |
+| `tests/unit/test_prompt_preload.py` | new: seven tests (startup refusal, no half-filled cache, the nine, zero reads, lifetime, and both sides of the fallback) |
+| `README.md` | the `prompting.py` module row; the `main.py` module row; the `structured_intelligence/` directory row; the `DODEAL_PROMPTS_DIR` configuration row |
+| `docs/register.md` | item 85 to DONE; header sha; 85 dropped from the step order |
+| `docs/STATUS.md` | the Piece 85 row; the register-item section; suite line to 1240 / 99.57%; header piece list |
+| `CAMPAIGN_REPORT.md` | this block |
+
+---
+
+## Piece 86: the two middlewares as pure ASGI   STATUS: DONE `76ed6af`
+
+**Register item 86, closed.** *"Rewrite `RequestIDMiddleware` and `InflightMiddleware` as pure ASGI."*
+Two files under `src/` changed and nothing else: `middleware/request_id.py`, `middleware/inflight.py`.
+`main.py` is untouched — the class names and the one-argument constructor are the same, so the registration
+and its comment stay word for word.
+
+### What was actually wrong
+
+Both classes were `starlette.middleware.base.BaseHTTPMiddleware`. That base class is not a naming choice; it
+is a runtime. Every request it sees is run through an anyio task group and a pair of memory object streams,
+so that `dispatch` can be handed a `Request` and return a `Response`. Three costs, and the middle one is the
+one that decided this piece.
+
+**The load-shed middleware was paying for a task group in order to refuse work.** Its own docstring is
+explicit about the standard it has to meet:
+
+> Before everything else, so a refusal costs a counter comparison and nothing more -- no token verification,
+> no tenant resolution, no body read, no Redis round-trip.
+
+And then, before reaching that comparison, every request — admitted or refused — had a task group created
+for it, two memory streams opened, and a child task spawned. A defence that costs more than the work it
+refuses is not a defence, which is the argument the module already makes against reading a body; it applied
+to the base class too and had not been noticed.
+
+**The route ran in a child task, so `contextvars` did not survive a round trip.** This is the property the
+rewrite restores, and it is worth being precise about which half was broken, because the obvious test does
+not discriminate:
+
+- **Downward** (set outside the middleware, read in the route) **worked before this piece.** A child task
+  copies its parent's context at spawn, so a `ContextVar` set before `call_next` reaches the endpoint. A test
+  asserting this would have passed on both trees and proved nothing.
+- **Upward** (set in the route, read by a middleware after the call returns) **did not, and cannot.** The
+  route's `set()` lands in the child task's copy of the context and is discarded with the task. Measured on
+  the tree at `516f94d`, with one probe middleware outside the pair and a route that sets the var:
+
+  ```
+  with the two middlewares in the stack: outer sees -> MISSING
+  without them:                         outer sees -> SET-IN-ROUTE
+  ```
+
+  That is the direction any future request-scoped context depends on: a tenant, a trace span, a cost tally
+  set deep in the pipeline and read on the way out.
+
+**Cancellation behaviour that moves between releases.** `BaseHTTPMiddleware`'s handling of a disconnect
+mid-response has changed more than once upstream. Starlette is pinned at 1.3.1, which defers the question
+rather than answering it. A plain callable has no such behaviour of its own to change.
+
+### The change
+
+Both are now the two-method shape. `RequestIDMiddleware`:
+
+```python
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        request_id = _accepted_inbound_id(scope) or str(uuid.uuid4())
+        state = scope.setdefault("state", {})
+        state["request_id"] = request_id
+        state["observability"] = RequestObservability(
+            request_id=request_id, trace_id=request_id
+        )
+```
+
+Four things in that are deliberate, and each is a way it could have been got wrong:
+
+**`scope["state"]` is not a second home for the id.** `Request.state` is a *view* over exactly this dict —
+Starlette's `HTTPConnection.state` does `scope.setdefault("state", {})` and wraps the result — so writing the
+key here **is** writing `request.state.request_id`. All four `getattr(request.state, "request_id", "unknown")`
+reads in `core/auth/dependencies.py`, the one in `core/errors.py:149`, and every audit line downstream keep
+working with no change of their own. That is why the security tests pass unedited.
+
+**`setdefault`, not assignment.** An ASGI server may have put a `state` dict there already — uvicorn hands
+each request a shallow copy of the lifespan state — and replacing it would drop whatever the lifespan put in.
+
+**The header is read from `scope["headers"]`, first occurrence wins.** ASGI header names are lower-cased
+bytes; the value is decoded `latin-1`, which is the decoding HTTP header bytes have, is what Starlette's
+`Headers` uses, and cannot raise — so a caller cannot reach this code with an exception. First-match is what
+`Headers.get` did, so a caller who sends the header twice still does not get to choose which copy is checked.
+`_VALID_REQUEST_ID` is unchanged, and a rejected value is still dropped without being logged.
+
+**The response header goes onto a copy:**
+
+```python
+        async def send_with_request_id(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                message = {
+                    **message,
+                    "headers": [
+                        *message.get("headers", []),
+                        (_REQUEST_ID_HEADER, request_id.encode("latin-1")),
+                    ],
+                }
+            await send(message)
+```
+
+A `Response` sends its own `raw_headers` list, and a `Response` object can be sent more than once. Appending
+in place would add one `x-request-id` per send, so the second response from a reused object would carry two.
+The bytes on the wire are unchanged: `MutableHeaders.__setitem__` lower-cased the name on the way out too, so
+`b"x-request-id"` is what went out before.
+
+`InflightMiddleware` is the same shape, with the three lines that were `request.*` now `scope[...]`:
+
+```python
+        scope["app"].state.inflight = _counter
+
+        if scope["path"] in EXEMPT_PATHS:
+            ...
+            request_id = scope.get("state", {}).get("request_id", "unknown")
+            ...
+            await dodeal_error_response(LoadShed(), request_id)(scope, receive, send)
+            return
+
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            _counter.release()
+```
+
+`URL.path` **is** `scope["path"]` in this Starlette (`datastructures.py` builds it with no root-path
+handling), so the exempt match is unchanged rather than merely equivalent. The refusal is the same
+`JSONResponse` from the same `dodeal_error_response`, now *called* rather than returned — a `Response` is
+itself an ASGI app, so the status, the headers and the body bytes are identical, and `core/errors.py`'s
+explanation of why a middleware cannot simply `raise` is still exactly true.
+
+**The `finally` matters more now, not less.** Under `BaseHTTPMiddleware` an exception from the inner app came
+back through `call_next`; now it propagates straight up to `ServerErrorMiddleware`. A `release()` written on
+the success path alone would leak a slot on every 500 — item 73's hardening, unchanged and re-proved below.
+
+**One thing is genuinely new in both: a non-http scope passes straight through.** `BaseHTTPMiddleware` did
+that for us; a plain callable has to do it itself, and getting it wrong is silent. A counted `lifespan` scope
+holds its slot until the process exits, so the cap is one lower for the life of the pod; an id written into a
+lifespan scope is one id shared by everything that later reads that state.
+
+### The guard
+
+**Every existing test passes unedited.** That is the actual evidence for "behaviour unchanged", and none of
+them needed so much as a whitespace change: `tests/unit/test_inflight.py` in full (the twenty-concurrent
+exactness test, arrival order, the `finally` release on a raising route, `app.state.inflight` live, the
+refusal body, the `WARNING` line with no tenant, the sentinel body reaching no log line, both exempt paths
+taking no slot) and `tests/security/test_chain.py` in full (the honoured well-formed inbound id, the overlong
+one replaced by a generated uuid4, the newline / CRLF / brace-bearing ones replaced and never logged, the
+echoed header).
+
+Two new files, sixteen tests:
+
+`tests/test_no_base_http_middleware.py` — the grep, in the shape of `tests/test_no_sync_clients.py`. **The
+patterns are import-shaped and class-shaped, not the bare word**, and that is a decision worth recording: both
+middleware docstrings now *name* `BaseHTTPMiddleware` to explain why they are not one, which is the single
+most useful sentence in each file, and a bare-word grep would forbid the explanation along with the thing. So
+it matches the two import spellings and `class X(...BaseHTTPMiddleware...)`, which an alias
+(`from starlette.middleware import base`) still has to write out. A self-test asserts the patterns hit the
+four spellings they forbid and miss a line of the prose, because a pattern typo is the failure mode a grep
+has that produces a green run.
+
+`tests/unit/test_middleware_asgi.py` — the properties that were not true before:
+
+- **A `ContextVar` set in the route is visible to an outer middleware**, and — the mechanism behind it — the
+  route runs in the **same asyncio task** as the middleware.
+- **A `lifespan` and a `websocket` scope** reach the inner app **as the same object**, with nothing added to
+  it (`state` included) and **no slot taken**. Both scopes carry `app`, as every scope Starlette builds does,
+  so a middleware that wrongly counted one would be *counted* by the assertion rather than raising `KeyError`
+  before reaching it.
+- **An `http` scope on the same stack is counted and identified** — the control. A pass-through that swallowed
+  real requests too would pass both tests above.
+- **The id header is added to a copy**, asserted by handing the middleware an inner app that sends a list the
+  test still holds.
+
+### Sabotage
+
+**(a) The `finally` release removed** (the `try:`/`finally:` reduced to the bare `await self.app(...)`):
+
+```
+FAILED tests/unit/test_inflight.py::test_the_counter_returns_to_zero
+FAILED tests/unit/test_inflight.py::test_a_request_that_raises_still_decrements
+FAILED tests/unit/test_inflight.py::test_the_request_at_the_cap_is_refused
+FAILED tests/unit/test_inflight.py::test_the_count_is_exact_under_twenty_concurrent_requests
+FAILED tests/unit/test_inflight.py::test_the_cap_is_reusable_after_a_burst
+FAILED tests/unit/test_inflight.py::test_the_count_is_exposed_on_app_state
+FAILED tests/unit/test_middleware_asgi.py::test_an_http_scope_on_the_same_stack_is_counted_and_identified
+7 failed, 24 passed
+```
+
+The twenty-concurrent test failed on `current_inflight() == 0` with a leaked slot per request. Restored byte
+for byte (md5 verified against the pre-sabotage copy).
+
+**(b) The `_VALID_REQUEST_ID` check skipped** (`_accepted_inbound_id` reduced to `return _inbound_header(scope)`):
+
+```
+FAILED tests/security/test_chain.py::test_overlong_inbound_request_id_is_replaced_by_a_generated_uuid
+FAILED tests/security/test_chain.py::test_malformed_inbound_request_id_is_replaced_by_a_generated_uuid[newline-...]
+FAILED tests/security/test_chain.py::test_malformed_inbound_request_id_is_replaced_by_a_generated_uuid[crlf-...]
+FAILED tests/security/test_chain.py::test_malformed_inbound_request_id_is_replaced_by_a_generated_uuid[json_brace-...]
+4 failed, 146 passed
+```
+
+The injected newline, CRLF and brace values were accepted and echoed. Restored byte for byte.
+
+**(c) A `lifespan` scope counted** (`scope["type"] != "http"` changed to `== "websocket"`):
+
+```
+FAILED tests/unit/test_middleware_asgi.py::test_a_non_http_scope_reaches_the_inner_app_untouched[lifespan]
+FAILED tests/unit/test_middleware_asgi.py::test_a_non_http_scope_takes_no_slot[lifespan]
+2 failed, 7 passed
+```
+
+Both lifespan cases failed, on `KeyError: 'path'` — a lifespan scope has no `path`, so the exempt-path lookup
+raised before the counting assertion was reached. That proves the guard but not the *counting* claim, so a
+narrower variant was run as well:
+
+**(c′) The non-http pass-through takes a slot** (one `_counter.acquire(get_settings().max_inflight)` added
+before the delegation):
+
+```
+FAILED tests/unit/test_middleware_asgi.py::test_a_non_http_scope_takes_no_slot[lifespan]
+FAILED tests/unit/test_middleware_asgi.py::test_a_non_http_scope_takes_no_slot[websocket]
+2 failed, 7 passed
+```
+
+`At index 0 diff: 1 != 0` — the scope was counted while inside. Restored byte for byte.
+
+### For the lead
+
+1. **Phase 0 question 4, both halves NO.**
+   - *Does `core/prompting.py` log `prompt_template_not_preloaded` on a cache miss?* **No.** That module has
+     no logger at all — no `logging` import, no `_logger`. `_load_template` (`core/prompting.py:137-143`)
+     falls back to `_read_template_file` silently.
+   - *Does any test scan `src/` for template names and assert each is in `UNIT_A_TEMPLATES`?* **No.** The
+     nearest is `tests/unit/test_prompt_preload.py:101-110`
+     (`test_the_tuple_names_the_nine_templates_that_ship`), which runs the **other** direction: it takes the
+     tuple and asserts each name is a file that ships. Nothing reads `src/` for the names a pass actually
+     sends. Neither was added; they are not this piece.
+2. **The contextvar test is the *reverse* direction, on purpose, and the prompt's suggested direction would
+   not have proved anything.** The prompt asked for "a request id set by the middleware ... visible inside a
+   route through a `contextvars.ContextVar` set in the middleware and read in the route". Measured on
+   `516f94d`: that already worked, because a child task copies its parent's context at spawn — the assertion
+   passes identically before and after the rewrite. The direction a task boundary actually severs is
+   route → outer middleware, and it is measured in both trees (`MISSING` before, `SET-IN-ROUTE` after). The
+   test asserts that, plus the mechanism directly (`asyncio.current_task()` is the same object in the
+   middleware and in the route). The grep test is kept either way.
+3. **No existing test needed an edit.** None.
+4. **`middleware/inflight.py` and `middleware/request_id.py` both measure 100%** at this head, and neither has
+   a per-file floor. Inflight is a deny path, which is the argument the existing floor list is built on. Not
+   added — floors are the lead's.
+5. **One line of prose in `src/` had to be reworded to get past an *existing* guard.** The request-id
+   docstring cited `starlette/requests.py` as the file that makes `request.state` a view over `scope["state"]`,
+   and `tests/test_no_sync_clients.py` greps `src/` for `\brequests\.` — a true positive for its own purpose
+   and a false one here. The sentence now names `HTTPConnection.state` instead, which is more precise anyway.
+   The alternative was editing that guard's pattern, which is a policy change and not this piece's.
+6. **Nothing in `README.md`, `ASSUMPTIONS.md` or a module docstring was left false, and one line was already
+   stale.** No line anywhere named `BaseHTTPMiddleware` or "task group" before this piece, so nothing became
+   wrong; the README rows gained the new fact. The stale one is in `docs/STATUS.md`: the suite line read "the
+   deselected 28 are the `integration` marker (7) and the `redis_real` lane (21)" while the tree deselects
+   **30** (integration is **9**, measured this session). Corrected in the same edit.
+7. **`ASSUMPTIONS.md` is untouched.** §10.1 ("the cap is read lazily, per request, never in `__init__`") is
+   still true word for word — and is now true of a constructor that genuinely exists and takes the inner app
+   and nothing else.
+8. **The new register item is numbered 122, not 116.** `docs/register.md` stops at 115, but the master carries
+   at least item 121 (the `event` field on the startup lines, named in this prompt's Out list and absent from
+   the file). 116 risked colliding with a master number. Renumber if the master's next free is lower; the note
+   is in the register beside the item.
+9. **No `.env.example` row is owed and no setting changed.** `DODEAL_MAX_INFLIGHT`, the exempt paths and the
+   request-id character set are all untouched, as the scope required.
+10. **`current_inflight` still lives in `middleware/inflight.py`** and `pipeline.py:119` still imports it from
+    there. That is item 13's job, with `import-linter`, and was left alone.
+
+### Files
+
+| File | Change |
+| --- | --- |
+| `src/dodeal_ai/middleware/request_id.py` | `RequestIDMiddleware` as `__init__`/`__call__`; header read from `scope["headers"]`; state written to `scope["state"]`; id appended to a copy of the response-start headers; non-http pass-through; docstring's ordering paragraph rewritten for the new shape |
+| `src/dodeal_ai/middleware/inflight.py` | `InflightMiddleware` as `__init__`/`__call__`; counter published through `scope["app"].state`; `scope["path"]` against `EXEMPT_PATHS`; the refusal `Response` awaited as an ASGI app; the `finally` release kept; non-http pass-through; docstring gains the SHAPE paragraph, "WHERE IT SITS" and the `add_middleware` note unchanged |
+| `tests/test_no_base_http_middleware.py` | new: the grep, import-shaped and class-shaped, plus a self-test of the patterns |
+| `tests/unit/test_middleware_asgi.py` | new: nine tests (contextvar upward, same task, `request.state` through the route, two non-http scopes × untouched and uncounted, the http control, the header copy) |
+| `README.md` | the middleware directory bullet; the `inflight.py` and `request_id.py` module rows; two test-file rows; the repo-wide guards paragraph |
+| `docs/register.md` | item 86 to DONE; header sha to this head; 86 dropped from the step order; the lead's new item 122 |
+| `docs/STATUS.md` | the Piece 86 row; the register-item section; suite line to 1256 and the deselected count corrected to 30; header piece list and date |
+| `CAMPAIGN_REPORT.md` | this block |
+
+---
+
+## Piece 87: the body-size limit, outermost   STATUS: DONE `39018b5`
+
+**Register item 87, closed.** *"Pure-ASGI body-size limit, outermost, 64 kB, 413 above it, before Gate 1."*
+One new file under `src/` and three edited: `middleware/body_limit.py` (new), `core/config.py`,
+`core/errors.py`, `main.py`, plus the `.env.example` row in the same commit because the pin test requires it.
+
+### What was actually wrong
+
+Nothing in the app bounded a request body. A caller could send megabytes and the app would read every one of
+them into memory **before Gate 1 decided whether that caller was allowed to send anything at all**. The order
+was backwards: identification was paying for the request rather than the request paying for itself. Register
+item 43 puts a limit at the edge, but it is DevOps's, it is unowned, and an in-app service that has no bound
+of its own is one misconfigured ingress away from having none at all.
+
+`ASSUMPTIONS.md` §10.1 said the in-app limit "is not coming back" — that section is rewritten by this piece.
+The reason it was removed was never that an in-app cap is wrong; it was that the first build called
+`get_settings()` in a middleware constructor, which forced config to load at import time. That is a fixable
+mistake and it is fixed here: the cap is read per request, and `__init__` takes the inner app and nothing else.
+
+### The disagreement between the prompt and the tree, and how it was resolved
+
+The prompt specified the streamed path like this:
+
+> the moment the running total passes the cap, raise `PayloadTooLarge`. The exception surfaces inside the
+> route's own body read, propagates to the `DodealError` handler, and comes back as the same 413 with a real
+> request id
+
+**It does not.** FastAPI wraps the body read in a broad `except Exception` and re-raises whatever comes out of
+it as its own `HTTPException(400, "There was an error parsing the body")` (`fastapi/routing.py`, and the
+adjacent comment shows it is deliberate). Measured against the real stack at `7a3ec5c`, before any code for
+this piece was written — a minimal FastAPI app, a middleware raising `PayloadTooLarge` out of a wrapped
+`receive`:
+
+```
+http.response.start 400
+http.response.body  b'{"detail":"There was an error parsing the body"}'
+```
+
+So a delegated refusal tells the caller its request was **malformed** when it was only too big — 400 where
+the register says 413, and a status that points the CRM at its own serialiser rather than at the size.
+
+**The workaround that looks obvious is worse.** FastAPI's `except HTTPException: raise` branch exists exactly
+so a middleware can raise one, so making `PayloadTooLarge` inherit `DodealError` *and* `HTTPException` should
+thread it through. It cannot: under the combined MRO, `DodealError.__init__`'s `super().__init__(reason_code)`
+resolves to `HTTPException.__init__`, which reads the reason code as a status —
+`ValueError: 'payload_too_large' is not a valid HTTPStatus`. Measured too. Worse than not working, it is a
+trap laid for every future `DodealError` subclass.
+
+**Resolution: the middleware owns its refusal end to end, on both paths.** The wrapped `receive` raises to
+stop the read where it stands; the wrapped `send` discards whatever the inner app answered with; the
+middleware sends the 413 itself, from the same `dodeal_error_response` builder every other enumerated refusal
+uses. What the framework inside makes of the exception stops mattering — which is the property worth having
+across a FastAPI upgrade, since the alternative fails *into a 400* rather than loudly.
+
+The status, the reason code, the body shape, the placement, the cap and the `>`-not-`>=` boundary are all
+exactly as item 87 specifies. Only the mechanism differs, and it differs because the specified one was
+measured not to hold.
+
+### The change
+
+`middleware/body_limit.py`, the Piece 86 shape: `__slots__ = ("app",)`, `__init__(app)`,
+`__call__(scope, receive, send)`, no settings read in the constructor.
+
+- **Non-http scopes** pass through untouched, as in the other two.
+- **The header path.** A `content-length` that parses as an int above the cap is refused with
+  `dodeal_error_response(PayloadTooLarge(), request_id)` awaited as an ASGI app. `receive` is **never called**,
+  so not one byte of the body comes off the socket. `request_id` is `"unknown"`: outermost, nothing has minted
+  one yet, and generating one here would mean two middlewares minting ids.
+- **The streamed path.** No length, chunked, or a lying header: every `http.request` message's body length is
+  added to a running integer — never a copy of the bytes — and the moment the total passes the cap the read
+  raises. That 413 carries a **real** request id, because the overflow is noticed while the route is reading
+  the body, which is inside every middleware below this one. Same lookup, different moment.
+- **Exactly the cap is admitted**; one byte over is refused.
+- **It cannot retract a response that has already started.** A route that streams a reply while still reading
+  the request would have its first bytes on the wire already; ASGI offers no way to take those back, so the
+  `started` flag passes the rest through rather than corrupting the response. No route here does that today.
+- **It logs nothing.** The 413 is the record. A WARNING per oversized request is a log-volume lever a caller
+  controls — the same asymmetry this middleware closes, arriving through the log pipeline instead.
+- **`/health` and `/ready` are not exempt**, unlike in `inflight.py`. They carry no body, so the check costs
+  them a dict lookup, and an exemption is a path a caller can aim a large body at. The test asserts the
+  *absence* of an exemption list, not just that `/health` answers 200 — which it would either way.
+
+`core/config.py`: the commented placeholder becomes `max_request_body_bytes: int = Field(default=65_536, ge=1)`.
+`core/errors.py`: `PayloadTooLarge` → `("payload_too_large", 413)`. 413 and not 503 because this is about
+**this request's size**: not the service's capacity (`LoadShed`'s 503) and not the caller's quota (Gate 4's
+429). `main.py`: registered **last**, so outermost; the order comment now reads body limit → request id →
+inflight → routing, and the dead `# register_body_size_limit(app)` line is gone.
+
+### Sabotage
+
+| Change | Result | Restored |
+| --- | --- | --- |
+| The fast-path header check replaced by `if False:` | 5 failed: `test_a_declared_length_over_the_cap_never_touches_the_body` (`receive` was called), `test_the_refusal_body_is_the_shared_error_shape`, `test_the_header_path_request_id_is_unknown_by_placement`, `test_the_first_content_length_header_wins`, `test_one_byte_over_the_cap_is_413` — the last three because the slow path still refuses with 413 but now carries a **real** id, which is the discriminator between the two paths | byte for byte, sha256 verified |
+| `received > cap` to `received >= cap` | 2 failed: `test_a_body_of_exactly_the_cap_is_admitted` and `test_a_body_of_exactly_the_cap_is_judged` | byte for byte, sha256 verified |
+
+### For the lead
+
+1. **No existing test posts a body over 64 kB.** The largest body construction anywhere in the tree is
+   `"x" * 4001` (`test_direct_routes.py`, the over-length note), about 4 kB. Nothing was raised to fit.
+2. **The per-file floor for `middleware/body_limit.py` is not added**, per the prompt. It measures **100%**
+   today. `scripts/check_coverage_floors.py` is unchanged and still lists 15 floors.
+3. **The slow-path 413 does carry a real request id**, as expected — asserted directly
+   (`test_the_streamed_refusal_carries_a_real_request_id`). Neither 413 carries an `X-Request-ID`
+   *header*, because both are sent from outside `RequestIDMiddleware`'s send wrapper. That is inherent to
+   being outermost and is the same on both paths, so the two refusals are consistent with each other rather
+   than one being an anomaly. Say if the header is wanted on the streamed one; it would mean this middleware
+   knowing the id header's name, which today only `request_id.py` does.
+4. **`middleware/inflight.py`'s docstring is now stale and was deliberately left alone.** The paragraph under
+   "THE CAP IS READ LAZILY" says *"The body-size middleware that used to live here was removed after exactly
+   that"*. The history is still true; the implication that there is no such middleware is not. The prompt's
+   Out list forbids touching that file beyond registration order, so it is reported rather than fixed. It
+   wants one clause in the next piece that may touch it.
+5. **`docs/STATUS.md` has no config list to add the setting to.** The prompt asked for "the new setting in the
+   config list"; STATUS records settings only inside register-item rows, and the row for 87 names it. The
+   configuration reference table is in `README.md` and did get the row.
+6. **The `.env.example` row, as exact text** (already committed — the pin test requires it in the same commit
+   as the field, and it was written by a script that prints a status and never a line of the file):
+
+   ```
+   # The largest request body the app will read, in bytes. Above it the
+   # request is refused with 413 payload_too_large at the outermost
+   # middleware, before any gate runs. 64 kB is four times the largest real
+   # note plus its lead fields: a memory bound, not a content rule. This does
+   # not replace the edge limit; it is what holds when the edge has none.
+   DODEAL_MAX_REQUEST_BODY_BYTES=65536
+   ```
+
+7. **Item 43 stays open and its note is unchanged.** This piece does not close it. Bytes should still be
+   refused where they are first accepted; 64 kB in the app is the bound that holds when the edge has none.
+8. **The 413 status phrase is computed, not spelled out, in the test.** `_unit_error_body` builds `detail`
+   from `HTTPStatus(413).phrase`, which the stdlib renamed from "Request Entity Too Large" to "Content Too
+   Large" in 3.13. `requires-python` is `>=3.12`, so a literal would pin the suite to one interpreter over a
+   string this service does not choose. Every other field in that body is asserted literally.
+9. **`main.py`'s dead `# register_body_size_limit(app)` line was removed.** It named a function that does not
+   exist and, with the real middleware now registered twenty lines above it, read as a second unregistered one.
+10. **The numbering repair is applied as instructed**: item 122 (the lifespan close-on-raise, from Piece 86)
+    renumbered to **124**, its numbering note deleted, items **116–123** appended above it all OPEN, and **125**
+    added OPEN. The file now runs 1–125 with no gap.
+
+### Files
+
+| File | Change |
+| --- | --- |
+| `src/dodeal_ai/middleware/body_limit.py` | new: `BodyLimitMiddleware`, `_declared_length`, `_request_id`; the two paths, the send guard, the lazy cap |
+| `src/dodeal_ai/core/config.py` | the commented placeholder becomes `max_request_body_bytes: int = Field(default=65_536, ge=1)` with its three-line comment |
+| `src/dodeal_ai/core/errors.py` | `PayloadTooLarge` as `("payload_too_large", 413)`, docstring in `LoadShed`'s style plus why it is never rendered by the handler |
+| `src/dodeal_ai/main.py` | `BodyLimitMiddleware` imported and registered **last**; the order comment extended; the dead `# register_body_size_limit(app)` line removed |
+| `.env.example` | the `DODEAL_MAX_REQUEST_BODY_BYTES` row beside `DODEAL_MAX_INFLIGHT` |
+| `tests/unit/test_body_limit.py` | new: 25 tests — raw ASGI for the middleware's own claims, `TestClient` at the real cap for the stack's |
+| `README.md` | the middleware bullet and the request order; the file tree; the `body_limit.py` module row; the `main.py` row; the `DODEAL_MAX_REQUEST_BODY_BYTES` configuration row; the test-file row; the error catalogue |
+| `ASSUMPTIONS.md` | §10.1 replaced with the lead's text: the in-app limit, outermost |
+| `docs/register.md` | item 87 to DONE; header sha to this head; 87 dropped from the step order; the numbering repair (116–123 added, 122 to 124, 125 added) |
+| `docs/STATUS.md` | the Piece 87 row; the register-item section; suite line to 1281 and 99.59%; header piece list |
+| `CAMPAIGN_REPORT.md` | this block |
+
+---
+
+## Piece 88: JsonFormatter formats exc_info frames only   STATUS: DONE `77a2bbd`
+
+**Register item 88, closed.** *"`JsonFormatter` formats `exc_info` frames only; a stdout-wide sentinel test
+through the ASGI stack."* One file edited under `src/`: `core/logging_config.py`. One new test file.
+
+### What was actually wrong
+
+Nothing inside the `dodeal_ai` tree passes `exc_info` to a log call, and `core/errors.py`'s catch-all logs
+the traceback by hand with `frames_only` and a comment saying why. That discipline covered every log line
+this codebase writes — and none of the ones it does not.
+
+`JsonFormatter` is on the **root** logger. Starlette's `ServerErrorMiddleware`, uvicorn's error logger
+("Exception in ASGI application") and any library in the process log exceptions with `exc_info=True`, and
+those records reached our formatter, which rendered them with:
+
+```python
+if record.exc_info:
+    payload["exc_info"] = self.formatException(record.exc_info)
+```
+
+`formatException` is `traceback.format_exception`, which prints `str(exc)` **and walks
+`__cause__`/`__context__`, printing every message in the chain**. For an exception raised outside this
+package that message is frequently the data that failed: pydantic puts the rejected `input_value` in its
+message, a `KeyError`'s message is the missing key, an httpx error can carry a URL with a query string, a
+backend error string can quote the note it choked on. The rule in ASSUMPTIONS §3.3 was enforced at our own
+call sites and unenforced at the one place every record in the process passes through.
+
+### What landed
+
+Two fields replace one, and the old key is **gone**:
+
+```python
+exc_info = record.exc_info
+if isinstance(exc_info, tuple):
+    exc_class, exc_value = exc_info[0], exc_info[1]
+    if exc_class is not None:
+        payload["exc_type"] = f"{exc_class.__module__}.{exc_class.__name__}"
+    if exc_value is not None:
+        payload["exc_frames"] = frames_only(exc_value)
+```
+
+- **`str()` is never called on the value anywhere in `format`.** The only thing read off the exception is
+  `__traceback__`, by `frames_only`, which formats the outer frames and neither the exception line nor the
+  chain.
+- **`record.exc_text` is never read**, and a comment says why: the stdlib caches the *message-bearing*
+  formatted exception there when a handler formats a record twice, so reading it would restore the exact
+  text this piece removes.
+- **The tuple shape only.** `(type, None, None)` reaches a formatter on some logging paths; it yields
+  `exc_type` and no `exc_frames`. A bare `True` — the value before the logging module resolves it — yields
+  neither field, because a formatter that raised here would lose the whole line, including the fields that
+  are safe.
+- **`record.stack_info` is ignored**, before this change and after; the docstring now says so, since the
+  question is otherwise asked once per reader.
+- **The `exc_info` key disappears.** The class docstring says that, and why, so a collector query on it is
+  corrected rather than silently returning nothing.
+- The import is `from dodeal_ai.core.log_safety import frames_only`. `log_safety.py` imports `traceback`
+  and nothing else — no `dodeal_ai` import at all — so the direction is one way and there is no cycle.
+
+`safe_error_fields` is deliberately **not** called: it also emits the message for classes defined under
+`dodeal_ai`, and a formatter must not know which classes are ours. The spelling is its two type fields
+joined instead — see the disagreement below.
+
+### The guard
+
+`tests/security/test_log_exc_info.py`, 7 tests. Two sentinels, an outer and an inner, both passed as
+**arguments** to the raising helper: a traceback quotes the source text of every frame it lists, so a
+sentinel written down in a raising frame would be printed by the frames themselves and prove nothing.
+
+- **The stdout-wide test through the ASGI stack.** A test-only route is registered on the **real** app by
+  the fixture and removed on teardown — never added to `src/`, where a route that raises on purpose has no
+  business being. It raises a foreign `RuntimeError` whose message is the outer sentinel, chained `from` a
+  `ValueError` carrying the inner one, and a library-shaped logger logs it with `exc_info` before it goes on
+  to the catch-all. Driven through `TestClient(raise_server_exceptions=False)` with the real
+  `configure_logging()`, captured with **`capfd`** and not `caplog`: the claim is about the bytes on the
+  file descriptor, where a uvicorn-style logger's line is seen too. Neither sentinel appears in stdout, in
+  stderr or in the 500 body; a line carrying `exc_frames` names the failing route function.
+  **Why the log call is in the route:** TestClient never runs uvicorn, and uvicorn is what logs an escaping
+  exception with `exc_info` in production. A library logging inside the request reaches the same root
+  handler by the same path, and the record the formatter receives is identical. The uvicorn logger itself is
+  covered directly by the next test.
+- **`uvicorn.error` directly**, after `configure_logging()` has handed it back to the root handler: the same
+  chained exception, absent from stdout, the line carrying `logger: "uvicorn.error"`, `exc_type`,
+  `exc_frames` naming the raising helper, and no `exc_info` key.
+- **The chained cause contributes nothing** — not its message, not its class name, not its frames.
+- **`exc_type` present and `exc_info` absent** as JSON keys on every framed line.
+- **The three record shapes**: `(type, None, None)`, all-`None`, and a bare `True`.
+
+Every existing test in `tests/security/test_log_safety.py` passes **unedited**. None asserted the
+`exc_info` key by name — `grep -rn exc_info --include=*.py` over the repo hit only `core/errors.py`'s
+comment and the two formatter lines this piece replaced — so there was nothing to stop and report.
+
+### Sabotage record
+
+| Sabotage | Result |
+| --- | --- |
+| (a) `payload["exc_info"] = self.formatException(exc_info)` restored alongside the new fields | **5 of 7 failed.** The ASGI test on `RuntimeError: SENTINEL-OUTER-…` in the captured stdout; the uvicorn test on the same; the key test on `exc_info` present; **the chained test on the INNER sentinel** (`ValueError: SENTINEL-INNER-… / The above exception was the direct cause of…`), which is the chain walk the piece exists to stop; the `(type, None, None)` test on `exc_info: "NoneType: None"` |
+| (b) `frames_only` kept, `exc_type` changed to `f"{module}.{name}: {exc_value}"` | **5 of 7 failed**, the sentinel tests on the outer message inside `exc_type`, the chained test on its `exc_type` equality, the tuple test on the same |
+
+Restored byte for byte after each: `md5sum` of `core/logging_config.py` is `007847c498c980dff0aaad098584f83f`
+before sabotage (a), after the restore, before sabotage (b) and after the final restore. 7 passed.
+
+### Coverage, and the flip at line 60
+
+`core/logging_config.py` is at **100%, no missing lines**, in every run. The old line 60 was reached only
+when something outside the tree happened to log an `exc_info` record during the suite, which is what moved
+the total between 99.51% and 99.57% in earlier runs. Three full runs at this head, all identical:
+
+| Run | Result | Total coverage | `core/logging_config.py` |
+| --- | --- | --- | --- |
+| 1 | 1288 passed, 1 skipped, 30 deselected | 99.5885% | 100%, missing `[]` |
+| 2 | 1288 passed, 1 skipped, 30 deselected | 99.5885% | 100%, missing `[]` |
+| 3 | 1288 passed, 1 skipped, 30 deselected | 99.5885% | 100%, missing `[]` |
+
+**The flip is gone**, and it is gone because the branch is now driven deterministically by this piece's own
+tests rather than incidentally by another test's log line. All 15 coverage floors met. The `integration`
+lane: 9 passed. The `redis_real` lane was not run — this piece touches no Redis code and no Lua.
+
+### The disagreement between the prompt and the tree, and how it was resolved
+
+1. **`exc_type`'s spelling.** The prompt asked for "the exception's class name with its module, the same
+   spelling `safe_error_fields` uses for its type field". `safe_error_fields` has no single dotted field: it
+   reports `error_type` = `__name__` and `error_module` = `__module__` **separately**. Those two clauses
+   cannot both be satisfied in one field. Resolved in favour of the field list the prompt actually specifies
+   — two fields, `exc_type` and `exc_frames` — with `exc_type` as `f"{__module__}.{__name__}"`, which is
+   those two values joined and nothing else. **The consequence for the lead:** a collector query that
+   matches `error_type == "RuntimeError"` exactly will not match `exc_type` on a formatter line, which reads
+   `builtins.RuntimeError`; it needs a suffix match, or the lead prefers a third field (`exc_module`) and
+   says so.
+2. **README line numbers.** The prompt named "README.md lines 283 and 405 (the log_safety row and the
+   sentinel-test row)". Line 283 is the `logging_config.py` row, 405 is the `log_safety.py` row, and the
+   sentinel-test row (`test_log_safety.py`) is at **408**. All three were read and all three are updated;
+   the new test file gets a row of its own beside the existing one.
+3. **Sabotage (b)'s expected failure.** The prompt expected the chained test to fail "on the inner" under
+   sabotage (b). It cannot: `str(exc)` of the outer exception is the outer message only, and the inner one
+   is reachable only by walking the chain — which is sabotage (a). Under (a) the chained test does fail on
+   the inner sentinel, as recorded above. The first version of that test was too weak to show this (it
+   inspected one field rather than the captured stdout) and was strengthened before the sabotage runs, which
+   is why it now fails under both.
+4. **Ruff G201.** The library-shaped log call inside the test route was written `.error(..., exc_info=True)`
+   and ruff's default rule set rejects it in favour of `.exception(...)`. Changed to `.exception(...)`, which
+   *is* `exc_info=True` and is the spelling a library actually uses; the record the formatter receives is the
+   same.
+
+### For the lead
+
+1. **Should the chained cause's frames be printed too?** `frames_only` formats the outer traceback only, so
+   when an exception is re-raised `from` another, the original failure's frames are lost along with its
+   message. A second field `exc_cause_frames` would be **safe** — frames carry a file, a line, a function
+   name and a source line from our own or a library's source, none of it caller data — and it is what makes
+   a wrapped failure debuggable: today `exc_frames` shows where the wrapper was raised, not where the
+   original broke. **Recommended, as its own item, not folded into anything**, with two conditions: it walks
+   `__cause__`/`__context__` one level only (a deep chain is a log-size lever nobody controls), and it is a
+   change to `core/log_safety.py`, whose floor is 100 — so it is a piece with its own tests, not a line
+   added here. Deliberately **not** in this piece: item 88 is about what must never be printed, and adding a
+   field is a different decision from removing one.
+2. **`exc_type`'s spelling**, and that it does not literally match `safe_error_fields` — see disagreement 1
+   above. The decision to make is whether a collector prefers the joined field or a split pair.
+3. **No per-file floor for `core/logging_config.py`.** It now sits on the log-safety deny path, next to
+   `core/log_safety.py`, which has a floor of 100. The file is at 100% today. **Not added** — floors are the
+   lead's. If added, 100 is reachable: every branch in the module is driven by a unit test now.
+4. **Three-run figures and the flip:** in the coverage section above. The flip is gone.
+5. **No `.env.example` row.** This piece adds no setting.
+6. **Lines that were true before and are false after**, all updated in this commit:
+   - `README.md:283` — the `logging_config.py` row said what the formatter emits; it said nothing about
+     exceptions, and a reader would have assumed `exc_info`.
+   - `README.md:405` — the `log_safety.py` row said "the two helpers every exception-logging **site** uses".
+     That is now weaker than the truth: `frames_only` is applied to every **record**, whoever wrote the call.
+   - `ASSUMPTIONS.md §3.3` — "Tracebacks are frames-only, unchained" was true of our call sites only, and
+     "Enforced by `tests/security/test_log_safety.py`" named one test file.
+   - `ASSUMPTIONS.md §8.10` — "enforced by code in **three** places" is now four; the formatter is the
+     fourth, and it is the one that covers records this codebase never wrote.
+
+### Files
+
+| File | Change |
+| --- | --- |
+| `src/dodeal_ai/core/logging_config.py` | the `exc_info` branch becomes `exc_type` + `exc_frames`; `frames_only` imported; the class docstring gains the exception rule, the removed key and the `stack_info` note; a comment on why `record.exc_text` is never read |
+| `README.md` | the `logging_config.py` row; the `log_safety.py` row; a row for the new test file |
+| `ASSUMPTIONS.md` | §3.3's logging row; §8.10's count, its fourth bullet and the sentinel-test bullet |
+| `docs/register.md` | item 88 to DONE with the sha; header sha to this head; the step order left behind is 125, then 123, then 74 with 104, 106 and 96 |
+| `docs/STATUS.md` | the Piece 88 row; the register-item section; suite line to 1288 and the three-run figures; header piece list |
+| `CAMPAIGN_REPORT.md` | this block |
+| `tests/security/test_log_exc_info.py` | new: 7 tests — the stdout-wide sentinel through the ASGI stack with `capfd`, `uvicorn.error` directly, the chained cause, the key swap, and the three record shapes |
+
+---
+
+## Batch F1: items 125, 123 and 117   STATUS: DONE `c2d4941` · `3edbd57` · `1935d01` · `741b17a`
+
+The first foundation batch. The first commit adds to `CLAUDE.md` the rule that allows a batch: a foundation
+piece may carry up to three register items, each in its own code commit, with one backfill closing the
+session. The three items follow, and the chain was green before every commit.
+
+**The F1 session's backfill stopped at its own guard, and nothing was written for it.** The prompt said to
+stop if any of the register numbers it was adding already existed. Item 115 did: its row sits in the
+"Items 80 to 96" table with the same step, status and sha as the prompt's row, but different wording. This
+block and the rest of the backfill were written in Piece F1b, whose prompt rules that 115's row stays where it
+is and is not added again.
+
+### Commits and suite numbers
+
+| Point | Commit | Passed | Skipped | Deselected | Coverage |
+| --- | --- | --- | --- | --- | --- |
+| Baseline | `a546614` | 1288 | 1 | 30 | 99.5885 % |
+| The rule | `c2d4941` docs(F1): foundation pieces may be batched | 1288 | 1 | 30 | 99.5885 % |
+| Item 123 | `3edbd57` test(123): the fake clock holds whole milliseconds and refuses other attributes | 1289 | 1 | 30 | 99.5885 % |
+| Item 125 | `1935d01` core(125): warn on a template cache miss once the cache is populated | 1293 | 1 | 30 | **99.5900 %** |
+| Item 117 | `741b17a` docs(117): a CRM note id is assumed unique and never reused | 1293 | 1 | 30 | 99.5900 % |
+
+All 15 coverage floors met at every commit; ruff, format and mypy clean at every commit. `core/prompting.py`
+is at 100 % (56 statements).
+
+### 125 — a template cache miss warns once the cache is populated   `1935d01`
+
+Piece 85 kept the disk fallback for a name the preload never cached, and that fallback was silent. In a
+running app a silent miss means two things: a disk read on the event loop, and a template missing from the
+image discovered on a paid call instead of at startup.
+
+- `_load_template` logs one WARNING `prompt_template_not_preloaded` when the name is not cached **and**
+  `_TEMPLATE_CACHE` is non-empty. It goes to a new logger, `dodeal_ai.prompting`, with one `extra=` field,
+  `template`. Then it reads from disk exactly as before.
+- **Once per name per app.** `_WARNED_NOT_PRELOADED` is a module-level set. `clear_templates()` empties it
+  along with the cache, so the next app in the same process warns again.
+- **An empty cache logs nothing.** That is a script, the wheel check or a tmp-dir test, all of which rely on
+  the fallback.
+- **The name only, never the resolved path**, which would carry the deployment's directory layout into a log
+  line.
+
+Four tests, added to `tests/unit/test_prompt_preload.py`:
+
+- (a) Two misses on one name against a populated cache log exactly one WARNING. The formatted line's keys are
+  exactly `message`, `template`, `level`, `logger`, `timestamp`.
+- (b) A miss against an empty cache logs nothing.
+- (c) After `clear_templates()`, the same name warns again.
+- (d) Every `.py` file under `src/dodeal_ai/` is parsed, and every string constant (docstrings included) is
+  searched for `structured_intelligence/[a-z_]+_v[0-9]+\.txt`. At least nine names must turn up, and each
+  must be in `UNIT_A_TEMPLATES`. Before the test was trusted, the scan was checked: it finds exactly nine,
+  one literal each.
+
+**Sabotage record**
+
+| Sabotage | Result |
+| --- | --- |
+| (a) the `_logger.warning` call removed from `core/prompting.py` | Tests (a) and (c) failed and the other 9 in the module passed, as the prompt predicted. Restored; md5 `9fd11fe65be0e26201cfe257b6508db8` before and after. |
+| (b) `SCORE_TEMPLATE` dropped from `UNIT_A_TEMPLATES` in `units/structured_intelligence/templates.py` | **4 tests failed, not the 2 predicted**. A full-suite run showed the same 4 and nothing else. See finding 1 below. Restored; md5 `a9e76f41114639d5cf6563f0ee12619b` before and after. |
+
+### 123 — the fake clock holds whole milliseconds and refuses other attributes   `3edbd57`
+
+Piece 102 put `test_elapsed_covers_more_than_any_single_pass` on a fake clock, `_FakeClock`, which replaces the
+pipeline module's `time` global. That clock had two weaknesses. It held a float, and `_ms_since` truncates, so
+20 ms at a realistic base reads 19. And its `__getattr__` delegated every other attribute to the real `time`
+module, so a second clock reading added to the pipeline would silently run on the real clock.
+
+- `_FakeClock` holds an integer `_ms` starting at 0 and has no constructor argument. `monotonic()` returns
+  `self._ms / 1000`. `advance` takes whole milliseconds, and the one caller passes `20`.
+- `__getattr__` raises `AttributeError` naming the attribute.
+- One new test, `test_the_fake_clock_refuses_any_attribute_but_monotonic`.
+- **Both assertions of the elapsed test are unchanged.**
+- The module ran 20 times in a row, 50 passed each time.
+
+The code comment gives the cause as the zero base rather than the float; see finding 2 below.
+
+**Sabotage record**
+
+| Sabotage | Result |
+| --- | --- |
+| the delegating `__getattr__` restored | `test_the_fake_clock_refuses_any_attribute_but_monotonic` failed with `DID NOT RAISE AttributeError`; the elapsed test still passed. Restored; md5 `648b1e686cb2ca3a5212f08a2ce49845` before and after. |
+
+### 117 — a CRM note id is assumed unique and never reused   `741b17a`
+
+Docs only. `ASSUMPTIONS.md` gains §4.8, and `docs/STATUS.md` §6 gains Q22.
+
+- **Assumed:** a CRM note id is unique within a tenant and never reused, not even after a delete.
+- **Three mechanisms rest on it:**
+  - the per-note attempt cap (`attempt:{tenant}:{lead_id}:{note_id}`);
+  - the resubmission's `attempt_fp:` reference (item 33);
+  - the six-hour `attempt_ttl_seconds` that both keys carry.
+- **What reuse does:** the new note inherits the old one's spent allowance and answers `attempt_cap`, and
+  nothing in the logs tells the two notes apart. This was seen on the fake CRM, whose ids reset on restart.
+- **Correction path:** the attempt keys gain the note's `createdAt` or a CRM-issued unique token, with the TTL
+  unchanged.
+- **Seams:** `state.py` (`_attempt_key`, `_attempt_fingerprint_key`) and `config.py`
+  (`attempt_ttl_seconds`). The key shapes were checked against `state.py:122` and `:134`, and the TTL against
+  `config.py:207`.
+
+**The tag.** The `ASSUMPTIONS.md` legend defines `[D]` as "a document states it", and no document states
+this. So the body says "`[D]` at best" and the §4.8 heading carries no tag.
+
+**The question is Q22**, owned by the backend, and it is still **UNASKED**. The register marks 117 DONE as a
+record. The question itself is owed by a person.
+
+No sabotage: this commit changes no code, and no guard was asked for.
+
+### The two recorded findings
+
+1. **Sabotage (b) failed 4 tests, not 2.** The prompt predicted test (d) and the existing nine-templates test.
+   Both failed:
+   - (d) named `score_v1.txt` at `scoring.py:52`;
+   - `test_the_tuple_names_the_nine_templates_that_ship` failed with `8 == 9`.
+
+   Two more failed, both following directly from the change:
+   - `test_a_full_judgement_reads_no_template_from_disk`: `score_v1.txt` was now read from disk;
+   - `test_startup_refuses_when_one_template_is_missing`: the template it removes is `score_v1.txt`, so with
+     that name out of the tuple, startup no longer refused.
+
+   The last one is worth knowing: that startup test depends on which template the tuple names.
+2. **Item 123's cause is the base, not the float.** The register gives the cause as "holds a float from zero".
+   But whole milliseconds alone do not fix the 19. From a base of 1,000,000, `_ms / 1000` gives 1000.0 and
+   1000.02, the difference is 0.019999…, and `_ms_since` truncates it to 19. The reading is exact because the
+   clock starts at zero with no base to set, and the code comment says that rather than crediting the integer.
+
+### The backfill, Piece F1b
+
+Docs only. It changes `docs/register.md`, `docs/STATUS.md`, `README.md` and this block. Each change and its
+reasons:
+
+- **`docs/register.md`:**
+  - 125, 123 and 117 are marked DONE with their shas. 117's status adds that Q22 is still UNASKED, so a
+    reader of the register does not take the backend question as asked.
+  - The header now reads `741b17a` / ed3r11, and the step order is the one left behind.
+  - Rows 107 to 114 and 126 are copied exactly from the prompt, in number order. Both need a section header.
+    The existing headers each name a source, and I cannot confirm a source for these beyond the prompt. So
+    both read "added from master ed3r11, 16 September": 107 to 114 in a new section after 106, and 126 in a
+    new section after 125.
+  - Item 115's row is left where it is.
+- **`docs/STATUS.md`:**
+  - A §1 row for each of the four commits, the rule commit included.
+  - The suite line.
+  - The "Last updated" header, which would otherwise have stopped at Piece 88.
+  - A "Register items closed in Batch F1" section. The prompt did not name it, but `CLAUDE.md` asks for the
+    register item rows, and every piece since L has one.
+- **`README.md`:** the `core/prompting.py` row gains the WARNING, its logger and its field. The README's other
+  event tables cover the token budget and the breaker only. None of them claims to list every event, so no
+  other line became wrong.
+
+**The chain before the backfill commit:** 1293 passed, 1 skipped, 30 deselected, 99.59 %, with
+`core/prompting.py` at 100 % (56 statements). ruff, format and mypy clean; all 15 coverage floors met. The
+three sabotaged files still hash to the md5 values F1 recorded after each restore (`test_judgement_pipeline.py`
+`648b1e68…`, `core/prompting.py` `9fd11fe6…`, `templates.py` `a9e76f41…`), which confirms from the tree itself
+that no sabotage survived. No sabotage in F1b: it changes no code.
+
+**Disagreements between the F1b prompt and the tree.**
+
+1. **`.env.example` is not modified.** The prompt says it "shows as modified", and the F1 report said it was
+   still modified. At `741b17a`, `git status` lists only the untracked `docs/audit/` and `docs/campaign/`,
+   and `git ls-files -v` gives the file the plain `H` flag, not assume-unchanged. The file was not read,
+   staged or restored.
+2. **CANDIDATE is not a register status word.** Row 108 uses it, and the register's rules line lists PENDING,
+   OPEN, DECIDED, NOTE, RETRACTED and DONE. The row went in as written, and the rules line was not changed.
+3. **Rows 109 to 114 and 126 agree with the tree:**
+   - `_HTTP_TIMEOUT_SHARE: Final = 0.9` at `core/llm/openai_compatible.py:77`;
+   - `provider_reason` and `provider_transient` at `llm_call.py:180-181`;
+   - `tests/test_env_example_matches_settings.py` exists;
+   - `LLM_CALLS_PER_JUDGEMENT = 2` at `main.py:31`;
+   - no `PoolTimeout` handling anywhere under `src/`;
+   - no `exc_cause_frames` yet.
+
+   Rows 107 and 108 name no symbol that can be checked.
+
+### For the lead
+
+1. **Owed by a person:**
+   - Q22, the note-id question, to the backend. It is UNASKED.
+   - The STATUS row "`.env.example` has been modified-unstaged in the working tree throughout the campaign"
+     (§1, "Open items carried out of Unit A Project 1") is now stale if the file is clean. It was left alone
+     because `.env.example` is out of this piece's scope. It needs your ruling.
+2. **Conservative choices F1 made:**
+   - **Test (d) scans docstrings too.** It reads every string constant, not only whole literals. A docstring
+     that names a retired template will fail it and need rewording. A name built with an f-string is not seen,
+     and the runtime WARNING covers that case.
+   - **The warned set has no lock.** On the event loop it cannot race. Under threads, the worst case is a
+     duplicate line.
+3. **Floors:** none added. `core/prompting.py` is at 100 %, and item 113 already says it gets no floor.
+4. **`.env.example` rows:** none. No setting was added in F1 or F1b.
+5. **The register's status words:** rule on CANDIDATE, either adding it to the rules line or changing row
+   108's status.
+
+### Files
+
+| File | Change |
+| --- | --- |
+| `CLAUDE.md` | `c2d4941`: the "Commits" rule's first bullet replaced with the AI/foundation split |
+| `src/dodeal_ai/core/prompting.py` | `1935d01`: the module logger, `_WARNED_NOT_PRELOADED`, the warn-once branch in `_load_template`, `clear_templates` clearing both |
+| `ASSUMPTIONS.md` | `741b17a`: §4.8 |
+| `docs/STATUS.md` | `741b17a`: the Q22 row in §6. Backfill: the four §1 rows, the suite line, the header, the Batch F1 register section |
+| `docs/register.md` | backfill: 125, 123, 117 DONE; header; step order; rows 107 to 114 and 126 |
+| `README.md` | backfill: the `core/prompting.py` row |
+| `CAMPAIGN_REPORT.md` | backfill: this block |
+| `test_judgement_pipeline.py` | `3edbd57`: `_FakeClock` on whole milliseconds and refusing other attributes; one new test |
+| `test_prompt_preload.py` | `1935d01`: four new tests, (a) to (d) |

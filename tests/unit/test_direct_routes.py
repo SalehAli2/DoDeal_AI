@@ -337,8 +337,9 @@ def test_a_note_judged_on_the_fetch_route_is_a_duplicate_on_the_direct_route(
         == 200
     )
     second = fetch_client.post(DIRECT, json=_direct_body(), headers=_headers())
-    assert second.status_code == 409
-    assert second.json()["reason"] == "duplicate_request"
+    assert second.status_code == 200
+    assert second.headers["Idempotent-Replay"] == "true"
+    assert llm.call_count == 3
 
 
 # --- the direct route's own behaviour ---------------------------------------
@@ -378,19 +379,29 @@ def test_a_direct_request_never_calls_the_leads_client(client, llm):
         assert get_leads_client not in _dependency_calls(path), path
 
 
-def test_a_second_identical_direct_request_is_409(client, llm):
+def test_a_second_identical_direct_request_is_a_replay(client, llm):
     _script(llm, judgements=2)
 
     first = client.post(DIRECT, json=_direct_body(), headers=_headers())
     assert first.status_code == 200
 
     second = client.post(DIRECT, json=_direct_body(), headers=_headers())
-    assert second.status_code == 409
+    assert second.status_code == 200
+    assert second.headers["Idempotent-Replay"] == "true"
     assert second.json() == {
-        "detail": "Conflict",
-        "reason": "duplicate_request",
+        **first.json(),
         "request_id": second.headers["X-Request-ID"],
     }
+    assert llm.call_count == 3
+
+
+def test_the_direct_resubmission_route_replays_too(client, llm):
+    _script(llm, judgements=2)
+    path = DIRECT + "/resubmission"
+    client.post(path, json=_direct_body(), headers=_headers())
+    second = client.post(path, json=_direct_body(), headers=_headers())
+    assert second.status_code == 200
+    assert second.headers["Idempotent-Replay"] == "true"
 
 
 def test_an_edited_text_is_a_new_judgement_not_a_duplicate(client, llm):
@@ -416,9 +427,18 @@ def test_a_thin_note_is_suppressed_without_reserving_anything(client, llm, opera
     assert r.json()["suppressed"] == {
         "reason": "insufficient_evidence",
         "detail_code": "note_too_short",
+        # Register item 64: the fixed question, capped like a model one --
+        # both routes behave the same.
+        "clarification_prompt": (
+            "What happened, what did the client say, and what is the next "
+            "step with a date?"
+        ),
+        "prompt_withheld": None,
     }
     assert r.json()["score"] is None and r.json()["decision"] is None
-    assert operational.store == {}  # nothing reserved
+    # No JUDGEMENT is reserved; the fixed question's own attempt/rate slots
+    # are a separate store, and do move.
+    assert not any(key.startswith("idem:") for key in operational.store)
     assert llm.call_count == 0  # nothing spent
 
 
@@ -440,6 +460,8 @@ def test_a_note_over_the_soft_limit_is_suppressed_without_reserving(
     assert r.json()["suppressed"] == {
         "reason": "not_scorable",
         "detail_code": "note_too_long",
+        "clarification_prompt": None,
+        "prompt_withheld": None,
     }
     assert r.json()["score"] is None and r.json()["decision"] is None
     # No model ran, so nothing is stamped as having run one.
@@ -474,6 +496,28 @@ def test_a_note_over_the_hard_ceiling_is_422_invalid_request(client, llm, operat
         "reason": "invalid_request",
         "request_id": r.headers["X-Request-ID"],
     }
+    assert operational.store == {}
+    assert llm.call_count == 0
+
+
+@pytest.mark.parametrize("value", [0, -1])
+@pytest.mark.parametrize("field", ["lead_id", "note_id", "author_id"])
+@pytest.mark.parametrize("path", [DIRECT, DIRECT_RESUBMIT])
+def test_an_id_below_one_on_the_direct_routes_is_422_without_echo(
+    client, llm, operational, path, field, value
+):
+    """An id of 0 or -1 is a 422 whose body carries neither the field name nor the value, and nothing is reserved or called."""
+    r = client.post(path, json=_direct_body(**{field: value}), headers=_headers())
+
+    assert r.status_code == 422
+    request_id = r.headers["X-Request-ID"]
+    assert r.json() == {
+        "detail": "Unprocessable Entity",
+        "reason": "invalid_request",
+        "request_id": request_id,
+    }
+    assert field not in r.text
+    assert str(value) not in r.text.replace(request_id, "")
     assert operational.store == {}
     assert llm.call_count == 0
 

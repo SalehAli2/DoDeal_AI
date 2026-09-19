@@ -10,21 +10,28 @@ judging the same text differently.
 The order is not incidental; each step is placed where it is because of what
 the step after it costs:
 
-  1. fetch the lead                      404 lead_not_found     (see H2 below)
+  1. fetch the lead                      404 lead_not_found
   2. fetch page one of its notes, match  404 note_not_found
+     (1 and 2 start together, register item 9; the lead's error always
+      wins, register item 89; a note not found is re-read once, item 17)
      (the direct route skips 1 and 2: the CRM sent the note, and no
       LeadsClient call is made at all)
   3. too thin, or too long?              -> suppressed, STOP. No reservation,
-                                            no model call, nothing spent.
-  4. reserve idempotency, SHORT          409 duplicate / 503 unavailable
-  5. read the attempt count              (fail open)
+                                            no model call, nothing spent. A
+                                            too-thin note still takes its
+                                            prompt slots for a FIXED question
+                                            (item 64) -- capped, never charged.
+  4. reserve idempotency, SHORT          409 duplicate / 503 unavailable;
+                                         a confirmed duplicate replays 200
+  5. read the attempt count              (fail open; provisional, see step 8)
   6. token pre-flight                    429 token_budget_exceeded
   7. classify, THEN vague + score        three passes, two round-trips
-  8. compute, decide -- and the rate     ONE db2 trip, and only when it can
-     limit in the same breath            change the answer (fail open)
+  8. compute, decide -- and the attempt  ONE db2 trip, and only when it can
+     cap and rate limit in one breath    change the answer (fail open)
   9. confirm the reservation, LONG       the judgement exists (fail open);
                                          a classifier suppression confirms too
- 10. increment the attempt counter ONLY if a prompt was actually sent
+ 10. record the prompted note's          ONLY if a prompt was actually sent
+     fingerprint
 
 A PASS IS NOT A CALL. Each of the three passes is one validated model call, and
 a malformed answer buys that pass one reprompt (llm_call.call_model) -- so the
@@ -47,19 +54,15 @@ raises: the request has already failed, and an abandoned pass whose answer
 comes back malformed would spend a reprompt on a judgement nobody will ever
 receive (register item 63).
 
-WHY THE ATTEMPT COUNTER MOVES LAST, AND ONLY SOMETIMES. Step 10 runs after the
-judgement exists and outside the release-on-error block, because by then the
-request has been answered: the note was fetched, three calls were paid for, and
-a decision was made. An unreachable db2 at that moment must not undo any of
-that, so the increment fails open (state.py) AND sits where a raise could not
-reach the release path. And it moves only when a prompt was ACTUALLY SENT --
-a counter that advanced on a withheld prompt would rate-limit a salesperson for
-questions they never received.
-
-THE RATE LIMIT MOVES AT STEP 8 INSTEAD, because taking its slot is how it is
-checked (register item 27, state.take_rate_limit): a separate check and
-increment could both see "one under the cap". It fails open inside state.py, so
-it cannot raise into the release path from inside the try.
+WHY BOTH COUNTERS MOVE AT STEP 8, IN ONE SCRIPT (register items 27 and 119).
+Taking a slot is how each guard is checked (state.take_prompt_slots): a
+separate check and increment could both see "one under the cap". The step 5
+read is only provisional -- two requests for one note both read 0 -- so the
+script checks the attempt cap again as it takes, and the request that lost the
+race reads back the cap and reports attempt_cap. Both move only when a prompt
+would be SENT; a counter that advanced on a withheld prompt would limit a
+salesperson for questions they never received. The trip fails open inside
+state.py, so it cannot raise into the release path from inside the try.
 
 WHY THIS ORDER, at the two places it matters:
 
@@ -100,26 +103,47 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import re
 import time
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
+from pydantic import ValidationError
+
+from dodeal_ai.core import metrics
 from dodeal_ai.core.config import Settings
 from dodeal_ai.core.context import TenantScope
 from dodeal_ai.core.cost.limiter import token_preflight
 from dodeal_ai.core.errors import (
+    BackendRejectedError,
     BackendUnavailableError,
+    DodealError,
     DuplicateRequestError,
     IdempotencyUnavailableResponse,
     JudgementDeadlineExceeded,
+    LeadNotFoundError,
     NoteNotFoundError,
 )
+from dodeal_ai.core.inflight import current_inflight
 from dodeal_ai.core.llm import LLMClient, LLMResponse
-from dodeal_ai.core.resilience import ExternalCallError, gather_or_cancel
-from dodeal_ai.middleware.inflight import current_inflight
+from dodeal_ai.core.redaction import Redaction, redact
+from dodeal_ai.core.resilience import (
+    ExternalCallError,
+    gather_first_wins,
+    gather_or_cancel,
+)
 from dodeal_ai.schemas.lead import Lead, LeadNote
+from dodeal_ai.tools.errors import (
+    BackendEnvelopeInvalid,
+    BackendForbidden,
+    BackendNotFound,
+    BackendRejected,
+    BackendUnauthorized,
+)
 from dodeal_ai.tools.keys import BackendKeyError
-from dodeal_ai.tools.leads import LeadsClient
+from dodeal_ai.tools.leads import GET_LEAD_LABEL, LeadsClient
 from dodeal_ai.units.structured_intelligence import state
 from dodeal_ai.units.structured_intelligence.classify import (
     CLASSIFY_LABEL,
@@ -127,7 +151,7 @@ from dodeal_ai.units.structured_intelligence.classify import (
     suppression_for,
 )
 from dodeal_ai.units.structured_intelligence.config import TenantConfig
-from dodeal_ai.units.structured_intelligence.decide import decide
+from dodeal_ai.units.structured_intelligence.decide import decide, withheld_reason
 from dodeal_ai.units.structured_intelligence.schemas import (
     Decision,
     DirectJudgementRequest,
@@ -170,6 +194,39 @@ NO_MODEL = ""
 # deadline it multiplies; the load lane sets the two together.
 IDEMPOTENCY_INFLIGHT_MULTIPLIER = 4
 
+# The daily rate-limit key's window (register item 66): a calendar day, fixed
+# here rather than on TenantConfig. Only the CAP varies per tenant; a shorter
+# window here would let a subject clear the daily cap before the day is over.
+RATE_LIMIT_DAY_WINDOW_SECONDS = 86400
+
+# Register item 64: a note below the length floor still gets a question, with
+# no model call to write one. Matched on any Arabic-script letter in the note's
+# OWN text (never the redacted copy, which is what the length gate itself
+# reads) rather than a full language model, since this is a two-way switch.
+_ARABIC_SCRIPT_PATTERN = re.compile("[؀-ۿ]")
+_FIXED_CLARIFICATION_PROMPT_AR = (
+    "ماذا حدث، وماذا قال العميل، وما الخطوة التالية مع موعدها؟"
+)
+_FIXED_CLARIFICATION_PROMPT_EN = (
+    "What happened, what did the client say, and what is the next step with a date?"
+)
+
+
+def _fixed_clarification_prompt(text: str) -> str:
+    """The length gate's fixed question, in the note's own script."""
+    return (
+        _FIXED_CLARIFICATION_PROMPT_AR
+        if _ARABIC_SCRIPT_PATTERN.search(text)
+        else _FIXED_CLARIFICATION_PROMPT_EN
+    )
+
+
+# Register item 17: a note missing from page one is read again once, this long
+# after the first read, for a save the CRM has not yet made visible to its
+# reads. Only when this much of the judgement deadline is left; else 404 at once.
+NOTE_REREAD_DELAY_SECONDS = 0.25
+NOTE_REREAD_MIN_REMAINING_SECONDS = 1.0
+
 
 @dataclass(frozen=True, slots=True)
 class JudgementDeps:
@@ -207,6 +264,12 @@ class JudgementDeps:
 # unpacked into a Lead and a LeadNote by judge_note_direct before the shared
 # function is entered, so nothing below this line knows which route it is on.
 _JudgementInput = JudgementRequest | DirectJudgementRequest
+
+
+class ReplayedJudgement(Judgement):
+    """A judgement answered from the idempotency store, not judged again
+    (register items 1 and 2). Same fields; the type is how the route knows to
+    send Idempotent-Replay: true."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,6 +361,8 @@ def _suppressed(
     config: TenantConfig,
     analysis: NoteAnalysis | None = None,
     model_version: str = NO_MODEL,
+    clarification_prompt: str | None = None,
+    prompt_withheld: PromptWithheld | None = None,
 ) -> Judgement:
     """Build a suppressed judgement: score and decision are null, never zero.
 
@@ -310,6 +375,10 @@ def _suppressed(
     while a system_event was refused BY a classifier and carries what that
     classifier reported. Both are suppressed; only one cost money, and the
     stamp is the only place that difference survives.
+
+    `clarification_prompt`/`prompt_withheld` (register item 64) are null for
+    every suppression except a note below the length floor, which carries a
+    fixed question instead of a model-written one.
     """
     return Judgement(
         note_id=request.note_id,
@@ -318,7 +387,12 @@ def _suppressed(
         analysis=analysis or NoteAnalysis(),
         score=None,
         decision=None,
-        suppressed=Suppressed(reason=reason, detail_code=detail),
+        suppressed=Suppressed(
+            reason=reason,
+            detail_code=detail,
+            clarification_prompt=clarification_prompt,
+            prompt_withheld=prompt_withheld,
+        ),
         versions=_versions(config, model_version),
         request_id=scope.request_id,
     )
@@ -358,10 +432,65 @@ def _length_gate(
     return None
 
 
+async def _fixed_question(
+    scope: TenantScope,
+    request: _JudgementInput,
+    note: LeadNote,
+    detail: SuppressedDetail,
+    *,
+    config: TenantConfig,
+    resubmission: bool,
+) -> tuple[str | None, PromptWithheld | None]:
+    """Register item 64: the length gate's fixed question, for a too-short note
+    only -- a too-long note (NOTE_TOO_LONG) gets neither field.
+
+    No model wrote this question, but it is still capped like one would be: it
+    takes the note's attempt slot and the subject's hourly and daily rate slots
+    in the SAME trip a model question takes (state.take_prompt_slots), so a
+    salesperson cannot be asked more often for writing a thin note than for
+    writing a vague one. A resubmission withholds outright, the same reason a
+    scored judgement's resubmission does, and touches no counter.
+    """
+    if detail is not SuppressedDetail.NOTE_TOO_SHORT:
+        return None, None
+    prompt = _fixed_clarification_prompt(note.note)
+    if resubmission:
+        return prompt, PromptWithheld.RESUBMISSION
+    attempts = await state.read_attempts(
+        scope.tenant, request.note_id, request_id=scope.request_id
+    )
+    attempts, rate_allowed, rate_count = await state.take_prompt_slots(
+        scope.tenant,
+        request.note_id,
+        scope.subject,
+        attempt_cap=config.clarification_cap,
+        attempt_ttl=config.attempt_ttl_seconds,
+        rate_limit=config.rate_limit_per_hour,
+        rate_ttl=config.rate_limit_window_seconds,
+        rate_limit_day=config.rate_limit_per_day,
+        rate_ttl_day=RATE_LIMIT_DAY_WINDOW_SECONDS,
+        attempts_read=attempts,
+        request_id=scope.request_id,
+    )
+    withheld = withheld_reason(
+        NoteAnalysis(clarification_prompt=prompt),
+        attempts=attempts,
+        rate_allowed=rate_allowed,
+        rate_count=rate_count,
+        config=config,
+        resubmission=False,
+    )
+    return prompt, withheld
+
+
 async def _fetch_note(
-    scope: TenantScope, request: JudgementRequest, deps: JudgementDeps
+    scope: TenantScope,
+    request: JudgementRequest,
+    deps: JudgementDeps,
+    *,
+    deadline: float,
 ) -> tuple[Lead, LeadNote]:
-    """Fetch the lead, then find the note on page one of its notes.
+    """Fetch the lead and page one of its notes together, then find the note.
 
     Both come back. The lead is not fetched only to prove it exists: four of its
     fields are the classifier's context section, and the alternative -- fetching
@@ -369,50 +498,111 @@ async def _fetch_note(
     the number of backend calls depend on the note type.
 
     ASSUMPTION[Q8]: the target note is on PAGE ONE (notes come back newest
-    first, 25 per page), so one un-paged fetch finds it. Nothing branches on
-    this -- there is no paging code to take a second path -- and if a note can
-    fall off page one, the fix is query parameters in tools/leads.py at step 4,
-    not a change here.
+    first, 25 per page), so an un-paged fetch finds it. A miss is read again
+    ONCE, after NOTE_REREAD_DELAY_SECONDS and only with a second of deadline
+    left (register item 17) -- the same page, never a second one; if a note can
+    fall off page one, the fix is query parameters in tools/leads.py.
 
     Design A: the note is matched BY ID, never taken by position. "The newest
     note" would judge whatever arrived most recently, which on a busy lead is
     not the note the caller asked about.
 
-    H2 CAVEAT: the watchdog collapses every backend failure into
-    ExternalCallError, so a genuine 404 for a missing lead is indistinguishable
-    here from a 500 or a timeout, and both become 503 backend_unavailable. That
-    is why LeadNotFoundError is not raised from this function today -- inferring
-    "not found" from ExternalCallError would report a backend outage to the CRM
-    as a missing lead. Typed backend errors are step 4 (audit H2); when they
-    land, the 404 branch goes here and nothing else moves.
+    TYPED BACKEND ERRORS (register item 89, audit H2). The lead's 404 is 404
+    lead_not_found; any other 4xx, the notes' 404 included, is 503
+    backend_rejected; 401, 403, a missing key and a failure that outlived its
+    retry are 503 backend_unavailable. `deadline` is the loop time the
+    judgement ends at, so no retry is scheduled past it.
     """
     # Only judge_note reaches this function, and only the fetch route reaches
     # judge_note -- so a None client here would mean the direct entry point had
     # grown a fetch, which is the one thing this route may not do.
-    assert deps.leads is not None
-    try:
-        lead = await deps.leads.get_lead(scope, request.lead_id)
-        notes = await deps.leads.get_lead_notes(scope, request.lead_id)
-    except (ExternalCallError, BackendKeyError) as exc:
-        # The real reason is already in the log: the watchdog logged the failure
-        # type, and BackendKeyError logged its fixed reason code. Nothing about
-        # either is repeated to the caller.
-        _logger.warning(
-            "judgement_backend_unavailable",
+    leads = deps.leads
+    assert leads is not None
+    with _backend_errors(scope):
+        # Register item 9: both reads start together. The lead's error is the
+        # one raised whenever the lead fails, even if the notes failed first.
+        lead, notes = await gather_first_wins(
+            leads.get_lead(scope, request.lead_id, deadline=deadline),
+            leads.get_lead_notes(scope, request.lead_id, deadline=deadline),
+        )
+    note = _matching(notes, request.note_id)
+    if note is None:
+        loop = asyncio.get_running_loop()
+        reread = deadline - loop.time() >= NOTE_REREAD_MIN_REMAINING_SECONDS
+        _logger.info(
+            "note_not_on_first_read",
             extra={
-                "reason_code": "backend_unavailable",
                 "tenant": scope.tenant,
                 "request_id": scope.request_id,
-                "error_type": type(exc).__name__,
+                "reread": reread,
             },
         )
-        raise BackendUnavailableError() from None
+        if reread:
+            await asyncio.sleep(NOTE_REREAD_DELAY_SECONDS)
+            with _backend_errors(scope):
+                notes = await leads.get_lead_notes(
+                    scope, request.lead_id, deadline=deadline
+                )
+            note = _matching(notes, request.note_id)
+    if note is None:
+        raise NoteNotFoundError()
+    return lead, note
 
-    for note in notes:
-        if note.id == request.note_id:
-            return lead, note
 
-    raise NoteNotFoundError()
+def _matching(notes: list[LeadNote], note_id: int) -> LeadNote | None:
+    """The note with this id, matched by id and never by position (Design A)."""
+    return next((note for note in notes if note.id == note_id), None)
+
+
+@contextmanager
+def _backend_errors(scope: TenantScope) -> Iterator[None]:
+    """Every backend failure inside, as the enumerated error the CRM is told."""
+    try:
+        yield
+    except BackendNotFound as exc:
+        if exc.label == GET_LEAD_LABEL:
+            raise _backend_failure(scope, exc, LeadNotFoundError()) from None
+        raise _backend_failure(scope, exc, BackendRejectedError()) from None
+    except BackendRejected as exc:
+        raise _backend_failure(scope, exc, BackendRejectedError()) from None
+    except (
+        ExternalCallError,
+        BackendKeyError,
+        BackendUnauthorized,
+        BackendForbidden,
+        BackendEnvelopeInvalid,
+    ) as exc:
+        raise _backend_failure(scope, exc, BackendUnavailableError()) from None
+
+
+# backend_errors_total{kind} (register item 22): one word per failure class.
+_BACKEND_ERROR_KINDS: dict[type[Exception], str] = {
+    BackendNotFound: "not_found",
+    BackendRejected: "rejected",
+    BackendUnauthorized: "unauthorized",
+    BackendForbidden: "forbidden",
+    BackendKeyError: "key_missing",
+    ExternalCallError: "unavailable",
+    BackendEnvelopeInvalid: "envelope_invalid",
+}
+
+
+def _backend_failure(
+    scope: TenantScope, exc: Exception, error: DodealError
+) -> DodealError:
+    """Log the fetch that failed and hand back the error to raise. The error
+    TYPE only: the watchdog and the tool layer already logged the rest."""
+    metrics.BACKEND_ERRORS.labels(kind=_BACKEND_ERROR_KINDS[type(exc)]).inc()
+    _logger.warning(
+        f"judgement_{error.reason_code}",
+        extra={
+            "reason_code": error.reason_code,
+            "tenant": scope.tenant,
+            "request_id": scope.request_id,
+            "error_type": type(exc).__name__,
+        },
+    )
+    return error
 
 
 async def judge_note(
@@ -451,10 +641,29 @@ async def judge_note(
     # elapsed_ms that began after them would be silent about the slowest thing
     # the fetch route does. time.monotonic, never a wall clock -- see _Timings.
     started = time.monotonic()
+    return await _metered(
+        started,
+        _judge_fetched(
+            scope, request, resubmission=resubmission, deps=deps, started=started
+        ),
+    )
+
+
+async def _judge_fetched(
+    scope: TenantScope,
+    request: JudgementRequest,
+    *,
+    resubmission: bool,
+    deps: JudgementDeps,
+    started: float,
+) -> Judgement:
+    """judge_note's body: the deadline, the fetch, then the shared steps."""
     # The deadline starts with the clock, so the two backend reads spend it too.
     try:
-        async with asyncio.timeout(deps.settings.judgement_deadline_seconds):
-            lead, note = await _fetch_note(scope, request, deps)
+        async with asyncio.timeout(deps.settings.judgement_deadline_seconds) as budget:
+            deadline = budget.when()
+            assert deadline is not None  # set: the timeout was given a delay
+            lead, note = await _fetch_note(scope, request, deps, deadline=deadline)
             return await _judge(
                 scope,
                 request,
@@ -505,6 +714,23 @@ async def judge_note_direct(
     # do. Comparing them is how "is the CRM's read surface the slow part?" gets
     # answered when it comes back.
     started = time.monotonic()
+    return await _metered(
+        started,
+        _judge_sent(
+            scope, request, resubmission=resubmission, deps=deps, started=started
+        ),
+    )
+
+
+async def _judge_sent(
+    scope: TenantScope,
+    request: DirectJudgementRequest,
+    *,
+    resubmission: bool,
+    deps: JudgementDeps,
+    started: float,
+) -> Judgement:
+    """judge_note_direct's body: the deadline, the note as sent, the shared steps."""
     # The same deadline as the fetch route, from the same point, so the two
     # routes' 503s mean the same thing.
     try:
@@ -521,15 +747,9 @@ async def judge_note_direct(
                 note=request.note_text,
                 author=None,
                 author_id=request.author_id,
-                # Nothing reads createdAt today -- not the prompts, not the
-                # scoring, not the counters -- and the CRM is not asked for it,
-                # because a timestamp we do not use is a field that can be wrong
-                # for free. Register item 32 (aware datetime parsing) MUST guard
-                # this empty string: the day createdAt becomes a parsed
-                # datetime, a note that arrived on this route has no value to
-                # parse, and a parser that assumes one will raise on the direct
-                # route only.
-                createdAt="",
+                # The CRM sends this right after the save, so arrival time
+                # stands in for createdAt (item 32). Nothing reads it today.
+                createdAt=datetime.now(UTC),
             )
             return await _judge(
                 scope,
@@ -544,6 +764,34 @@ async def judge_note_direct(
             )
     except TimeoutError:
         raise _deadline_exceeded(scope, started) from None
+
+
+async def _metered(started: float, judging: Awaitable[Judgement]) -> Judgement:
+    """Count the judgement's outcome and observe its duration (register item
+    22): completed, suppressed, replayed, a reason code, cancelled or error."""
+    try:
+        judgement = await judging
+    except DodealError as exc:
+        _observe(exc.reason_code, started)
+        raise
+    except BaseException as exc:
+        _observe(
+            "cancelled" if isinstance(exc, asyncio.CancelledError) else "error",
+            started,
+        )
+        raise
+    if isinstance(judgement, ReplayedJudgement):
+        _observe("replayed", started)
+    else:
+        _observe(
+            "suppressed" if judgement.suppressed is not None else "completed", started
+        )
+    return judgement
+
+
+def _observe(outcome: str, started: float) -> None:
+    metrics.JUDGEMENTS.labels(outcome=outcome).inc()
+    metrics.JUDGEMENT_SECONDS.observe(time.monotonic() - started)
 
 
 def _deadline_exceeded(scope: TenantScope, started: float) -> JudgementDeadlineExceeded:
@@ -598,11 +846,24 @@ async def _judge(
     compares it to a clock, and it is not on any line.
     """
     config = deps.config
+    # Register item 59: the key is the ORIGINAL text's fingerprint; only the
+    # three prompts read the redacted copy. Counts reach the outcome line.
+    fingerprint = state.note_fingerprint(note.note)
+    redaction = redact(note.note)
+    prompt_note = note.model_copy(update={"note": redaction.text})
 
     # --- length: before any reservation, before any spend -------------------
     gated = _length_gate(note, config)
     if gated is not None:
         gate_reason, gate_detail = gated
+        clarification_prompt, prompt_withheld = await _fixed_question(
+            scope,
+            request,
+            note,
+            gate_detail,
+            config=config,
+            resubmission=resubmission,
+        )
         judgement = _suppressed(
             scope,
             request,
@@ -610,6 +871,8 @@ async def _judge(
             reason=gate_reason,
             detail=gate_detail,
             config=config,
+            clarification_prompt=clarification_prompt,
+            prompt_withheld=prompt_withheld,
         )
         _log_outcome(
             scope,
@@ -618,59 +881,88 @@ async def _judge(
             # No pass ran, so all three are null. Not zero: this note did not
             # take no time to classify, it was never classified.
             timings=_Timings(elapsed_ms=_ms_since(started)),
+            redaction=redaction,
+            request_ids=_no_request_ids(),
             author_differs_from_subject=author_differs_from_subject,
         )
         return judgement
 
     # --- reserve: the only thing between a double-submit and paying twice ---
-    fingerprint = state.note_fingerprint(note.note)
+    # SHORT: the in-flight lifetime. The long one is the confirm's, at the end
+    # of the try below. Rounded UP, never down: a deadline under a quarter-second
+    # would otherwise give EX 0, which Redis refuses, and a refused reservation
+    # is a 503.
+    inflight_ttl = math.ceil(
+        deps.settings.judgement_deadline_seconds * IDEMPOTENCY_INFLIGHT_MULTIPLIER
+    )
+    replay: ReplayedJudgement | None = None
     try:
         claimed = await state.reserve_idempotency(
             scope.tenant,
             request.note_id,
             fingerprint,
-            # SHORT: the in-flight lifetime. The long one is the confirm's, at
-            # the end of the try below. Rounded UP, never down: a deadline
-            # under a quarter-second would otherwise give EX 0, which Redis
-            # refuses, and a refused reservation is a 503.
-            ttl=math.ceil(
-                deps.settings.judgement_deadline_seconds
-                * IDEMPOTENCY_INFLIGHT_MULTIPLIER
-            ),
+            ttl=inflight_ttl,
             request_id=scope.request_id,
         )
+        if not claimed:
+            claimed, replay = await _existing_judgement(
+                scope, request, fingerprint, ttl=inflight_ttl
+            )
     except state.IdempotencyUnavailableError:
         raise IdempotencyUnavailableResponse() from None
+    if replay is not None:
+        _logger.info(
+            "judgement_replayed",
+            extra={
+                "tenant": scope.tenant,
+                "request_id": scope.request_id,
+                **_Timings(elapsed_ms=_ms_since(started)).fields(),
+            },
+        )
+        return replay
     if not claimed:
         raise DuplicateRequestError()
 
     decision: Decision | None = None
+    # Register item 26: each pass's provider request id, null for a pass that
+    # did not run -- the handle for reconciling a call with the provider's bill.
+    request_ids = _no_request_ids()
     # None until the pass that fills each one actually runs, so a judgement that
     # stopped early carries null rather than a made-up zero.
     classify_ms: int | None = None
     vague_ms: int | None = None
     score_ms: int | None = None
     try:
-        # Read HERE, before anything is spent, so a concurrent request cannot
-        # change this judgement's answer halfway through. Fails OPEN (0). The
-        # rate limit is not read here: it is one trip at step 8.
+        # Read HERE, before anything is spent: it picks step 8's trip, and that
+        # trip's script re-checks the cap as it takes, so a concurrent request
+        # for this note cannot also send. Fails OPEN (0).
         attempts = await state.read_attempts(
             scope.tenant,
-            request.lead_id,
             request.note_id,
             request_id=scope.request_id,
         )
 
         # The token budget, read before the first thing that costs money. Over
         # budget is 429 token_budget_exceeded and releases the reservation
-        # below like any other non-200 after reserving.
-        await token_preflight(scope)
+        # below like any other non-200 after reserving. Near it, no pass may
+        # reprompt (register item 61).
+        reprompt = not await token_preflight(scope)
 
         # --- classify: the first thing that costs money ---------------------
         (classification, classify_response), classify_ms = await _timed(
-            classify(deps.llm, note, lead, scope=scope, settings=deps.settings)
+            classify(
+                deps.llm,
+                prompt_note,
+                lead,
+                scope=scope,
+                settings=deps.settings,
+                reprompt=reprompt,
+            )
         )
         model_passes = 1
+        request_ids["classify_provider_request_id"] = (
+            classify_response.provider_request_id
+        )
 
         detail = suppression_for(classification.note_type)
         if detail is not None:
@@ -701,21 +993,23 @@ async def _judge(
                 _timed(
                     detect_vagueness(
                         deps.llm,
-                        note,
+                        prompt_note,
                         note_type,
                         scope=scope,
                         config=config,
                         settings=deps.settings,
+                        reprompt=reprompt,
                     )
                 ),
                 _timed(
                     score_note(
                         deps.llm,
-                        note,
+                        prompt_note,
                         note_type,
                         scope=scope,
                         config=config,
                         settings=deps.settings,
+                        reprompt=reprompt,
                     )
                 ),
             )
@@ -723,6 +1017,12 @@ async def _judge(
 
             vague_output, vague_response = vague_result
             score_output, score_response = score_result
+            request_ids["vague_provider_request_id"] = (
+                vague_response.provider_request_id
+            )
+            request_ids["score_provider_request_id"] = (
+                score_response.provider_request_id
+            )
             analysis = NoteAnalysis(
                 note_type=note_type,
                 is_vague=vague_output.is_vague,
@@ -732,9 +1032,9 @@ async def _judge(
             )
             score = compute_score(score_output.marks, note_type, config)
             # decide() is PURE, so it is asked twice: once with the window
-            # assumed open, whose answer says which db2 trip (if any) the rate
-            # limit owes, and once with what the store actually said.
-            rate_allowed, rate_count = await _rate_limit_trip(
+            # assumed open, whose answer says which db2 trip (if any) the two
+            # guards owe, and once with what the store actually said.
+            attempts, rate_allowed, rate_count = await _rate_limit_trip(
                 decide(
                     score,
                     analysis,
@@ -745,6 +1045,8 @@ async def _judge(
                     resubmission=resubmission,
                 ),
                 scope,
+                request,
+                attempts=attempts,
                 config=config,
             )
             decision = decide(
@@ -768,7 +1070,6 @@ async def _judge(
                         "original_note_fingerprint": (
                             await state.read_attempt_fingerprint(
                                 scope.tenant,
-                                request.lead_id,
                                 request.note_id,
                                 request_id=scope.request_id,
                             )
@@ -809,6 +1110,7 @@ async def _judge(
             scope.tenant,
             request.note_id,
             fingerprint,
+            judgement_json=judgement.model_dump_json(),
             ttl=config.idempotency_ttl_seconds,
             request_id=scope.request_id,
         )
@@ -827,32 +1129,24 @@ async def _judge(
         )
         raise
 
-    # --- step 10: the attempt counter, only for a prompt that is actually sent
+    # --- step 10: the resubmission reference, only for a prompt actually sent
     #
     # OUTSIDE the try, deliberately. The judgement exists: the note was
     # fetched, three calls were paid for, a decision was made. A db2 outage now
     # must not release the reservation and turn an answered request into a 503,
-    # so these calls are placed where a raise could not reach the release path
-    # -- as well as failing open inside state.py. Both guards, because one of
+    # so this call is placed where a raise could not reach the release path --
+    # as well as failing open inside state.py. Both guards, because one of
     # them is a promise another module keeps.
     #
     # decision is None on every suppressed judgement, so a suppressed note
-    # never moves a counter -- and neither does a resubmission, which withholds
-    # its prompt by policy and so never reaches prompt_sent. The rate limit is
-    # not here: its slot was claimed at step 8, by the check itself.
+    # never writes one -- and neither does a resubmission, which withholds its
+    # prompt by policy and so never reaches prompt_sent. Neither counter is
+    # here: both were taken at step 8, by the check itself.
     if decision is not None and decision.prompt_sent:
-        await state.increment_attempts(
-            scope.tenant,
-            request.lead_id,
-            request.note_id,
-            ttl=config.attempt_ttl_seconds,
-            request_id=scope.request_id,
-        )
         # Register item 33: the note we are prompting on, recorded beside the
         # counter it belongs to, at the one moment prompt_sent becomes true.
         await state.write_attempt_fingerprint(
             scope.tenant,
-            request.lead_id,
             request.note_id,
             fingerprint,
             ttl=config.attempt_ttl_seconds,
@@ -863,7 +1157,7 @@ async def _judge(
         scope,
         judgement,
         model_passes=model_passes,
-        # Read LAST, after the counters: elapsed_ms is what the caller waited
+        # Read LAST, after the reference: elapsed_ms is what the caller waited
         # for, and the caller was still waiting through step 10.
         timings=_Timings(
             elapsed_ms=_ms_since(started),
@@ -871,40 +1165,115 @@ async def _judge(
             vague_ms=vague_ms,
             score_ms=score_ms,
         ),
+        redaction=redaction,
+        request_ids=request_ids,
         author_differs_from_subject=author_differs_from_subject,
     )
     return judgement
 
 
+def _no_request_ids() -> dict[str, str | None]:
+    """The three per-pass request id fields, all null until a pass answers."""
+    return {
+        "classify_provider_request_id": None,
+        "vague_provider_request_id": None,
+        "score_provider_request_id": None,
+    }
+
+
+async def _existing_judgement(
+    scope: TenantScope,
+    request: _JudgementInput,
+    fingerprint: str,
+    *,
+    ttl: int,
+) -> tuple[bool, ReplayedJudgement | None]:
+    """What a request that lost the reservation gets: (claimed, replay).
+
+    A confirmed judgement for this note is replayed with THIS request's id. A
+    key still reserved, or one for another lead, is (False, None): 409. A stored
+    value that no longer validates is logged, taken over and judged again.
+    """
+    stored = await state.read_confirmed_judgement(
+        scope.tenant, request.note_id, fingerprint, request_id=scope.request_id
+    )
+    if stored is None:
+        return False, None
+    try:
+        replay = ReplayedJudgement.model_validate_json(stored)
+    except ValidationError:
+        # Never the value or pydantic's message: the value holds model output.
+        _logger.warning(
+            "idempotency_replay_invalid",
+            extra={
+                "reason_code": "idempotency_replay_invalid",
+                "tenant": scope.tenant,
+                "request_id": scope.request_id,
+            },
+        )
+        claimed = await state.take_over_idempotency(
+            scope.tenant,
+            request.note_id,
+            fingerprint,
+            expected=stored,
+            ttl=ttl,
+            request_id=scope.request_id,
+        )
+        return claimed, None
+    if (replay.note_id, replay.lead_id) != (request.note_id, request.lead_id):
+        return False, None
+    return False, replay.model_copy(update={"request_id": scope.request_id})
+
+
 async def _rate_limit_trip(
-    provisional: Decision, scope: TenantScope, *, config: TenantConfig
-) -> tuple[bool, int]:
-    """The ONE db2 trip this judgement's rate limit takes, or none at all.
+    provisional: Decision,
+    scope: TenantScope,
+    request: _JudgementInput,
+    *,
+    attempts: int,
+    config: TenantConfig,
+) -> tuple[int, bool, int]:
+    """The ONE db2 trip this judgement's two prompt guards take, or none at all.
 
-    `provisional` is decide() with the window assumed open, so the documented
-    order (resubmission, attempt cap, rate limit, nothing to ask) picks the trip
-    and no condition is restated here:
+    `provisional` is decide() with the window assumed open and `attempts` as read
+    at step 5, so the documented order (resubmission, attempt cap, rate limit,
+    nothing to ask) picks the trip and no condition is restated here:
 
-      a prompt would be sent   TAKE a slot -- this IS the increment.
-      nothing to ask           READ only, so an exhausted window still reports
-                               `rate_limited` ahead of `nothing_to_ask`.
+      a prompt would be sent   TAKE the note's attempt and the subject's slot
+                               together -- this IS both increments, and a
+                               request that lost the note's attempt gets the cap.
+      nothing to ask           READ the rate limit only, so an exhausted window
+                               still reports `rate_limited` ahead of
+                               `nothing_to_ask`.
       anything else            NO call (resubmission, attempt cap, accept_silent).
+
+    Returns (attempts, rate_allowed, rate_count) for the second decide().
     """
     # ASSUMPTION[Q7]: keyed on scope.subject -- who is ASKING -- not on the
     # note's author_id; the person we would pester is the one making the request.
     if provisional.prompt_sent:
-        return await state.take_rate_limit(
+        return await state.take_prompt_slots(
             scope.tenant,
+            request.note_id,
             scope.subject,
-            limit=config.rate_limit_per_hour,
-            ttl=config.rate_limit_window_seconds,
+            attempt_cap=config.clarification_cap,
+            attempt_ttl=config.attempt_ttl_seconds,
+            rate_limit=config.rate_limit_per_hour,
+            rate_ttl=config.rate_limit_window_seconds,
+            rate_limit_day=config.rate_limit_per_day,
+            rate_ttl_day=RATE_LIMIT_DAY_WINDOW_SECONDS,
+            attempts_read=attempts,
             request_id=scope.request_id,
         )
     if provisional.prompt_withheld is PromptWithheld.NOTHING_TO_ASK:
-        return True, await state.read_rate_limit(
-            scope.tenant, scope.subject, request_id=scope.request_id
+        return (
+            attempts,
+            True,
+            await state.read_rate_limit(
+                scope.tenant, scope.subject, request_id=scope.request_id
+            ),
         )
-    return True, 0
+    return attempts, True, 0
 
 
 def _check_one_model_answered(
@@ -942,9 +1311,14 @@ def _log_outcome(
     *,
     model_passes: int,
     timings: _Timings,
+    redaction: Redaction,
+    request_ids: dict[str, str | None],
     author_differs_from_subject: bool | None = None,
 ) -> None:
     """One structured line per judgement.
+
+    `redacted_phone`, `redacted_email` and `redacted_id` (register item 59) are
+    counts of what the prompts did not see -- numbers, never the values.
 
     Fields only, via extra=, and every one of them is an identifier or a member
     of a fixed vocabulary. NEVER the note text, never the reasoning, never the
@@ -1008,6 +1382,8 @@ def _log_outcome(
                 "suppressed_detail": judgement.suppressed.detail_code.value,
                 "model_passes": model_passes,
                 **timings.fields(),
+                **redaction.fields(),
+                **request_ids,
                 **author_field,
             },
         )
@@ -1029,6 +1405,8 @@ def _log_outcome(
             "attempt": judgement.decision.attempt,
             "model_passes": model_passes,
             **timings.fields(),
+            **redaction.fields(),
+            **request_ids,
             **author_field,
         },
     )

@@ -19,6 +19,7 @@ import httpx
 import pytest
 from pydantic import SecretStr
 
+from dodeal_ai.core.breaker import BreakerState
 from dodeal_ai.core.config import (
     ConfigError,
     LLMProvider,
@@ -317,11 +318,61 @@ async def test_http_timeout_is_strictly_inside_the_watchdog_deadline(
     sent = recorder.requests[0].extensions["timeout"]
     assert sent["read"] < settings.llm_timeout_seconds
     assert sent["read"] == pytest.approx(60.0 * _HTTP_TIMEOUT_SHARE)
-    # Every phase, not just read: a hang during connect or while waiting on the
-    # pool has to lose the same race.
+    # Every phase but the pool, which waits for the acquire setting (item 112).
     assert sorted(sent) == ["connect", "pool", "read", "write"]
-    for phase, value in sent.items():
-        assert value == pytest.approx(60.0 * _HTTP_TIMEOUT_SHARE), phase
+    for phase in ("connect", "read", "write"):
+        assert sent[phase] == pytest.approx(60.0 * _HTTP_TIMEOUT_SHARE), phase
+    assert sent["pool"] == settings.llm_pool_acquire_timeout_seconds == 1.0
+
+
+@BOTH_URLS
+async def test_the_pool_wait_is_the_acquire_setting(
+    monkeypatch: pytest.MonkeyPatch, base_url: str
+) -> None:
+    """DODEAL_LLM_POOL_ACQUIRE_TIMEOUT_SECONDS reaches the pool phase alone."""
+    monkeypatch.setenv("DODEAL_LLM_POOL_ACQUIRE_TIMEOUT_SECONDS", "0.25")
+    settings = _settings(monkeypatch)
+    recorder = Recorder(httpx.Response(200, json=_ok_body()))
+    await _call(settings, base_url, recorder)
+    sent = recorder.requests[0].extensions["timeout"]
+    assert sent["pool"] == 0.25
+    assert sent["read"] == pytest.approx(
+        settings.llm_timeout_seconds * _HTTP_TIMEOUT_SHARE
+    )
+
+
+@BOTH_URLS
+async def test_the_pool_wait_never_outlasts_the_http_budget(
+    monkeypatch: pytest.MonkeyPatch, base_url: str
+) -> None:
+    """A pool setting above the HTTP budget is capped, so httpx still loses first."""
+    settings = _settings(monkeypatch, TIMEOUT_SECONDS="0.5")
+    recorder = Recorder(httpx.Response(200, json=_ok_body()))
+    await _call(settings, base_url, recorder)
+    sent = recorder.requests[0].extensions["timeout"]
+    assert sent["pool"] == pytest.approx(0.5 * _HTTP_TIMEOUT_SHARE)
+
+
+@BOTH_URLS
+async def test_a_pool_timeout_is_provider_pool_exhausted_not_a_timeout(
+    monkeypatch: pytest.MonkeyPatch, base_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Register item 112: an exhausted pool has its own reason, and is transient."""
+    recorder = Recorder(raises=httpx.PoolTimeout("no connection"))
+    with (
+        caplog.at_level(logging.WARNING, logger="dodeal_ai.llm.openai_compatible"),
+        pytest.raises(OpenAICompatibleError) as caught,
+    ):
+        await _call(_settings(monkeypatch), base_url, recorder)
+    assert caught.value.reason is LLMErrorReason.PROVIDER_POOL_EXHAUSTED
+    assert caught.value.reason is not LLMErrorReason.UNAVAILABLE
+    assert caught.value.transient is True
+    assert caught.value.status is None
+    assert str(caught.value) == "llm_provider_error:provider_pool_exhausted"
+    (record,) = [
+        r for r in caplog.records if r.getMessage() == "llm_provider_call_failed"
+    ]
+    assert record.reason_code == "provider_pool_exhausted"
 
 
 @BOTH_URLS
@@ -789,3 +840,188 @@ def test_both_supported_providers_have_a_base_url() -> None:
     """Fail closed on a provider added to the enum without a URL beside it."""
     assert set(BASE_URLS) == {LLMProvider.GROQ, LLMProvider.OPENAI}
     assert all(url.startswith("https://") for url in BASE_URLS.values())
+
+
+# --- one circuit breaker per provider client (register item 20) --------------
+
+
+class Scripted:
+    """A handler answering each request with the next scripted response or error."""
+
+    def __init__(self, *outcomes: httpx.Response | Exception) -> None:
+        self._outcomes = list(outcomes)
+        self.calls = 0
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.calls += 1
+        outcome = self._outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+
+def _breaker_settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
+    monkeypatch.setenv("DODEAL_BREAKER_FAILURE_THRESHOLD", "2")
+    return _settings(monkeypatch)
+
+
+async def _calls(settings: Settings, handler: Scripted, n: int) -> list[object]:
+    """`n` calls on ONE client, each outcome or error kept in order."""
+    results: list[object] = []
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = _client(settings, GROQ_BASE_URL, http)
+        for _ in range(n):
+            try:
+                results.append(
+                    await client.complete(PROMPT, profile=PROFILE_UNIT_A_CLASSIFY)
+                )
+            except OpenAICompatibleError as exc:
+                results.append(exc)
+        results.append(client.breaker.state)
+    return results
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        httpx.ConnectError("refused"),
+        httpx.ReadTimeout("slow"),
+        httpx.ConnectTimeout("slow connect"),
+        httpx.Response(500, json={}),
+        httpx.Response(503, json={}),
+        httpx.Response(429, json={}),
+    ],
+    ids=["connect", "read-timeout", "connect-timeout", "500", "503", "429"],
+)
+async def test_a_counted_failure_opens_the_breaker_and_it_refuses_with_no_socket(
+    monkeypatch: pytest.MonkeyPatch, failure, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Two counted failures open it; the third call is breaker_open and sends nothing."""
+    handler = Scripted(failure, failure)
+    with caplog.at_level(logging.WARNING):
+        *errors, state = await _calls(_breaker_settings(monkeypatch), handler, 3)
+
+    assert handler.calls == 2
+    assert state is BreakerState.OPEN
+    refused = errors[2]
+    assert isinstance(refused, OpenAICompatibleError)
+    assert refused.reason is LLMErrorReason.BREAKER_OPEN
+    assert refused.transient is True and refused.status is None
+    assert str(refused) == "llm_provider_error:breaker_open"
+    opened = [r for r in caplog.records if r.getMessage() == "breaker_opened"]
+    assert [r.breaker for r in opened] == ["llm.groq"]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        httpx.Response(400, json={}),
+        httpx.Response(401, json={}),
+        httpx.Response(404, json={}),
+        httpx.Response(200, text="not json"),
+        httpx.ReadError("reset"),
+        httpx.PoolTimeout("pool"),
+    ],
+    ids=["400", "401", "404", "malformed-200", "read-error", "pool"],
+)
+async def test_an_uncounted_failure_never_opens_the_breaker(
+    monkeypatch: pytest.MonkeyPatch, failure
+) -> None:
+    """4xx, a malformed 200, other transport errors and our own pool do not count."""
+    handler = Scripted(*[failure] * 4)
+    *errors, state = await _calls(_breaker_settings(monkeypatch), handler, 4)
+
+    assert handler.calls == 4
+    assert state is BreakerState.CLOSED
+    assert all(e.reason is not LLMErrorReason.BREAKER_OPEN for e in errors)
+
+
+async def test_a_success_clears_the_consecutive_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failure, success, failure: never two in a row, never open."""
+    handler = Scripted(
+        httpx.Response(503, json={}),
+        httpx.Response(200, json=_ok_body()),
+        httpx.Response(503, json={}),
+    )
+    *_, state = await _calls(_breaker_settings(monkeypatch), handler, 3)
+    assert state is BreakerState.CLOSED
+
+
+async def test_each_client_has_its_own_breaker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A second client (the fallback's, item 21) is not refused by the first's."""
+    settings = _breaker_settings(monkeypatch)
+    handler = Scripted(
+        httpx.ConnectError("x"),
+        httpx.ConnectError("x"),
+        httpx.Response(200, json=_ok_body()),
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        first = _client(settings, GROQ_BASE_URL, http)
+        second = _client(settings, OPENAI_BASE_URL, http)
+        for _ in range(2):
+            with pytest.raises(OpenAICompatibleError):
+                await first.complete(PROMPT, profile=PROFILE_UNIT_A_CLASSIFY)
+        assert first.breaker is not second.breaker
+        assert first.breaker.state is BreakerState.OPEN
+        await second.complete(PROMPT, profile=PROFILE_UNIT_A_CLASSIFY)
+        assert second.breaker.state is BreakerState.CLOSED
+
+
+async def test_the_breaker_uses_the_redis_breaker_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Threshold and window come from DODEAL_BREAKER_*, not from new settings."""
+    monkeypatch.setenv("DODEAL_BREAKER_OPEN_SECONDS", "7.5")
+    settings = _breaker_settings(monkeypatch)
+    async with httpx.AsyncClient() as http:
+        breaker = _client(settings, GROQ_BASE_URL, http).breaker
+    assert breaker._failure_threshold == 2
+    assert breaker._open_seconds == 7.5
+
+
+# --- the provider's request id (register item 26) ----------------------------
+
+
+def _with_headers(headers: dict[str, str], **body: object) -> httpx.Response:
+    return httpx.Response(200, json=_ok_body(**body), headers=headers)
+
+
+@pytest.mark.parametrize(
+    ("headers", "expected"),
+    [
+        ({"x-request-id": "req_ABC-123"}, "req_ABC-123"),
+        ({"request-id": "req-xyz"}, "req-xyz"),
+        ({"x-request-id": "req-x", "request-id": "req-r"}, "req-x"),
+        ({"x-request-id": "bad id with spaces"}, "chatcmpl-abc123"),
+        ({"x-request-id": "a" * 129}, "chatcmpl-abc123"),
+        ({"x-request-id": "a" * 128}, "a" * 128),
+        ({"x-request-id": "evil;id=1"}, "chatcmpl-abc123"),
+        ({}, "chatcmpl-abc123"),
+    ],
+    ids=[
+        "x-request-id",
+        "request-id",
+        "x-wins",
+        "spaces-rejected",
+        "too-long",
+        "max-length",
+        "punctuation-rejected",
+        "body-fallback",
+    ],
+)
+async def test_the_request_id_comes_from_the_header_first(
+    monkeypatch: pytest.MonkeyPatch, headers: dict[str, str], expected: str
+) -> None:
+    """x-request-id, then request-id, then the body id, each only if well formed."""
+    recorder = Recorder(_with_headers(headers))
+    result = await _call(_settings(monkeypatch), GROQ_BASE_URL, recorder)
+    assert result.provider_request_id == expected
+
+
+async def test_a_malformed_body_id_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No usable header and a body id with unsafe characters is simply absent."""
+    recorder = Recorder(_with_headers({}, id="id with\nnewline"))
+    result = await _call(_settings(monkeypatch), GROQ_BASE_URL, recorder)
+    assert result.provider_request_id is None

@@ -10,9 +10,12 @@ import dodeal_ai.core.cost.limiter as cost_limiter
 from dodeal_ai.core.auth.dependencies import get_verifier
 from dodeal_ai.core.auth.verify import JwtVerifier
 from dodeal_ai.core.config import Settings, get_settings
-from dodeal_ai.main import app
 from tests.helpers import tokens
 from tests.helpers.fake_cost_redis import FakeCostRedis
+from tests.helpers.probe_app import probe_app
+
+# Register item 93: the served app has no probe route, so these mount it.
+app = probe_app()
 
 
 @pytest.fixture(autouse=True)

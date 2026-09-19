@@ -3,10 +3,18 @@ leads/notes from `data`, and validates the single-lead and notes shapes."""
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
+from pydantic import ValidationError
 
 from dodeal_ai.core.validation import OutputValidationError, validate_output
-from dodeal_ai.schemas.lead import LeadListResponse, LeadNotesResponse, LeadResponse
+from dodeal_ai.schemas.lead import (
+    LeadListResponse,
+    LeadNote,
+    LeadNotesResponse,
+    LeadResponse,
+)
 
 
 def _lead_payload(**overrides) -> dict:
@@ -62,6 +70,14 @@ def test_lead_tolerates_null_booked_amount():
     assert result.data[0].bookedAmount is None
 
 
+def test_lead_accepts_any_booked_amount():
+    """Register item 90: bookedAmount's type is unconfirmed, so any value loads."""
+    for value in ("1,250,000", 1500, {"amount": 1}):
+        payload = _response_payload([_lead_payload(id=1, bookedAmount=value)])
+        result = validate_output(LeadListResponse, payload, label="tool.get_leads")
+        assert result.data[0].bookedAmount == value
+
+
 def test_lead_requires_id():
     bad = {"name": "No ID"}  # missing id
     with pytest.raises(OutputValidationError):
@@ -115,3 +131,43 @@ def test_empty_notes_list_is_valid():
     payload = {"status": True, "data": [], "meta": _meta(0)}
     result = validate_output(LeadNotesResponse, payload, label="tool.get_lead_notes")
     assert result.data == []
+
+
+# --- LeadNote.createdAt is an aware datetime (register item 32) --------------
+
+
+def _note(created_at: object) -> dict:
+    return {"id": 1, "note": "Called.", "author_id": 10, "createdAt": created_at}
+
+
+def test_an_offset_timestamp_keeps_its_offset():
+    """An ISO-8601 time with an offset parses to that aware instant."""
+    note = LeadNote.model_validate(_note("2026-01-01T10:00:00+04:00"))
+    assert note.createdAt == datetime(2026, 1, 1, 6, 0, tzinfo=UTC)
+    assert note.createdAt.utcoffset() == timedelta(hours=4)
+
+
+def test_a_naive_timestamp_is_read_as_utc():
+    """ASSUMPTION[Q5]: no offset means UTC, never local time."""
+    note = LeadNote.model_validate(_note("2026-01-01T10:00:00"))
+    assert note.createdAt == datetime(2026, 1, 1, 10, 0, tzinfo=UTC)
+    assert note.createdAt.tzinfo is UTC
+
+
+def test_a_z_timestamp_is_utc():
+    """The Z suffix is an offset of zero."""
+    note = LeadNote.model_validate(_note("2026-01-01T10:00:00Z"))
+    assert note.createdAt.utcoffset() == timedelta(0)
+
+
+@pytest.mark.parametrize("value", ["", "yesterday", None])
+def test_an_unparseable_created_at_is_rejected(value):
+    """The field stays required: empty, junk and null are not times."""
+    with pytest.raises(ValidationError):
+        LeadNote.model_validate(_note(value))
+
+
+def test_every_parsed_created_at_is_aware():
+    """No path yields a naive datetime a comparison could trip on."""
+    for raw in ("2026-01-01T10:00:00", "2026-01-01T10:00:00-05:00", "2026-01-01"):
+        assert LeadNote.model_validate(_note(raw)).createdAt.tzinfo is not None

@@ -202,8 +202,10 @@ class JudgementRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    lead_id: int
-    note_id: int
+    # ge=1 on every id (register item 10): 0 or a negative id is a 422
+    # invalid_request, never a fetch, a reservation or a counter key.
+    lead_id: int = Field(ge=1)
+    note_id: int = Field(ge=1)
 
 
 # The hard ceiling on note text in a request body. A REQUEST-SIZE bound, not a
@@ -260,9 +262,10 @@ class DirectJudgementRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    lead_id: int
-    note_id: int
-    author_id: int
+    # ge=1 on every id, as on JudgementRequest (register item 10).
+    lead_id: int = Field(ge=1)
+    note_id: int = Field(ge=1)
+    author_id: int = Field(ge=1)
     note_text: str = Field(max_length=MAX_NOTE_TEXT_CHARS)
     lead: LeadContext
 
@@ -393,10 +396,20 @@ class NoteScore(BaseModel):
 
 
 class Suppressed(BaseModel):
-    """Why this judgement carries no score."""
+    """Why this judgement carries no score.
+
+    `clarification_prompt` and `prompt_withheld` (register item 64) are for the
+    ONE suppression that still asks something: a note below the length floor
+    carries a fixed question, no model involved, since there is nothing to
+    classify or score. Both are null for every other suppression -- a
+    too-long note and a classifier suppression (system_event, unclassifiable)
+    have no question to ask at all.
+    """
 
     reason: SuppressedReason
     detail_code: SuppressedDetail
+    clarification_prompt: str | None = None
+    prompt_withheld: PromptWithheld | None = None
 
 
 class Decision(BaseModel):

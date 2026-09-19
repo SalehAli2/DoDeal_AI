@@ -55,10 +55,14 @@ _CLOSED_PORT_REDIS_URLS = {
 
 _REAL_POOL_BUILDS = pytest.StashKey[list[str]]()
 
-# The one module whose tests build real pools on purpose: core/redis.py IS the
-# factory, and building a pool opens no socket. test_hermetic_fakes.py grants the
-# same module the same exemption.
-_FACTORY_TESTS = "tests/unit/test_redis.py::"
+# The tests that build real pools on purpose: core/redis.py IS the factory, and
+# the load lane (tests/load/) serves the app on a real Redis. Neither is in the
+# default run's reach: test_redis.py opens no socket, and `load` is deselected.
+_FACTORY_TESTS = ("tests/unit/test_redis.py::", "tests/load/")
+
+# Lanes that bring their own Redis, so the shared fakes are not installed. The
+# redis_real lane never reaches a factory; the load lane reaches the real ones.
+_REAL_REDIS_MARKERS = ("redis_real", "load")
 
 
 @pytest.fixture(autouse=True)
@@ -121,14 +125,15 @@ def redis_fakes(
 
     The redis_real lane is not covered: it builds its own clients from
     DODEAL_REDIS_REAL_URL, and a lane test that reached a factory must not
-    quietly run on a fake. Its breakers and caches are still reset.
+    quietly run on a fake. Nor is the load lane, which points the real factories
+    at its own databases. Both lanes' breakers and caches are still reset.
     """
     redis_module.get_cost_client.cache_clear()
     redis_module.get_operational_client.cache_clear()
     # One test's outage must not refuse the next test's calls.
     reset_breakers()
     fakes = RedisFakes(cost=FakeCostRedis(), operational=FakeOperationalRedis())
-    if request.node.get_closest_marker("redis_real") is None:
+    if not any(request.node.get_closest_marker(m) for m in _REAL_REDIS_MARKERS):
         for module in _COST_CLIENT_HOLDERS:
             monkeypatch.setattr(module, "get_cost_client", lambda: fakes.cost)
         for module in _OPERATIONAL_CLIENT_HOLDERS:
@@ -215,8 +220,8 @@ def _real_pool_builds(request: pytest.FixtureRequest) -> Iterator[list[str]]:
 
 
 def pytest_sessionfinish(session: pytest.Session) -> None:
-    """Fail the run if any test outside tests/unit/test_redis.py built a real
-    Redis pool.
+    """Fail the run if any test outside tests/unit/test_redis.py and the load
+    lane built a real Redis pool.
 
     Sets the exit status and names each test rather than raising: a raise here
     is an INTERNALERROR that buries the list.

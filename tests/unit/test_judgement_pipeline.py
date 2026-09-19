@@ -27,20 +27,24 @@ import pytest
 import redis
 
 import dodeal_ai.units.structured_intelligence.pipeline as pipeline_module
+from dodeal_ai.core import inflight
 from dodeal_ai.core.breaker import operational_breaker
 from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.context import RequestContext
 from dodeal_ai.core.cost import limiter
 from dodeal_ai.core.errors import (
+    BackendRejectedError,
     BackendUnavailableError,
     DuplicateRequestError,
     IdempotencyUnavailableResponse,
     JudgementDeadlineExceeded,
+    LeadNotFoundError,
     MalformedOutputError,
     ModelUnavailableError,
     NoteNotFoundError,
     dodeal_error_response,
 )
+from dodeal_ai.core.inflight import InflightCounter
 from dodeal_ai.core.llm import LLMErrorReason, LLMProviderError
 from dodeal_ai.core.llm.profiles import (
     PROFILE_UNIT_A_CLASSIFY,
@@ -50,8 +54,12 @@ from dodeal_ai.core.llm.profiles import (
 from dodeal_ai.core.logging_config import JsonFormatter
 from dodeal_ai.core.prompting import AssembledPrompt, build_prompt
 from dodeal_ai.core.resilience import ExternalCallError
-from dodeal_ai.middleware import inflight
-from dodeal_ai.middleware.inflight import InflightCounter
+from dodeal_ai.tools.errors import (
+    BackendForbidden,
+    BackendNotFound,
+    BackendRejected,
+    BackendUnauthorized,
+)
 from dodeal_ai.tools.keys import BackendKeyError
 from dodeal_ai.units.structured_intelligence import state
 from dodeal_ai.units.structured_intelligence.classify import (
@@ -61,14 +69,17 @@ from dodeal_ai.units.structured_intelligence.classify import (
 from dodeal_ai.units.structured_intelligence.config import get_tenant_config
 from dodeal_ai.units.structured_intelligence.pipeline import (
     JudgementDeps,
+    ReplayedJudgement,
     judge_note,
     judge_note_direct,
 )
 from dodeal_ai.units.structured_intelligence.schemas import (
     DirectJudgementRequest,
+    Judgement,
     JudgementRequest,
     LeadContext,
     NoteType,
+    PromptWithheld,
     SuppressedDetail,
 )
 from dodeal_ai.units.structured_intelligence.scoring import (
@@ -276,10 +287,93 @@ async def test_the_original_failure_is_not_replaced_by_the_release(
 # --- the stop points, straight through -------------------------------------
 
 
-async def test_a_duplicate_is_refused(deps, operational):
-    await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+async def test_a_duplicate_is_replayed_without_a_model_call(
+    deps, operational, json_capture
+):
+    """Items 1 and 2: the stored judgement comes back, the model is not asked."""
+    first = await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+    second = await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+
+    assert isinstance(second, ReplayedJudgement)
+    assert not isinstance(first, ReplayedJudgement)
+    assert second.model_dump() == first.model_dump()
+    assert deps.llm.call_count == 3
+    (line,) = [x for x in json_capture() if x["message"] == "judgement_replayed"]
+    assert (line["tenant"], line["request_id"]) == ("tenant-a", "req-1")
+
+
+def _stored_key() -> str:
+    return state._idempotency_key(
+        "tenant-a", NOTE_ID, state.note_fingerprint(GOOD_NOTE)
+    )
+
+
+async def test_a_duplicate_meeting_the_reservation_is_409(deps, operational):
+    """A key still reserved means the judgement is in flight: 409, no model call."""
+    operational.store[_stored_key()] = state._RESERVED
     with pytest.raises(DuplicateRequestError):
         await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+    assert deps.llm.call_count == 0
+
+
+async def test_an_invalid_stored_judgement_is_judged_again(
+    deps, operational, json_capture
+):
+    """A value that no longer validates is logged, taken over and judged again."""
+    sentinel = "SENTINEL-stored-value-7d1e"
+    operational.store[_stored_key()] = f'{{"reasoning": "{sentinel}"}}'
+
+    judgement = await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+
+    assert not isinstance(judgement, ReplayedJudgement)
+    assert deps.llm.call_count == 3
+    assert operational.store[_stored_key()] == judgement.model_dump_json()
+    (line,) = [
+        x for x in json_capture() if x["message"] == "idempotency_replay_invalid"
+    ]
+    assert line["reason_code"] == "idempotency_replay_invalid"
+    assert sentinel not in json.dumps(json_capture())
+
+
+async def test_a_lost_take_over_is_409(deps, operational, monkeypatch):
+    """The invalid value changed before the take-over: someone else has it."""
+    operational.store[_stored_key()] = state._RESERVED
+
+    async def _read_stale(*args, **kwargs):
+        return "not-json"
+
+    monkeypatch.setattr(state, "read_confirmed_judgement", _read_stale)
+
+    with pytest.raises(DuplicateRequestError):
+        await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+    assert deps.llm.call_count == 0
+
+
+async def test_a_stored_judgement_for_another_lead_is_409(deps, operational):
+    """A replay never answers a request for a different lead with this body."""
+    await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+    deps.leads.leads[LEAD_ID + 1] = lead(LEAD_ID + 1)
+    deps.leads.notes[LEAD_ID + 1] = [note(NOTE_ID, GOOD_NOTE)]
+
+    with pytest.raises(DuplicateRequestError):
+        await judge_note(
+            _scope(),
+            _request(lead_id=LEAD_ID + 1),
+            resubmission=False,
+            deps=deps,
+        )
+
+
+@pytest.mark.parametrize("command", ["get", "eval"])
+async def test_an_unanswered_duplicate_check_is_idempotency_unavailable(
+    deps, operational, command
+):
+    """Reading the stored value and taking it over both fail closed with 503."""
+    operational.store[_stored_key()] = "not-json"
+    operational.raise_on.add(command)
+    with pytest.raises(IdempotencyUnavailableResponse):
+        await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+    assert deps.llm.call_count == 0
 
 
 async def test_a_missing_note_is_note_not_found(deps, operational):
@@ -335,6 +429,60 @@ async def test_a_breaker_that_opens_mid_judgement_bypasses_the_rate_limit(
     assert bypass["breaker"] == "open"
 
 
+# --- one question per note, race-safe (register item 119) -------------------
+
+
+async def test_a_judgement_that_lost_the_attempt_race_withholds_at_the_cap(
+    monkeypatch, deps, operational
+):
+    """A step-5 read of 0 that another request has since overtaken ends in
+    attempt_cap, with no rate slot taken and no reference written."""
+    attempt_key = f"attempt:tenant-a:{NOTE_ID}"
+
+    async def _read_before_the_winner_took(*args, **kwargs):
+        # The winner's take lands between this read and the loser's take.
+        operational.store[attempt_key] = "1"
+        return 0
+
+    monkeypatch.setattr(state, "read_attempts", _read_before_the_winner_took)
+
+    judgement = await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+
+    assert judgement.decision is not None
+    assert judgement.decision.prompt_sent is False
+    assert judgement.decision.prompt_withheld is PromptWithheld.ATTEMPT_CAP
+    assert judgement.decision.attempt == 1
+    assert [outcome for _, _, outcome in operational.evals] == [
+        state._SLOTS_DENIED_BY_ATTEMPT
+    ]
+    assert operational.store[attempt_key] == "1"
+    assert not [key for key in operational.store if key.startswith("ratelimit:")]
+    assert not [key for key in operational.store if key.startswith("attempt_fp:")]
+
+
+async def test_one_note_id_under_two_lead_ids_shares_one_attempt(deps, operational):
+    """Register item 118: a second lead id on the same note id meets attempt_cap."""
+    decisions = []
+    for lead_id, text in ((LEAD_ID, GOOD_NOTE), (LEAD_ID + 1, f"{GOOD_NOTE} Edited.")):
+        request = DirectJudgementRequest(
+            lead_id=lead_id,
+            note_id=NOTE_ID,
+            author_id=42,
+            note_text=text,
+            lead=LeadContext(leadType="buyer"),
+        )
+        judgement = await judge_note_direct(
+            _scope(), request, resubmission=False, deps=deps
+        )
+        assert judgement.decision is not None
+        decisions.append(judgement.decision)
+
+    assert [decision.prompt_sent for decision in decisions] == [True, False]
+    assert decisions[1].prompt_withheld is PromptWithheld.ATTEMPT_CAP
+    attempt_keys = [key for key in operational.store if key.startswith("attempt:")]
+    assert attempt_keys == [f"attempt:tenant-a:{NOTE_ID}"]
+
+
 async def test_a_backend_key_failure_is_backend_unavailable(deps, leads, operational):
     # BackendKeyError is a CONFIGURATION fault, never retried and never wrapped
     # by the watchdog -- but from the caller's side it is still "we could not
@@ -377,6 +525,535 @@ async def test_a_stop_before_the_seam_spends_nothing(deps, operational):
     with pytest.raises(NoteNotFoundError):
         await judge_note(_scope(), _request(note_id=999), resubmission=False, deps=deps)
     assert deps.llm.call_count == 0
+
+
+# --- the lead and its notes are fetched together (register item 9) ----------
+
+
+async def test_the_lead_and_notes_fetches_both_start_before_either_finishes(
+    deps, leads, operational, monkeypatch
+):
+    """Both backend reads have started before either one has returned."""
+    events: list[str] = []
+    real_get_lead, real_get_lead_notes = leads.get_lead, leads.get_lead_notes
+
+    async def _get_lead(*args, **kwargs):
+        events.append("lead started")
+        await asyncio.sleep(0)
+        events.append("lead finished")
+        return await real_get_lead(*args, **kwargs)
+
+    async def _get_lead_notes(*args, **kwargs):
+        events.append("notes started")
+        await asyncio.sleep(0)
+        events.append("notes finished")
+        return await real_get_lead_notes(*args, **kwargs)
+
+    monkeypatch.setattr(leads, "get_lead", _get_lead)
+    monkeypatch.setattr(leads, "get_lead_notes", _get_lead_notes)
+
+    await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+
+    assert sorted(events[:2]) == ["lead started", "notes started"]
+
+
+async def test_a_lead_failure_is_reported_over_a_notes_failure(
+    deps, leads, operational, json_capture
+):
+    """When both reads fail, the outcome line names the lead's error type."""
+    leads.raise_on["get_lead"] = BackendKeyError("tenant-a")
+    leads.raise_on["get_lead_notes"] = ExternalCallError(
+        "tool.get_lead_notes", RuntimeError()
+    )
+
+    with pytest.raises(BackendUnavailableError):
+        await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+
+    line = next(
+        x for x in json_capture() if x["message"] == "judgement_backend_unavailable"
+    )
+    assert line["error_type"] == "BackendKeyError"
+    assert [call.method for call in leads.calls] == ["get_lead", "get_lead_notes"]
+
+
+async def test_a_lead_failure_cancels_the_notes_fetch_in_flight(
+    deps, leads, operational, monkeypatch
+):
+    """A failed lead read cancels the notes read that is still waiting."""
+    never = asyncio.Event()
+    cancelled: list[str] = []
+
+    async def _held_get_lead_notes(*args, **kwargs):
+        try:
+            await never.wait()
+        except asyncio.CancelledError:
+            cancelled.append("notes")
+            raise
+
+    leads.raise_on["get_lead"] = ExternalCallError("tool.get_lead", RuntimeError())
+    monkeypatch.setattr(leads, "get_lead_notes", _held_get_lead_notes)
+
+    with pytest.raises(BackendUnavailableError):
+        await asyncio.wait_for(
+            judge_note(_scope(), _request(), resubmission=False, deps=deps),
+            SAFETY_SECONDS,
+        )
+
+    assert cancelled == ["notes"]
+
+
+# --- typed backend errors (register item 89) ---------------------------------
+
+
+async def test_a_lead_404_is_lead_not_found(deps, leads, operational, json_capture):
+    """The lead's 404 is 404 lead_not_found, and nothing is reserved."""
+    leads.raise_on["get_lead"] = BackendNotFound("tool.get_lead", 404)
+    with pytest.raises(LeadNotFoundError):
+        await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+    assert operational.store == {}
+    line = next(x for x in json_capture() if x["message"] == "judgement_lead_not_found")
+    assert line["error_type"] == "BackendNotFound"
+
+
+async def test_a_notes_404_is_backend_rejected(deps, leads, operational):
+    """Only the LEAD's 404 means a missing lead; the notes' 404 is backend_rejected."""
+    leads.raise_on["get_lead_notes"] = BackendNotFound("tool.get_lead_notes", 404)
+    with pytest.raises(BackendRejectedError):
+        await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+
+
+@pytest.mark.parametrize("method", ["get_lead", "get_lead_notes"])
+async def test_another_4xx_is_backend_rejected(deps, leads, operational, method):
+    """A 400-class refusal on either read is 503 backend_rejected."""
+    leads.raise_on[method] = BackendRejected(f"tool.{method}", 422)
+    with pytest.raises(BackendRejectedError):
+        await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [BackendUnauthorized("tool.get_lead", 401), BackendForbidden("tool.get_lead", 403)],
+)
+async def test_a_refused_key_is_backend_unavailable(deps, leads, operational, error):
+    """401 and 403 are ours to fix, so the caller sees backend_unavailable."""
+    leads.raise_on["get_lead"] = error
+    with pytest.raises(BackendUnavailableError):
+        await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+
+
+async def test_the_lead_error_wins_even_when_the_notes_failed_first(
+    deps, leads, operational, monkeypatch
+):
+    """A notes failure that lands first does not hide the lead's later 404."""
+    notes_failed = asyncio.Event()
+
+    async def _late_missing_lead(*args, **kwargs):
+        await notes_failed.wait()
+        raise BackendNotFound("tool.get_lead", 404)
+
+    async def _notes_fail_first(*args, **kwargs):
+        notes_failed.set()
+        raise ExternalCallError("tool.get_lead_notes", RuntimeError())
+
+    monkeypatch.setattr(leads, "get_lead", _late_missing_lead)
+    monkeypatch.setattr(leads, "get_lead_notes", _notes_fail_first)
+
+    with pytest.raises(LeadNotFoundError):
+        await asyncio.wait_for(
+            judge_note(_scope(), _request(), resubmission=False, deps=deps),
+            SAFETY_SECONDS,
+        )
+
+
+async def test_both_reads_are_handed_the_judgement_deadline(
+    deps, leads, operational, monkeypatch
+):
+    """The loop-time deadline reaches both reads, deadline_seconds from the start."""
+    seen: dict[str, float] = {}
+    real_lead, real_notes = leads.get_lead, leads.get_lead_notes
+
+    async def _lead(scope, lead_id, *, deadline):
+        seen["lead"] = deadline
+        return await real_lead(scope, lead_id)
+
+    async def _notes(scope, lead_id, *, deadline):
+        seen["notes"] = deadline
+        return await real_notes(scope, lead_id)
+
+    monkeypatch.setattr(leads, "get_lead", _lead)
+    monkeypatch.setattr(leads, "get_lead_notes", _notes)
+    loop = asyncio.get_running_loop()
+    before = loop.time()
+
+    await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+
+    budget = deps.settings.judgement_deadline_seconds
+    assert seen["lead"] == seen["notes"]
+    assert before + budget <= seen["lead"] <= loop.time() + budget
+
+
+# --- a note missing from the first read is read again once (item 17) --------
+
+
+def _notes_empty_first(leads, monkeypatch) -> list[float]:
+    """The first notes read comes back empty, later ones as stored; returns the
+    loop time of every notes read."""
+    real = leads.get_lead_notes
+    times: list[float] = []
+
+    async def _read(scope, lead_id, *, deadline=None):
+        times.append(asyncio.get_running_loop().time())
+        notes = await real(scope, lead_id)
+        return [] if len(times) == 1 else notes
+
+    monkeypatch.setattr(leads, "get_lead_notes", _read)
+    return times
+
+
+async def test_a_note_found_on_the_reread_is_judged(
+    deps, leads, operational, monkeypatch
+):
+    """The re-read finds the note after a 250 ms wait and the judgement goes ahead."""
+    times = _notes_empty_first(leads, monkeypatch)
+    waits: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def _recorded(delay: float) -> None:
+        waits.append(delay)
+        await real_sleep(0)
+
+    # The wait is recorded, not measured: a Windows loop may wake a timer up to
+    # one clock tick early, so an elapsed-time assertion would flake.
+    monkeypatch.setattr(pipeline_module.asyncio, "sleep", _recorded)
+
+    judgement = await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+
+    assert judgement.note_id == NOTE_ID and judgement.score is not None
+    assert len(times) == 2
+    assert waits == [pipeline_module.NOTE_REREAD_DELAY_SECONDS]
+    assert [c.method for c in leads.calls].count("get_lead") == 1
+
+
+async def test_a_note_missing_twice_is_note_not_found_after_one_reread(
+    deps, leads, operational, json_capture
+):
+    """Exactly one re-read, then 404, with nothing reserved and nothing spent."""
+    with pytest.raises(NoteNotFoundError):
+        await judge_note(_scope(), _request(note_id=999), resubmission=False, deps=deps)
+
+    assert [c.method for c in leads.calls] == [
+        "get_lead",
+        "get_lead_notes",
+        "get_lead_notes",
+    ]
+    assert operational.store == {}
+    assert deps.llm.call_count == 0
+    (line,) = [x for x in json_capture() if x["message"] == "note_not_on_first_read"]
+    assert line["reread"] is True
+    assert {"tenant", "request_id", "reread"} <= set(line)
+
+
+async def test_under_a_second_of_deadline_left_there_is_no_reread(
+    leads, operational, json_capture
+):
+    """With less than a second left the miss is 404 at once, one notes read."""
+    deps = _with_deadline(FakeLLM(), leads, 0.9)
+
+    with pytest.raises(NoteNotFoundError):
+        await judge_note(_scope(), _request(note_id=999), resubmission=False, deps=deps)
+
+    assert [c.method for c in leads.calls] == ["get_lead", "get_lead_notes"]
+    (line,) = [x for x in json_capture() if x["message"] == "note_not_on_first_read"]
+    assert line["reread"] is False
+
+
+async def test_a_reread_that_fails_is_backend_unavailable(
+    deps, leads, operational, monkeypatch
+):
+    """The re-read maps its failure like the first read does."""
+    times = _notes_empty_first(leads, monkeypatch)
+    real = leads.get_lead_notes
+
+    async def _second_fails(scope, lead_id, *, deadline=None):
+        notes = await real(scope, lead_id, deadline=deadline)
+        if len(times) == 2:
+            raise ExternalCallError("tool.get_lead_notes", RuntimeError())
+        return notes
+
+    monkeypatch.setattr(leads, "get_lead_notes", _second_fails)
+
+    with pytest.raises(BackendUnavailableError):
+        await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+    assert operational.store == {}
+
+
+async def test_a_found_note_is_never_reread(deps, leads, operational, json_capture):
+    """The happy path reads the notes once and logs no miss."""
+    await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+    assert [c.method for c in leads.calls] == ["get_lead", "get_lead_notes"]
+    assert not [x for x in json_capture() if x["message"] == "note_not_on_first_read"]
+
+
+# --- no reprompt near the token budget (register item 61) -------------------
+
+
+@pytest.mark.parametrize("malformed_pass", ["classify", "score"])
+async def test_a_degraded_judgement_503s_on_a_malformed_first_answer(
+    monkeypatch, leads, operational, cost, json_capture, malformed_pass
+):
+    """Near the budget a malformed answer is 503 malformed_output, never a reprompt."""
+    monkeypatch.setenv("DODEAL_COST_TOKENS_PER_USER_LIMIT", "1000")
+    get_settings.cache_clear()
+    cost.store["tokens:user:tenant-a:42"] = 900
+    if malformed_pass == "classify":
+        llm = FakeLLM(response("not json"), *_happy_path())
+    else:
+        llm = FakeLLM()
+        llm.script_for(CLASSIFY_TEMPLATE, _classified("discovery"))
+        llm.script_for(template_for(NoteType.DISCOVERY), _vague_answer())
+        llm.script_for(SCORE_TEMPLATE, response("not json"), _score_answer())
+
+    with pytest.raises(MalformedOutputError):
+        await judge_note(
+            _scope(), _request(), resubmission=False, deps=_deps_with(llm, leads)
+        )
+
+    messages = [x["message"] for x in json_capture()]
+    assert "reprompt_issued" not in messages
+    assert messages.count("token_budget_degraded") == 1
+    assert "reprompt_withheld" in messages
+    assert llm.call_count == (1 if malformed_pass == "classify" else 3)
+    assert operational.store == {}
+
+
+async def test_a_judgement_under_the_budget_still_reprompts(
+    leads, operational, json_capture
+):
+    """Away from the budget the one reprompt is unchanged."""
+    llm = FakeLLM(response("not json"), *_happy_path())
+    judgement = await judge_note(
+        _scope(), _request(), resubmission=False, deps=_deps_with(llm, leads)
+    )
+    assert judgement.score is not None
+    assert "reprompt_issued" in [x["message"] for x in json_capture()]
+
+
+# --- redaction of the text a model reads (register item 59) ----------------
+
+CONTACT_NOTE = (
+    "Called the client on +20 10 1234 5678, emailed buyer@example.com, "
+    "national id 29801011234567, viewing 2026-01-15 at 10:30 for 1250000."
+)
+
+
+async def test_the_prompts_read_the_redacted_note_and_the_key_the_original(
+    leads, operational, json_capture
+):
+    """Every variable half is redacted; the fingerprint and the outcome line are not."""
+    leads.notes[LEAD_ID] = [note(NOTE_ID, CONTACT_NOTE)]
+    llm = FakeLLM(*_happy_path())
+
+    await judge_note(
+        _scope(), _request(), resubmission=False, deps=_deps_with(llm, leads)
+    )
+
+    assert llm.call_count == 3
+    for prompt in llm.prompts:
+        assert "+20 10 1234 5678" not in prompt.text
+        assert "buyer@example.com" not in prompt.text
+        assert "29801011234567" not in prompt.text
+        assert "[PHONE]" in prompt.variable and "[EMAIL]" in prompt.variable
+        assert "[ID]" in prompt.variable
+        assert "2026-01-15 at 10:30 for 1250000" in prompt.variable
+        assert "[PHONE]" not in prompt.stable
+    [key] = _idem_keys(operational)
+    assert key.endswith(state.note_fingerprint(CONTACT_NOTE))
+    (line,) = [x for x in json_capture() if x["message"] == "judgement_completed"]
+    assert (line["redacted_phone"], line["redacted_email"], line["redacted_id"]) == (
+        1,
+        1,
+        1,
+    )
+    assert "buyer@example.com" not in json.dumps(json_capture())
+
+
+async def test_a_suppressed_line_carries_the_counts_too(
+    leads, operational, json_capture
+):
+    """The length gate reads the original, and its line still has the three counts."""
+    leads.notes[LEAD_ID] = [note(NOTE_ID, "ok 010-1234-5678")]
+
+    judgement = await judge_note(
+        _scope(), _request(), resubmission=False, deps=_deps_with(FakeLLM(), leads)
+    )
+
+    assert judgement.suppressed is not None
+    (line,) = [x for x in json_capture() if x["message"] == "judgement_suppressed"]
+    assert line["redacted_phone"] == 1
+    assert (line["redacted_email"], line["redacted_id"]) == (0, 0)
+
+
+# --- provider request ids on the outcome line (register item 26) -----------
+
+
+async def test_the_outcome_line_carries_each_passs_provider_request_id(
+    leads, operational, json_capture
+):
+    """classify, vague and score each report the id of the response they used."""
+    llm = FakeLLM()
+    llm.script_for(
+        CLASSIFY_TEMPLATE,
+        json_response({"note_type": "discovery"}, provider_request_id="req-c"),
+    )
+    llm.script_for(
+        template_for(NoteType.DISCOVERY),
+        response(_vague_answer().text, provider_request_id="req-v"),
+    )
+    llm.script_for(
+        SCORE_TEMPLATE, response(_score_answer().text, provider_request_id="req-s")
+    )
+
+    await judge_note(
+        _scope(), _request(), resubmission=False, deps=_deps_with(llm, leads)
+    )
+
+    (line,) = [x for x in json_capture() if x["message"] == "judgement_completed"]
+    assert (
+        line["classify_provider_request_id"],
+        line["vague_provider_request_id"],
+        line["score_provider_request_id"],
+    ) == ("req-c", "req-v", "req-s")
+
+
+async def test_a_pass_that_did_not_run_has_a_null_request_id(
+    leads, operational, json_capture
+):
+    """A classifier suppression carries its one id; the other two are null."""
+    llm = FakeLLM(
+        json_response({"note_type": "system_event"}, provider_request_id="c1")
+    )
+
+    await judge_note(
+        _scope(), _request(), resubmission=False, deps=_deps_with(llm, leads)
+    )
+
+    (line,) = [x for x in json_capture() if x["message"] == "judgement_suppressed"]
+    assert line["classify_provider_request_id"] == "c1"
+    assert line["vague_provider_request_id"] is None
+    assert line["score_provider_request_id"] is None
+
+
+async def test_a_length_gated_line_has_three_null_request_ids(
+    leads, operational, json_capture
+):
+    """No model ran, so no id: null, never absent."""
+    leads.notes[LEAD_ID] = [note(NOTE_ID, "ok")]
+    await judge_note(
+        _scope(), _request(), resubmission=False, deps=_deps_with(FakeLLM(), leads)
+    )
+    (line,) = [x for x in json_capture() if x["message"] == "judgement_suppressed"]
+    assert [
+        line[f"{p}_provider_request_id"] for p in ("classify", "vague", "score")
+    ] == [
+        None,
+        None,
+        None,
+    ]
+
+
+# --- register item 64: the length gate's fixed question ---------------------
+
+
+async def test_a_short_english_note_gets_the_fixed_english_question(
+    leads, operational
+) -> None:
+    leads.notes[LEAD_ID] = [note(NOTE_ID, "ok")]
+
+    judgement = await judge_note(
+        _scope(), _request(), resubmission=False, deps=_deps_with(FakeLLM(), leads)
+    )
+
+    assert judgement.suppressed is not None
+    assert (
+        judgement.suppressed.clarification_prompt
+        == pipeline_module._FIXED_CLARIFICATION_PROMPT_EN
+    )
+    assert judgement.suppressed.prompt_withheld is None
+    assert operational.store[f"attempt:tenant-a:{NOTE_ID}"] == "1"
+
+
+async def test_a_short_arabic_note_gets_the_fixed_arabic_question(
+    leads, operational
+) -> None:
+    leads.notes[LEAD_ID] = [note(NOTE_ID, "لا")]
+
+    judgement = await judge_note(
+        _scope(), _request(), resubmission=False, deps=_deps_with(FakeLLM(), leads)
+    )
+
+    assert judgement.suppressed is not None
+    assert (
+        judgement.suppressed.clarification_prompt
+        == pipeline_module._FIXED_CLARIFICATION_PROMPT_AR
+    )
+
+
+async def test_a_short_note_spends_zero_model_calls_and_takes_one_slot(
+    leads, operational
+) -> None:
+    leads.notes[LEAD_ID] = [note(NOTE_ID, "ok")]
+    llm = FakeLLM()
+
+    await judge_note(
+        _scope(), _request(), resubmission=False, deps=_deps_with(llm, leads)
+    )
+
+    assert llm.call_count == 0
+    assert [outcome for _, _, outcome in operational.evals] == [state._SLOTS_ALLOWED]
+
+
+async def test_a_second_short_note_on_the_same_note_id_is_withheld_attempt_cap(
+    leads, operational
+) -> None:
+    leads.notes[LEAD_ID] = [note(NOTE_ID, "ok")]
+    deps = _deps_with(FakeLLM(), leads)
+
+    first = await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+    second = await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+
+    assert first.suppressed is not None and first.suppressed.prompt_withheld is None
+    assert second.suppressed is not None
+    assert second.suppressed.prompt_withheld is PromptWithheld.ATTEMPT_CAP
+    assert second.suppressed.clarification_prompt is not None
+
+
+async def test_a_too_long_note_gets_no_question(leads, operational) -> None:
+    leads.notes[LEAD_ID] = [note(NOTE_ID, "x " * 2000)]
+
+    judgement = await judge_note(
+        _scope(), _request(), resubmission=False, deps=_deps_with(FakeLLM(), leads)
+    )
+
+    assert judgement.suppressed is not None
+    assert judgement.suppressed.detail_code is SuppressedDetail.NOTE_TOO_LONG
+    assert judgement.suppressed.clarification_prompt is None
+    assert judgement.suppressed.prompt_withheld is None
+    assert operational.store == {}
+
+
+async def test_a_short_note_resubmission_withholds_without_taking_a_slot(
+    leads, operational
+) -> None:
+    leads.notes[LEAD_ID] = [note(NOTE_ID, "ok")]
+
+    judgement = await judge_note(
+        _scope(), _request(), resubmission=True, deps=_deps_with(FakeLLM(), leads)
+    )
+
+    assert judgement.suppressed is not None
+    assert judgement.suppressed.prompt_withheld is PromptWithheld.RESUBMISSION
+    assert judgement.suppressed.clarification_prompt is not None
+    assert operational.store == {}
 
 
 # --- vague and scoring run concurrently (register item 14) ------------------
@@ -867,22 +1544,35 @@ class _FakeClock:
     Substituted for the module's `time` global rather than for `time.monotonic`
     itself, because that attribute is shared with asyncio's event loop: a clock
     that jumps twenty milliseconds under the loop's own scheduling is a second
-    source of flakiness in place of the first. Everything other than
-    `monotonic` is delegated to the real module, so the patch narrows to the
-    one reading under test.
+    source of flakiness in place of the first. Every other attribute raises:
+    the pipeline reads only `monotonic`, and a second reading must fail loudly
+    rather than run on the real clock.
     """
 
     def __init__(self) -> None:
-        self._now = 0.0
+        # Whole milliseconds from zero, with no base to set: `_ms_since`
+        # truncates, and 20 ms read from a float sum or a large base (1000.0)
+        # comes back as 19.
+        self._ms = 0
 
     def monotonic(self) -> float:
-        return self._now
+        return self._ms / 1000
 
-    def advance(self, seconds: float) -> None:
-        self._now += seconds
+    def advance(self, ms: int) -> None:
+        self._ms += ms
 
     def __getattr__(self, name: str):
-        return getattr(time, name)
+        raise AttributeError(
+            f"_FakeClock has no {name!r}; the pipeline reads monotonic"
+        )
+
+
+def test_the_fake_clock_refuses_any_attribute_but_monotonic() -> None:
+    """Reading any other `time` attribute through the fake clock raises AttributeError."""
+    clock = _FakeClock()
+
+    with pytest.raises(AttributeError, match="'time'"):
+        _ = clock.time
 
 
 async def test_elapsed_covers_more_than_any_single_pass(
@@ -906,7 +1596,7 @@ async def test_elapsed_covers_more_than_any_single_pass(
     real_get_lead = leads.get_lead
 
     async def _slow_get_lead(*args, **kwargs):
-        clock.advance(0.02)
+        clock.advance(20)
         return await real_get_lead(*args, **kwargs)
 
     monkeypatch.setattr(leads, "get_lead", _slow_get_lead)
@@ -1249,16 +1939,19 @@ async def test_the_reservation_is_short_while_the_judgement_runs(leads, operatio
     assert (operational.store[key], operational.ttls[key]) == ("1", 100)
 
     llm.released.set()
-    await task
-    assert (operational.store[key], operational.ttls[key]) == ("done", LONG_TTL)
+    judgement = await task
+    assert (operational.store[key], operational.ttls[key]) == (
+        judgement.model_dump_json(),
+        LONG_TTL,
+    )
 
 
 @pytest.mark.parametrize("classified", ["discovery", "system_event"])
 async def test_a_judgement_confirms_the_reservation_for_the_long_ttl(
     classified, leads, operational
 ):
-    """Item 82 (c). Once the judgement exists the key holds "done" for the
-    tenant's long TTL -- a classifier suppression exists as much as a score
+    """Item 82 (c), items 1 and 2. Once the judgement exists the key holds it for
+    the tenant's long TTL -- a classifier suppression exists as much as a score
     does, so it confirms the same way."""
     script = (
         _happy_path(classified)
@@ -1274,18 +1967,34 @@ async def test_a_judgement_confirms_the_reservation_for_the_long_ttl(
     assert (judgement.suppressed is None) is (classified == "discovery")
 
     [key] = _idem_keys(operational)
-    assert (operational.store[key], operational.ttls[key]) == ("done", LONG_TTL)
+    assert (operational.store[key], operational.ttls[key]) == (
+        judgement.model_dump_json(),
+        LONG_TTL,
+    )
 
 
-async def test_a_confirmed_judgement_is_still_a_duplicate(deps, operational):
-    """Item 82 (f), from the other side: the confirm REPLACES the reservation,
-    so the second identical request still meets 409."""
-    await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+async def test_a_confirmed_judgement_is_replayed_with_this_request_id(
+    deps, operational
+):
+    """The replay is the stored body with the CURRENT request's id."""
+    first = await judge_note(_scope(), _request(), resubmission=False, deps=deps)
     [key] = _idem_keys(operational)
-    assert operational.store[key] == "done"
+    assert Judgement.model_validate_json(operational.store[key]) == first
 
-    with pytest.raises(DuplicateRequestError):
-        await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+    later = RequestContext(
+        tenant="tenant-a",
+        subject="42",
+        database="crm_tenant_a",
+        roles=(),
+        permissions=frozenset(),
+        request_id="req-2",
+    ).scope()
+    replay = await judge_note(later, _request(), resubmission=False, deps=deps)
+
+    assert replay.request_id == "req-2"
+    assert replay.model_dump(exclude={"request_id"}) == first.model_dump(
+        exclude={"request_id"}
+    )
 
 
 async def test_a_confirm_that_fails_still_returns_the_judgement(

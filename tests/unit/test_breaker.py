@@ -18,6 +18,7 @@ from dodeal_ai.core.breaker import (
     reset_breakers,
 )
 from dodeal_ai.core.config import get_settings
+from dodeal_ai.core.logging_config import _STANDARD_RECORD_ATTRS
 from dodeal_ai.core.redis import PoolExhausted
 
 THRESHOLD = 3
@@ -481,6 +482,93 @@ async def test_each_transition_logs_exactly_once(breaker, clock, caplog) -> None
     assert messages == ["breaker_opened", "breaker_closed"]
     assert {r.levelname for r in caplog.records} == {"WARNING"}
     assert {r.breaker for r in caplog.records} == {"test"}
+
+
+# --- why a probe was abandoned (register item 122) --------------------------
+
+
+def _abandoned_fields(caplog: pytest.LogCaptureFixture) -> dict[str, object]:
+    """The structured fields of the one breaker_probe_abandoned record."""
+    records = [r for r in caplog.records if r.getMessage() == "breaker_probe_abandoned"]
+    assert len(records) == 1
+    return {
+        key: value
+        for key, value in records[0].__dict__.items()
+        if key not in _STANDARD_RECORD_ATTRS
+    }
+
+
+async def _hung_probe(breaker: CircuitBreaker) -> asyncio.Task[None]:
+    """A probe task parked inside the store call, never resumed on its own."""
+    entered = asyncio.Event()
+    never = asyncio.Event()
+
+    async def _hung() -> None:
+        entered.set()
+        await never.wait()
+
+    task = asyncio.create_task(breaker.call(_hung))
+    await entered.wait()
+    return task
+
+
+async def test_a_pool_refused_probe_logs_cause_pool(breaker, clock, caplog) -> None:
+    """The PoolExhausted branch while HALF_OPEN logs cause `pool`."""
+    await _open_past_the_window(breaker, clock)
+
+    with (
+        caplog.at_level(logging.WARNING, logger="dodeal_ai.breaker"),
+        pytest.raises(PoolExhausted),
+    ):
+        await breaker.call(_exhausted)
+
+    assert _abandoned_fields(caplog) == {"breaker": "test", "cause": "pool"}
+
+
+async def test_a_taken_over_probe_logs_cause_never_returned(
+    breaker, clock, caplog
+) -> None:
+    """The takeover of a probe older than its window logs cause `never_returned`."""
+    await _open_past_the_window(breaker, clock)
+    hung = await _hung_probe(breaker)
+    clock.advance(OPEN_SECONDS)
+
+    with caplog.at_level(logging.WARNING, logger="dodeal_ai.breaker"):
+        assert await breaker.call(_Store()) == "answered"
+
+    assert _abandoned_fields(caplog) == {"breaker": "test", "cause": "never_returned"}
+    hung.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await hung
+
+
+async def test_a_cancelled_probe_logs_cause_cancelled(breaker, clock, caplog) -> None:
+    """A CancelledError ending the probe logs cause `cancelled`."""
+    await _open_past_the_window(breaker, clock)
+    probe = await _hung_probe(breaker)
+
+    with caplog.at_level(logging.WARNING, logger="dodeal_ai.breaker"):
+        probe.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await probe
+
+    assert _abandoned_fields(caplog) == {"breaker": "test", "cause": "cancelled"}
+
+
+async def test_a_probe_failing_in_our_code_logs_cause_error(
+    breaker, clock, caplog
+) -> None:
+    """Our own exception logs cause `error`, never `cancelled`, and not its message."""
+    await _open_past_the_window(breaker, clock)
+
+    with (
+        caplog.at_level(logging.WARNING, logger="dodeal_ai.breaker"),
+        pytest.raises(ValueError),
+    ):
+        await breaker.call(_boom)
+
+    assert _abandoned_fields(caplog) == {"breaker": "test", "cause": "error"}
+    assert "ours, not theirs" not in caplog.text
 
 
 # --- the integration with every existing except clause ----------------------

@@ -1,10 +1,8 @@
-"""Temporary probe route exercising the gate chain over HTTP. Scaffolding;
-remove before the first real feature route.
+"""Probe route exercising the gate chain over HTTP. Test scaffolding only.
 
-Removal deferred past the campaign: the judgement routes now exercise the same
-chain, but 19 gate assertions across test_chain / test_exit_demo / test_audit
-are written against this route, and moving them is a change to the security
-suite that deserves its own commit rather than riding along with a feature.
+create_app() does not mount it (register item 93), so no deployment serves it.
+The gate assertions in test_chain / test_exit_demo / test_audit mount it on
+their own app through tests/helpers/probe_app.py.
 
 Runs Gate 1 (auth) and Gate 2 (tenancy). Gate 3 (permissions) is parked pending
 a confirmed permission model, so no permission is required here yet.

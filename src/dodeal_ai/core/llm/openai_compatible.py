@@ -21,6 +21,9 @@ WHAT THIS MODULE PROMISES, and what each promise is worth:
     provider's side even when we saw a failure. One attempt per complete(); the
     watchdog wraps this with retry=False and a test asserts the transport is
     entered exactly once on every failure path.
+  - ONE CIRCUIT BREAKER PER CLIENT (register item 20), on the Redis breaker's
+    settings. Only a connect error, a timeout, a 5xx or a 429 counts; an open
+    breaker refuses with reason breaker_open before any socket is opened.
   - Exceptions carry the HTTP STATUS and the PROVIDER NAME and nothing else.
     Never the body, never a header, never the provider's message, never the base
     URL -- which can carry a credential when it is a proxy override.
@@ -29,11 +32,13 @@ WHAT THIS MODULE PROMISES, and what each promise is worth:
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Final
 
 import httpx
 from pydantic import SecretStr
 
+from dodeal_ai.core.breaker import CircuitBreaker
 from dodeal_ai.core.config import ConfigError, LLMProvider, Settings
 from dodeal_ai.core.llm.client import (
     FinishReason,
@@ -95,6 +100,11 @@ _FINISH_REASONS: Final[dict[str, FinishReason]] = {
 # on. 403 is also what a key with the wrong scope returns.
 _AUTH_STATUSES: Final = frozenset({401, 403})
 
+# Register item 26: the provider's request id, from its response header first.
+# Only a short token of safe characters is kept, so it can go on a log line.
+_REQUEST_ID_HEADERS: Final = ("x-request-id", "request-id")
+_REQUEST_ID: Final = re.compile(r"[A-Za-z0-9_-]{1,128}")
+
 
 class OpenAICompatibleError(LLMProviderError):
     """A provider failure that also remembers the two facts that are safe to
@@ -113,10 +123,28 @@ class OpenAICompatibleError(LLMProviderError):
         transient: bool,
         status: int | None,
         provider: str,
+        trips_breaker: bool = False,
+        fallback_eligible: bool = False,
     ) -> None:
         super().__init__(reason, transient=transient)
         self.status = status
         self.provider = provider
+        # True for the four failures the breaker counts (register item 20).
+        self.trips_breaker = trips_breaker
+        # True when no response body came back: connect error, 429, 503 or an
+        # open breaker. The only failures a fallback may retry (register item 21).
+        self.fallback_eligible = fallback_eligible
+
+
+def _trips_breaker(exc: BaseException) -> bool:
+    return isinstance(exc, OpenAICompatibleError) and exc.trips_breaker
+
+
+def _never_reached_provider(exc: BaseException) -> bool:
+    return (
+        isinstance(exc, OpenAICompatibleError)
+        and exc.reason is LLMErrorReason.PROVIDER_POOL_EXHAUSTED
+    )
 
 
 def provider_name_for(base_url: str) -> str:
@@ -156,6 +184,19 @@ class OpenAICompatibleClient:
         self._http = http
         self._settings = settings
         self._provider = provider_name_for(base_url)
+        self._breaker = CircuitBreaker(
+            f"llm.{self._provider}",
+            failure_threshold=settings.breaker_failure_threshold,
+            open_seconds=settings.breaker_open_seconds,
+            counts=_trips_breaker,
+            uncounted=_never_reached_provider,
+            refusal=self._refused,
+        )
+
+    @property
+    def breaker(self) -> CircuitBreaker:
+        """This client's breaker, for readiness and metrics to read."""
+        return self._breaker
 
     # --- the one method on the seam ----------------------------------------
 
@@ -173,21 +214,43 @@ class OpenAICompatibleClient:
             else max_output_tokens
         )
         payload = self._body(prompt, resolved, task_ceiling)
+        response = await self._breaker.call(lambda: self._post(payload))
+        return self._parse(response)
 
+    async def _post(self, payload: dict[str, Any]) -> httpx.Response:
+        """The one HTTP call, its failures translated. A malformed 200 is parsed
+        outside, so an answering provider never counts against its breaker."""
         try:
             response = await self._http.post(
                 f"{self._base_url}{_COMPLETIONS_PATH}",
                 json=payload,
                 headers=self._headers(),
-                timeout=httpx.Timeout(self._http_timeout_seconds()),
+                timeout=self._timeout(),
             )
+        except httpx.PoolTimeout:
+            # Register items 112 and 16: no free pooled connection. Nothing was
+            # sent, so it is named for the pool and never read as a timeout.
+            raise self._error(
+                LLMErrorReason.PROVIDER_POOL_EXHAUSTED, transient=True, status=None
+            ) from None
         except httpx.TimeoutException:
             # Catch-list 55: a timeout leaves here as the seam's transient
             # exception, NEVER as a builtin TimeoutError -- which asyncio.wait_for
             # also raises, and which the watchdog could then not tell apart from
             # its own deadline.
             raise self._error(
-                LLMErrorReason.UNAVAILABLE, transient=True, status=None
+                LLMErrorReason.UNAVAILABLE,
+                transient=True,
+                status=None,
+                trips_breaker=True,
+            ) from None
+        except httpx.ConnectError:
+            raise self._error(
+                LLMErrorReason.UNAVAILABLE,
+                transient=True,
+                status=None,
+                trips_breaker=True,
+                fallback_eligible=True,
             ) from None
         except httpx.HTTPError:
             # Connect/read/protocol failures. `from None` on purpose: the
@@ -199,7 +262,23 @@ class OpenAICompatibleClient:
 
         if response.status_code != httpx.codes.OK:
             raise self._status_error(response.status_code)
-        return self._parse(response)
+        return response
+
+    def _refused(self, name: str) -> OpenAICompatibleError:
+        """What an open breaker raises: transient, no status, nothing sent."""
+        return self._error(
+            LLMErrorReason.BREAKER_OPEN,
+            transient=True,
+            status=None,
+            fallback_eligible=True,
+        )
+
+    def _timeout(self) -> httpx.Timeout:
+        """The HTTP budget on connect, write and read; the pool wait is the
+        acquire setting, and never longer than that budget."""
+        budget = self._http_timeout_seconds()
+        pool = min(self._settings.llm_pool_acquire_timeout_seconds, budget)
+        return httpx.Timeout(budget, pool=pool)
 
     def _http_timeout_seconds(self) -> float:
         """The HTTP budget: inside the watchdog deadline, never equal to it.
@@ -297,7 +376,7 @@ class OpenAICompatibleClient:
                 finish_reason=_FINISH_REASONS.get(
                     choice["finish_reason"], FinishReason.OTHER
                 ),
-                provider_request_id=_optional_str(body.get("id")),
+                provider_request_id=_request_id(response, body),
             )
         except (KeyError, IndexError, TypeError, ValueError):
             # ValueError covers json.JSONDecodeError (non-JSON) and a token count
@@ -316,11 +395,19 @@ class OpenAICompatibleClient:
             return self._error(LLMErrorReason.AUTH, transient=False, status=status)
         if status == httpx.codes.TOO_MANY_REQUESTS:
             return self._error(
-                LLMErrorReason.RATE_LIMITED, transient=True, status=status
+                LLMErrorReason.RATE_LIMITED,
+                transient=True,
+                status=status,
+                trips_breaker=True,
+                fallback_eligible=True,
             )
         if status >= httpx.codes.INTERNAL_SERVER_ERROR:
             return self._error(
-                LLMErrorReason.UNAVAILABLE, transient=True, status=status
+                LLMErrorReason.UNAVAILABLE,
+                transient=True,
+                status=status,
+                trips_breaker=True,
+                fallback_eligible=status == httpx.codes.SERVICE_UNAVAILABLE,
             )
         if status == httpx.codes.BAD_REQUEST:
             return self._error(
@@ -332,7 +419,13 @@ class OpenAICompatibleClient:
         return self._error(LLMErrorReason.UNKNOWN, transient=False, status=status)
 
     def _error(
-        self, reason: LLMErrorReason, *, transient: bool, status: int | None
+        self,
+        reason: LLMErrorReason,
+        *,
+        transient: bool,
+        status: int | None,
+        trips_breaker: bool = False,
+        fallback_eligible: bool = False,
     ) -> OpenAICompatibleError:
         """Build the exception AND log the failure in one place, so the two can
         never disagree about what a call did. Four content-free fields."""
@@ -346,12 +439,21 @@ class OpenAICompatibleClient:
             },
         )
         return OpenAICompatibleError(
-            reason, transient=transient, status=status, provider=self._provider
+            reason,
+            transient=transient,
+            status=status,
+            provider=self._provider,
+            trips_breaker=trips_breaker,
+            fallback_eligible=fallback_eligible,
         )
 
 
-def _optional_str(value: object) -> str | None:
-    """The provider's request id when it sent a usable one. Absent, null or a
-    non-string is None rather than a failure: it is a reconciliation handle, not
-    part of the answer."""
-    return value if isinstance(value, str) else None
+def _request_id(response: httpx.Response, body: dict[str, Any]) -> str | None:
+    """The provider's request id: x-request-id, then request-id, then the body's
+    id, the first that is 1-128 of [A-Za-z0-9_-]. Anything else is None rather
+    than a failure: it is a reconciliation handle, not part of the answer."""
+    candidates = [response.headers.get(name) for name in _REQUEST_ID_HEADERS]
+    for value in (*candidates, body.get("id")):
+        if isinstance(value, str) and _REQUEST_ID.fullmatch(value):
+            return value
+    return None

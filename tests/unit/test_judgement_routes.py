@@ -26,6 +26,7 @@ from dodeal_ai.core.llm import (
 from dodeal_ai.core.logging_config import JsonFormatter
 from dodeal_ai.core.resilience import ExternalCallError
 from dodeal_ai.main import app
+from dodeal_ai.tools.errors import BackendNotFound, BackendRejected
 from dodeal_ai.tools.leads import get_leads_client
 from dodeal_ai.units.structured_intelligence import state
 from dodeal_ai.units.structured_intelligence.classify import (
@@ -297,6 +298,28 @@ def test_a_non_integer_id_is_invalid_request(client):
     assert r.json()["reason"] == "invalid_request"
 
 
+@pytest.mark.parametrize("value", [0, -1])
+@pytest.mark.parametrize("field", ["lead_id", "note_id"])
+@pytest.mark.parametrize("path", [JUDGE, RESUBMIT])
+def test_an_id_below_one_on_the_fetch_routes_is_422_without_echo(
+    client, leads, llm, path, field, value
+):
+    """An id of 0 or -1 is a 422 whose body carries neither the field name nor the value, and nothing is fetched."""
+    r = client.post(path, json={**_body(), field: value}, headers=_headers())
+
+    assert r.status_code == 422
+    request_id = r.headers["X-Request-ID"]
+    assert r.json() == {
+        "detail": "Unprocessable Entity",
+        "reason": "invalid_request",
+        "request_id": request_id,
+    }
+    assert field not in r.text
+    assert str(value) not in r.text.replace(request_id, "")
+    assert leads.calls == []
+    assert llm.call_count == 0
+
+
 def test_validation_failure_logs_types_not_values(client, json_log):
     secret = "SENTINEL-0501234567"
     client.post(JUDGE, json={**_body(), "note": secret}, headers=_headers())
@@ -314,16 +337,31 @@ def test_validation_failure_logs_types_not_values(client, json_log):
 # --- the pipeline's stop points --------------------------------------------
 
 
-def test_missing_lead_is_backend_unavailable_today(client, leads):
-    # H2: the watchdog collapses a backend 404 into ExternalCallError, which is
-    # indistinguishable from a 500 or a timeout. Reporting that as
-    # lead_not_found would tell the CRM a lead is missing when the backend is
-    # merely down, so it is 503 until typed backend errors land at step 4.
+def test_a_backend_outage_on_the_lead_is_backend_unavailable(client, leads):
+    """A lead read that outlived its retry is 503 backend_unavailable, never 404."""
     leads.raise_on["get_lead"] = ExternalCallError("tool.get_lead", RuntimeError())
     r = client.post(JUDGE, json=_body(), headers=_headers())
 
     assert r.status_code == 503
     assert r.json()["reason"] == "backend_unavailable"
+
+
+def test_a_missing_lead_is_404_lead_not_found(client, leads):
+    """Register item 89: the lead's own 404 reaches the CRM as lead_not_found."""
+    leads.raise_on["get_lead"] = BackendNotFound("tool.get_lead", 404)
+    r = client.post(JUDGE, json=_body(), headers=_headers())
+
+    assert r.status_code == 404
+    assert r.json()["reason"] == "lead_not_found"
+
+
+def test_a_rejected_read_is_503_backend_rejected(client, leads):
+    """Any other 4xx from the CRM is 503 backend_rejected."""
+    leads.raise_on["get_lead_notes"] = BackendRejected("tool.get_lead_notes", 400)
+    r = client.post(JUDGE, json=_body(), headers=_headers())
+
+    assert r.status_code == 503
+    assert r.json()["reason"] == "backend_rejected"
 
 
 def test_backend_failure_leaks_no_internal_detail(client, leads):
@@ -367,12 +405,19 @@ def test_a_thin_note_is_suppressed_without_reserving_anything(
     assert body["suppressed"] == {
         "reason": "insufficient_evidence",
         "detail_code": "note_too_short",
+        # Register item 64: a fixed question, no model, still capped like one.
+        "clarification_prompt": (
+            "What happened, what did the client say, and what is the next "
+            "step with a date?"
+        ),
+        "prompt_withheld": None,
     }
     assert body["score"] is None
     assert body["decision"] is None
-    # Nothing reserved: the salesperson can fix the note and resubmit at once
-    # instead of being told 409 for the next 24 hours.
-    assert operational.store == {}
+    # No JUDGEMENT is reserved: the salesperson can fix the note and resubmit
+    # at once instead of being told 409 for the next 24 hours. The fixed
+    # question's own attempt/rate slots are a separate store, and do move.
+    assert not any(key.startswith("idem:") for key in operational.store)
     # And nothing spent: the check is before the reservation and before the
     # first thing that costs money.
     assert llm.call_count == 0
@@ -391,17 +436,62 @@ def test_a_long_single_token_note_is_still_thin(client, leads):
     assert r.json()["suppressed"]["detail_code"] == "note_too_short"
 
 
-def test_second_identical_request_is_409(client):
+def test_second_identical_request_is_a_replay(client, llm):
+    """Items 1 and 2: 200, the same body with this request's id, the replay header."""
     first = client.post(JUDGE, json=_body(), headers=_headers())
     assert first.status_code == 200
+    assert "Idempotent-Replay" not in first.headers
 
     second = client.post(JUDGE, json=_body(), headers=_headers())
-    assert second.status_code == 409
+    assert second.status_code == 200
+    assert second.headers["Idempotent-Replay"] == "true"
     assert second.json() == {
-        "detail": "Conflict",
-        "reason": "duplicate_request",
+        **first.json(),
         "request_id": second.headers["X-Request-ID"],
     }
+    assert second.json()["request_id"] != first.json()["request_id"]
+    assert llm.call_count == 3
+
+
+def test_a_request_meeting_an_in_flight_reservation_is_409(client, operational, llm):
+    """A key that is still only reserved is a 409, with no model call."""
+    key = state._idempotency_key("tenant-a", NOTE_ID, state.note_fingerprint(GOOD_NOTE))
+    operational.store[key] = state._RESERVED
+
+    r = client.post(JUDGE, json=_body(), headers=_headers())
+
+    assert r.status_code == 409
+    assert r.json() == {
+        "detail": "Conflict",
+        "reason": "duplicate_request",
+        "request_id": r.headers["X-Request-ID"],
+    }
+    assert llm.call_count == 0
+
+
+def test_an_invalid_stored_value_is_judged_again_over_http(
+    client, operational, llm, json_log
+):
+    """A stored value that does not validate is re-judged, and never logged."""
+    key = state._idempotency_key("tenant-a", NOTE_ID, state.note_fingerprint(GOOD_NOTE))
+    operational.store[key] = '{"clarification_prompt": "SENTINEL-replay-3b9a"}'
+
+    r = client.post(JUDGE, json=_body(), headers=_headers())
+
+    assert r.status_code == 200
+    assert "Idempotent-Replay" not in r.headers
+    assert llm.call_count == 3
+    assert "SENTINEL-replay-3b9a" not in json_log.getvalue()
+    assert [x for x in _lines(json_log) if x["message"] == "idempotency_replay_invalid"]
+
+
+def test_the_resubmission_route_replays_too(client, llm):
+    """The replay header is set on every judgement route that can replay."""
+    first = client.post(RESUBMIT, json=_body(), headers=_headers())
+    second = client.post(RESUBMIT, json=_body(), headers=_headers())
+    assert (first.status_code, second.status_code) == (200, 200)
+    assert second.headers["Idempotent-Replay"] == "true"
+    assert llm.call_count == 3
 
 
 def test_an_edited_note_is_a_new_judgement_not_a_duplicate(client, leads):
@@ -596,6 +686,8 @@ def test_a_system_event_is_suppressed_after_one_call(client, llm, operational):
     assert body["suppressed"] == {
         "reason": "not_scorable",
         "detail_code": "system_event",
+        "clarification_prompt": None,
+        "prompt_withheld": None,
     }
     assert body["score"] is None and body["decision"] is None
     assert body["analysis"]["note_type"] == "system_event"
@@ -610,6 +702,8 @@ def test_an_unclassifiable_note_is_suppressed_after_one_call(client, llm):
     assert r.json()["suppressed"] == {
         "reason": "not_scorable",
         "detail_code": "unclassifiable",
+        "clarification_prompt": None,
+        "prompt_withheld": None,
     }
     assert r.json()["analysis"]["note_type"] == "unclassifiable"
     assert llm.call_count == 1
@@ -781,8 +875,8 @@ def test_a_provider_failure_releases_the_key_so_a_retry_works(client, llm, opera
 # question was actually asked.
 
 RATE_KEY = "ratelimit:tenant-a:42"
-ATTEMPT_KEY = f"attempt:tenant-a:{LEAD_ID}:{NOTE_ID}"
-ATTEMPT_FP_KEY = f"attempt_fp:tenant-a:{LEAD_ID}:{NOTE_ID}"
+ATTEMPT_KEY = f"attempt:tenant-a:{NOTE_ID}"
+ATTEMPT_FP_KEY = f"attempt_fp:tenant-a:{NOTE_ID}"
 
 
 def _idem_key(text: str = GOOD_NOTE) -> str:
@@ -894,8 +988,11 @@ def test_a_burst_of_four_sends_three_prompts_and_rate_limits_the_fourth(
         withheld.append(body["decision"]["prompt_withheld"])
 
     assert withheld == [None, None, None, "rate_limited"]
-    assert [allowed for _, _, allowed in operational.evals] == [True, True, True, False]
-    assert {key for _, key, _ in operational.evals} == {RATE_KEY}
+    assert [outcome for _, _, outcome in operational.evals] == [
+        *[state._SLOTS_ALLOWED] * 3,
+        state._SLOTS_DENIED_BY_RATE,
+    ]
+    assert {keys[1] for _, keys, _ in operational.evals} == {RATE_KEY}
     # Three prompts sent, three counted: the refused fourth left it alone.
     assert operational.store[RATE_KEY] == "3"
 
@@ -1022,10 +1119,10 @@ def test_a_fair_but_not_vague_note_withholds_because_there_is_nothing_to_ask(
 def test_the_counter_store_being_down_bypasses_it_without_failing_the_request(
     client, operational, json_log
 ):
-    # Every command the counters use is broken (the attempt read and increment,
-    # the rate limit's script). They fail open: the prompt is sent, nothing is
+    # Every command the counters use is broken (the attempt read and the
+    # prompt-slots script). They fail open: the prompt is sent, nothing is
     # counted, and a politeness guard being down never 503s the judgement.
-    operational.raise_on.update({"get", "incr", "eval"})
+    operational.raise_on.update({"get", "eval"})
 
     r = client.post(JUDGE, json=_body(), headers=_headers())
 

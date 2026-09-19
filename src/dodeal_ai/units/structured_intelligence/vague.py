@@ -156,6 +156,7 @@ async def detect_vagueness(
     scope: TenantScope,
     config: TenantConfig,
     settings: Settings,
+    reprompt: bool = True,
 ) -> tuple[VagueOutput, LLMResponse]:
     """One model call against this type's template, or two if the first answer
     is malformed. Returns the validated answer and the raw response, whose
@@ -170,4 +171,5 @@ async def detect_vagueness(
         profile=PROFILE_UNIT_A_VAGUE,
         max_output_tokens=VAGUE_MAX_OUTPUT_TOKENS,
         check=allowed_components_check(note_type, config),
+        reprompt=reprompt,
     )

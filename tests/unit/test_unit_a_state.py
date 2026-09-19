@@ -17,34 +17,39 @@ from dodeal_ai.units.structured_intelligence import state
 from dodeal_ai.units.structured_intelligence.state import (
     IdempotencyUnavailableError,
     confirm_idempotency,
-    increment_attempts,
     note_fingerprint,
     read_attempt_fingerprint,
     read_attempts,
+    read_confirmed_judgement,
     read_rate_limit,
     release_idempotency,
     reserve_idempotency,
-    take_rate_limit,
+    take_over_idempotency,
+    take_prompt_slots,
     write_attempt_fingerprint,
 )
 from tests.helpers import breakers
-from tests.helpers.fake_operational_redis import (
-    TTL_NO_EXPIRY,
-    FakeOperationalRedis,
-)
+from tests.helpers.fake_operational_redis import FakeOperationalRedis
 
 TENANT = "tenant-a"
 SUBJECT = "42"
-LEAD_ID = 1656
 NOTE_ID = 10
 REQUEST_ID = "req-1"
 
 IDEM_TTL = 86400
 WINDOW = 3600
-# The rate limit is now checked BY taking a slot, so every call needs the cap
-# it is checked against. 3 is TenantConfig's default.
+# Both guards are checked BY taking a slot, so every take needs the caps it is
+# checked against. 3 and 1 are TenantConfig's defaults.
 LIMIT = 3
+CAP = 1
 ATTEMPT_TTL = 21600
+ATTEMPT_KEY = f"attempt:{TENANT}:{NOTE_ID}"
+RATE_KEY = f"ratelimit:{TENANT}:{SUBJECT}"
+# Register item 66: the daily ceiling beside the hourly one. 10 is
+# TenantConfig's default; DAY_WINDOW is the fixed 86400s pipeline.py passes.
+DAY_LIMIT = 10
+DAY_WINDOW = 86400
+RATE_DAY_KEY = f"ratelimit_day:{TENANT}:{SUBJECT}"
 
 # Shaped like a real fingerprint: 64 hex chars. Bound to a NAME here and only
 # ever passed by name, never written as a literal on a line that could end up
@@ -252,9 +257,18 @@ INFLIGHT_TTL = 100
 _FORMATTER_FIELDS = {"message", "timestamp", "level", "logger"}
 
 
+# A stand-in for the validated judgement JSON the pipeline stores (items 1, 2).
+JUDGEMENT_JSON = '{"note_id": 10}'
+
+
 async def _confirm() -> None:
     await confirm_idempotency(
-        TENANT, NOTE_ID, SENTINEL_FINGERPRINT, ttl=IDEM_TTL, request_id=REQUEST_ID
+        TENANT,
+        NOTE_ID,
+        SENTINEL_FINGERPRINT,
+        judgement_json=JUDGEMENT_JSON,
+        ttl=IDEM_TTL,
+        request_id=REQUEST_ID,
     )
 
 
@@ -269,8 +283,8 @@ async def test_confirm_replaces_the_reservation_with_the_long_ttl(
 
     await _confirm()
 
-    # "done", not "1": the two states are told apart in a console.
-    assert (fake.store[key], fake.ttls[key]) == ("done", IDEM_TTL)
+    # The judgement itself, not "1": a duplicate replays it (items 1 and 2).
+    assert (fake.store[key], fake.ttls[key]) == (JUDGEMENT_JSON, IDEM_TTL)
 
 
 async def test_confirm_uses_xx_and_never_creates_a_key(
@@ -294,6 +308,94 @@ async def test_a_confirmed_key_is_still_a_duplicate(fake: FakeOperationalRedis) 
         TENANT, NOTE_ID, SENTINEL_FINGERPRINT, ttl=INFLIGHT_TTL, request_id=REQUEST_ID
     )
     assert again is False
+
+
+# --- reading a confirmed judgement back, and taking over a bad one ----------
+
+
+async def _reserve() -> None:
+    await reserve_idempotency(
+        TENANT, NOTE_ID, SENTINEL_FINGERPRINT, ttl=INFLIGHT_TTL, request_id=REQUEST_ID
+    )
+
+
+async def _read() -> str | None:
+    return await read_confirmed_judgement(
+        TENANT, NOTE_ID, SENTINEL_FINGERPRINT, request_id=REQUEST_ID
+    )
+
+
+async def _take_over(expected: str) -> bool:
+    return await take_over_idempotency(
+        TENANT,
+        NOTE_ID,
+        SENTINEL_FINGERPRINT,
+        expected=expected,
+        ttl=INFLIGHT_TTL,
+        request_id=REQUEST_ID,
+    )
+
+
+async def test_a_confirmed_judgement_reads_back(fake: FakeOperationalRedis) -> None:
+    """The stored JSON comes back for the duplicate to replay."""
+    await _reserve()
+    await _confirm()
+    assert await _read() == JUDGEMENT_JSON
+
+
+async def test_a_reservation_still_in_flight_reads_as_none(
+    fake: FakeOperationalRedis,
+) -> None:
+    """A key that is only reserved has no judgement to replay."""
+    await _reserve()
+    assert await _read() is None
+
+
+async def test_a_missing_key_reads_as_none(fake: FakeOperationalRedis) -> None:
+    """A key that expired or was released has nothing to replay either."""
+    assert await _read() is None
+
+
+async def test_the_read_fails_closed_without_the_key_in_the_line(
+    failing, json_log
+) -> None:
+    """An unanswered read raises, unchained, and logs no key material."""
+    failing("get")
+    with pytest.raises(IdempotencyUnavailableError) as caught:
+        await _read()
+    assert caught.value.__cause__ is None and caught.value.__suppress_context__
+    assert SENTINEL_FINGERPRINT not in json_log.getvalue()
+    assert _lines(json_log)[-1]["message"] == "idempotency_unavailable"
+
+
+async def test_a_take_over_of_the_value_read_reserves_it_short(
+    fake: FakeOperationalRedis,
+) -> None:
+    """The unchanged value becomes the reservation marker with the short TTL."""
+    await _reserve()
+    [key] = fake.store
+    fake.store[key] = "stale"
+    assert await _take_over("stale") is True
+    assert (fake.store[key], fake.ttls[key]) == ("1", INFLIGHT_TTL)
+
+
+async def test_a_take_over_of_a_changed_value_is_refused(
+    fake: FakeOperationalRedis,
+) -> None:
+    """Someone replaced the value since the read: it is left as it is."""
+    await _reserve()
+    await _confirm()
+    [key] = fake.store
+    assert await _take_over("stale") is False
+    assert fake.store[key] == JUDGEMENT_JSON
+
+
+async def test_the_take_over_fails_closed(failing, json_log) -> None:
+    """An unanswered take-over raises rather than judge without a reservation."""
+    failing("eval")
+    with pytest.raises(IdempotencyUnavailableError):
+        await _take_over("stale")
+    assert SENTINEL_FINGERPRINT not in json_log.getvalue()
 
 
 async def test_confirm_fails_open_with_a_line_of_ids_only(failing, json_log) -> None:
@@ -335,76 +437,170 @@ async def test_an_open_breaker_bypasses_the_confirm_without_asking(
     )
 
 
-# --- rate limit ------------------------------------------------------------
+# --- the attempt cap and the rate limit, taken together (item 119) ----------
 
 
 async def test_rate_limit_starts_at_zero(fake: FakeOperationalRedis) -> None:
     assert await read_rate_limit(TENANT, SUBJECT, request_id=REQUEST_ID) == 0
 
 
-async def _take(fake_limit: int = LIMIT) -> tuple[bool, int]:
-    """One slot, at the default cap unless a case needs another."""
-    return await take_rate_limit(
-        TENANT, SUBJECT, limit=fake_limit, ttl=WINDOW, request_id=REQUEST_ID
+async def _take(
+    note_id: int = NOTE_ID,
+    *,
+    cap: int = CAP,
+    limit: int = LIMIT,
+    limit_day: int = DAY_LIMIT,
+    attempts_read: int = 0,
+) -> tuple[int, bool, int]:
+    """One take for this subject, at the default caps unless a case needs others."""
+    return await take_prompt_slots(
+        TENANT,
+        note_id,
+        SUBJECT,
+        attempt_cap=cap,
+        attempt_ttl=ATTEMPT_TTL,
+        rate_limit=limit,
+        rate_ttl=WINDOW,
+        rate_limit_day=limit_day,
+        rate_ttl_day=DAY_WINDOW,
+        attempts_read=attempts_read,
+        request_id=REQUEST_ID,
+    )
+
+
+async def test_a_take_counts_one_attempt_and_one_rate_slot(
+    fake: FakeOperationalRedis,
+) -> None:
+    """An allowed take moves all three counters by one (item 66: hourly and
+    daily rate slots taken together with the attempt)."""
+    assert await _take() == (0, True, 0)
+    assert (
+        fake.store[ATTEMPT_KEY],
+        fake.store[RATE_KEY],
+        fake.store[RATE_DAY_KEY],
+    ) == (
+        "1",
+        "1",
+        "1",
     )
 
 
 async def test_rate_limit_counts_prompts_sent(fake: FakeOperationalRedis) -> None:
-    for _ in range(3):
-        await _take()
+    for note_id in (10, 11, 12):
+        await _take(note_id)
     assert await read_rate_limit(TENANT, SUBJECT, request_id=REQUEST_ID) == 3
 
 
-async def test_taking_a_slot_returns_the_count_before_it(
+async def test_taking_slots_returns_the_counts_before_it(
     fake: FakeOperationalRedis,
 ) -> None:
-    """Each slot returns the count before this request, which is what decide() compares
-    to the cap."""
-    assert await _take() == (True, 0)
-    assert await _take() == (True, 1)
-    assert await _take() == (True, 2)
+    """Both counts come back as they were before this take, which is what decide()
+    compares to the caps."""
+    assert await _take(10) == (0, True, 0)
+    assert await _take(11) == (0, True, 1)
+    assert await _take(12) == (0, True, 2)
 
 
-async def test_the_slot_at_the_cap_is_refused_and_not_counted(
+async def test_the_attempt_cap_refuses_and_leaves_the_rate_key_untouched(
     fake: FakeOperationalRedis,
 ) -> None:
-    """A slot refused at the cap leaves the counter where it was."""
-    for _ in range(LIMIT):
-        await _take()
+    """At the attempt cap the take is refused, the stored count comes back, and no
+    rate slot is taken or even created."""
+    fake.store[ATTEMPT_KEY] = str(CAP)
 
-    assert await _take() == (False, LIMIT)
-    assert await read_rate_limit(TENANT, SUBJECT, request_id=REQUEST_ID) == LIMIT
+    assert await _take() == (CAP, True, 0)
+    assert fake.store == {ATTEMPT_KEY: str(CAP)}
+    assert fake.ttls == {}
 
 
-async def test_rate_limit_window_is_set_on_create(fake: FakeOperationalRedis) -> None:
+async def test_the_rate_limit_refuses_and_leaves_the_attempt_key_untouched(
+    fake: FakeOperationalRedis,
+) -> None:
+    """At the rate limit the take is refused and no attempt is counted or created."""
+    fake.store[RATE_KEY] = str(LIMIT)
+
+    assert await _take() == (0, False, LIMIT)
+    assert fake.store == {RATE_KEY: str(LIMIT)}
+    assert fake.ttls == {}
+
+
+async def test_a_second_take_on_one_note_gets_the_cap_back(
+    fake: FakeOperationalRedis,
+) -> None:
+    """The race, played in order: the second take reads the first one's attempt."""
+    assert await _take() == (0, True, 0)
+    assert await _take() == (CAP, True, 0)
+    assert (fake.store[ATTEMPT_KEY], fake.store[RATE_KEY]) == ("1", "1")
+
+
+async def test_both_windows_are_set_on_create(fake: FakeOperationalRedis) -> None:
     await _take()
-    assert fake.ttls[f"ratelimit:{TENANT}:{SUBJECT}"] == WINDOW
+    assert (fake.ttls[ATTEMPT_KEY], fake.ttls[RATE_KEY], fake.ttls[RATE_DAY_KEY]) == (
+        ATTEMPT_TTL,
+        WINDOW,
+        DAY_WINDOW,
+    )
 
 
 async def test_rate_limit_is_keyed_on_the_subject_and_the_tenant(
     fake: FakeOperationalRedis,
 ) -> None:
     await _take()
-    assert f"ratelimit:{TENANT}:{SUBJECT}" in fake.store
+    assert RATE_KEY in fake.store
     # A different subject in the same tenant is counted separately.
     assert await read_rate_limit(TENANT, "99", request_id=REQUEST_ID) == 0
     # ... and so is the same subject in another tenant.
     assert await read_rate_limit("tenant-b", SUBJECT, request_id=REQUEST_ID) == 0
 
 
-async def test_rate_limit_does_not_reset_the_window_on_later_increments(
+async def test_a_later_take_does_not_reset_either_window(
     fake: FakeOperationalRedis,
 ) -> None:
-    await _take()
-    key = f"ratelimit:{TENANT}:{SUBJECT}"
-    fake.ttls[key] = 60  # the window has been running a while
-    await _take()
+    await _take(cap=2)
+    fake.ttls[ATTEMPT_KEY] = 60  # both windows have been running a while
+    fake.ttls[RATE_KEY] = 60
+    await _take(cap=2)
     # A sliding window would let a busy user never hit the cap.
-    assert fake.ttls[key] == 60
+    assert (fake.ttls[ATTEMPT_KEY], fake.ttls[RATE_KEY]) == (60, 60)
 
 
-async def test_one_slot_is_one_round_trip(fake: FakeOperationalRedis) -> None:
-    """Register item 27: the read-then-increment pair is one EVAL now."""
+async def test_the_fourth_take_in_an_hour_is_withheld(
+    fake: FakeOperationalRedis,
+) -> None:
+    """Register item 66: the hourly cap still denies on its own, day cap wide open."""
+    replies = [await _take(n, cap=99, limit_day=999) for n in (10, 11, 12, 13)]
+    assert [rate_allowed for _, rate_allowed, _ in replies] == [
+        True,
+        True,
+        True,
+        False,
+    ]
+    assert fake.store[RATE_KEY] == str(LIMIT)
+    assert fake.store.get(RATE_DAY_KEY) == "3"  # the three allowed takes only
+
+
+async def test_the_eleventh_take_in_a_day_is_withheld(
+    fake: FakeOperationalRedis,
+) -> None:
+    """Register item 66: the daily cap denies once the hourly one is wide open."""
+    replies = [await _take(n, cap=99, limit=999) for n in range(10, 21)]
+    assert [rate_allowed for _, rate_allowed, _ in replies] == [True] * 10 + [False]
+    assert fake.store[RATE_DAY_KEY] == str(DAY_LIMIT)
+
+
+async def test_a_refused_take_writes_nothing(fake: FakeOperationalRedis) -> None:
+    """Whichever guard refuses, no counter moves at all -- all three or none."""
+    fake.store[RATE_DAY_KEY] = str(DAY_LIMIT)
+
+    # The third value is the HOURLY count on every denial path, not whichever
+    # guard refused: decide() compares it against rate_limit_per_hour.
+    assert await _take() == (0, False, 0)
+    assert fake.store == {RATE_DAY_KEY: str(DAY_LIMIT)}
+    assert fake.ttls == {}
+
+
+async def test_one_take_is_one_round_trip(fake: FakeOperationalRedis) -> None:
+    """Register item 119: both checks and both increments are one EVAL."""
     await _take()
     assert [c for c, _ in fake.commands] == ["eval"]
 
@@ -412,58 +608,38 @@ async def test_one_slot_is_one_round_trip(fake: FakeOperationalRedis) -> None:
 # --- the M4 edge, carried to db2 -------------------------------------------
 
 
-async def test_a_key_with_no_ttl_gets_one_on_the_next_slot(
+async def test_keys_with_no_ttl_get_one_on_the_next_take(
     fake: FakeOperationalRedis,
 ) -> None:
-    # Audit M4 on db2: a counter that somehow exists WITHOUT an expiry would
-    # otherwise pin this user's rate limit forever, silently withholding every
-    # future clarification prompt. The script carries the guard now.
-    key = f"ratelimit:{TENANT}:{SUBJECT}"
-    fake.store[key] = "2"  # exists, no entry in ttls -> TTL == -1
-    assert await fake.ttl(key) == TTL_NO_EXPIRY
+    """Audit M4 on db2: a counter with no expiry gains its window on the next take,
+    rather than pinning a user's rate limit or a note's attempts forever."""
+    fake.store[ATTEMPT_KEY] = "1"  # exists, no entry in ttls -> TTL == -1
+    fake.store[RATE_KEY] = "2"
 
-    await _take()
+    await _take(cap=2)
 
-    assert fake.ttls[key] == WINDOW
-
-
-async def test_an_attempt_key_with_no_ttl_gets_one_too(
-    fake: FakeOperationalRedis,
-) -> None:
-    key = f"attempt:{TENANT}:{LEAD_ID}:{NOTE_ID}"
-    fake.store[key] = "1"
-    await increment_attempts(TENANT, LEAD_ID, NOTE_ID, ttl=21600, request_id=REQUEST_ID)
-    assert fake.ttls[key] == 21600
-
-
-async def test_a_new_key_does_not_pay_for_a_ttl_lookup(
-    fake: FakeOperationalRedis,
-) -> None:
-    # The `or` short-circuits: count == 1 means the key is new, so EXPIRE is
-    # issued without asking for the TTL first.
-    await increment_attempts(TENANT, LEAD_ID, NOTE_ID, ttl=21600, request_id=REQUEST_ID)
-    assert [c for c, _ in fake.commands] == ["incr", "expire"]
+    assert (fake.ttls[ATTEMPT_KEY], fake.ttls[RATE_KEY]) == (ATTEMPT_TTL, WINDOW)
 
 
 # --- attempts --------------------------------------------------------------
 
 
 async def test_attempts_start_at_zero(fake: FakeOperationalRedis) -> None:
-    assert await read_attempts(TENANT, LEAD_ID, NOTE_ID, request_id=REQUEST_ID) == 0
+    assert await read_attempts(TENANT, NOTE_ID, request_id=REQUEST_ID) == 0
 
 
 async def test_attempts_count_per_note(fake: FakeOperationalRedis) -> None:
-    await increment_attempts(TENANT, LEAD_ID, NOTE_ID, ttl=21600, request_id=REQUEST_ID)
-    assert await read_attempts(TENANT, LEAD_ID, NOTE_ID, request_id=REQUEST_ID) == 1
+    await _take()
+    assert await read_attempts(TENANT, NOTE_ID, request_id=REQUEST_ID) == 1
     # A different note on the same lead is counted separately.
-    assert await read_attempts(TENANT, LEAD_ID, 11, request_id=REQUEST_ID) == 0
+    assert await read_attempts(TENANT, 11, request_id=REQUEST_ID) == 0
 
 
-async def test_attempt_key_carries_tenant_lead_and_note(
+async def test_attempt_key_carries_tenant_and_note(
     fake: FakeOperationalRedis,
 ) -> None:
-    await increment_attempts(TENANT, LEAD_ID, NOTE_ID, ttl=21600, request_id=REQUEST_ID)
-    assert f"attempt:{TENANT}:{LEAD_ID}:{NOTE_ID}" in fake.store
+    await _take()
+    assert f"attempt:{TENANT}:{NOTE_ID}" in fake.store
 
 
 # --- the resubmission reference (register item 33) --------------------------
@@ -471,8 +647,7 @@ async def test_attempt_key_carries_tenant_lead_and_note(
 
 async def test_the_reference_starts_absent(fake: FakeOperationalRedis) -> None:
     assert (
-        await read_attempt_fingerprint(TENANT, LEAD_ID, NOTE_ID, request_id=REQUEST_ID)
-        is None
+        await read_attempt_fingerprint(TENANT, NOTE_ID, request_id=REQUEST_ID) is None
     )
 
 
@@ -481,14 +656,13 @@ async def test_the_reference_reads_back_what_was_written(
 ) -> None:
     await write_attempt_fingerprint(
         TENANT,
-        LEAD_ID,
         NOTE_ID,
         SENTINEL_FINGERPRINT,
         ttl=ATTEMPT_TTL,
         request_id=REQUEST_ID,
     )
     assert (
-        await read_attempt_fingerprint(TENANT, LEAD_ID, NOTE_ID, request_id=REQUEST_ID)
+        await read_attempt_fingerprint(TENANT, NOTE_ID, request_id=REQUEST_ID)
         == SENTINEL_FINGERPRINT
     )
 
@@ -499,20 +673,17 @@ async def test_the_reference_lives_beside_the_counter_on_the_same_ttl(
     # The two are written in the same breath and must die together: a reference
     # that outlived its counter would point at a judgement whose attempt state
     # is gone.
-    await increment_attempts(
-        TENANT, LEAD_ID, NOTE_ID, ttl=ATTEMPT_TTL, request_id=REQUEST_ID
-    )
+    await _take()
     await write_attempt_fingerprint(
         TENANT,
-        LEAD_ID,
         NOTE_ID,
         SENTINEL_FINGERPRINT,
         ttl=ATTEMPT_TTL,
         request_id=REQUEST_ID,
     )
 
-    counter = f"attempt:{TENANT}:{LEAD_ID}:{NOTE_ID}"
-    reference = f"attempt_fp:{TENANT}:{LEAD_ID}:{NOTE_ID}"
+    counter = f"attempt:{TENANT}:{NOTE_ID}"
+    reference = f"attempt_fp:{TENANT}:{NOTE_ID}"
     assert reference in fake.store
     assert fake.ttls[reference] == fake.ttls[counter] == ATTEMPT_TTL
 
@@ -526,42 +697,34 @@ async def test_the_reference_is_the_first_one_written(
     other = "a1" * 32
     await write_attempt_fingerprint(
         TENANT,
-        LEAD_ID,
         NOTE_ID,
         SENTINEL_FINGERPRINT,
         ttl=ATTEMPT_TTL,
         request_id=REQUEST_ID,
     )
     await write_attempt_fingerprint(
-        TENANT, LEAD_ID, NOTE_ID, other, ttl=ATTEMPT_TTL, request_id=REQUEST_ID
+        TENANT, NOTE_ID, other, ttl=ATTEMPT_TTL, request_id=REQUEST_ID
     )
     assert (
-        await read_attempt_fingerprint(TENANT, LEAD_ID, NOTE_ID, request_id=REQUEST_ID)
+        await read_attempt_fingerprint(TENANT, NOTE_ID, request_id=REQUEST_ID)
         == SENTINEL_FINGERPRINT
     )
 
 
-async def test_the_reference_is_scoped_per_tenant_lead_and_note(
+async def test_the_reference_is_scoped_per_tenant_and_note(
     fake: FakeOperationalRedis,
 ) -> None:
     await write_attempt_fingerprint(
         TENANT,
-        LEAD_ID,
         NOTE_ID,
         SENTINEL_FINGERPRINT,
         ttl=ATTEMPT_TTL,
         request_id=REQUEST_ID,
     )
-    assert f"attempt_fp:{TENANT}:{LEAD_ID}:{NOTE_ID}" in fake.store
-    for tenant, lead_id, note_id in (
-        ("tenant-b", LEAD_ID, NOTE_ID),
-        (TENANT, 1657, NOTE_ID),
-        (TENANT, LEAD_ID, 11),
-    ):
+    assert f"attempt_fp:{TENANT}:{NOTE_ID}" in fake.store
+    for tenant, note_id in (("tenant-b", NOTE_ID), (TENANT, 11)):
         assert (
-            await read_attempt_fingerprint(
-                tenant, lead_id, note_id, request_id=REQUEST_ID
-            )
+            await read_attempt_fingerprint(tenant, note_id, request_id=REQUEST_ID)
             is None
         )
 
@@ -573,15 +736,13 @@ async def test_the_reference_fails_open_on_both_sides(failing, json_log) -> None
 
     await write_attempt_fingerprint(
         TENANT,
-        LEAD_ID,
         NOTE_ID,
         SENTINEL_FINGERPRINT,
         ttl=ATTEMPT_TTL,
         request_id=REQUEST_ID,
     )
     assert (
-        await read_attempt_fingerprint(TENANT, LEAD_ID, NOTE_ID, request_id=REQUEST_ID)
-        is None
+        await read_attempt_fingerprint(TENANT, NOTE_ID, request_id=REQUEST_ID) is None
     )
 
     codes = [line["reason_code"] for line in _lines(json_log)]
@@ -596,13 +757,12 @@ async def test_no_reference_fingerprint_reaches_a_log_line(failing, json_log) ->
 
     await write_attempt_fingerprint(
         TENANT,
-        LEAD_ID,
         NOTE_ID,
         SENTINEL_FINGERPRINT,
         ttl=ATTEMPT_TTL,
         request_id=REQUEST_ID,
     )
-    await read_attempt_fingerprint(TENANT, LEAD_ID, NOTE_ID, request_id=REQUEST_ID)
+    await read_attempt_fingerprint(TENANT, NOTE_ID, request_id=REQUEST_ID)
 
     text = json_log.getvalue()
     assert SENTINEL_FINGERPRINT not in text
@@ -623,25 +783,21 @@ async def test_read_rate_limit_fails_open_with_a_log_line(failing, json_log) -> 
     assert line["request_id"] == REQUEST_ID
 
 
-async def test_take_rate_limit_fails_open_with_a_log_line(failing, json_log) -> None:
-    """An unreachable store costs a question too many, never a refusal: the
-    slot is granted and simply not counted."""
+async def test_take_prompt_slots_fails_open_with_both_guards_lines(
+    failing, json_log
+) -> None:
+    """An unreachable store costs a question too many, never a refusal: the take is
+    granted on the attempts read earlier, and each guard logs its own bypass."""
     failing("eval")
-    assert await _take() == (True, 0)
+    assert await _take(cap=2, attempts_read=1) == (1, True, 0)
 
-    assert _lines(json_log)[-1]["reason_code"] == "rate_limit_bypassed"
+    codes = [line["reason_code"] for line in _lines(json_log)]
+    assert codes == ["attempt_counter_bypassed", "rate_limit_bypassed"]
 
 
 async def test_read_attempts_fails_open_with_a_log_line(failing, json_log) -> None:
     failing("get")
-    assert await read_attempts(TENANT, LEAD_ID, NOTE_ID, request_id=REQUEST_ID) == 0
-
-    assert _lines(json_log)[-1]["reason_code"] == "attempt_counter_bypassed"
-
-
-async def test_increment_attempts_fails_open_with_a_log_line(failing, json_log) -> None:
-    failing("incr")
-    await increment_attempts(TENANT, LEAD_ID, NOTE_ID, ttl=21600, request_id=REQUEST_ID)
+    assert await read_attempts(TENANT, NOTE_ID, request_id=REQUEST_ID) == 0
 
     assert _lines(json_log)[-1]["reason_code"] == "attempt_counter_bypassed"
 
@@ -661,13 +817,14 @@ async def test_a_bypass_logs_exactly_one_line_per_call(failing, json_log) -> Non
 
 async def test_the_three_policies_are_not_the_same(failing) -> None:
     # The whole point of this module: one store, three policies.
-    failing("set", "get", "incr")
+    failing("set", "get", "eval")
     with pytest.raises(IdempotencyUnavailableError):
         await reserve_idempotency(
             TENANT, NOTE_ID, SENTINEL_FINGERPRINT, ttl=IDEM_TTL, request_id=REQUEST_ID
         )
     assert await read_rate_limit(TENANT, SUBJECT, request_id=REQUEST_ID) == 0
-    assert await read_attempts(TENANT, LEAD_ID, NOTE_ID, request_id=REQUEST_ID) == 0
+    assert await read_attempts(TENANT, NOTE_ID, request_id=REQUEST_ID) == 0
+    assert await _take() == (0, True, 0)
 
 
 # --- sentinel: no key value reaches a log line -----------------------------

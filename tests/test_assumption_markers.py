@@ -46,6 +46,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # correction path.
 ASSUMPTION_MARKERS = [
     "ASSUMPTION[Q1]",
+    "ASSUMPTION[Q5]",
     "ASSUMPTION[Q6]",
     "ASSUMPTION[Q7]",
     "ASSUMPTION[Q8]",
@@ -123,7 +124,7 @@ def test_the_seam_marker_is_gone():
     )
 
 
-def test_the_marker_set_is_the_five_the_campaign_answered():
+def test_the_marker_set_is_the_one_this_file_tracks():
     # A sixth ASSUMPTION[...] appearing in src/ without an entry above means
     # someone answered a question provisionally and did not add it to the
     # ledger. This test is how that gets noticed.

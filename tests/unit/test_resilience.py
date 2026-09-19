@@ -13,9 +13,11 @@ import asyncio
 
 import pytest
 
+from dodeal_ai.core import resilience
 from dodeal_ai.core.resilience import (
     ExternalCallError,
     call_with_watchdog,
+    gather_first_wins,
     gather_or_cancel,
 )
 
@@ -229,3 +231,164 @@ async def test_caller_cancellation_propagates_and_takes_the_children_with_it():
 
     assert left.cancelled and right.cancelled
     assert not left.finished and not right.finished
+
+
+# --- the retry rule and the deadline (register item 89) ----------------------
+
+
+@pytest.fixture
+def sleeps(monkeypatch) -> list[float]:
+    """Every wait the watchdog schedules, recorded instead of slept."""
+    recorded: list[float] = []
+
+    async def _record(delay: float) -> None:
+        recorded.append(delay)
+
+    monkeypatch.setattr(resilience.asyncio, "sleep", _record)
+    return recorded
+
+
+async def test_a_rule_that_says_none_tries_once(sleeps):
+    """A retry rule returning None fails closed after one attempt."""
+    calls = 0
+
+    async def always_fails():
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("down")
+
+    with pytest.raises(ExternalCallError):
+        await call_with_watchdog(
+            always_fails, label="t", retry=True, retry_delay=lambda exc: None
+        )
+    assert calls == 1
+    assert sleeps == []
+
+
+async def test_the_rule_is_asked_with_the_failure_and_its_wait_is_slept(sleeps):
+    """The rule sees the exception and its answer is the wait before the retry."""
+    seen: list[Exception] = []
+    failure = RuntimeError("once")
+
+    async def flaky():
+        if not seen:
+            raise failure
+        return "ok"
+
+    def rule(exc: Exception) -> float:
+        seen.append(exc)
+        return 0.3
+
+    assert (
+        await call_with_watchdog(flaky, label="t", retry=True, retry_delay=rule) == "ok"
+    )
+    assert seen == [failure]
+    assert sleeps == [0.3]
+
+
+async def test_a_retry_that_would_end_past_the_deadline_is_skipped(sleeps):
+    """The deadline is event-loop time; a wait reaching it means no retry."""
+    calls = 0
+
+    async def always_fails():
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("down")
+
+    deadline = asyncio.get_running_loop().time() + 0.1
+    with pytest.raises(ExternalCallError):
+        await call_with_watchdog(
+            always_fails,
+            label="t",
+            retry=True,
+            retry_delay=lambda exc: 0.2,
+            deadline=deadline,
+        )
+    assert calls == 1
+
+
+async def test_no_rule_retries_at_once_without_a_sleep(sleeps):
+    """The old behaviour: no rule means an immediate retry and no suspension."""
+    calls = 0
+
+    async def always_fails():
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("down")
+
+    with pytest.raises(ExternalCallError):
+        await call_with_watchdog(always_fails, label="t", retry=True)
+    assert calls == 2
+    assert sleeps == []
+
+
+# --- gather_first_wins (register item 89) ------------------------------------
+
+
+async def test_first_wins_returns_both_results_in_order():
+    """On success the two results come back in argument order."""
+    assert await gather_first_wins(_Watched(0.02, "a")(), _Watched(0, "b")()) == (
+        "a",
+        "b",
+    )
+
+
+async def test_the_first_error_wins_even_when_the_second_failed_earlier():
+    """The second fails at once, the first fails later: the first's error is raised."""
+
+    async def late_failure():
+        await asyncio.sleep(0.02)
+        raise LookupError("first")
+
+    with pytest.raises(LookupError, match="first"):
+        await gather_first_wins(late_failure(), _boom(RuntimeError("second")))
+
+
+async def test_the_second_error_is_raised_when_the_first_succeeds():
+    """A notes failure still surfaces once the lead has come back."""
+    first = _Watched(0.02, "a")
+    with pytest.raises(RuntimeError, match="second"):
+        await gather_first_wins(first(), _boom(RuntimeError("second")))
+    assert first.finished
+
+
+async def test_a_first_failure_cancels_the_second():
+    """The first's failure does not leave the second running."""
+    slow = _Watched(delay=5.0)
+    with pytest.raises(LookupError):
+        await gather_first_wins(_boom(LookupError("first")), slow())
+    assert slow.cancelled and not slow.finished
+
+
+async def test_first_wins_leaves_no_unretrieved_exception():
+    """The unraised second failure is retrieved, so asyncio reports nothing."""
+    import gc
+
+    reported: list[dict] = []
+    loop = asyncio.get_running_loop()
+    loop.set_exception_handler(lambda _loop, context: reported.append(context))
+    try:
+
+        async def late_failure():
+            await asyncio.sleep(0.01)
+            raise LookupError("first")
+
+        with pytest.raises(LookupError):
+            await gather_first_wins(late_failure(), _boom(RuntimeError("second")))
+        gc.collect()
+        await asyncio.sleep(0)
+    finally:
+        loop.set_exception_handler(None)
+    assert reported == []
+
+
+async def test_first_wins_passes_caller_cancellation_to_both():
+    """A cancelled caller cancels both reads and sees the cancellation."""
+    left, right = _Watched(delay=5.0), _Watched(delay=5.0)
+    task = asyncio.create_task(gather_first_wins(left(), right()))
+    while not (left.started and right.started):
+        await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert left.cancelled and right.cancelled

@@ -215,7 +215,9 @@ async def test_the_thin_notes_are_suppressed_before_any_model_call(operational):
         assert judgement.suppressed.reason is SuppressedReason.INSUFFICIENT_EVIDENCE
 
     assert llm.call_count == 0
-    assert operational.store == {}  # no idempotency key was ever reserved
+    # The fixed question (item 64) still takes attempt/rate slots, but no
+    # judgement is ever reserved for a thin note.
+    assert not any(key.startswith("idem:") for key in operational.store)
 
 
 async def test_the_over_long_notes_are_suppressed_before_any_model_call(operational):

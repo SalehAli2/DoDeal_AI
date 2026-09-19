@@ -59,3 +59,16 @@ def frames_only(exc: BaseException) -> str:
     alone are what makes the failure debuggable; the messages are the risk.
     """
     return "".join(traceback.format_tb(exc.__traceback__))
+
+
+def chained(exc: BaseException) -> BaseException | None:
+    """The exception ONE level down: `__cause__`, else `__context__`, else None.
+    Never walks further, so a line carries at most two frames sections."""
+    return exc.__cause__ if exc.__cause__ is not None else exc.__context__
+
+
+def cause_frames_only(exc: BaseException) -> str | None:
+    """The frames of `exc`'s chained exception, one level down, or None
+    (register item 126). Frames only: the cause's message is never read."""
+    cause = chained(exc)
+    return None if cause is None else frames_only(cause)

@@ -45,7 +45,7 @@ from pydantic import SecretStr
 from dodeal_ai.core.config import Settings, get_settings
 from dodeal_ai.core.context import TenantScope
 from dodeal_ai.core.resilience import ExternalCallError
-from dodeal_ai.core.validation import OutputValidationError
+from dodeal_ai.tools.errors import BackendEnvelopeInvalid, BackendError
 from dodeal_ai.tools.httpx_transport import HttpxTransport
 from dodeal_ai.tools.keys import SettingsKeyResolver, TenantKeyResolver
 from dodeal_ai.tools.leads import LeadsClient
@@ -180,7 +180,7 @@ def _report_external_call_error(exc: ExternalCallError) -> None:
         )
 
 
-def _report_validation_error(exc: OutputValidationError) -> None:
+def _report_validation_error(exc: BackendEnvelopeInvalid) -> None:
     print(
         f"SHAPE MISMATCH: the response for '{exc.label}' did not match the "
         "expected schema (dodeal_ai.schemas.lead.LeadListResponse). The real backend "
@@ -192,11 +192,8 @@ def _report_validation_error(exc: OutputValidationError) -> None:
         "Validation errors (field path and problem only; no field values shown):",
         file=sys.stderr,
     )
-    for error in exc.cause.errors(include_url=False):
-        loc = ".".join(str(part) for part in error["loc"])
-        print(
-            f"  - {loc or '(root)'}: {error['type']} - {error['msg']}", file=sys.stderr
-        )
+    for loc, error_type in exc.errors:
+        print(f"  - {loc or '(root)'}: {error_type}", file=sys.stderr)
 
 
 async def _run(tenant: str, live: bool) -> int:
@@ -220,7 +217,6 @@ async def _run(tenant: str, live: bool) -> int:
     _guard_against_accidental_live_call(settings, live)
 
     scope = _build_scope(tenant)
-    client = LeadsClient(HttpxTransport(), key_resolver, settings)
     # Built from the same two settings LeadsClient._base_url reads, scheme
     # included: a printed URL that disagrees with the call it describes is
     # worse than no printed URL at all.
@@ -242,7 +238,15 @@ async def _run(tenant: str, live: bool) -> int:
     print()
 
     try:
-        leads = await client.get_leads(scope)
+        # One client for the one call, with the service's own timeout.
+        async with httpx.AsyncClient(
+            timeout=settings.external_call_timeout_seconds
+        ) as http:
+            client = LeadsClient(HttpxTransport(http), key_resolver, settings)
+            leads = await client.get_leads(scope)
+    except BackendError as exc:
+        print(f"FAILED: the backend refused the call ({exc.reason_code}).")
+        return 1
     except ExternalCallError as exc:
         _report_external_call_error(exc)
         if not live:
@@ -253,7 +257,7 @@ async def _run(tenant: str, live: bool) -> int:
             )
             return 0
         return 1
-    except OutputValidationError as exc:
+    except BackendEnvelopeInvalid as exc:
         _report_validation_error(exc)
         return 1
 

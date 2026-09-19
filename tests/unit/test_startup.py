@@ -25,13 +25,21 @@ import io
 import json
 import logging
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from dodeal_ai.core.config import ConfigError, get_settings
+from dodeal_ai.core import prompting
+from dodeal_ai.core.config import REDIS_POOL_HEADROOM, ConfigError, get_settings
+from dodeal_ai.core.llm import FallbackLLMClient
 from dodeal_ai.core.llm.profiles import PROFILE_UNIT_A_CLASSIFY
 from dodeal_ai.core.logging_config import JsonFormatter
-from dodeal_ai.main import LLM_CALLS_PER_JUDGEMENT, _llm_limits, app
+from dodeal_ai.main import (
+    BACKEND_CALLS_PER_JUDGEMENT,
+    LLM_CALLS_PER_JUDGEMENT,
+    _llm_limits,
+    app,
+)
 
 STARTUP_LOGGER = "dodeal_ai.startup"
 EVENT = "backend_keys_missing"
@@ -79,6 +87,7 @@ def test_backend_keys_missing_logs_error_when_map_is_empty(monkeypatch, json_lin
     # logger -- which is the whole point of emitting it after configure_logging.
     assert found[0]["level"] == "ERROR"
     assert found[0]["logger"] == STARTUP_LOGGER
+    assert found[0]["event"] == EVENT  # register item 121
     get_settings.cache_clear()
 
 
@@ -136,6 +145,7 @@ def test_unset_provider_starts_the_app_and_says_so_loudly(monkeypatch, json_line
     assert found, "no llm_not_configured line reached the JSON stream"
     assert found[0]["level"] == "ERROR"
     assert found[0]["logger"] == STARTUP_LOGGER
+    assert found[0]["event"] == LLM_EVENT  # register item 121
     get_settings.cache_clear()
 
 
@@ -148,6 +158,23 @@ def test_a_configured_provider_builds_one_client(monkeypatch):
         # ONE client for the process, not one per request: the same object is
         # still there after traffic has gone through the app.
         assert app.state.llm is first
+    get_settings.cache_clear()
+
+
+def test_a_configured_fallback_is_built_at_startup(monkeypatch):
+    """Register item 21: lifespan builds the primary with its fallback behind it."""
+    _llm_env(
+        monkeypatch,
+        PROVIDER="groq",
+        MODEL="pinned-model",
+        API_KEY="k",
+        FALLBACK_PROVIDER="openai",
+        FALLBACK_MODEL="fallback-model",
+        FALLBACK_API_KEY="k2",
+    )
+
+    with TestClient(app):
+        assert isinstance(app.state.llm, FallbackLLMClient)
     get_settings.cache_clear()
 
 
@@ -178,6 +205,60 @@ def test_the_pool_is_sized_from_max_inflight(monkeypatch):
     get_settings.cache_clear()
 
 
+# --- the one CRM client lifespan owns (register item 4) ---------------------
+
+
+def test_one_crm_client_is_built_and_closed_on_shutdown(monkeypatch):
+    """The CRM pool is built once for the app and closed when it stops."""
+    _llm_env(monkeypatch)
+
+    with TestClient(app):
+        crm = app.state.crm_http
+        assert isinstance(crm, httpx.AsyncClient)
+        assert crm is not app.state.http
+        assert not crm.is_closed
+
+    assert crm.is_closed
+    get_settings.cache_clear()
+
+
+def test_the_crm_client_is_sized_and_timed_from_settings(monkeypatch):
+    """Limits are max_inflight * 2 and every timeout is external_call_timeout."""
+    _llm_env(monkeypatch)
+    monkeypatch.setenv("DODEAL_MAX_INFLIGHT", "7")
+    monkeypatch.setenv("DODEAL_EXTERNAL_CALL_TIMEOUT_SECONDS", "3.5")
+    get_settings.cache_clear()
+
+    with TestClient(app):
+        crm = app.state.crm_http
+        pool = crm._transport._pool
+
+    assert BACKEND_CALLS_PER_JUDGEMENT == 2
+    assert pool._max_connections == 7 * BACKEND_CALLS_PER_JUDGEMENT
+    assert pool._max_keepalive_connections == 7 * BACKEND_CALLS_PER_JUDGEMENT
+    assert crm.timeout == httpx.Timeout(3.5)
+    get_settings.cache_clear()
+
+
+def test_a_refused_llm_build_closes_the_crm_client(monkeypatch):
+    """A refused startup closes the CRM pool as well as the model's."""
+    _llm_env(monkeypatch, PROVIDER="groq", MODEL="pinned-model", API_KEY="k")
+    handed: list[httpx.AsyncClient] = []
+
+    def refuse(settings, http):
+        handed.append(app.state.crm_http)
+        raise ConfigError("llm_api_key_missing")
+
+    monkeypatch.setattr("dodeal_ai.main.build_llm_client", refuse)
+
+    with pytest.raises(ConfigError), TestClient(app):
+        pass
+
+    assert len(handed) == 1
+    assert handed[0].is_closed
+    get_settings.cache_clear()
+
+
 @pytest.mark.parametrize(
     ("env", "fragment"),
     [
@@ -187,8 +268,18 @@ def test_the_pool_is_sized_from_max_inflight(monkeypatch):
             "llm_provider_not_supported",
         ),
         ({"PROVIDER": "groq", "API_KEY": "k"}, "llm_not_configured"),
+        (
+            {
+                "PROVIDER": "groq",
+                "MODEL": "m",
+                "API_KEY": "k",
+                "FALLBACK_PROVIDER": "openai",
+                "FALLBACK_MODEL": "m",
+            },
+            "llm_fallback_api_key_missing",
+        ),
     ],
-    ids=["no-key", "no-adapter", "no-model"],
+    ids=["no-key", "no-adapter", "no-model", "fallback-no-key"],
 )
 def test_a_configured_but_broken_provider_refuses_to_start(monkeypatch, env, fragment):
     """Somebody MEANT to configure this and got it wrong. That is not a state to
@@ -223,6 +314,47 @@ def test_a_bad_profile_refuses_to_start(monkeypatch):
     assert "llm_profile_provider_mismatch" in str(caught.value)
     # The provider is named; no value from the profile is interpolated.
     assert "claude-something" not in str(caught.value)
+    get_settings.cache_clear()
+
+
+def test_a_refused_llm_build_closes_the_pooled_client(monkeypatch):
+    """A refused build re-raises the same error and closes the pool it was handed."""
+    _llm_env(monkeypatch, PROVIDER="groq", MODEL="pinned-model", API_KEY="k")
+    refusal = ConfigError("llm_api_key_missing")
+    handed: list[httpx.AsyncClient] = []
+
+    def refuse(settings, http):
+        handed.append(http)
+        raise refusal
+
+    monkeypatch.setattr("dodeal_ai.main.build_llm_client", refuse)
+
+    with pytest.raises(ConfigError) as caught, TestClient(app):
+        pass
+
+    assert caught.value is refusal
+    assert len(handed) == 1
+    assert handed[0].is_closed
+    get_settings.cache_clear()
+
+
+def test_a_refused_llm_build_clears_the_template_cache(monkeypatch):
+    """A refused build leaves no preloaded template behind for the next app."""
+    _llm_env(monkeypatch, PROVIDER="groq", MODEL="pinned-model", API_KEY="k")
+    cache_at_build: list[int] = []
+
+    def refuse(settings, http):
+        cache_at_build.append(len(prompting._TEMPLATE_CACHE))
+        raise ConfigError("llm_api_key_missing")
+
+    monkeypatch.setattr("dodeal_ai.main.build_llm_client", refuse)
+
+    with pytest.raises(ConfigError), TestClient(app):
+        pass
+
+    # Populated when the build ran, so an empty cache below was cleared, not skipped.
+    assert cache_at_build and cache_at_build[0] > 0
+    assert prompting._TEMPLATE_CACHE == {}
     get_settings.cache_clear()
 
 
@@ -262,6 +394,7 @@ def test_http_backend_scheme_logs_an_error(monkeypatch, json_lines):
     assert found, "no backend_scheme_insecure line reached the JSON stream"
     assert found[0]["level"] == "ERROR"
     assert found[0]["logger"] == STARTUP_LOGGER
+    assert found[0]["event"] == SCHEME_EVENT  # register item 121
     get_settings.cache_clear()
 
 
@@ -305,4 +438,61 @@ def test_the_default_scheme_logs_nothing(monkeypatch, json_lines):
         "would pass vacuously"
     )
     assert _events(lines, SCHEME_EVENT) == []
+    get_settings.cache_clear()
+
+
+# --- an explicit Redis pool below the in-flight cap (register item 96) -------
+
+POOL_EVENT = "redis_pool_below_inflight"
+_INFLIGHT = 10
+_REQUIRED_POOL = _INFLIGHT + REDIS_POOL_HEADROOM
+
+
+def _pool_env(monkeypatch, pool: int | None) -> None:
+    """A fixed in-flight cap, and an explicit pool size or none."""
+    monkeypatch.setenv("DODEAL_JWT_SIGNING_KEY", "test-key")
+    monkeypatch.setenv("DODEAL_MAX_INFLIGHT", str(_INFLIGHT))
+    monkeypatch.delenv("DODEAL_REDIS_MAX_CONNECTIONS", raising=False)
+    if pool is not None:
+        monkeypatch.setenv("DODEAL_REDIS_MAX_CONNECTIONS", str(pool))
+    get_settings.cache_clear()
+
+
+def test_a_pool_below_the_inflight_cap_warns_once_with_both_numbers(
+    monkeypatch, json_lines
+):
+    """One WARNING on the startup logger carrying the pool and the size it needs."""
+    _pool_env(monkeypatch, _REQUIRED_POOL - 1)
+
+    with TestClient(app):
+        pass
+
+    found = _events(json_lines(), POOL_EVENT)
+    assert len(found) == 1
+    assert found[0]["level"] == "WARNING"
+    assert found[0]["logger"] == STARTUP_LOGGER
+    assert found[0]["event"] == POOL_EVENT  # register item 121
+    assert found[0]["pool"] == _REQUIRED_POOL - 1
+    assert found[0]["required"] == _REQUIRED_POOL
+    get_settings.cache_clear()
+
+
+@pytest.mark.parametrize(
+    "pool", [_REQUIRED_POOL, _REQUIRED_POOL + 1, None], ids=["equal", "above", "unset"]
+)
+def test_a_pool_at_or_above_the_cap_or_unset_logs_nothing(
+    monkeypatch, json_lines, pool
+):
+    """No line when the pool meets the cap or is derived from it."""
+    _pool_env(monkeypatch, pool)
+
+    with TestClient(app):
+        pass
+
+    # PROVE THE CHANNEL FIRST, as above: an empty capture passes vacuously.
+    logging.getLogger(STARTUP_LOGGER).warning("startup_probe_line count=0")
+
+    lines = json_lines()
+    assert _events(lines, "startup_probe_line")
+    assert _events(lines, POOL_EVENT) == []
     get_settings.cache_clear()

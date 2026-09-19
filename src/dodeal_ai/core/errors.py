@@ -92,6 +92,13 @@ class BackendUnavailableError(DodealError):
         super().__init__("backend_unavailable", 503)
 
 
+class BackendRejectedError(DodealError):
+    """The CRM refused a read with a 4xx we cannot act on (register item 89)."""
+
+    def __init__(self) -> None:
+        super().__init__("backend_rejected", 503)
+
+
 class ModelUnavailableError(DodealError):
     def __init__(self) -> None:
         super().__init__("model_unavailable", 503)
@@ -143,6 +150,26 @@ class LoadShed(DodealError):
 
     def __init__(self) -> None:
         super().__init__("load_shed", 503)
+
+
+class PayloadTooLarge(DodealError):
+    """Refused at the door: the body is larger than `max_request_body_bytes`.
+
+    Like LoadShed, nothing went wrong and nothing was spent -- the request
+    never reached the gate chain, no tenant was resolved, and on the header
+    path not one byte of the body was read. 413 and not 503 because this is
+    about THIS REQUEST'S SIZE: not the service's capacity (LoadShed's 503) and
+    not the caller's quota (Gate 4's 429). A caller reading the code should
+    hear "send less", not "come back later" and not "you have had your share".
+
+    RAISED ONLY INSIDE middleware/body_limit.py, and never rendered by
+    `dodeal_error_handler`: FastAPI wraps any exception out of
+    `await request.body()` into its own `HTTPException(400)`, so the middleware
+    that raises this also sends the response for it. See that module.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("payload_too_large", 413)
 
 
 def _request_id(request: Request) -> str:

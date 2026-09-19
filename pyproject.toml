@@ -11,6 +11,7 @@ dependencies = [
     "redis>=8.1.0",
     "httpx>=0.27.0",
     "arq>=0.25.0",
+    "prometheus-client>=0.21.0",
 ]
 
 [build-system]
@@ -23,10 +24,11 @@ packages = ["src/dodeal_ai"]
 [tool.pytest.ini_options]
   pythonpath = ["."]
   asyncio_mode = "auto"
-  addopts = "--cov=src/dodeal_ai --cov-report=term-missing --cov-report=json -m \"not integration and not redis_real\""
+  addopts = "--cov=src/dodeal_ai --cov-report=term-missing --cov-report=json -m \"not integration and not redis_real and not load\""
   markers = [
     "integration: starts a local ASGI-backed fake HTTP server; excluded from the default run (pytest -m integration to run it).",
     "redis_real: needs a REAL Redis server on the configured URL; excluded from the default run (pytest -m redis_real to run it). The hermetic lane is fakeredis[lua] -- see tests/unit/test_cost_lua.py. Carried by every test under tests/redis_real/.",
+    "load: the whole app in process under concurrent bursts, on a REAL Redis (db 10 cost, db 11 operational, on the DODEAL_REDIS_REAL_URL server, flushed per test); excluded from the default run (pytest -m load --no-cov to run it). Carried by every test under tests/load/.",
     "eval: runs the whole vendored note corpus through the pipeline against FakeLLM. STRUCTURAL only -- it asserts every note yields a Judgement or a Suppressed state and never an exception, not that any judgement is good. Included in the default run: it is hermetic and fast, and a corpus note that crashes the pipeline should break CI. The real-model quality eval is tests/eval/test_quality_eval.py and is skipped unless DODEAL_EVAL_REAL=1.",
   ]
 
@@ -58,6 +60,30 @@ warn_redundant_casts = true
 warn_unused_ignores = true
 no_implicit_optional = true
 plugins = ["pydantic.mypy"]
+
+# The layer rule (register item 13), run as `uv run lint-imports` in CI. Core is
+# the bottom layer and units sit under api and middleware; an import against the
+# arrow fails the chain. Indirect imports count, so a detour does not pass.
+[tool.importlinter]
+root_package = "dodeal_ai"
+
+[[tool.importlinter.contracts]]
+name = "core imports nothing from units, api, middleware or tools"
+type = "forbidden"
+source_modules = ["dodeal_ai.core"]
+forbidden_modules = [
+    "dodeal_ai.units",
+    "dodeal_ai.api",
+    "dodeal_ai.middleware",
+    "dodeal_ai.tools",
+]
+
+[[tool.importlinter.contracts]]
+name = "units import nothing from api or middleware"
+type = "forbidden"
+source_modules = ["dodeal_ai.units"]
+forbidden_modules = ["dodeal_ai.api", "dodeal_ai.middleware"]
+
 [dependency-groups]
 # The ONE dev list. `uv sync` installs from here; a second copy under
 # [project.optional-dependencies] was never installed from and drifted.
@@ -68,6 +94,7 @@ dev = [
     # with the transport rewrite).
     "httpx2>=2.9.1",
     "hypothesis>=6.100.0",
+    "import-linter>=2.15",
     "mypy>=2.3.0",
     # The dependency auditor, locked like every other tool so CI and a hand run
     # use one advisory client. Always run against the EXPORTED lock, never the

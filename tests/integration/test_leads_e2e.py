@@ -17,11 +17,13 @@ from __future__ import annotations
 import httpx
 import pytest
 
-import dodeal_ai.tools.httpx_transport as httpx_transport_module
 from dodeal_ai.core.config import Settings
 from dodeal_ai.core.context import RequestContext, TenantScope
-from dodeal_ai.core.resilience import ExternalCallError
-from dodeal_ai.core.validation import OutputValidationError
+from dodeal_ai.tools.errors import (
+    BackendEnvelopeInvalid,
+    BackendNotFound,
+    BackendUnauthorized,
+)
 from dodeal_ai.tools.httpx_transport import HttpxTransport
 from dodeal_ai.tools.keys import SettingsKeyResolver
 from dodeal_ai.tools.leads import LeadsClient
@@ -35,18 +37,20 @@ def fake_backend() -> FakeBackend:
     return FakeBackend()
 
 
+_HTTP: httpx.AsyncClient | None = None
+
+
 @pytest.fixture(autouse=True)
-def _route_httpx_to_fake_backend(monkeypatch, fake_backend: FakeBackend):
-    """The ONLY thing patched: which transport httpx.AsyncClient uses. Every
-    line HttpxTransport.get_json() runs is the real, unmodified production
-    code path."""
-
-    class _ASGIAsyncClient(httpx.AsyncClient):
-        def __init__(self, *args, **kwargs):
-            kwargs["transport"] = httpx.ASGITransport(app=fake_backend.app)
-            super().__init__(*args, **kwargs)
-
-    monkeypatch.setattr(httpx_transport_module.httpx, "AsyncClient", _ASGIAsyncClient)
+async def _route_httpx_to_fake_backend(fake_backend: FakeBackend):
+    """The ONLY thing faked: the AsyncClient's transport. Every line
+    HttpxTransport.get_json() runs is the real, unmodified production path."""
+    global _HTTP
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=fake_backend.app)
+    ) as http:
+        _HTTP = http
+        yield
+    _HTTP = None
 
 
 def _settings(dd_api_key: str = EXPECTED_API_KEY, tenant: str = "tenant-a") -> Settings:
@@ -59,7 +63,8 @@ def _settings(dd_api_key: str = EXPECTED_API_KEY, tenant: str = "tenant-a") -> S
 
 
 def _client(settings: Settings) -> LeadsClient:
-    return LeadsClient(HttpxTransport(), SettingsKeyResolver(settings), settings)
+    assert _HTTP is not None
+    return LeadsClient(HttpxTransport(_HTTP), SettingsKeyResolver(settings), settings)
 
 
 def _scope(tenant: str = "tenant-a") -> TenantScope:
@@ -104,15 +109,21 @@ async def test_empty_notes_list_is_not_an_error():
 
 async def test_malformed_response_fails_closed_through_real_http():
     client = _client(_settings())
-    with pytest.raises(OutputValidationError):
+    with pytest.raises(BackendEnvelopeInvalid):
         await client.get_lead(_scope(), 999)
 
 
 async def test_wrong_dd_api_key_is_rejected_and_fails_closed(fake_backend):
     client = _client(_settings(dd_api_key="wrong-key"))
-    with pytest.raises(ExternalCallError):
+    with pytest.raises(BackendUnauthorized):
         await client.get_leads(_scope())
     assert fake_backend.last_dd_api_key == "wrong-key"
+
+
+async def test_an_unknown_lead_is_a_typed_404_through_real_http():
+    """Register item 89: the real transport carries the status to the typed error."""
+    with pytest.raises(BackendNotFound):
+        await _client(_settings()).get_lead(_scope(), 424242)
 
 
 async def test_fake_backend_returns_401_with_no_key_header_at_all(fake_backend):

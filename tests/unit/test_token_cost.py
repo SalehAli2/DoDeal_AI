@@ -523,3 +523,67 @@ async def test_the_warning_does_not_deny(monkeypatch, cost):
     )
 
     assert cost.store[USER_KEY] == 500
+
+
+# --- degraded near the budget (register item 61) -----------------------------
+
+
+@pytest.mark.parametrize(
+    ("limit_env", "key", "stored", "budgets"),
+    [
+        ("DODEAL_COST_TOKENS_PER_TENANT_LIMIT", TENANT_KEY, 900, "tenant"),
+        ("DODEAL_COST_TOKENS_PER_USER_LIMIT", USER_KEY, 950, "user"),
+    ],
+    ids=["tenant", "user"],
+)
+async def test_the_preflight_is_degraded_at_ninety_percent(
+    monkeypatch, cost, json_log, limit_env, key, stored, budgets
+):
+    """At or above 90 % of either limit the pre-flight answers True and says so once."""
+    monkeypatch.setenv(limit_env, "1000")
+    get_settings.cache_clear()
+    monkeypatch.setattr(limiter, "get_cost_client", lambda: cost)
+    cost.store[key] = stored
+
+    assert await token_preflight(TEST_SCOPE) is True
+
+    lines = [x for x in _lines(json_log) if x["message"] == "token_budget_degraded"]
+    assert len(lines) == 1
+    assert (lines[0]["budgets"], lines[0]["tenant"]) == (budgets, "tenant-a")
+    assert lines[0]["level"] == "WARNING"
+
+
+async def test_the_preflight_just_under_ninety_percent_is_not_degraded(
+    monkeypatch, cost, json_log
+):
+    """899 of 1000 is a full judgement and no line."""
+    monkeypatch.setenv("DODEAL_COST_TOKENS_PER_TENANT_LIMIT", "1000")
+    get_settings.cache_clear()
+    monkeypatch.setattr(limiter, "get_cost_client", lambda: cost)
+    cost.store[TENANT_KEY] = 899
+
+    assert await token_preflight(TEST_SCOPE) is False
+    assert not [x for x in _lines(json_log) if x["message"] == "token_budget_degraded"]
+
+
+async def test_a_bypassed_preflight_is_not_degraded(monkeypatch, cost):
+    """Fail open means a full judgement: an unread budget is not a near one."""
+    monkeypatch.setattr(limiter, "get_cost_client", lambda: cost)
+    cost.fail = True
+    assert await token_preflight(TEST_SCOPE) is False
+
+
+def test_a_degraded_judgement_logs_the_line_once_for_three_passes(
+    monkeypatch, client, cost, llm, json_log
+):
+    """One judgement near the budget: three calls, 200, and one degraded line."""
+    monkeypatch.setenv("DODEAL_COST_TOKENS_PER_TENANT_LIMIT", "1000")
+    get_settings.cache_clear()
+    cost.store[TENANT_KEY] = 950
+
+    response = client.post(JUDGE, json=_body(), headers=_headers())
+
+    assert response.status_code == 200
+    assert llm.call_count == 3
+    degraded = [x for x in _lines(json_log) if x["message"] == "token_budget_degraded"]
+    assert len(degraded) == 1

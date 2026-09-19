@@ -92,7 +92,9 @@ class Settings(BaseSettings):
     # NEVER a real backend secret committed here.
     # HS256: the shared secret. RS256: the CRM's PUBLIC key (PEM). Field name kept for env
     # stability; it is the verification key.
-    jwt_signing_key: str
+    # SecretStr, so repr(settings) prints `**********` (register item 91). Read
+    # in exactly ONE place: JwtVerifier.verify, with .get_secret_value().
+    jwt_signing_key: SecretStr
 
     # --- Claim-name mapping: the ONE place (read by core/auth/claims.py) ---
     # Tymon JWT carries sub (user id) + subdomain (tenant) +
@@ -100,10 +102,21 @@ class Settings(BaseSettings):
     claim_subject: str = "sub"
     claim_subdomain: str = "subdomain"
     claim_database: str = "database"
-    # --- Input guard: max request body size in bytes (config-driven) ---------
-    # Placeholder cap; tune per real payload sizes later. Guards memory/cost
-    # abuse before any tool/LLM work happens.
-    # max_request_body_bytes: int = 1_000_000
+
+    # --- Input guard: max request body size in bytes (middleware/body_limit.py)
+    # The largest body the app will read. Above it the request is refused with
+    # 413 payload_too_large at the outermost middleware, before Gate 1.
+    #
+    # 64 kB because the largest real note plus its lead fields is well under
+    # 16 kB: this is four times that, so it is a MEMORY BOUND and not a content
+    # rule -- a body under the cap is not thereby valid, and the schemas still
+    # decide that. It does not replace the edge limit (register item 43); it is
+    # the bound that holds when the edge has none.
+    #
+    # ge=1: too small a value makes every judgement a 413, an outage that looks
+    # like the CRM sending bad requests, so the row in .env.example carries the
+    # default rather than leaving it to be guessed.
+    max_request_body_bytes: int = Field(default=65_536, ge=1)
 
     # Backend service credentials, ONE PER TENANT (integration guide §1: a key is valid only against
     # its own tenant host). Keyed by tenant subdomain. Parsed from JSON in the env var, e.g.
@@ -124,6 +137,10 @@ class Settings(BaseSettings):
     # Where versioned prompt files are read from. None = the copies shipped inside the package
     # (src/dodeal_ai/prompts). Set only for local prompt iteration; production uses the package.
     prompts_dir: Path | None = None
+    # Where per-tenant config files live: one `<tenant>.json` each, a section per
+    # unit (register item 97). None = every unit's default for every tenant. A
+    # wrong directory or an invalid file refuses startup, naming the tenant.
+    tenant_config_dir: Path | None = None
     # --- Watchdog: timeout + retry policy for external calls (§6) -----------
     # Placeholder values; tune per real LLM/tool latency later.
     external_call_timeout_seconds: float = 10.0
@@ -159,6 +176,28 @@ class Settings(BaseSettings):
     # a proxy in front. A wrong value sends every prompt to the wrong host, so
     # it is never logged and never carried on an exception.
     llm_base_url: str | None = None
+    # How long a model call waits for a free connection in the pooled client
+    # (register item 112). 1.0 s fails a burst fast as provider_pool_exhausted;
+    # too low refuses a brief queue, too high hides a full pool inside the call.
+    llm_pool_acquire_timeout_seconds: float = Field(default=1.0, gt=0)
+
+    # --- Fallback provider (register item 21), all optional -----------------
+    # The provider tried once when the primary gave no response body (connect
+    # error, 429, 503, breaker open). None = no fallback, the safe default; a
+    # half-configured fallback refuses to start rather than silently not exist.
+    llm_fallback_provider: LLMProvider | None = None
+    # The fallback's exact pinned model id, used for every task: the profile
+    # table is the primary's. Empty with a provider set refuses to start, as the
+    # primary's does; a wrong id costs a failed call only when the primary fails.
+    llm_fallback_model: str = ""
+    # The fallback provider's key. SecretStr, never logged; read only by the
+    # fallback client's header builder. Missing with a provider set refuses to
+    # start rather than send unauthenticated calls at the worst moment.
+    llm_fallback_api_key: SecretStr | None = None
+    # Proxy override for the fallback's base URL. None uses that provider's
+    # constant. A wrong value sends fallback prompts to the wrong host, so it is
+    # never logged and never carried on an exception, as for the primary.
+    llm_fallback_base_url: str | None = None
 
     # Redis connections. Two named connections so code never guesses which
     # instance it is using: a queue connection and a cost/quota connection.
@@ -242,6 +281,18 @@ class Settings(BaseSettings):
     # Above the CRM's timeout, the CRM abandons requests we go on to finish.
     judgement_deadline_seconds: float = Field(default=25.0, gt=0)
 
+    # --- Serving behind a proxy (serve.py, register item 94) ---------------
+    # The proxies whose X-Forwarded-For/-Proto uvicorn believes (comma list).
+    # Loopback only by default, so no forwarded header is trusted by accident;
+    # "*" lets any client forge its address and scheme in every log line.
+    forwarded_allow_ips: str = Field(default="127.0.0.1", min_length=1)
+
+    # --- Metrics (core/metrics.py, register item 22) ------------------------
+    # Whether GET /metrics answers. Off by default: the page is outside the gates,
+    # so it must be switched on only where the port is not public; on anywhere
+    # public, it tells anyone the service's traffic and failure rates.
+    metrics_enabled: bool = False
+
     # --- Logging (core/logging_config.py) ------------------------------
     # Effective level for the "dodeal_ai" logger tree (audit, error, cost,
     # resilience, validation, ...). Third-party libraries are unaffected --
@@ -270,13 +321,14 @@ def _build_settings(**overrides) -> Settings:
     """
     try:
         return Settings(**overrides)
-    except (ValidationError, SettingsError) as exc:
+    except (ValidationError, SettingsError):
         # SettingsError, not ValidationError, is what a JSON field with
         # unparseable text raises (dd_api_keys, llm_profiles). Both mean the
-        # same thing here: the configuration is unusable.
+        # same thing here: the configuration is unusable. `from None`: a
+        # validation error quotes the rejected input, which can be a secret.
         raise ConfigError(
             "Missing or invalid required configuration; refusing to start."
-        ) from exc
+        ) from None
 
 
 @lru_cache

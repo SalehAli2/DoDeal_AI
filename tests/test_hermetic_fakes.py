@@ -281,7 +281,7 @@ def test_a_dotenv_in_the_working_directory_cannot_reach_settings(
     assert settings.llm_provider is None
     assert settings.llm_model == ""
     # The environment still works; it is the FILE that is cut out.
-    assert settings.jwt_signing_key == "key-from-the-environment"
+    assert settings.jwt_signing_key.get_secret_value() == "key-from-the-environment"
 
 
 def test_a_dict_setting_is_not_merged_from_a_dotenv(
@@ -324,4 +324,4 @@ def test_the_explicit_env_file_seam_still_works(
 
     settings = _build_settings(_env_file=named)
 
-    assert settings.jwt_signing_key == "key-from-the-named-file"
+    assert settings.jwt_signing_key.get_secret_value() == "key-from-the-named-file"

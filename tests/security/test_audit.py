@@ -9,8 +9,11 @@ from dodeal_ai.core.audit.logger import audit
 from dodeal_ai.core.auth.dependencies import get_verifier
 from dodeal_ai.core.auth.verify import JwtVerifier
 from dodeal_ai.core.config import Settings
-from dodeal_ai.main import app
 from tests.helpers import tokens
+from tests.helpers.probe_app import probe_app
+
+# Register item 93: the served app has no probe route, so these mount it.
+app = probe_app()
 
 
 def test_allow_is_info_deny_is_warning(json_log):

@@ -26,8 +26,12 @@ sections in that order; don't interleave stable and variable content.
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+
+_logger = logging.getLogger("dodeal_ai.prompting")
 
 # The prompts shipped inside the package, next to core/. Always present in an
 # installed copy, unlike a repo-root directory that a wheel does not include.
@@ -89,14 +93,76 @@ def _prompts_dir() -> Path:
     return override if override is not None else _DEFAULT_PROMPTS_DIR
 
 
-def _load_template(name: str) -> str:
-    """Load a versioned prompt template from prompts/ by filename. Missing file
-    is a hard error — a prompt must exist as a tracked file, never inline."""
+def _read_template_file(name: str) -> str:
+    """THE ONE DISK READ IN THIS MODULE. Both the startup preload and the
+    uncached fallback go through here, so a test can count reads by patching a
+    single name rather than Path.read_text globally.
+
+    Missing file is a hard error -- a prompt must exist as a tracked file, never
+    inline. The message names the TEMPLATE and not the resolved path: it travels
+    into a log line, and the path carries the deployment's directory layout.
+    """
     path = _prompts_dir() / name
     try:
         return path.read_text(encoding="utf-8").strip()
     except OSError as exc:
         raise PromptError(f"prompt template not found: {name}") from exc
+
+
+# Template name -> stripped text, filled once by the lifespan so a judgement
+# makes no disk read. Empty outside a running app, where _load_template falls
+# back to disk: scripts, the wheel check and a tmp-dir test keep working. Left
+# populated past shutdown it would serve the old app's text to the new one.
+_TEMPLATE_CACHE: dict[str, str] = {}
+
+# Names that have logged prompt_template_not_preloaded, so a template the
+# preload missed warns once per app rather than on every judgement. Cleared with
+# the cache, so the next app in the process warns again.
+_WARNED_NOT_PRELOADED: set[str] = set()
+
+
+def preload_templates(names: Iterable[str]) -> None:
+    """Read every named template now, once, and hold it for the app's life.
+
+    Called from the lifespan before any socket exists. The FIRST missing file
+    raises PromptError and the process refuses to start: a deployment whose
+    prompts are not all present is a defect, not a degraded state, and
+    discovering it on the first paid call costs a judgement to learn.
+
+    Built into a local mapping and published only once every name resolved, so
+    a refused startup leaves no half-populated cache behind for whatever catches
+    the error.
+    """
+    loaded = {name: _read_template_file(name) for name in names}
+    _TEMPLATE_CACHE.update(loaded)
+
+
+def clear_templates() -> None:
+    """Empty the cache and forget which names have warned. The shutdown half of
+    preload_templates."""
+    _TEMPLATE_CACHE.clear()
+    _WARNED_NOT_PRELOADED.clear()
+
+
+def _load_template(name: str) -> str:
+    """This template's text: the preloaded copy when there is one, otherwise a
+    read from prompts/ exactly as before the cache existed.
+
+    A miss while the cache is populated means a running app is sending a
+    template the preload never named: a disk read on the event loop, and an
+    absent file found on a paid call rather than at startup. That logs one
+    WARNING per name. An empty cache is a script, the wheel check or a tmp-dir
+    test, and logs nothing.
+    """
+    cached = _TEMPLATE_CACHE.get(name)
+    if cached is not None:
+        return cached
+    if _TEMPLATE_CACHE and name not in _WARNED_NOT_PRELOADED:
+        _WARNED_NOT_PRELOADED.add(name)
+        # The template name only: never the resolved path, which carries the
+        # deployment's directory layout.
+        _logger.warning("prompt_template_not_preloaded", extra={"template": name})
+    return _read_template_file(name)
 
 
 def build_prompt(template_name: str, caller_data: str) -> AssembledPrompt:

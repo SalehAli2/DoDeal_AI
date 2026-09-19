@@ -77,6 +77,12 @@ class LLMErrorReason(str, Enum):
     AUTH = "auth"
     INVALID_REQUEST = "invalid_request"
     UNKNOWN = "unknown"
+    # Our own pool had no free connection: the provider was never asked
+    # (register item 112), so this is not a timeout.
+    PROVIDER_POOL_EXHAUSTED = "provider_pool_exhausted"
+    # This provider's circuit breaker is open: refused with no socket opened
+    # (register item 20).
+    BREAKER_OPEN = "breaker_open"
 
 
 class LLMProviderError(Exception):

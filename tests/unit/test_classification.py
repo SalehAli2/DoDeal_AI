@@ -215,6 +215,10 @@ async def test_a_provider_failure_leaks_no_provider_text(caplog):
         (LLMErrorReason.RATE_LIMITED, True),
         (LLMErrorReason.UNAVAILABLE, True),
         (LLMErrorReason.AUTH, False),
+        # Register item 112: the caller's 503 model_unavailable, its own reason.
+        (LLMErrorReason.PROVIDER_POOL_EXHAUSTED, True),
+        # Register item 20: an open provider breaker is the same 503.
+        (LLMErrorReason.BREAKER_OPEN, True),
     ],
 )
 async def test_the_outcome_line_carries_the_provider_reason_as_a_field(

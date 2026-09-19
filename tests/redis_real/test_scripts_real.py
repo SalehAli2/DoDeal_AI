@@ -30,19 +30,38 @@ from dodeal_ai.core.cost.limiter import (
     _token_keys,
 )
 from dodeal_ai.units.structured_intelligence.config import get_tenant_config
+from dodeal_ai.units.structured_intelligence.decide import decide
 from dodeal_ai.units.structured_intelligence.pipeline import (
     IDEMPOTENCY_INFLIGHT_MULTIPLIER,
+    RATE_LIMIT_DAY_WINDOW_SECONDS,
+)
+from dodeal_ai.units.structured_intelligence.schemas import (
+    Decision,
+    NoteAnalysis,
+    NoteScore,
+    NoteType,
+    PromptWithheld,
 )
 from dodeal_ai.units.structured_intelligence.state import (
-    _CONFIRMED,
     _RESERVED,
-    _TAKE_RATE_LIMIT_SCRIPT,
+    _SLOTS_ALLOWED,
+    _SLOTS_DENIED_BY_ATTEMPT,
+    _SLOTS_DENIED_BY_RATE,
+    _TAKE_OVER_SCRIPT,
+    _TAKE_PROMPT_SLOTS_SCRIPT,
     _TTL_NO_EXPIRY,
+    _attempt_key,
     _idempotency_key,
+    _prompt_slots_answer,
+    _rate_limit_day_key,
     _rate_limit_key,
 )
 
 pytestmark = [pytest.mark.redis_real, pytest.mark.asyncio(loop_scope="session")]
+
+# What a confirmed key holds since items 1 and 2: judgement JSON. Its content is
+# not what these SET XX tests are about, only that it replaces the reservation.
+_CONFIRMED = '{"note_id": 42}'
 
 _TENANT = "tenant-a"
 _SUBJECT = "user-1"
@@ -99,24 +118,31 @@ async def test_the_cost_window_is_set_on_create_and_only_on_create(
         assert await real_redis.ttl(key) <= _WINDOW
 
 
-async def test_a_cost_key_without_a_ttl_never_gains_one(
+async def test_a_cost_key_without_a_ttl_gains_the_window(
     real_redis: redis_async.Redis, cost_keys: tuple[str, str]
 ) -> None:
-    """Counterpart: test_a_pre_existing_key_without_a_ttl_never_gains_one.
+    """Counterpart: test_a_pre_existing_key_without_a_ttl_gains_the_window."""
+    for key in cost_keys:
+        await real_redis.set(key, 1)
+        assert await real_redis.ttl(key) == _TTL_NO_EXPIRY
 
-    Audit M4, pinned as it behaves TODAY, as its counterpart pins it: the request
-    script sets EXPIRE only on create, so a counter that exists without a window
-    keeps counting forever. The M4 fix changes this test and its counterpart in
-    the same commit.
-    """
-    tenant_key, user_key = cost_keys
-    await real_redis.set(tenant_key, 1)
-    assert await real_redis.ttl(tenant_key) == _TTL_NO_EXPIRY
+    await _incr_both_with_window(real_redis, *cost_keys, 1, _WINDOW)
 
-    await _incr_both_with_window(real_redis, tenant_key, user_key, 1, _WINDOW)
+    for key in cost_keys:
+        assert 0 < await real_redis.ttl(key) <= _WINDOW
 
-    assert await real_redis.ttl(tenant_key) == _TTL_NO_EXPIRY
-    _assert_window(await real_redis.ttl(user_key))
+
+async def test_a_cost_key_with_a_ttl_keeps_it(
+    real_redis: redis_async.Redis, cost_keys: tuple[str, str]
+) -> None:
+    """Counterpart: test_a_pre_existing_key_with_a_ttl_keeps_it."""
+    for key in cost_keys:
+        await real_redis.set(key, 1, ex=_WINDOW)
+
+    await _incr_both_with_window(real_redis, *cost_keys, 1, _WINDOW * 100)
+
+    for key in cost_keys:
+        assert 0 < await real_redis.ttl(key) <= _WINDOW
 
 
 # --- (b) the token script, and the line between the two ---------------------
@@ -148,19 +174,31 @@ async def test_the_token_window_is_set_on_create_and_only_on_create(
         assert await real_redis.ttl(key) <= _WINDOW
 
 
-async def test_a_token_key_without_a_ttl_never_gains_one(
+async def test_a_token_key_without_a_ttl_gains_the_window(
     real_redis: redis_async.Redis, token_keys: tuple[str, str]
 ) -> None:
-    """No hermetic counterpart. test_cost_lua.py pins M4 on the request script
-    only; the token script has the same EXISTS-then-EXPIRE shape and, as this
-    shows, the same edge. Pinned as it behaves today, like the request script."""
-    tenant_key, user_key = token_keys
-    await real_redis.set(tenant_key, 1)
+    """Counterpart: test_a_token_counter_without_a_ttl_gains_the_window."""
+    for key in token_keys:
+        await real_redis.set(key, 1)
+        assert await real_redis.ttl(key) == _TTL_NO_EXPIRY
 
-    await _add_tokens_with_window(real_redis, tenant_key, user_key, 120, _WINDOW)
+    await _add_tokens_with_window(real_redis, *token_keys, 120, _WINDOW)
 
-    assert await real_redis.ttl(tenant_key) == _TTL_NO_EXPIRY
-    _assert_window(await real_redis.ttl(user_key))
+    for key in token_keys:
+        assert 0 < await real_redis.ttl(key) <= _WINDOW
+
+
+async def test_a_token_key_with_a_ttl_keeps_it(
+    real_redis: redis_async.Redis, token_keys: tuple[str, str]
+) -> None:
+    """Counterpart: test_a_token_counter_with_a_ttl_keeps_it."""
+    for key in token_keys:
+        await real_redis.set(key, 1, ex=_WINDOW)
+
+    await _add_tokens_with_window(real_redis, *token_keys, 120, _WINDOW * 100)
+
+    for key in token_keys:
+        assert 0 < await real_redis.ttl(key) <= _WINDOW
 
 
 async def test_charging_tokens_leaves_the_request_counters_alone(
@@ -194,9 +232,16 @@ async def test_counting_a_request_leaves_the_token_counters_alone(
     assert sorted(stored) == sorted([*cost_keys, *token_keys])
 
 
-# --- (c) the rate limit's script: the check IS the increment ----------------
+# --- (c) the prompt-slots script: each check IS its increment ---------------
 
+_NOTE_ID = 10
+_ATTEMPT_CAP = 1
+_ATTEMPT_TTL = 600
 _RATE_LIMIT = 3
+# Register item 66: the daily ceiling beside the hourly one. Kept high in most
+# tests here so the hourly guard is the one being exercised.
+_RATE_LIMIT_DAY = 10
+_WINDOW_DAY = 86400
 
 
 @pytest.fixture
@@ -204,72 +249,172 @@ def rate_key(key_prefix: str) -> str:
     return key_prefix + _rate_limit_key(_TENANT, _SUBJECT)
 
 
+@pytest.fixture
+def rate_day_key(key_prefix: str) -> str:
+    return key_prefix + _rate_limit_day_key(_TENANT, _SUBJECT)
+
+
+@pytest.fixture
+def attempt_key(key_prefix: str) -> str:
+    return key_prefix + _attempt_key(_TENANT, _NOTE_ID)
+
+
 async def _take(
     client: redis_async.Redis,
-    key: str,
+    attempt_key: str,
+    rate_key: str,
+    rate_day_key: str,
     *,
+    cap: int = _ATTEMPT_CAP,
     limit: int = _RATE_LIMIT,
     window: int = _WINDOW,
+    limit_day: int = _RATE_LIMIT_DAY,
+    window_day: int = _WINDOW_DAY,
 ) -> list[int]:
-    """One raw execution of the imported script: [allowed, count before]."""
-    return await client.eval(_TAKE_RATE_LIMIT_SCRIPT, 1, key, limit, window)
+    """One raw execution of the imported script: [outcome, attempts, rate count]."""
+    return await client.eval(
+        _TAKE_PROMPT_SLOTS_SCRIPT,
+        3,
+        attempt_key,
+        rate_key,
+        rate_day_key,
+        cap,
+        _ATTEMPT_TTL,
+        limit,
+        window,
+        limit_day,
+        window_day,
+    )
 
 
-async def test_the_rate_script_allows_up_to_the_limit_and_returns_the_count_before(
-    real_redis: redis_async.Redis, rate_key: str
+async def test_the_rate_slots_run_out_across_notes_with_the_count_before(
+    real_redis: redis_async.Redis, key_prefix: str, rate_key: str, rate_day_key: str
 ) -> None:
-    """Counterparts: test_the_rate_script_increments_only_under_the_limit,
-    test_the_rate_script_returns_the_count_before_the_call."""
-    replies = [await _take(real_redis, rate_key) for _ in range(_RATE_LIMIT + 1)]
+    """Counterpart: test_the_rate_slots_run_out_across_notes."""
+    notes = [key_prefix + _attempt_key(_TENANT, n) for n in (10, 11, 12, 13)]
+    replies = [await _take(real_redis, note, rate_key, rate_day_key) for note in notes]
 
-    assert replies == [[1, 0], [1, 1], [1, 2], [0, 3]]
+    assert replies == [
+        [_SLOTS_ALLOWED, 1, 0],
+        [_SLOTS_ALLOWED, 1, 1],
+        [_SLOTS_ALLOWED, 1, 2],
+        [_SLOTS_DENIED_BY_RATE, 0, _RATE_LIMIT],
+    ]
     assert await real_redis.get(rate_key) == str(_RATE_LIMIT)
+    assert await real_redis.exists(notes[-1]) == 0
 
 
-async def test_the_rate_window_is_set_when_the_counter_is_created(
-    real_redis: redis_async.Redis, rate_key: str
+async def test_the_attempt_cap_denies_and_leaves_the_rate_key_untouched(
+    real_redis: redis_async.Redis, attempt_key: str, rate_key: str, rate_day_key: str
 ) -> None:
-    """Counterparts: the same name, and test_a_later_slot_does_not_refresh_the_rate_window."""
-    await _take(real_redis, rate_key)
-    _assert_window(await real_redis.ttl(rate_key))
+    """Counterpart: the same name."""
+    await real_redis.set(attempt_key, _ATTEMPT_CAP)
 
-    await _take(real_redis, rate_key, window=_WINDOW * 100)
-    assert await real_redis.ttl(rate_key) <= _WINDOW
+    assert await _take(real_redis, attempt_key, rate_key, rate_day_key) == [
+        _SLOTS_DENIED_BY_ATTEMPT,
+        _ATTEMPT_CAP,
+        0,
+    ]
+    assert await real_redis.exists(rate_key) == 0
+    assert await real_redis.exists(rate_day_key) == 0
+    assert await real_redis.ttl(attempt_key) == _TTL_NO_EXPIRY
 
 
-async def test_a_rate_key_without_a_ttl_gains_one_on_the_next_slot(
-    real_redis: redis_async.Redis, rate_key: str
+async def test_the_rate_limit_denies_and_leaves_the_attempt_key_untouched(
+    real_redis: redis_async.Redis, attempt_key: str, rate_key: str, rate_day_key: str
 ) -> None:
-    """Counterpart: the same name. Audit M4, repaired for this key."""
-    await real_redis.set(rate_key, 1)
+    """Counterpart: the same name."""
+    await real_redis.set(rate_key, _RATE_LIMIT)
+
+    assert await _take(real_redis, attempt_key, rate_key, rate_day_key) == [
+        _SLOTS_DENIED_BY_RATE,
+        0,
+        _RATE_LIMIT,
+    ]
+    assert await real_redis.exists(attempt_key) == 0
+    assert await real_redis.exists(rate_day_key) == 0
     assert await real_redis.ttl(rate_key) == _TTL_NO_EXPIRY
 
-    await _take(real_redis, rate_key)
 
+async def test_both_windows_are_set_on_create_and_only_on_create(
+    real_redis: redis_async.Redis, attempt_key: str, rate_key: str, rate_day_key: str
+) -> None:
+    """Counterparts: test_both_windows_are_set_when_the_counters_are_created,
+    test_a_later_take_does_not_refresh_either_window."""
+    await _take(real_redis, attempt_key, rate_key, rate_day_key, cap=2)
+    _assert_window(await real_redis.ttl(attempt_key), _ATTEMPT_TTL)
     _assert_window(await real_redis.ttl(rate_key))
+    _assert_window(await real_redis.ttl(rate_day_key), _WINDOW_DAY)
+
+    await _take(
+        real_redis, attempt_key, rate_key, rate_day_key, cap=2, window=_WINDOW * 100
+    )
+    assert await real_redis.ttl(attempt_key) <= _ATTEMPT_TTL
+    assert await real_redis.ttl(rate_key) <= _WINDOW
+    assert await real_redis.ttl(rate_day_key) <= _WINDOW_DAY
+
+
+async def test_keys_without_a_ttl_gain_one_on_the_next_take(
+    real_redis: redis_async.Redis, attempt_key: str, rate_key: str, rate_day_key: str
+) -> None:
+    """Counterpart: the same name. Audit M4, repaired for all three keys."""
+    await real_redis.set(attempt_key, 1)
+    await real_redis.set(rate_key, 1)
+    await real_redis.set(rate_day_key, 1)
+
+    await _take(real_redis, attempt_key, rate_key, rate_day_key, cap=2)
+
+    _assert_window(await real_redis.ttl(attempt_key), _ATTEMPT_TTL)
+    _assert_window(await real_redis.ttl(rate_key))
+    _assert_window(await real_redis.ttl(rate_day_key), _WINDOW_DAY)
 
 
 async def test_concurrent_slots_are_taken_exactly_up_to_the_limit(
-    real_redis: redis_async.Redis, rate_key: str
+    real_redis: redis_async.Redis, key_prefix: str, rate_key: str, rate_day_key: str
 ) -> None:
     """No hermetic counterpart: fakeredis runs in-process, so nothing there is
-    ever concurrent. Here the gathered EVALs each take their own connection and
-    reach one server at once -- register item 27's claim that two judgements
-    cannot both take the last slot.
+    ever concurrent. Here the gathered EVALs, each on its own note, reach one
+    server at once -- register item 27's claim that two judgements cannot both
+    take the last slot.
 
     Exact, not "at most": every allowed reply saw a DIFFERENT count before it, and
     every refused one saw the full count.
     """
     limit = 10
     replies = await asyncio.gather(
-        *(_take(real_redis, rate_key, limit=limit) for _ in range(limit + 5))
+        *(
+            _take(
+                real_redis,
+                key_prefix + _attempt_key(_TENANT, note_id),
+                rate_key,
+                rate_day_key,
+                limit=limit,
+            )
+            for note_id in range(limit + 5)
+        )
     )
 
-    allowed = sorted(count for ok, count in replies if ok == 1)
-    refused = [count for ok, count in replies if ok == 0]
+    allowed = sorted(rate for outcome, _, rate in replies if outcome == _SLOTS_ALLOWED)
+    refused = [rate for outcome, _, rate in replies if outcome == _SLOTS_DENIED_BY_RATE]
     assert allowed == list(range(limit))
     assert refused == [limit] * 5
     assert await real_redis.get(rate_key) == str(limit)
+
+
+async def test_concurrent_takes_on_one_note_have_exactly_one_winner(
+    real_redis: redis_async.Redis, attempt_key: str, rate_key: str, rate_day_key: str
+) -> None:
+    """No hermetic counterpart. Register item 119's claim: ten takes for one note
+    reaching the server at once send one question, and the other nine read the cap
+    back without taking a rate slot."""
+    replies = await asyncio.gather(
+        *(_take(real_redis, attempt_key, rate_key, rate_day_key) for _ in range(10))
+    )
+
+    outcomes = [outcome for outcome, _, _ in replies]
+    assert outcomes.count(_SLOTS_ALLOWED) == 1
+    assert outcomes.count(_SLOTS_DENIED_BY_ATTEMPT) == 9
+    assert await real_redis.mget(attempt_key, rate_key) == ["1", "1"]
 
 
 # --- (d) the reservation: SET NX EX, SET XX EX, DEL -------------------------
@@ -351,6 +496,43 @@ async def test_a_confirm_replaces_the_value_and_the_ttl(
     assert duplicate is None
 
 
+async def test_the_take_over_replaces_only_the_value_it_read(
+    real_redis: redis_async.Redis, reservation_key: str
+) -> None:
+    """Counterparts: the take-over tests in test_cost_lua.py. A changed value is
+    left alone; the value read becomes the reservation with the short TTL."""
+    await real_redis.set(reservation_key, "stale", ex=_LONG_TTL)
+
+    refused = await real_redis.eval(
+        _TAKE_OVER_SCRIPT, 1, reservation_key, "other", _RESERVED, _SHORT_TTL
+    )
+    assert int(refused) == 0
+    assert await real_redis.get(reservation_key) == "stale"
+
+    taken = await real_redis.eval(
+        _TAKE_OVER_SCRIPT, 1, reservation_key, "stale", _RESERVED, _SHORT_TTL
+    )
+    assert int(taken) == 1
+    assert await real_redis.get(reservation_key) == _RESERVED
+    _assert_window(await real_redis.ttl(reservation_key), _SHORT_TTL)
+
+
+async def test_concurrent_take_overs_have_exactly_one_winner(
+    real_redis: redis_async.Redis, reservation_key: str
+) -> None:
+    """Ten duplicates that read the same invalid value: one takes it over."""
+    await real_redis.set(reservation_key, "stale", ex=_LONG_TTL)
+    results = await asyncio.gather(
+        *(
+            real_redis.eval(
+                _TAKE_OVER_SCRIPT, 1, reservation_key, "stale", _RESERVED, _SHORT_TTL
+            )
+            for _ in range(10)
+        )
+    )
+    assert sorted(int(r) for r in results) == [0] * 9 + [1]
+
+
 async def test_a_release_frees_the_note_for_a_new_reservation(
     real_redis: redis_async.Redis, reservation_key: str
 ) -> None:
@@ -362,3 +544,81 @@ async def test_a_release_frees_the_note_for_a_new_reservation(
     assert await real_redis.exists(reservation_key) == 0
     reclaim = await real_redis.set(reservation_key, _RESERVED, nx=True, ex=_SHORT_TTL)
     assert reclaim is True
+
+
+# --- (e) one question per note, text A then text B (register item 120) -----
+
+# A judgement that asks: a total of 69 accepts with a flag, and the note is vague.
+_CONFIG = get_tenant_config(_TENANT)
+_SCORE = NoteScore(total=69, band=_CONFIG.band_for(69), denominator=80, components=[])
+_ANALYSIS = NoteAnalysis(
+    note_type=NoteType.DISCOVERY,
+    is_vague=True,
+    missing_components=[],
+    clarification_prompt="Which day is the follow-up?",
+    reasoning="...",
+)
+
+
+async def _judge_prompt(
+    client: redis_async.Redis, attempt_key: str, rate_key: str, rate_day_key: str
+) -> Decision:
+    """One judgement's prompt decision, in the pipeline's order: step 5 reads the
+    attempts, a provisional decide picks the trip, step 8 takes both slots only
+    when a prompt would be sent, and decide runs again on what the store said."""
+    read = int(await client.get(attempt_key) or 0)
+
+    def _decide(attempts: int, rate_allowed: bool, rate_count: int) -> Decision:
+        return decide(
+            _SCORE,
+            _ANALYSIS,
+            attempts=attempts,
+            rate_allowed=rate_allowed,
+            rate_count=rate_count,
+            config=_CONFIG,
+            resubmission=False,
+        )
+
+    if not _decide(read, True, 0).prompt_sent:
+        return _decide(read, True, 0)
+    reply = await client.eval(
+        _TAKE_PROMPT_SLOTS_SCRIPT,
+        3,
+        attempt_key,
+        rate_key,
+        rate_day_key,
+        _CONFIG.clarification_cap,
+        _CONFIG.attempt_ttl_seconds,
+        _CONFIG.rate_limit_per_hour,
+        _CONFIG.rate_limit_window_seconds,
+        _CONFIG.rate_limit_per_day,
+        RATE_LIMIT_DAY_WINDOW_SECONDS,
+    )
+    return _decide(*_prompt_slots_answer(reply))
+
+
+async def test_text_a_then_text_b_on_one_note_withholds_the_second_at_the_cap(
+    real_redis: redis_async.Redis,
+    key_prefix: str,
+    attempt_key: str,
+    rate_key: str,
+    rate_day_key: str,
+) -> None:
+    """No hermetic counterpart at this depth. Text B is a new fingerprint, so its
+    reservation is claimed rather than refused, and with no flush between the two
+    the second judgement withholds at attempt_cap with the counter still at 1."""
+    decisions = []
+    # Two inert digests stand for text A and text B; neither is derived from a note.
+    for digest in ("a" * 64, "b" * 64):
+        reservation = key_prefix + _idempotency_key(_TENANT, _NOTE_ID, digest)
+        claimed = await real_redis.set(reservation, _RESERVED, nx=True, ex=_SHORT_TTL)
+        assert claimed is True
+        decisions.append(
+            await _judge_prompt(real_redis, attempt_key, rate_key, rate_day_key)
+        )
+
+    assert [d.prompt_sent for d in decisions] == [True, False]
+    assert decisions[1].prompt_withheld is PromptWithheld.ATTEMPT_CAP
+    assert decisions[1].attempt == 1
+    assert await real_redis.mget(attempt_key, rate_key) == ["1", "1"]
+    _assert_window(await real_redis.ttl(attempt_key), _CONFIG.attempt_ttl_seconds)

@@ -35,14 +35,20 @@ fails closed. The confirm fails OPEN (idempotency_confirm_bypassed): a lost
 confirm leaves the short reservation to expire, and a duplicate after that is
 judged again, which costs money but is never wrong.
 
+A CONFIRMED KEY HOLDS THE VALIDATED JUDGEMENT (register items 1 and 2), as JSON,
+so a duplicate is answered from it with no model call. Reading it back fails
+closed like the reservation; a value that no longer validates is taken over by
+one script and judged again.
+
 EVERY call here runs inside `operational_breaker` (core/breaker.py). BreakerOpen
 is a RedisError, so a refusal takes the same branch: the two politeness guards
 bypass, and the reservation still 503s.
 
-ONE LUA SCRIPT: the rate limit's check IS its increment (register item 27), so
-two judgements cannot both take the last slot; it runs on fakeredis[lua] in
-tests/unit/test_cost_lua.py. The attempt counter stays sequential INCR/EXPIRE,
-where a lost race only re-sets the same TTL.
+ONE LUA SCRIPT FOR BOTH GUARDS (register items 27 and 119): the attempt cap and
+the rate limit are checked and taken in one execution, and the check IS the
+increment. Two judgements for one note cannot both take its one attempt, and
+two for one subject cannot both take the last slot. It runs on fakeredis[lua]
+in tests/unit/test_cost_lua.py.
 
 KEY VALUES ARE NEVER LOGGED. The idempotency key embeds a fingerprint of the
 note text; logging it would put a stable identifier for a specific note body
@@ -57,25 +63,27 @@ import hashlib
 import logging
 
 import redis
-from redis import asyncio as redis_async
 
+from dodeal_ai.core import metrics
 from dodeal_ai.core.breaker import breaker_field, operational_breaker
 from dodeal_ai.core.redis import get_operational_client
 
 _logger = logging.getLogger("dodeal_ai.unit_a.state")
 
-# A reservation only has to EXIST; nothing ever reads its value back. A fixed
-# inert byte keeps note-derived content out of the store as well as the log.
+# What an in-flight reservation holds: a fixed inert byte, told apart from a
+# confirmed key's judgement JSON when a duplicate reads it back.
 _RESERVED = "1"
-# What a CONFIRMED key holds: as inert as _RESERVED, and different from it, so a
-# Redis console shows which of the two states a key is in. A seam for D3, which
-# will store the judgement itself here instead of this marker.
-_CONFIRMED = "done"
 
-# TTL sentinels redis returns for a key that has no expiry set and for a key
-# that is absent. -1 is the M4 edge: a key that survived without a TTL would
+# The TTL redis returns for a key that has no expiry set: the `-1` in the
+# prompt-slots script. The M4 edge: a key that survived without a TTL would
 # otherwise pin a user's rate limit or a note's attempt count forever.
 _TTL_NO_EXPIRY = -1
+
+# The script's first reply element: which guard refused the prompt, or neither.
+# The Lua below returns these numbers; the two must be edited together.
+_SLOTS_DENIED_BY_ATTEMPT = 0
+_SLOTS_DENIED_BY_RATE = 1
+_SLOTS_ALLOWED = 2
 
 
 class IdempotencyUnavailableError(Exception):
@@ -118,26 +126,35 @@ def _rate_limit_key(tenant: str, subject: str) -> str:
     return f"ratelimit:{tenant}:{subject}"
 
 
-def _attempt_key(tenant: str, lead_id: int, note_id: int) -> str:
-    return f"attempt:{tenant}:{lead_id}:{note_id}"
+# Register item 66: the daily ceiling on the same subject, a separate key so it
+# keeps its own window instead of sharing (and resetting) the hourly one.
+def _rate_limit_day_key(tenant: str, subject: str) -> str:
+    return f"ratelimit_day:{tenant}:{subject}"
 
 
-def _attempt_fingerprint_key(tenant: str, lead_id: int, note_id: int) -> str:
-    """Beside the attempt counter, same (tenant, lead, note), same TTL.
+# Register item 118: the note alone, never the lead. A lead id is the caller's
+# to send, so a key that carried it gave every new lead id a fresh allowance.
+def _attempt_key(tenant: str, note_id: int) -> str:
+    return f"attempt:{tenant}:{note_id}"
+
+
+def _attempt_fingerprint_key(tenant: str, note_id: int) -> str:
+    """Beside the attempt counter, same (tenant, note), same TTL.
 
     A SECOND KEY rather than a hash holding both. The two are written in the
     same breath and expire on the same TTL, so the only thing a hash would add
     is that they expire on ONE ttl instead of two identical ones -- and it would
-    cost the fork of _incr_with_window, which the rate limit and the attempt
-    counter share today. See the phase report for the full comparison.
+    turn the prompt-slots script's INCR on the counter into an HINCRBY. See the
+    phase report for the full comparison.
     """
-    return f"attempt_fp:{tenant}:{lead_id}:{note_id}"
+    return f"attempt_fp:{tenant}:{note_id}"
 
 
 def _bypass(code: str, tenant: str, request_id: str, exc: BaseException) -> None:
     """One WARNING per bypassed call. Tenant and request_id only -- both are
     identifiers we already log at the gates, neither is note-derived -- plus
     `breaker: open` when the breaker refused rather than the store failing."""
+    metrics.BYPASSES.labels(event=code).inc()
     _logger.warning(
         code,
         extra={
@@ -147,22 +164,6 @@ def _bypass(code: str, tenant: str, request_id: str, exc: BaseException) -> None
             **breaker_field(exc),
         },
     )
-
-
-async def _incr_with_window(client: redis_async.Redis, key: str, ttl: int) -> int:
-    """INCR, then set the window's expiry when the key is NEW or has no TTL.
-
-    The `or` short-circuits, so a brand-new key costs one INCR and one EXPIRE
-    and never calls TTL. The TTL == -1 branch is audit finding M4 carried over
-    to db2: the cost limiter's Lua sets EXPIRE only on create, so a key that
-    somehow exists without a TTL never expires. Here that key would pin a
-    note's attempt count forever, silently withholding every future
-    clarification prompt. The rate limit's own script carries the same guard.
-    """
-    count = int(await client.incr(key))
-    if count == 1 or int(await client.ttl(key)) == _TTL_NO_EXPIRY:
-        await client.expire(key, ttl)
-    return count
 
 
 # --- idempotency: fails CLOSED ---------------------------------------------
@@ -233,11 +234,13 @@ async def confirm_idempotency(
     note_id: int,
     fingerprint: str,
     *,
+    judgement_json: str,
     ttl: int,
     request_id: str,
 ) -> None:
-    """The judgement exists: keep the reservation for the long TTL.
+    """The judgement exists: store it under the key for the long TTL.
 
+    `judgement_json` is the validated judgement and nothing else (items 1, 2).
     SET XX EX, so this only ever REPLACES the reservation this request holds and
     never creates one. A key that has already expired stays gone -- writing it
     back would lock the note on the strength of a reservation nobody holds.
@@ -250,54 +253,184 @@ async def confirm_idempotency(
     key = _idempotency_key(tenant, note_id, fingerprint)
     try:
         await operational_breaker().call(
-            lambda: get_operational_client().set(key, _CONFIRMED, xx=True, ex=ttl)
+            lambda: get_operational_client().set(key, judgement_json, xx=True, ex=ttl)
         )
     except redis.RedisError as exc:
         # No key material in the line, as for the reservation beside it.
         _bypass("idempotency_confirm_bypassed", tenant, request_id, exc)
 
 
-# --- rate limit: fails OPEN ------------------------------------------------
+async def read_confirmed_judgement(
+    tenant: str,
+    note_id: int,
+    fingerprint: str,
+    *,
+    request_id: str,
+) -> str | None:
+    """The stored judgement JSON a duplicate replays, or None while the key is
+    only reserved (or has gone). Untrusted until the caller validates it.
+
+    Fails CLOSED like the reservation: an unanswered read raises
+    IdempotencyUnavailableError rather than guess whether to judge.
+    """
+    key = _idempotency_key(tenant, note_id, fingerprint)
+    try:
+        raw = await operational_breaker().call(
+            lambda: get_operational_client().get(key)
+        )
+    except redis.RedisError as exc:
+        _bypass("idempotency_unavailable", tenant, request_id, exc)
+        raise IdempotencyUnavailableError() from None
+    if raw is None or raw == _RESERVED:
+        return None
+    assert isinstance(raw, str)  # decode_responses=True, as for the reference
+    return raw
 
 
-# Take one slot or refuse, in one execution: the check IS the increment. The
-# window is set on creation and on a key with none (audit M4, as in
-# _incr_with_window). ARGV[1] is the limit, ARGV[2] the window.
-_TAKE_RATE_LIMIT_SCRIPT = """
-local count = tonumber(redis.call('GET', KEYS[1]) or '0')
-if count >= tonumber(ARGV[1]) then
-  return {0, count}
+# KEYS[1] the idempotency key. ARGV: the value read, the reservation marker, the
+# short TTL. Replaces the value only if it is still the one read, so two
+# duplicates that met the same invalid judgement cannot both take it over.
+_TAKE_OVER_SCRIPT = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
+  return 1
+end
+return 0
+"""
+
+
+async def take_over_idempotency(
+    tenant: str,
+    note_id: int,
+    fingerprint: str,
+    *,
+    expected: str,
+    ttl: int,
+    request_id: str,
+) -> bool:
+    """Turn a stored value that no longer validates back into a reservation.
+
+    True if WE took it: the caller judges again. False if the value changed
+    since it was read: someone else has it, and the caller answers 409.
+    Fails CLOSED, as the reservation does.
+    """
+    key = _idempotency_key(tenant, note_id, fingerprint)
+    try:
+        taken = await operational_breaker().call(
+            lambda: get_operational_client().eval(
+                _TAKE_OVER_SCRIPT, 1, key, expected, _RESERVED, ttl
+            )
+        )
+    except redis.RedisError as exc:
+        _bypass("idempotency_unavailable", tenant, request_id, exc)
+        raise IdempotencyUnavailableError() from None
+    return int(taken) == 1
+
+
+# --- the attempt cap and the rate limit, taken together: fails OPEN ---------
+
+
+# KEYS[1] the note's attempt counter, KEYS[2] the subject's hourly rate limit,
+# KEYS[3] the subject's daily rate limit (register item 66). ARGV: attempt cap,
+# attempt TTL, hourly limit, hourly window, daily limit, daily window. A refusal
+# writes nothing; a take INCRs all three and sets a window on a key that is new
+# or has none (audit M4). The daily check runs after the hourly one and denies
+# with the SAME outcome code -- one withheld reason, `rate_limited`, for either.
+_TAKE_PROMPT_SLOTS_SCRIPT = """
+local attempts = tonumber(redis.call('GET', KEYS[1]) or '0')
+if attempts >= tonumber(ARGV[1]) then
+  return {0, attempts, 0}
+end
+local rate = tonumber(redis.call('GET', KEYS[2]) or '0')
+if rate >= tonumber(ARGV[3]) then
+  return {1, attempts, rate}
+end
+local rate_day = tonumber(redis.call('GET', KEYS[3]) or '0')
+if rate_day >= tonumber(ARGV[5]) then
+  -- The third value is always the HOURLY count, on every path: decide()
+  -- compares it against rate_limit_per_hour. The daily guard denies with the
+  -- same `rate_limited` reason and does not change what this slot means.
+  return {1, attempts, rate}
 end
 local taken = redis.call('INCR', KEYS[1])
 if taken == 1 or redis.call('TTL', KEYS[1]) == -1 then
   redis.call('EXPIRE', KEYS[1], ARGV[2])
 end
-return {1, count}
+local rate_taken = redis.call('INCR', KEYS[2])
+if rate_taken == 1 or redis.call('TTL', KEYS[2]) == -1 then
+  redis.call('EXPIRE', KEYS[2], ARGV[4])
+end
+local rate_day_taken = redis.call('INCR', KEYS[3])
+if rate_day_taken == 1 or redis.call('TTL', KEYS[3]) == -1 then
+  redis.call('EXPIRE', KEYS[3], ARGV[6])
+end
+return {2, taken, rate}
 """
 
 
-async def take_rate_limit(
-    tenant: str, subject: str, *, limit: int, ttl: int, request_id: str
-) -> tuple[bool, int]:
-    """Claim one prompt against this subject's window, in one round trip.
+def _prompt_slots_answer(reply: list[int]) -> tuple[int, bool, int]:
+    """The script's reply as decide() reads it: (attempts, rate_allowed, rate_count).
 
-    The only writer of this counter, called only where a prompt would be sent.
-    Returns (allowed, count BEFORE this call). Fails OPEN at (True, 0).
+    Both counts are BEFORE this request. The script hands back the attempt count
+    AFTER its INCR on a take, so one comes off it there; a refusal changed
+    nothing, and the stored count is already the one before.
+    """
+    outcome, attempts, rate_count = (int(value) for value in reply)
+    if outcome == _SLOTS_ALLOWED:
+        return attempts - 1, True, rate_count
+    return attempts, outcome != _SLOTS_DENIED_BY_RATE, rate_count
+
+
+async def take_prompt_slots(
+    tenant: str,
+    note_id: int,
+    subject: str,
+    *,
+    attempt_cap: int,
+    attempt_ttl: int,
+    rate_limit: int,
+    rate_ttl: int,
+    rate_limit_day: int,
+    rate_ttl_day: int,
+    attempts_read: int,
+    request_id: str,
+) -> tuple[int, bool, int]:
+    """Claim this note's next attempt and this subject's next prompt, or neither.
+
+    The only writer of the three counters, called only where a prompt would be
+    sent, in one round trip (register items 66 and 119). Returns (attempts,
+    rate_allowed, rate_count), both counts BEFORE this call. A request that lost
+    the race for the note's attempt gets the stored count back, so decide() says
+    attempt_cap.
+
+    `rate_limit`/`rate_ttl` are the hourly guard, `rate_limit_day`/`rate_ttl_day`
+    the daily one beside it (register item 66); either denies with the same
+    `rate_limited` reason, so the caller need not tell them apart.
+
+    Fails OPEN at (attempts_read, True, 0) -- the attempts read before the model
+    ran, and an open window -- with both guards' own bypass codes.
     """
     try:
-        allowed, count = await operational_breaker().call(
+        reply = await operational_breaker().call(
             lambda: get_operational_client().eval(
-                _TAKE_RATE_LIMIT_SCRIPT,
-                1,
+                _TAKE_PROMPT_SLOTS_SCRIPT,
+                3,
+                _attempt_key(tenant, note_id),
                 _rate_limit_key(tenant, subject),
-                limit,
-                ttl,
+                _rate_limit_day_key(tenant, subject),
+                attempt_cap,
+                attempt_ttl,
+                rate_limit,
+                rate_ttl,
+                rate_limit_day,
+                rate_ttl_day,
             )
         )
     except redis.RedisError as exc:
+        _bypass("attempt_counter_bypassed", tenant, request_id, exc)
         _bypass("rate_limit_bypassed", tenant, request_id, exc)
-        return True, 0
-    return bool(allowed), int(count)
+        return attempts_read, True, 0
+    return _prompt_slots_answer(reply)
 
 
 async def read_rate_limit(tenant: str, subject: str, *, request_id: str) -> int:
@@ -325,16 +458,16 @@ async def read_rate_limit(tenant: str, subject: str, *, request_id: str) -> int:
 # --- attempts: fails OPEN --------------------------------------------------
 
 
-async def read_attempts(
-    tenant: str, lead_id: int, note_id: int, *, request_id: str
-) -> int:
+async def read_attempts(tenant: str, note_id: int, *, request_id: str) -> int:
     """How many clarification prompts this note has already drawn.
 
+    PROVISIONAL: it picks which trip take_prompt_slots makes, and that script
+    checks the cap again as it takes, so a concurrent request cannot slip past.
     0 when the store is unreachable (fail open) or the key has expired.
     """
     try:
         raw = await operational_breaker().call(
-            lambda: get_operational_client().get(_attempt_key(tenant, lead_id, note_id))
+            lambda: get_operational_client().get(_attempt_key(tenant, note_id))
         )
     except redis.RedisError as exc:
         _bypass("attempt_counter_bypassed", tenant, request_id, exc)
@@ -342,27 +475,11 @@ async def read_attempts(
     return int(raw or 0)
 
 
-async def increment_attempts(
-    tenant: str, lead_id: int, note_id: int, *, ttl: int, request_id: str
-) -> None:
-    """Count one clarification prompt against this note. Same rule as the rate
-    limit: only when a prompt is actually sent."""
-    try:
-        await operational_breaker().call(
-            lambda: _incr_with_window(
-                get_operational_client(), _attempt_key(tenant, lead_id, note_id), ttl
-            )
-        )
-    except redis.RedisError as exc:
-        _bypass("attempt_counter_bypassed", tenant, request_id, exc)
-
-
 # --- the resubmission reference (register item 33): also fails OPEN --------
 
 
 async def write_attempt_fingerprint(
     tenant: str,
-    lead_id: int,
     note_id: int,
     fingerprint: str,
     *,
@@ -391,7 +508,7 @@ async def write_attempt_fingerprint(
     try:
         await operational_breaker().call(
             lambda: get_operational_client().set(
-                _attempt_fingerprint_key(tenant, lead_id, note_id),
+                _attempt_fingerprint_key(tenant, note_id),
                 fingerprint,
                 nx=True,
                 ex=ttl,
@@ -402,7 +519,7 @@ async def write_attempt_fingerprint(
 
 
 async def read_attempt_fingerprint(
-    tenant: str, lead_id: int, note_id: int, *, request_id: str
+    tenant: str, note_id: int, *, request_id: str
 ) -> str | None:
     """The note text we first prompted on for this note, or None.
 
@@ -415,7 +532,7 @@ async def read_attempt_fingerprint(
     try:
         raw = await operational_breaker().call(
             lambda: get_operational_client().get(
-                _attempt_fingerprint_key(tenant, lead_id, note_id)
+                _attempt_fingerprint_key(tenant, note_id)
             )
         )
     except redis.RedisError as exc:

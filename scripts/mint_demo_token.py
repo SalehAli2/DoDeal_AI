@@ -191,7 +191,9 @@ def _body(args: argparse.Namespace) -> str | None:
 _PATHS = {
     "fetch": "/api/v1/notes/judgements",
     "direct": "/api/v1/notes/judgements/direct",
-    "probe": "/_probe/protected",
+    # The versions read runs the whole gate chain and needs nothing else; the
+    # old /_probe route is no longer served (register item 93).
+    "probe": "/api/v1/meta/versions",
 }
 
 
@@ -248,7 +250,7 @@ def main() -> int:
     host = f"{tenant}.{settings.inbound_base_domain}"
     token = jwt.encode(
         _payload(args, settings, tenant),
-        settings.jwt_signing_key,
+        settings.jwt_signing_key.get_secret_value(),
         algorithm=settings.jwt_algorithm,
     )
 

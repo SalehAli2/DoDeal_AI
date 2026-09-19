@@ -12,8 +12,8 @@ The script is IMPORTED, never retyped. A copied script would keep passing the
 day the real one changed, which is the one failure a test like this exists to
 prevent.
 
-The last section runs the rate limit's db2 script (register item 27) here,
-because this is the file where Lua actually runs.
+The last section runs the prompt-slots db2 script (register items 27 and 119)
+here, because this is the file where Lua actually runs.
 """
 
 from __future__ import annotations
@@ -34,7 +34,13 @@ from dodeal_ai.core.cost.limiter import (
     get_usage,
 )
 from dodeal_ai.units.structured_intelligence import state
-from dodeal_ai.units.structured_intelligence.state import _TAKE_RATE_LIMIT_SCRIPT
+from dodeal_ai.units.structured_intelligence.state import (
+    _SLOTS_ALLOWED,
+    _SLOTS_DENIED_BY_ATTEMPT,
+    _SLOTS_DENIED_BY_RATE,
+    _TAKE_OVER_SCRIPT,
+    _TAKE_PROMPT_SLOTS_SCRIPT,
+)
 
 _TENANT_KEY = "cost:tenant:tenant-a"
 _USER_KEY = "cost:user:tenant-a:user-1"
@@ -105,16 +111,27 @@ async def test_a_later_increment_does_not_refresh_the_window(client):
     assert await client.ttl(_USER_KEY) <= _WINDOW
 
 
-async def test_a_pre_existing_key_without_a_ttl_never_gains_one(client):
-    """Audit M4, pinned as it behaves TODAY: a counter that exists without a
-    window keeps counting forever, and the script will not repair it."""
+async def test_a_pre_existing_key_without_a_ttl_gains_the_window(client):
+    """Audit M4, repaired: a counter found with no TTL gets the window on the next call."""
     await client.set(_TENANT_KEY, 1)
+    await client.set(_USER_KEY, 1)
     assert await client.ttl(_TENANT_KEY) == -1
 
     await _incr_both_with_window(client, _TENANT_KEY, _USER_KEY, 1, _WINDOW)
 
-    assert await client.ttl(_TENANT_KEY) == -1
+    assert await client.ttl(_TENANT_KEY) == _WINDOW
     assert await client.ttl(_USER_KEY) == _WINDOW
+
+
+async def test_a_pre_existing_key_with_a_ttl_keeps_it(client):
+    """A counter that already has a window is not reset by the M4 repair."""
+    await client.set(_TENANT_KEY, 1, ex=_WINDOW)
+    await client.set(_USER_KEY, 1, ex=_WINDOW)
+
+    await _incr_both_with_window(client, _TENANT_KEY, _USER_KEY, 1, _WINDOW * 100)
+
+    assert 0 < await client.ttl(_TENANT_KEY) <= _WINDOW
+    assert 0 < await client.ttl(_USER_KEY) <= _WINDOW
 
 
 def test_the_script_itself_makes_no_limit_decision():
@@ -208,6 +225,32 @@ async def test_a_later_token_charge_does_not_refresh_the_window(client):
     assert await client.ttl(_TOKEN_USER_KEY) <= _WINDOW
 
 
+async def test_a_token_counter_without_a_ttl_gains_the_window(client):
+    """Audit M4, repaired: a token counter found with no TTL gets the window on the next charge."""
+    await client.set(_TOKEN_TENANT_KEY, 1)
+    await client.set(_TOKEN_USER_KEY, 1)
+
+    await _add_tokens_with_window(
+        client, _TOKEN_TENANT_KEY, _TOKEN_USER_KEY, 120, _WINDOW
+    )
+
+    assert await client.ttl(_TOKEN_TENANT_KEY) == _WINDOW
+    assert await client.ttl(_TOKEN_USER_KEY) == _WINDOW
+
+
+async def test_a_token_counter_with_a_ttl_keeps_it(client):
+    """A token counter that already has a window is not reset by the M4 repair."""
+    await client.set(_TOKEN_TENANT_KEY, 1, ex=_WINDOW)
+    await client.set(_TOKEN_USER_KEY, 1, ex=_WINDOW)
+
+    await _add_tokens_with_window(
+        client, _TOKEN_TENANT_KEY, _TOKEN_USER_KEY, 120, _WINDOW * 100
+    )
+
+    assert 0 < await client.ttl(_TOKEN_TENANT_KEY) <= _WINDOW
+    assert 0 < await client.ttl(_TOKEN_USER_KEY) <= _WINDOW
+
+
 def test_the_token_script_makes_no_limit_decision():
     """The script counts; `enforce_token_cost` warns and `token_preflight`
     denies. Pinned so moving either into Lua has to change this test."""
@@ -232,77 +275,236 @@ async def test_the_two_scripts_touch_disjoint_keys(client):
     assert await client.get(_TOKEN_TENANT_KEY) == "120"
 
 
-# --- the rate limit's script (db2): check and increment in one execution ------
+# --- the prompt-slots script (db2): both guards checked and taken at once ------
 
+_ATTEMPT_KEY = "attempt:tenant-a:10"
 _RATE_KEY = "ratelimit:tenant-a:42"
+_RATE_DAY_KEY = "ratelimit_day:tenant-a:42"
+_ATTEMPT_CAP = 1
+_ATTEMPT_TTL = 600
 _RATE_LIMIT = 3
+# Register item 66: the daily ceiling beside the hourly one. 10 is TenantConfig's
+# default; kept high in most tests below so the hourly guard is what is exercised.
+_RATE_LIMIT_DAY = 10
+_WINDOW_DAY = 86400
 
 
-async def _take(client, limit: int = _RATE_LIMIT, window: int = _WINDOW):
-    """One raw execution of the imported script: [allowed, count before]."""
-    return await client.eval(_TAKE_RATE_LIMIT_SCRIPT, 1, _RATE_KEY, limit, window)
+async def _take(
+    client,
+    attempt_key: str = _ATTEMPT_KEY,
+    *,
+    cap: int = _ATTEMPT_CAP,
+    limit: int = _RATE_LIMIT,
+    window: int = _WINDOW,
+    limit_day: int = _RATE_LIMIT_DAY,
+    window_day: int = _WINDOW_DAY,
+):
+    """One raw execution of the imported script: [outcome, attempts, rate count]."""
+    return await client.eval(
+        _TAKE_PROMPT_SLOTS_SCRIPT,
+        3,
+        attempt_key,
+        _RATE_KEY,
+        _RATE_DAY_KEY,
+        cap,
+        _ATTEMPT_TTL,
+        limit,
+        window,
+        limit_day,
+        window_day,
+    )
 
 
-async def test_the_rate_script_increments_only_under_the_limit(client):
-    """Three slots are taken and the fourth is refused without writing."""
-    replies = [await _take(client) for _ in range(_RATE_LIMIT + 1)]
+def _note(note_id: int) -> str:
+    return f"attempt:tenant-a:{note_id}"
 
-    assert [allowed for allowed, _ in replies] == [1, 1, 1, 0]
+
+async def test_an_allowed_take_increments_both_counters(client):
+    """A take moves both keys by one and returns the new attempt count and the rate
+    count before it."""
+    assert await _take(client) == [_SLOTS_ALLOWED, 1, 0]
+    assert await client.mget(_ATTEMPT_KEY, _RATE_KEY) == ["1", "1"]
+
+
+async def test_the_attempt_cap_denies_and_leaves_the_rate_key_untouched(client):
+    """At the attempt cap nothing is written: the rate key is neither moved nor
+    created, and the attempt key keeps its value and its missing TTL."""
+    await client.set(_ATTEMPT_KEY, _ATTEMPT_CAP)
+
+    assert await _take(client) == [_SLOTS_DENIED_BY_ATTEMPT, _ATTEMPT_CAP, 0]
+    assert await client.exists(_RATE_KEY) == 0
+    assert await client.get(_ATTEMPT_KEY) == str(_ATTEMPT_CAP)
+    assert await client.ttl(_ATTEMPT_KEY) == -1
+
+
+async def test_the_rate_limit_denies_and_leaves_the_attempt_key_untouched(client):
+    """At the rate limit nothing is written: the attempt key is neither moved nor
+    created, and the rate key keeps its value and its missing TTL."""
+    await client.set(_RATE_KEY, _RATE_LIMIT)
+
+    assert await _take(client) == [_SLOTS_DENIED_BY_RATE, 0, _RATE_LIMIT]
+    assert await client.exists(_ATTEMPT_KEY) == 0
+    assert await client.get(_RATE_KEY) == str(_RATE_LIMIT)
+    assert await client.ttl(_RATE_KEY) == -1
+
+
+async def test_the_attempt_cap_is_checked_before_the_rate_limit(client):
+    """Both at their caps: the note's cap is the reason, as decide() orders them."""
+    await client.set(_ATTEMPT_KEY, _ATTEMPT_CAP)
+    await client.set(_RATE_KEY, _RATE_LIMIT)
+
+    assert (await _take(client))[0] == _SLOTS_DENIED_BY_ATTEMPT
+
+
+async def test_a_second_take_on_one_note_is_denied_at_the_cap(client):
+    """The race, in order: the second take for one note sees the first one's attempt."""
+    replies = [await _take(client), await _take(client)]
+
+    assert replies == [[_SLOTS_ALLOWED, 1, 0], [_SLOTS_DENIED_BY_ATTEMPT, 1, 0]]
+    assert await client.mget(_ATTEMPT_KEY, _RATE_KEY) == ["1", "1"]
+
+
+async def test_the_rate_slots_run_out_across_notes(client):
+    """Three notes take the three slots and the fourth is refused, each reply
+    carrying the rate count before its call."""
+    replies = [await _take(client, _note(n)) for n in (10, 11, 12, 13)]
+
+    assert replies == [
+        [_SLOTS_ALLOWED, 1, 0],
+        [_SLOTS_ALLOWED, 1, 1],
+        [_SLOTS_ALLOWED, 1, 2],
+        [_SLOTS_DENIED_BY_RATE, 0, _RATE_LIMIT],
+    ]
+    assert await client.get(_RATE_KEY) == str(_RATE_LIMIT)
+    assert await client.exists(_note(13)) == 0
+
+
+async def test_both_windows_are_set_when_the_counters_are_created(client):
+    """Each counter gets its own window, or a note or a subject is limited forever."""
+    await _take(client)
+
+    assert await client.ttl(_ATTEMPT_KEY) == _ATTEMPT_TTL
+    assert await client.ttl(_RATE_KEY) == _WINDOW
+    assert await client.ttl(_RATE_DAY_KEY) == _WINDOW_DAY
+
+
+# --- register item 66: the daily rate limit beside the hourly one -----------
+
+
+async def test_the_fourth_take_in_an_hour_is_withheld(client):
+    """The hourly cap denies on its own with the day cap wide open."""
+    replies = [
+        await _take(client, _note(n), cap=99, limit_day=999) for n in (10, 11, 12, 13)
+    ]
+
+    assert [reply[0] for reply in replies] == [
+        _SLOTS_ALLOWED,
+        _SLOTS_ALLOWED,
+        _SLOTS_ALLOWED,
+        _SLOTS_DENIED_BY_RATE,
+    ]
     assert await client.get(_RATE_KEY) == str(_RATE_LIMIT)
 
 
-async def test_the_rate_script_returns_the_count_before_the_call(client):
-    """The count returned is the one before the call, whether the slot was taken or
-    refused."""
-    replies = [await _take(client) for _ in range(_RATE_LIMIT + 1)]
+async def test_the_eleventh_take_in_a_day_is_withheld(client):
+    """The daily cap denies once the hourly one is wide open."""
+    replies = [await _take(client, _note(n), cap=99, limit=999) for n in range(10, 21)]
 
-    assert replies == [[1, 0], [1, 1], [1, 2], [0, 3]]
-
-
-async def test_the_rate_window_is_set_when_the_counter_is_created(client):
-    """A created counter gets the window, or a subject would be limited forever."""
-    await _take(client)
-
-    assert await client.ttl(_RATE_KEY) == _WINDOW
+    assert [reply[0] for reply in replies] == [_SLOTS_ALLOWED] * 10 + [
+        _SLOTS_DENIED_BY_RATE
+    ]
+    assert await client.get(_RATE_DAY_KEY) == str(_RATE_LIMIT_DAY)
 
 
-async def test_a_later_slot_does_not_refresh_the_rate_window(client):
+async def test_a_refused_take_writes_nothing(client):
+    """Whichever guard refuses -- attempt, hourly or daily -- no counter moves."""
+    await client.set(_RATE_DAY_KEY, _RATE_LIMIT_DAY)
+
+    # The third value is the HOURLY count on every denial path, not whichever
+    # guard refused: decide() compares it against rate_limit_per_hour.
+    assert await _take(client) == [_SLOTS_DENIED_BY_RATE, 0, 0]
+    assert await client.exists(_ATTEMPT_KEY) == 0
+    assert await client.exists(_RATE_KEY) == 0
+    assert await client.get(_RATE_DAY_KEY) == str(_RATE_LIMIT_DAY)
+
+
+async def test_a_later_take_does_not_refresh_either_window(client):
     """Fixed, not sliding: a busy subject must not push its own reset away."""
-    await _take(client)
-    await _take(client, window=_WINDOW * 100)
+    await _take(client, cap=2)
+    await _take(client, cap=2, window=_WINDOW * 100)
 
+    assert await client.ttl(_ATTEMPT_KEY) <= _ATTEMPT_TTL
     assert await client.ttl(_RATE_KEY) <= _WINDOW
 
 
-async def test_a_rate_key_without_a_ttl_gains_one_on_the_next_slot(client):
-    """A rate-limit counter with no window gains one on the next slot (audit M4,
-    repaired for this key)."""
+async def test_keys_without_a_ttl_gain_one_on_the_next_take(client):
+    """Counters with no window gain one on the next take (audit M4, repaired for
+    both keys)."""
+    await client.set(_ATTEMPT_KEY, 1)
     await client.set(_RATE_KEY, 1)
-    assert await client.ttl(_RATE_KEY) == -1
 
-    await _take(client)
+    await _take(client, cap=2)
 
+    assert await client.ttl(_ATTEMPT_KEY) == _ATTEMPT_TTL
     assert await client.ttl(_RATE_KEY) == _WINDOW
 
 
-async def test_a_refused_slot_does_not_set_a_window(client):
-    """At the cap nothing is written at all -- not the count, not the TTL."""
-    await client.set(_RATE_KEY, _RATE_LIMIT)
+# --- the idempotency take-over (register items 1 and 2) ----------------------
 
-    assert await _take(client) == [0, _RATE_LIMIT]
-    assert await client.ttl(_RATE_KEY) == -1
+_IDEM_KEY = "idem:tenant-a:judge_note:10:" + "0" * 64
 
 
-async def test_take_rate_limit_end_to_end_on_real_lua(client, monkeypatch):
-    """Lua's integer replies reach the pipeline through take_rate_limit as a (bool, int)
-    pair."""
+async def test_the_take_over_replaces_the_value_it_read_with_a_reservation(client):
+    """The value still read becomes the reservation, with the short TTL."""
+    await client.set(_IDEM_KEY, "stale", ex=86400)
+    taken = await client.eval(_TAKE_OVER_SCRIPT, 1, _IDEM_KEY, "stale", "1", 100)
+    assert int(taken) == 1
+    assert await client.get(_IDEM_KEY) == "1"
+    assert await client.ttl(_IDEM_KEY) == 100
+
+
+async def test_the_take_over_leaves_a_changed_value_alone(client):
+    """A value someone else replaced since the read is not taken."""
+    await client.set(_IDEM_KEY, "newer", ex=86400)
+    taken = await client.eval(_TAKE_OVER_SCRIPT, 1, _IDEM_KEY, "stale", "1", 100)
+    assert int(taken) == 0
+    assert await client.get(_IDEM_KEY) == "newer"
+    assert await client.ttl(_IDEM_KEY) == 86400
+
+
+async def test_the_take_over_creates_no_missing_key(client):
+    """A key that expired is not recreated by a take-over."""
+    taken = await client.eval(_TAKE_OVER_SCRIPT, 1, _IDEM_KEY, "stale", "1", 100)
+    assert int(taken) == 0
+    assert await client.exists(_IDEM_KEY) == 0
+
+
+async def test_take_prompt_slots_end_to_end_on_real_lua(client, monkeypatch):
+    """Lua's integer replies reach the pipeline through take_prompt_slots as the
+    (attempts, rate_allowed, rate_count) decide() reads, both counts before."""
     monkeypatch.setattr(state, "get_operational_client", lambda: client)
 
-    taken = [
-        await state.take_rate_limit(
-            "tenant-a", "42", limit=_RATE_LIMIT, ttl=_WINDOW, request_id="req-1"
+    async def take(note_id: int):
+        return await state.take_prompt_slots(
+            "tenant-a",
+            note_id,
+            "42",
+            attempt_cap=_ATTEMPT_CAP,
+            attempt_ttl=_ATTEMPT_TTL,
+            rate_limit=_RATE_LIMIT,
+            rate_ttl=_WINDOW,
+            rate_limit_day=_RATE_LIMIT_DAY,
+            rate_ttl_day=_WINDOW_DAY,
+            attempts_read=0,
+            request_id="req-1",
         )
-        for _ in range(_RATE_LIMIT + 1)
-    ]
 
-    assert taken == [(True, 0), (True, 1), (True, 2), (False, 3)]
+    taken = [await take(n) for n in (10, 10, 11, 12, 13)]
+
+    assert taken == [
+        (0, True, 0),
+        (_ATTEMPT_CAP, True, 0),
+        (0, True, 1),
+        (0, True, 2),
+        (0, False, _RATE_LIMIT),
+    ]

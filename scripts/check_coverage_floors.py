@@ -25,6 +25,19 @@ decides what a salesperson is told about their own work:
       ... /decide.py   whether we interrupt a salesperson to ask a question,
                        and what the CRM is advised to do. Wrong -> nagging, or
                        silence where a note needed a question.
+    core/llm/openai_compatible.py  the paid call. Wrong -> a retry, or a
+                       provider's message in an exception.
+    middleware/body_limit.py  the byte check before every gate. Wrong -> an
+                       unbounded body read on behalf of anyone.
+    core/logging_config.py  how every log line is written. Wrong -> a raw
+                       exception message on the stream, or no line at all.
+    middleware/inflight.py  load shedding. Wrong -> an unbounded queue, or
+                       a slot that is never given back.
+    tools/errors.py   typed CRM failures. Wrong -> a 404 reported as a 503.
+    core/llm/fallback.py  when a second provider is called. Wrong -> a paid
+                       call sent twice.
+    core/inflight.py  the counter load shedding reads. Wrong -> a count that
+                       drifts, shedding traffic the service could serve.
 
 A file matched by both a `**` pattern and its own exact pattern is checked
 against both and printed twice; the stricter floor governs. That is deliberate
@@ -63,6 +76,9 @@ _FLOORS: dict[str, float] = {
     "src/dodeal_ai/core/errors.py": 95,
     "src/dodeal_ai/core/validation.py": 100,
     "src/dodeal_ai/core/log_safety.py": 100,
+    # What a model reads of a note (register item 59). Pure functions over a
+    # string, so every rule and every kept shape is reachable in a unit test.
+    "src/dodeal_ai/core/redaction.py": 100,
     # Unit A. The unit decides what a salesperson is told about their own work,
     # and its config is the only source of a weight or a threshold -- a gap
     # there is a silently wrong score, not a crash.
@@ -88,6 +104,31 @@ _FLOORS: dict[str, float] = {
     # no I/O, no clock, no model -- so every branch is reachable and a gap here
     # is a wrong decision shipped silently.
     "src/dodeal_ai/units/structured_intelligence/decide.py": 100,
+    # Register item 113, four deny-path files. The adapter every paid call goes
+    # through: no retry, and an exception carries a status and a provider name
+    # only. Its failure paths run on a fake transport, so a gap is an untested one.
+    "src/dodeal_ai/core/llm/openai_compatible.py": 100,
+    # The byte check before every gate (item 87). Plain ASGI, so the header path
+    # and the streamed path both run without a server; a gap is a body read in
+    # full for a caller we were always going to refuse.
+    "src/dodeal_ai/middleware/body_limit.py": 100,
+    # How every log line is written: extra= fields lifted, an exception reduced
+    # to its type and frames. A gap is a line that ships a raw message, or none.
+    "src/dodeal_ai/core/logging_config.py": 100,
+    # The typed backend failures (items 89 and F1): which 4xx becomes which code,
+    # and the Retry-After parse. Pure classes and one function; a gap is a
+    # status the pipeline maps without a test behind it.
+    "src/dodeal_ai/tools/errors.py": 100,
+    # The fallback provider (item 21): the one rule for when a second paid call
+    # is allowed. A gap is a retry of a call that may already have been billed.
+    "src/dodeal_ai/core/llm/fallback.py": 100,
+    # The in-flight counter itself (item 13): three methods whose every line is a
+    # slot taken, refused or given back. A gap is a count that can drift unseen.
+    "src/dodeal_ai/core/inflight.py": 100,
+    # Load shedding (item 73): admit, refuse, and give the slot back in a finally.
+    # 95 as item 113 sets it; the file measured 100 when the floor was added, so
+    # the margin is headroom and not a known uncovered line.
+    "src/dodeal_ai/middleware/inflight.py": 95,
 }
 
 
