@@ -31,9 +31,17 @@ from dodeal_ai.tools.leads import get_leads_client
 from dodeal_ai.units.structured_intelligence import state
 from dodeal_ai.units.structured_intelligence.classify import (
     CLASSIFY_MAX_OUTPUT_TOKENS,
+    CLASSIFY_TEMPLATE,
 )
-from dodeal_ai.units.structured_intelligence.scoring import SCORE_MAX_OUTPUT_TOKENS
-from dodeal_ai.units.structured_intelligence.vague import VAGUE_MAX_OUTPUT_TOKENS
+from dodeal_ai.units.structured_intelligence.schemas import NoteType
+from dodeal_ai.units.structured_intelligence.scoring import (
+    SCORE_MAX_OUTPUT_TOKENS,
+    SCORE_TEMPLATE,
+)
+from dodeal_ai.units.structured_intelligence.vague import (
+    VAGUE_MAX_OUTPUT_TOKENS,
+    template_for,
+)
 from tests.helpers import tokens
 from tests.helpers.fake_cost_redis import FakeCostRedis
 from tests.helpers.fake_leads import FakeLeadsClient, lead, note
@@ -42,9 +50,11 @@ from tests.helpers.fake_llm import (
     FakeLLM,
     json_response,
     response,
+    stable_for,
     truncated,
 )
 from tests.helpers.fake_operational_redis import FakeOperationalRedis
+from tests.helpers.score_answers import score_payload
 
 JUDGE = "/api/v1/notes/judgements"
 RESUBMIT = "/api/v1/notes/judgements/resubmission"
@@ -53,8 +63,6 @@ VERSIONS = "/api/v1/meta/versions"
 LEAD_ID = 1656
 NOTE_ID = 10
 GOOD_NOTE = "Called the client, discussed the New Cairo 3BR, following up Tuesday."
-
-from tests.helpers.score_answers import score_payload
 
 
 def _classified(note_type: str):
@@ -586,10 +594,10 @@ def test_the_calls_are_issued_in_the_one_order_they_may_be(client, llm):
     # two are issued together, in the order gather was given them -- which is
     # what makes an ordered script a safe way to write these tests.
     client.post(JUDGE, json=_body(), headers=_headers())
-    stables = [p.stable[:40] for p in llm.prompts]
-    assert stables[0].startswith("You classify one CRM lead note")
-    assert stables[1].startswith("You decide whether one CRM lead note")
-    assert stables[2].startswith("PERSONA")  # score_v2 (item 131)
+    stables = [p.stable for p in llm.prompts]
+    assert stables[0] == stable_for(CLASSIFY_TEMPLATE)
+    assert stables[1] == stable_for(template_for(NoteType.DISCOVERY))
+    assert stables[2] == stable_for(SCORE_TEMPLATE)
 
 
 def test_the_tool_layer_sees_the_verified_tenant(client, leads):
@@ -790,9 +798,9 @@ def test_a_reprompt_on_one_pass_does_not_re_issue_the_other(client, llm, json_lo
     assert llm.call_count == 4
 
     classify_p, vague_p, vague_again, score_p = llm.prompts
-    assert classify_p.stable.startswith("You classify one CRM lead note")
-    assert vague_p.stable.startswith("You decide whether one CRM lead note")
-    assert "checks" in score_p.stable
+    assert classify_p.stable == stable_for(CLASSIFY_TEMPLATE)
+    assert vague_p.stable == stable_for(template_for(NoteType.DISCOVERY))
+    assert score_p.stable == stable_for(SCORE_TEMPLATE)
 
     # The reprompt is vague detection's, and it is the same prompt plus a tail.
     assert vague_again.stable == vague_p.stable

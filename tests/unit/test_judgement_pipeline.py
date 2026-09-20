@@ -52,7 +52,7 @@ from dodeal_ai.core.llm.profiles import (
     PROFILE_UNIT_A_VAGUE,
 )
 from dodeal_ai.core.logging_config import JsonFormatter
-from dodeal_ai.core.prompting import AssembledPrompt, build_prompt
+from dodeal_ai.core.prompting import AssembledPrompt
 from dodeal_ai.core.resilience import ExternalCallError
 from dodeal_ai.tools.errors import (
     BackendForbidden,
@@ -93,7 +93,7 @@ from dodeal_ai.units.structured_intelligence.vague import (
 from tests.helpers import breakers
 from tests.helpers.fake_cost_redis import FakeCostRedis
 from tests.helpers.fake_leads import FakeLeadsClient, lead, note
-from tests.helpers.fake_llm import FakeLLM, json_response, response
+from tests.helpers.fake_llm import FakeLLM, json_response, response, stable_for
 from tests.helpers.fake_operational_redis import FakeOperationalRedis
 from tests.helpers.score_answers import NO_CONTACT_CHECKS, score_payload
 
@@ -1210,8 +1210,8 @@ class _OnePassHeld:
 
     def __init__(self, inner: FakeLLM, *, held: str, failing: str) -> None:
         self._inner = inner
-        self._held = build_prompt(held, "").stable
-        self._failing = build_prompt(failing, "").stable
+        self._held = stable_for(held)
+        self._failing = stable_for(failing)
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
         self.held_calls = 0
@@ -2048,7 +2048,7 @@ async def test_each_pass_names_its_own_profile(operational, leads):
     assert judgement.suppressed is None and judgement.score is not None
 
     stable_to_profile = {
-        build_prompt(template, "").stable: profile
+        stable_for(template): profile
         for template, profile in _PROFILE_BY_TEMPLATE.items()
     }
     paired = {stable_to_profile[call.prompt.stable]: call.profile for call in llm.calls}
@@ -2072,7 +2072,7 @@ async def test_the_reprompt_runs_on_the_same_profile(operational, leads):
         _scope(), _request(), resubmission=False, deps=_deps_with(llm, leads)
     )
 
-    vague_stable = build_prompt(VAGUE_TEMPLATE, "").stable
+    vague_stable = stable_for(VAGUE_TEMPLATE)
     vague_calls = [c for c in llm.calls if c.prompt.stable == vague_stable]
     assert len(vague_calls) == 2
     assert {c.profile for c in vague_calls} == {PROFILE_UNIT_A_VAGUE}
@@ -2091,7 +2091,7 @@ async def test_each_pass_sends_its_own_task_ceiling(operational, leads):
     )
 
     ceilings = {
-        build_prompt(template, "").stable: ceiling
+        stable_for(template): ceiling
         for template, ceiling in (
             (CLASSIFY_TEMPLATE, CLASSIFY_MAX_OUTPUT_TOKENS),
             (VAGUE_TEMPLATE, VAGUE_MAX_OUTPUT_TOKENS),

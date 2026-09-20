@@ -103,7 +103,7 @@ async def _detect(payload_or_response, note_type: NoteType = NoteType.DISCOVERY)
 @pytest.mark.parametrize("note_type", SCORED_TYPES)
 def test_every_scored_type_has_its_own_template(note_type):
     assert template_for(note_type) == (
-        f"structured_intelligence/vague_{note_type.value}_v1.txt"
+        f"structured_intelligence/vague_{note_type.value}_v2.txt"
     )
 
 
@@ -129,8 +129,9 @@ def test_the_templates_plus_system_event_are_exactly_the_vocabulary():
 @pytest.mark.parametrize("note_type", SCORED_TYPES)
 def test_each_template_loads_and_names_its_own_bar(note_type):
     stable = build_vague_prompt(_note(), note_type).stable
-    assert "THE FLOOR TEST" in stable
-    assert "THIS NOTE RECORDS" in stable
+    assert "floor test" in stable.lower()
+    assert "NOTE TYPE:" in stable
+    assert "MAY BE MISSING" in stable
 
 
 @pytest.mark.parametrize("note_type", SCORED_TYPES)
@@ -183,15 +184,12 @@ def test_no_template_carries_a_weight_or_a_threshold(note_type):
         assert forbidden not in stable
 
 
-# The relative-time sentence, in the words all six templates carry it in. A
-# template that accepted only a calendar date or a named day would report
-# next_step_with_date missing on a note that says exactly when the next step is
-# -- and "cb tmrw" is how the corpus actually writes it.
-RELATIVE_TIME_SENTENCE = (
-    "A relative time anchored to when the note was written also counts as a "
-    'date — for example "tomorrow", "after 2 hrs", "next Tuesday", '
-    '"end of the week".'
-)
+# The relative-time rule, which the five types that ask for a dated next step
+# carry (won_lost accepts an explicit closure instead). A template that
+# accepted only a calendar date or a named day would report next_step_with_date
+# missing on a note that says exactly when the next step is -- and "cb tmrw" is
+# how the corpus actually writes it.
+RELATIVE_TIME_TYPES = [t for t in SCORED_TYPES if t is not NoteType.WON_LOST]
 
 
 def _collapsed(text: str) -> str:
@@ -201,10 +199,11 @@ def _collapsed(text: str) -> str:
     return " ".join(text.split())
 
 
-@pytest.mark.parametrize("note_type", SCORED_TYPES)
-def test_every_template_accepts_a_relative_time_as_a_date(note_type):
-    stable = build_vague_prompt(_note(), note_type).stable
-    assert RELATIVE_TIME_SENTENCE in _collapsed(stable)
+@pytest.mark.parametrize("note_type", RELATIVE_TIME_TYPES)
+def test_every_dated_next_step_template_accepts_a_relative_time(note_type):
+    collapsed = _collapsed(build_vague_prompt(_note(), note_type).stable).lower()
+    assert "relative time" in collapsed
+    assert '"tomorrow"' in collapsed
 
 
 @pytest.mark.parametrize("note_type", SCORED_TYPES)
@@ -212,8 +211,9 @@ def test_every_template_forbids_the_generic_question(note_type):
     # The one string this unit shows a human. "Please improve this note" tells
     # its author nothing they did not already know.
     stable = build_vague_prompt(_note(), note_type).stable
-    assert "please improve this note" in stable.lower()
-    assert "NEVER write a generic instruction" in stable
+    collapsed = _collapsed(stable).lower()
+    assert "please improve this note" in collapsed
+    assert "never write" in collapsed
 
 
 @pytest.mark.parametrize("note_type", SCORED_TYPES)

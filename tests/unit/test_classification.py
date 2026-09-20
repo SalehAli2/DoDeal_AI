@@ -350,7 +350,7 @@ def test_the_template_ships_and_is_loadable():
     # string. A missing file is a hard PromptError, not a fallback.
     assert build_classification_prompt(_note(), _lead()).stable
     with pytest.raises(PromptError):
-        build_prompt("structured_intelligence/no_such_template_v1.txt", "x")
+        build_prompt("structured_intelligence/no_such_template_v1.txt", caller_data="x")
 
 
 def test_the_template_names_every_type_and_the_escape():
@@ -370,7 +370,7 @@ def test_the_template_carries_no_weight_or_threshold():
 
 
 def test_the_template_name_is_versioned():
-    assert CLASSIFY_TEMPLATE == "structured_intelligence/classify_v1.txt"
+    assert CLASSIFY_TEMPLATE == "structured_intelligence/classify_v2.txt"
 
 
 # --- the response the judgement is stamped from ----------------------------

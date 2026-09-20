@@ -22,7 +22,10 @@ from dodeal_ai.units.structured_intelligence.classify import CLASSIFY_TEMPLATE
 from dodeal_ai.units.structured_intelligence.llm_call import REPROMPT_TAIL_TEMPLATE
 from dodeal_ai.units.structured_intelligence.schemas import NoteType
 from dodeal_ai.units.structured_intelligence.scoring import SCORE_TEMPLATE
-from dodeal_ai.units.structured_intelligence.vague import template_for
+from dodeal_ai.units.structured_intelligence.vague import (
+    VAGUE_SHARED_TEMPLATE,
+    template_for,
+)
 
 # The six types the vague pass runs on, derived from the enum rather than
 # listed: an eighth NoteType then appears here the moment it is added, and its
@@ -37,6 +40,7 @@ VAGUE_CHECKED_TYPES: tuple[NoteType, ...] = tuple(
 # names the first missing file, and a stable order makes that reproducible.
 UNIT_A_TEMPLATES: tuple[str, ...] = (
     CLASSIFY_TEMPLATE,
+    VAGUE_SHARED_TEMPLATE,
     *(template_for(note_type) for note_type in VAGUE_CHECKED_TYPES),
     SCORE_TEMPLATE,
     REPROMPT_TAIL_TEMPLATE,

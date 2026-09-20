@@ -1,0 +1,31 @@
+NOTE TYPE: how the lead ended.
+
+A useful one records the outcome and what drove it (closed, bought
+elsewhere, withdrew, dropped), the client's stated reason in their own
+words, and what follows and when, or that nothing follows, said
+explicitly.
+
+MAY BE MISSING, report only from this list:
+- what_happened      what the salesperson did and what came of it.
+- client_said        what the CLIENT said, in their terms.
+- next_step_with_date  what happens next AND when, or an explicit
+  closure with a reason, which counts as complete.
+
+EXAMPLES
+Note: العميل اشترى من مكان تاني.
+{"is_vague": true, "missing_components": ["client_said", "next_step_with_date"],
+ "clarification_prompt": "قال إيه السبب اللي خلاه يشتري من مكان تاني، وفيه حاجة بعد كده ولا خلاص؟",
+ "reasoning": "The outcome is recorded but not his reason, and nothing says what follows."}
+
+Note: Ms. Dalia signed the 2BR at Cedar Walk today. Said the payment
+plan decided it, the other compound wanted more up front. Paperwork to
+admin tmrw, handover walkthrough on the 12th next month.
+{"is_vague": false, "missing_components": [],
+ "clarification_prompt": null,
+ "reasoning": "The outcome, her reason and dated next steps are present."}
+
+Note: lead droped, not intrested anymore
+{"is_vague": true, "missing_components": ["client_said", "next_step_with_date"],
+ "clarification_prompt": "What did the client say when they lost
+ interest, and is anything still to be done or is it closed for good?",
+ "reasoning": "The outcome is stated without a reason or an explicit closure."}

@@ -72,14 +72,18 @@ VAGUE_MAX_OUTPUT_TOKENS = 1024
 # there is no seventh template to keep in step. A test asserts the keys plus
 # system_event are exactly NoteType, which is what makes a future eighth type a
 # failing test rather than a KeyError in production.
+# The block every type shares: role, task, rules, output contract. Written
+# once instead of six times, joined ahead of the type block by build_prompt.
+VAGUE_SHARED_TEMPLATE = "structured_intelligence/vague_shared_v2.txt"
+
 _TEMPLATES: Mapping[NoteType, str] = MappingProxyType(
     {
-        NoteType.NO_CONTACT: "structured_intelligence/vague_no_contact_v1.txt",
-        NoteType.CALLBACK: "structured_intelligence/vague_callback_v1.txt",
-        NoteType.DISCOVERY: "structured_intelligence/vague_discovery_v1.txt",
-        NoteType.VIEWING: "structured_intelligence/vague_viewing_v1.txt",
-        NoteType.NEGOTIATION: "structured_intelligence/vague_negotiation_v1.txt",
-        NoteType.WON_LOST: "structured_intelligence/vague_won_lost_v1.txt",
+        NoteType.NO_CONTACT: "structured_intelligence/vague_no_contact_v2.txt",
+        NoteType.CALLBACK: "structured_intelligence/vague_callback_v2.txt",
+        NoteType.DISCOVERY: "structured_intelligence/vague_discovery_v2.txt",
+        NoteType.VIEWING: "structured_intelligence/vague_viewing_v2.txt",
+        NoteType.NEGOTIATION: "structured_intelligence/vague_negotiation_v2.txt",
+        NoteType.WON_LOST: "structured_intelligence/vague_won_lost_v2.txt",
     }
 )
 
@@ -112,9 +116,14 @@ def _caller_data(note: LeadNote) -> str:
 
 
 def build_vague_prompt(note: LeadNote, note_type: NoteType) -> AssembledPrompt:
-    """The assembled prompt for this type. Separate from the call so a test can
-    inspect what would be sent without scripting a response for it."""
-    return build_prompt(template_for(note_type), _caller_data(note))
+    """The assembled prompt for this type: the shared block, then the type's
+    own. Separate from the call so a test can inspect what would be sent
+    without scripting a response for it."""
+    return build_prompt(
+        VAGUE_SHARED_TEMPLATE,
+        template_for(note_type),
+        caller_data=_caller_data(note),
+    )
 
 
 def allowed_components_check(

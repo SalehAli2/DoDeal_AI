@@ -60,13 +60,14 @@ from dodeal_ai.units.structured_intelligence.scoring import (
     SCORE_TEMPLATE,
     build_score_prompt,
 )
+from dodeal_ai.units.structured_intelligence.templates import UNIT_A_TEMPLATES
 from dodeal_ai.units.structured_intelligence.vague import (
     build_vague_prompt,
     template_for,
 )
 from tests.helpers.fake_cost_redis import FakeCostRedis
 from tests.helpers.fake_leads import FakeLeadsClient, lead, load_fixture_client, note
-from tests.helpers.fake_llm import FakeLLM, json_response, response
+from tests.helpers.fake_llm import FakeLLM, json_response, response, stable_for
 from tests.helpers.fake_operational_redis import FakeOperationalRedis
 from tests.helpers.score_answers import score_payload
 
@@ -365,7 +366,7 @@ def test_stable_is_byte_identical_across_ten_corpus_notes(pass_name):
 def test_each_vague_template_is_byte_identical_across_ten_corpus_notes(note_type):
     stables = {build_vague_prompt(n, note_type).stable for n in _TEN}
     assert len(stables) == 1
-    assert stables.pop() == _load_template(template_for(note_type))
+    assert stables.pop() == stable_for(template_for(note_type))
 
 
 def test_the_tail_is_byte_identical_across_ten_corpus_notes():
@@ -402,20 +403,15 @@ _SECRET_SHAPED = re.compile(
 )
 
 
-def test_the_unit_a_template_set_is_the_nine_files_under_structured_intelligence():
-    # The campaign brief says "the ten shipped, including unit_a_v1.txt", and
-    # it is right: `unit_a_v1.txt` DOES exist, one level up at
-    # src/dodeal_ai/prompts/. It is the Phase 0 placeholder that
-    # scripts/verify_wheel.py and tests/unit/test_prompting.py are built
-    # against -- generic, not Unit A's, and not used by the pipeline.
-    #
-    # This suite scopes itself to structured_intelligence/ on purpose: these
-    # are the templates a NOTE reaches, and they are the ones an injection can
-    # travel through. Nine is the count of that directory, not of the package.
-    # (An earlier version of this comment claimed the file did not exist. It
-    # was wrong -- the glob below never looks above its own directory, and the
-    # claim was generalised from it. See CAMPAIGN_REPORT.md, Phase J.)
-    assert len(_SHIPPED) == 10  # the nine, and score_v2 (register item 131)
+def test_the_ten_templates_in_use_ship_under_structured_intelligence():
+    # This suite scopes itself to structured_intelligence/ on purpose: these are
+    # the templates a NOTE reaches, and the ones an injection can travel
+    # through. `unit_a_v1.txt` exists one level up as the Phase 0 placeholder
+    # and is not used by the pipeline. Superseded versions (the v1 files beside
+    # their v2) stay in the directory, so they are still scanned below.
+    in_use = {name.split("/", 1)[1] for name in UNIT_A_TEMPLATES}
+    assert len(in_use) == 10
+    assert in_use <= set(_SHIPPED)
     assert "reprompt_tail_v1.txt" in _SHIPPED
     assert "unit_a_v1.txt" not in _SHIPPED  # it is the PARENT directory's
 

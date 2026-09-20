@@ -28,6 +28,7 @@ import pytest
 from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.context import RequestContext
 from dodeal_ai.core.cost import limiter
+from dodeal_ai.core.prompting import build_prompt
 from dodeal_ai.units.structured_intelligence import state
 from dodeal_ai.units.structured_intelligence.classify import CLASSIFY_TEMPLATE
 from dodeal_ai.units.structured_intelligence.config import get_tenant_config
@@ -303,7 +304,8 @@ async def test_every_timeline_event_is_suppressed_as_not_scorable(operational):
     # Every call that was made was a CLASSIFICATION call. This is the assertion
     # that "system_event costs one pass, not three" is worth: two more passes
     # per event is two more paid calls for text nobody wrote.
-    classify_calls = [p for p in llm.prompts if "classify" in p.stable[:400].lower()]
+    classify_stable = build_prompt(CLASSIFY_TEMPLATE, caller_data="").stable
+    classify_calls = [p for p in llm.prompts if p.stable == classify_stable]
     assert len(llm.prompts) == reached_model
     assert len(classify_calls) == len(llm.prompts)
 

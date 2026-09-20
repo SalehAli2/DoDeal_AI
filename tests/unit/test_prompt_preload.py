@@ -72,7 +72,7 @@ def read_counter(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 def test_startup_refuses_when_one_template_is_missing(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Eight of nine present. The process must not come up: a deployment whose
+    """Nine of ten present. The process must not come up: a deployment whose
     prompts are not all there is a defect, and every judgement that named the
     missing one would 503 after paying for the calls before it."""
     for name in UNIT_A_TEMPLATES:
@@ -108,12 +108,12 @@ def test_a_refused_startup_leaves_no_half_filled_cache(
     assert prompting._TEMPLATE_CACHE == {}
 
 
-def test_the_tuple_names_the_nine_templates_that_ship() -> None:
+def test_the_tuple_names_the_ten_templates_that_ship() -> None:
     """The preload is only as good as the list it is given: a template a pass
     sends but the tuple omits would read from disk on a paid call, and one the
     tuple names but nothing ships would refuse a healthy deployment."""
-    assert len(UNIT_A_TEMPLATES) == 9
-    assert len(set(UNIT_A_TEMPLATES)) == 9
+    assert len(UNIT_A_TEMPLATES) == 10
+    assert len(set(UNIT_A_TEMPLATES)) == 10
     for name in UNIT_A_TEMPLATES:
         assert (prompting._DEFAULT_PROMPTS_DIR / name).is_file(), name
 
@@ -230,7 +230,7 @@ def test_build_prompt_still_reads_disk_with_no_app_started(
     (tmp_path / "t.txt").write_text("WRITTEN HERE\n", encoding="utf-8")
     monkeypatch.setattr(prompting, "_prompts_dir", lambda: tmp_path)
 
-    assert build_prompt("t.txt", "data").stable == "WRITTEN HERE"
+    assert build_prompt("t.txt", caller_data="data").stable == "WRITTEN HERE"
 
 
 def test_a_preloaded_name_is_served_from_the_cache_not_the_file(

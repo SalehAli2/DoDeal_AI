@@ -42,8 +42,14 @@ from dataclasses import dataclass, field
 
 from dodeal_ai.core.llm import FinishReason, LLMResponse
 from dodeal_ai.core.prompting import AssembledPrompt, build_prompt
+from dodeal_ai.units.structured_intelligence.templates import VAGUE_CHECKED_TYPES
+from dodeal_ai.units.structured_intelligence.vague import (
+    VAGUE_SHARED_TEMPLATE,
+    template_for,
+)
 
 FAKE_MODEL = "fake-model-pinned"
+_VAGUE_TYPE_TEMPLATES = frozenset(template_for(t) for t in VAGUE_CHECKED_TYPES)
 
 
 def response(
@@ -92,6 +98,22 @@ def truncated(
         output_tokens=output_tokens,
         finish_reason=FinishReason.MAX_TOKENS,
     )
+
+
+def stable_for(template_name: str) -> str:
+    """The `stable` half a pass assembled from `template_name` sends.
+
+    A vague type template always travels behind the shared block, so its stable
+    text is the joined pair, exactly what build_vague_prompt assembles. Every
+    other template is sent alone. Resolved through build_prompt, the pipeline's
+    own loader, so it holds under DODEAL_PROMPTS_DIR too.
+    """
+    names = (
+        (VAGUE_SHARED_TEMPLATE, template_name)
+        if template_name in _VAGUE_TYPE_TEMPLATES
+        else (template_name,)
+    )
+    return build_prompt(*names, caller_data="").stable
 
 
 class FakeLLMExhausted(AssertionError):
@@ -169,7 +191,7 @@ class FakeLLM:
         notes' worth of answers for one template is the corpus case, and a
         second call that silently discarded the first would lose one.
         """
-        stable = build_prompt(template_name, "").stable
+        stable = stable_for(template_name)
         queue = self._by_template.get(stable)
         if queue is None:
             queue = _TemplateQueue(template_name=template_name)
