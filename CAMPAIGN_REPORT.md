@@ -6601,3 +6601,11 @@ Six commits: `548add4` (parseable examples), `1ed5852` (no_contact off `what_hap
 - **Failure mode 1:** an absent expected field defaulted rather than carried through as None manufactures agreement out of unfinished marking -- and the number it manufactures is the one the business is asked to accept. Every expected field is `| None`, and an empty `missing_components` list is a mark while an absent one is not.
 - **Failure mode 2:** a refusal that quotes the row puts a real salesperson's note on a terminal, in a CI log and in a pasted ticket. A bad row names its LINE NUMBER plus pydantic's field locations and error types (`include_input=False`), never a value.
 - **Stress test:** the committed fixture of invented notes is refused where it lies and loads only once copied outside the repository; `..` in the path cannot walk back in, because the refusal resolves first.
+
+## Register item 139: the diagnostic harness
+
+`scripts/diagnose_notes.py`. One note in, one CSV row out: the gate, item 132's recognition, the classified type, `is_vague`, the missing components, the clarification question, all twelve check answers, the five marks, the denominator, the total, the band, and the milliseconds per pass. `--live` or nothing is sent.
+
+- **Failure mode 1:** a harness that retried a failed call turns a provider having a bad day into an unbounded bill from a script nobody is watching. It never retries and never loops: a failed note is ONE row carrying the exception TYPE, and the run continues. `--live` refuses over 20 notes and prints the call count before it spends any of it.
+- **Failure mode 2:** a paid call placed by accident. The guard has two independent halves, like `real_fetch_check.py` -- the dry-run branch never builds a provider client, and `_guard_against_accidental_live_call` refuses immediately before the client is built even when that branch is wrong.
+- **Stress test:** five invented notes end to end against the real provider, then the dry-run branch inverted so a flagless run reaches the live path: the second guard refuses with exit 3 and writes no CSV.
