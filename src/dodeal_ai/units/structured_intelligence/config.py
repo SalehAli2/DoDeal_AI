@@ -137,7 +137,7 @@ class TenantConfig:
     # (na1, cb2); phrases match the whole stripped note. Tables, not a model
     # call: over half of real notes are this short. Empty recognises nothing.
     # Fillers ("tmrw", "am") may follow a code; every word must be a code or a
-    # filler. All three tables are stored casefolded (build() folds a tenant's).
+    # filler. All three tables are stored casefolded (__post_init__ folds them).
     short_note_codes: frozenset[str]
     short_note_phrases: frozenset[str]
     short_note_fillers: frozenset[str]
@@ -193,6 +193,13 @@ class TenantConfig:
 
     enforcement_mode: EnforcementMode
     config_version: str
+
+    def __post_init__(self) -> None:
+        # The three short-note tables are folded here, the one place every
+        # TenantConfig passes through, so a hand-built config matches too.
+        for name in ("short_note_codes", "short_note_phrases", "short_note_fillers"):
+            table = getattr(self, name)
+            object.__setattr__(self, name, frozenset(w.casefold() for w in table))
 
     def band_for(self, total: int) -> Band:
         """Derive the band from a total. THE only way a band is produced --
@@ -290,9 +297,6 @@ class TenantConfigFile(BaseModel):
             updates["weights"] = MappingProxyType(dict(self.weights))
         if self.band_boundaries is not None:
             updates["band_boundaries"] = tuple(self.band_boundaries)
-        for table in ("short_note_codes", "short_note_phrases", "short_note_fillers"):
-            if table in updates:
-                updates[table] = frozenset(word.casefold() for word in updates[table])
         config = dataclasses.replace(_DEFAULT_CONFIG, **updates)
         _check(config)
         return config

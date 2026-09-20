@@ -6536,3 +6536,27 @@ that no sabotage survived. No sabotage in F1b: it changes no code.
 | `CAMPAIGN_REPORT.md` | backfill: this block |
 | `test_judgement_pipeline.py` | `3edbd57`: `_FakeClock` on whole milliseconds and refusing other attributes; one new test |
 | `test_prompt_preload.py` | `1935d01`: four new tests, (a) to (d) |
+
+## Register item 132: recognise a short note before the length floor
+
+`ba23669`. A note below the floor that is a known code (na1, cb2) or phrase ("not interested") is judged, not asked.
+
+- **Failure mode 1:** a first-word-only rule let "na, client abusive, wants refund" through to three model passes.
+- **Failure mode 2:** a tenant that adds a common word to a table makes junk notes pass and spend model calls.
+- **Stress test:** every default phrase and code as a below-floor note reaches classification; "ok", "done" and "spoke" still get the fixed question.
+
+## Register item 132, follow-up 1: tighten recognition and bump the config version
+
+`f2084a3`. Every word must be a code or a filler (`short_note_fillers`); `config_version` is `tenant-cfg-default-3`.
+
+- **Failure mode 1:** a filler such as "ok" added by a tenant makes "na ok" pass without a question.
+- **Failure mode 2:** the two `test_judgement_routes.py` pins could not be run green under the item 131 red tree, so they are unverified.
+- **Stress test:** "cb1 tmrw" recognised, "na, client abusive, wants refund" not, and an empty filler table still recognises "na1".
+
+## Register item 132, follow-up 2: fold the short-note tables inside TenantConfig
+
+The tables are casefolded in `TenantConfig.__post_init__`, so JSON-built and hand-built configs match alike.
+
+- **Failure mode 1:** a mixed-case table on a hand-built config silently never matched; the fold lived only in `TenantConfigFile.build`.
+- **Failure mode 2:** a table added later without joining the fold list drifts back to the same defect.
+- **Stress test:** a config built with `NA`, `Cb`, `Not Interested` and `TMRW` recognises "cb1 tmrw", "NA1" and "not interested".

@@ -78,3 +78,17 @@ def test_a_tenant_with_no_fillers_still_recognises_a_bare_code() -> None:
     bare = dataclasses.replace(CONFIG, short_note_fillers=frozenset())
     assert _is_recognised_short_note("na1", bare)
     assert not _is_recognised_short_note("cb1 tmrw", bare)
+
+
+def test_mixed_case_tables_match_however_the_config_was_built() -> None:
+    """A directly built config with mixed-case tables is folded like a JSON one."""
+    mixed = dataclasses.replace(
+        CONFIG,
+        short_note_codes=frozenset({"NA", "Cb"}),
+        short_note_phrases=frozenset({"Not Interested"}),
+        short_note_fillers=frozenset({"TMRW"}),
+    )
+    assert _is_recognised_short_note("cb1 tmrw", mixed)
+    assert _is_recognised_short_note("NA1", mixed)
+    assert _is_recognised_short_note("not interested", mixed)
+    assert mixed.short_note_codes == frozenset({"na", "cb"})
