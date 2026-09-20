@@ -181,12 +181,14 @@ _logger = logging.getLogger("dodeal_ai.unit_a")
 # Version stamps. RUBRIC and PROMPT_SET move when the rubric or the prompt
 # files change; both are stamped on EVERY judgement, scored or suppressed, so
 # two judgements are only ever compared when all four stamps match.
-# v2 of both: register item 131 replaced the five marks with twelve checks, and
-# item 133 rewrote the prompt set as a shared block plus type blocks. Keeping
-# the v1 prompt files readable is only worth anything if the stamp moves with
-# them -- a judgement stamped v1 must be reproducible from the v1 text.
+# v2 of the rubric: register item 131 replaced the five marks with twelve
+# checks. v3 of the prompt set: item 133 rewrote it as a shared block plus type
+# blocks (v2), and item 141 then made ns_closure require a reason and not only
+# an ending. Keeping the older prompt files readable is only worth anything if
+# the stamp moves with them -- a judgement stamped v2 must be reproducible from
+# the v2 text, which it is not once a v2 file has been edited in place.
 RUBRIC_VERSION = "note_rubric_v2"
-PROMPT_SET_VERSION = "unit_a_prompts_v2"
+PROMPT_SET_VERSION = "unit_a_prompts_v3"
 
 # No model ran, so there is nothing the provider reported. Deliberately NOT
 # settings.llm_model: core/llm/client.py is explicit that `model` is what the

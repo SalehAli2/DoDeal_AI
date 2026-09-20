@@ -6657,3 +6657,14 @@ Six commits: `548add4` (parseable examples), `1ed5852` (no_contact off `what_hap
 - **Failure mode 1:** an empty daily email trains people to ignore the channel within a fortnight, and then the one that matters is ignored with the rest. `build_brief` returns None and the route answers 204 when no line carries a single FIGURE -- not when there are no rows. A brief that looked at eight notes and can say nothing about any of them is still an empty email. A 204 is reserved for that: an unknown subject is 404 and an unwired store is 503, because both would otherwise read as a quiet day for ever.
 - **Failure mode 2:** a model asked to narrate figures will eventually produce one that is not in them, and a brief is read as fact. Every number here is `measures.py` arithmetic and every sentence is a template in `brief.py`; a suppressed measure renders as "not enough yet (4 of 10)" and never as a band or a 0%. The team roll-up is computed over the team's rows POOLED, not averaged from per-person averages, so a rep with three notes cannot weigh the same as one with nine.
 - **Stress test:** every role against a subject with two notes under a floor of three returns None; raising it to three returns text containing "nothing was asked about" and no band anywhere in the improvement line. A team of nine notes at 30 and three at 75 renders "fair over 12 notes" (pooled mean 41), where averaging the averages would have said "good".
+
+## Piece: register item 141b, the prompt-set stamp
+
+Item 141b -- `PROMPT_SET_VERSION` moves to `unit_a_prompts_v3`. `d1b4146` edited
+`score_v2.txt` in place and left the stamp at v2, so two prompt texts shared one
+stamp and a judgement stamped v2 was no longer reproducible from the v2 files.
+Production failure modes: (1) two stamps, one text -- an eval run compares
+judgements from before and after a prompt edit as if the prompt had not moved;
+(2) the stamp is a string in one module, so a future edit can miss it again.
+Stress test: the meta/versions route and a judgement both assert the literal
+v3 string, so the stamp cannot move in one place and not the other.
