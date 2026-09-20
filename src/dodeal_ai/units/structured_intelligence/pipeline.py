@@ -398,6 +398,23 @@ def _suppressed(
     )
 
 
+def _is_recognised_short_note(text: str, config: TenantConfig) -> bool:
+    """Register item 132: is this below-floor note a known outcome?
+
+    Yes if the whole lowercased note is a tenant phrase, or if its first word is
+    a tenant code with an optional attempt number (na, cb1). Only the first word
+    is checked, so "cb1 tmrw" passes though "tmrw" is no code; the note is
+    already below the floor, which bounds what that lets through.
+    """
+    words = " ".join(text.casefold().split())
+    if not words:
+        return False
+    if words in {phrase.casefold() for phrase in config.short_note_phrases}:
+        return True
+    base = words.split(" ", 1)[0].rstrip("0123456789")
+    return bool(base) and base in {code.casefold() for code in config.short_note_codes}
+
+
 def _length_gate(
     note: LeadNote, config: TenantConfig
 ) -> tuple[SuppressedReason, SuppressedDetail] | None:
@@ -426,6 +443,9 @@ def _length_gate(
     """
     text = note.note.strip()
     if len(text) < config.min_note_chars or len(text.split()) < config.min_note_tokens:
+        # Register item 132: a short note that is a known outcome carries on.
+        if _is_recognised_short_note(text, config):
+            return None
         return (SuppressedReason.INSUFFICIENT_EVIDENCE, SuppressedDetail.NOTE_TOO_SHORT)
     if len(text) > config.max_note_chars:
         return (SuppressedReason.NOT_SCORABLE, SuppressedDetail.NOTE_TOO_LONG)

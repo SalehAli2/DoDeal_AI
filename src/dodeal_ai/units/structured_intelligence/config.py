@@ -132,6 +132,13 @@ class TenantConfig:
     suppressed_components_by_type: Mapping[NoteType, frozenset[ComponentName]]
     allowed_missing_by_type: Mapping[NoteType, frozenset[MissingComponent]]
 
+    # Register item 132: a note below the length floor that is a known outcome
+    # is judged, not asked "what happened". Codes take a trailing attempt number
+    # (na1, cb2); phrases match the whole stripped note. Tables, not a model
+    # call: over half of real notes are this short. Empty recognises nothing.
+    short_note_codes: frozenset[str]
+    short_note_phrases: frozenset[str]
+
     accept_threshold: int
     flag_threshold: int
 
@@ -205,6 +212,17 @@ _DEFAULT_CONFIG = TenantConfig(
     band_boundaries=_BAND_BOUNDARIES,
     suppressed_components_by_type=_SUPPRESSED_COMPONENTS_BY_TYPE,
     allowed_missing_by_type=_ALLOWED_MISSING_BY_TYPE,
+    short_note_codes=frozenset({"na", "wa", "cb"}),
+    short_note_phrases=frozenset(
+        {
+            "not interested",
+            "no answer",
+            "no reply",
+            "wrong number",
+            "لا يرد",
+            "مش مهتم",
+        }
+    ),
     accept_threshold=70,
     flag_threshold=40,
     business_line_field=None,  # ASSUMPTION[Q13] -- see TenantConfig above
@@ -239,6 +257,8 @@ class TenantConfigFile(BaseModel):
     config_version: str = Field(min_length=1)
     weights: dict[ComponentName, int] | None = None
     band_boundaries: list[tuple[Band, int]] | None = None
+    short_note_codes: frozenset[str] | None = None
+    short_note_phrases: frozenset[str] | None = None
     accept_threshold: int | None = Field(default=None, ge=0, le=100)
     flag_threshold: int | None = Field(default=None, ge=0, le=100)
     min_note_chars: int | None = Field(default=None, ge=1)
