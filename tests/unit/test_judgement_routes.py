@@ -54,6 +54,8 @@ LEAD_ID = 1656
 NOTE_ID = 10
 GOOD_NOTE = "Called the client, discussed the New Cairo 3BR, following up Tuesday."
 
+from tests.helpers.score_answers import score_payload
+
 
 def _classified(note_type: str):
     """One scripted classifier reply: exactly the JSON object the template asks
@@ -85,21 +87,21 @@ def _vague_answer(
     )
 
 
-def _score_answer(**marks: int):
-    """The scoring pass's answer. The default marks sum to 55 of a denominator of
+# 18 of 80 -> 23, `poor`: only wh_outcome and cl_readable came back true.
+_POOR = {
+    "wh_action": False,
+    "cs_present": False,
+    "cs_own_terms": False,
+    "cl_substance": False,
+}
+
+
+def _score_answer(**checks: bool):
+    """The scoring pass's answer. The default checks give 55 of a denominator of
     80 -- 69, `fair` -- which is one mark below the accept threshold and so the
-    most interesting default to carry into Phase H."""
-    return json_response(
-        {
-            "marks": {
-                "what_happened": 20,
-                "client_said": 15,
-                "next_step_date": 15,
-                "clarity": 5,
-                **marks,
-            }
-        }
-    )
+    most interesting default to carry into Phase H. Keyword overrides flip
+    individual checks (tests/helpers/score_answers.py)."""
+    return json_response(score_payload(**checks))
 
 
 def _happy_path(note_type: str = "discovery"):
@@ -587,7 +589,7 @@ def test_the_calls_are_issued_in_the_one_order_they_may_be(client, llm):
     stables = [p.stable[:40] for p in llm.prompts]
     assert stables[0].startswith("You classify one CRM lead note")
     assert stables[1].startswith("You decide whether one CRM lead note")
-    assert stables[2].startswith("You mark one CRM lead note")
+    assert stables[2].startswith("PERSONA")  # score_v2 (item 131)
 
 
 def test_the_tool_layer_sees_the_verified_tenant(client, leads):
@@ -790,7 +792,7 @@ def test_a_reprompt_on_one_pass_does_not_re_issue_the_other(client, llm, json_lo
     classify_p, vague_p, vague_again, score_p = llm.prompts
     assert classify_p.stable.startswith("You classify one CRM lead note")
     assert vague_p.stable.startswith("You decide whether one CRM lead note")
-    assert score_p.stable.startswith("You mark one CRM lead note")
+    assert "checks" in score_p.stable
 
     # The reprompt is vague detection's, and it is the same prompt plus a tail.
     assert vague_again.stable == vague_p.stable
@@ -884,18 +886,18 @@ def _idem_key(text: str = GOOD_NOTE) -> str:
 
 
 def test_scenario_1_a_good_note_is_accepted_silently(client, llm, operational):
-    # 65 of 80 -> 81, `good`, at or above accept_threshold. Nothing is asked,
+    # 63 of 80 -> 79, `good`, at or above accept_threshold. Nothing is asked,
     # because there is nothing wrong with the note -- and so nothing is counted.
     llm.rescript(
         _classified("discovery"),
         _vague_answer(is_vague=False, missing=[], prompt=None),
-        _score_answer(next_step_date=20, clarity=10),
+        _score_answer(ns_action=True, cl_substance=False),
     )
     r = client.post(JUDGE, json=_body(), headers=_headers())
 
     assert r.status_code == 200
     body = r.json()
-    assert body["score"]["total"] == 81
+    assert body["score"]["total"] == 79
     assert body["score"]["band"] == "good"
     assert body["suppressed"] is None
     assert body["decision"] == {
@@ -953,11 +955,11 @@ def test_scenario_3_a_poor_note_at_the_rate_limit_is_advised_but_not_asked(
     llm.rescript(
         _classified("discovery"),
         _vague_answer(),
-        _score_answer(what_happened=5, client_said=3, next_step_date=3, clarity=1),
+        _score_answer(**_POOR),
     )
     body = client.post(JUDGE, json=_body(), headers=_headers()).json()
 
-    assert body["score"]["total"] == 15  # 12 of 80
+    assert body["score"]["total"] == 23  # 18 of 80
     assert body["score"]["band"] == "poor"
     assert body["decision"]["action"] == "prompt_clarification"
     assert body["decision"]["prompt_sent"] is False
@@ -1004,7 +1006,7 @@ def test_an_exhausted_window_outranks_having_nothing_to_ask(client, llm, operati
     llm.rescript(
         _classified("discovery"),
         _vague_answer(is_vague=False, missing=[], prompt=None),
-        _score_answer(what_happened=5, client_said=3, next_step_date=3, clarity=1),
+        _score_answer(**_POOR),
     )
 
     body = client.post(JUDGE, json=_body(), headers=_headers()).json()
@@ -1201,14 +1203,7 @@ def test_the_stamp_is_the_model_that_scored_not_the_one_that_classified(
         _classified("discovery"),
         _vague_answer(),
         json_response(
-            {
-                "marks": {
-                    "what_happened": 20,
-                    "client_said": 15,
-                    "next_step_date": 15,
-                    "clarity": 5,
-                }
-            },
+            score_payload(),
             model="model-that-scored",
         ),
     )

@@ -43,6 +43,7 @@ from dodeal_ai.tools.leads import get_leads_client
 from tests.helpers import tokens
 from tests.helpers.fake_leads import FakeLeadsClient, lead, note
 from tests.helpers.fake_llm import FakeLLM, json_response
+from tests.helpers.score_answers import score_payload
 
 # The real default, asserted against Settings below rather than trusted: the
 # 64 kB in the register is the number these tests are about, and a test that
@@ -361,16 +362,7 @@ def llm() -> FakeLLM:
                 "reasoning": "The follow-up has no date.",
             }
         ),
-        json_response(
-            {
-                "marks": {
-                    "what_happened": 20,
-                    "client_said": 15,
-                    "next_step_date": 15,
-                    "clarity": 5,
-                }
-            }
-        ),
+        json_response(score_payload()),
     )
 
 

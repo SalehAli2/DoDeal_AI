@@ -80,6 +80,7 @@ from tests.helpers.fake_leads import note
 from tests.helpers.fake_llm import FakeLLM, json_response, response
 from tests.helpers.fake_operational_redis import FakeOperationalRedis
 from tests.helpers.scopes import TEST_SCOPE
+from tests.helpers.score_answers import score_payload
 
 # Shaped like the content this service actually handles: a phone number and a
 # budget inside a note body. If any of these tests can find it in a log line,
@@ -514,16 +515,7 @@ def direct_client(monkeypatch, cost):
     )
     llm.script_for(
         SCORE_TEMPLATE,
-        json_response(
-            {
-                "marks": {
-                    "what_happened": 20,
-                    "client_said": 15,
-                    "next_step_date": 15,
-                    "clarity": 5,
-                }
-            }
-        ),
+        json_response(score_payload()),
     )
 
     monkeypatch.setattr(limiter, "get_cost_client", lambda: cost)

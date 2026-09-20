@@ -6,16 +6,19 @@ switched off.
 from __future__ import annotations
 
 import dataclasses
+from types import MappingProxyType
 
 import pytest
 
 from dodeal_ai.units.structured_intelligence.config import (
     EnforcementMode,
     TenantConfig,
+    _check,
     get_tenant_config,
 )
 from dodeal_ai.units.structured_intelligence.schemas import (
     Band,
+    CheckName,
     ComponentName,
     MissingComponent,
     NoteType,
@@ -223,3 +226,97 @@ def test_every_frozenset_str_field_is_stored_casefolded() -> None:
     for name in tables:
         table = getattr(mixed, name)
         assert table == frozenset(word.casefold() for word in table), name
+
+
+def _broken(config: TenantConfig, **changes: object) -> TenantConfig:
+    return dataclasses.replace(config, **changes)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "reason"),
+    [
+        (
+            "checks_by_component",
+            MappingProxyType(
+                {
+                    c: v
+                    for c, v in get_tenant_config(
+                        "tenant-a"
+                    ).checks_by_component.items()
+                    if c is not ComponentName.CLARITY
+                }
+            ),
+            "checks_by_component",
+        ),
+        (
+            "marks_by_true_count",
+            MappingProxyType(
+                {
+                    c: v
+                    for c, v in get_tenant_config(
+                        "tenant-a"
+                    ).marks_by_true_count.items()
+                    if c is not ComponentName.CLARITY
+                }
+            ),
+            "marks_by_true_count",
+        ),
+        (
+            "marks_by_true_count",
+            MappingProxyType(
+                {
+                    **get_tenant_config("tenant-a").marks_by_true_count,
+                    ComponentName.CLARITY: (0, 10),
+                }
+            ),
+            "marks_length",
+        ),
+        (
+            "marks_by_true_count",
+            MappingProxyType(
+                {
+                    **get_tenant_config("tenant-a").marks_by_true_count,
+                    ComponentName.CLARITY: (0, 10, 5),
+                }
+            ),
+            "marks_order",
+        ),
+        (
+            "marks_by_true_count",
+            MappingProxyType(
+                {
+                    **get_tenant_config("tenant-a").marks_by_true_count,
+                    ComponentName.CLARITY: (1, 5, 10),
+                }
+            ),
+            "marks_order",
+        ),
+        (
+            "checks_by_component",
+            MappingProxyType(
+                {
+                    **get_tenant_config("tenant-a").checks_by_component,
+                    ComponentName.WHAT_HAPPENED: (
+                        CheckName.WH_OUTCOME,
+                        CheckName.CL_READABLE,
+                    ),
+                }
+            ),
+            "checks_coverage",
+        ),
+    ],
+    ids=[
+        "checks-missing-component",
+        "marks-missing-component",
+        "marks-length",
+        "marks-descending",
+        "marks-not-from-zero",
+        "check-listed-twice",
+    ],
+)
+def test_check_refuses_a_rubric_whose_checks_and_marks_do_not_line_up(
+    config: TenantConfig, field: str, value: object, reason: str
+) -> None:
+    """Register item 131: each mark-table invariant `_check` holds, refused by name."""
+    with pytest.raises(ValueError, match=f"^{reason}$"):
+        _check(_broken(config, **{field: value}))

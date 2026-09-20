@@ -1055,7 +1055,7 @@ async def _judge(
                 clarification_prompt=vague_output.clarification_prompt,
                 reasoning=vague_output.reasoning,
             )
-            score = compute_score(score_output.marks, note_type, config)
+            score = compute_score(score_output.checks, note_type, config)
             # decide() is PURE, so it is asked twice: once with the window
             # assumed open, whose answer says which db2 trip (if any) the two
             # guards owe, and once with what the store actually said.

@@ -95,6 +95,7 @@ from tests.helpers.fake_cost_redis import FakeCostRedis
 from tests.helpers.fake_leads import FakeLeadsClient, lead, note
 from tests.helpers.fake_llm import FakeLLM, json_response, response
 from tests.helpers.fake_operational_redis import FakeOperationalRedis
+from tests.helpers.score_answers import NO_CONTACT_CHECKS, score_payload
 
 LEAD_ID = 1656
 NOTE_ID = 10
@@ -131,21 +132,12 @@ def _vague_answer(
     )
 
 
-def _score_answer(**marks: int):
-    """The scoring pass's answer. The default marks sum to 55 of a denominator of
+def _score_answer(**checks: bool):
+    """The scoring pass's answer. The default checks give 55 of a denominator of
     80 -- 69, `fair` -- which is one mark below the accept threshold and so the
-    most interesting default to carry into Phase H."""
-    return json_response(
-        {
-            "marks": {
-                "what_happened": 20,
-                "client_said": 15,
-                "next_step_date": 15,
-                "clarity": 5,
-                **marks,
-            }
-        }
-    )
+    most interesting default to carry into Phase H. Keyword overrides flip
+    individual checks (tests/helpers/score_answers.py)."""
+    return json_response(score_payload(**checks))
 
 
 def _happy_path(note_type: str = "discovery"):
@@ -1169,9 +1161,7 @@ async def test_a_no_contact_note_is_scored_against_the_narrower_rubric(
     llm = FakeLLM(
         _classified("no_contact"),
         _vague_answer(missing=["next_step_with_date"]),
-        json_response(
-            {"marks": {"what_happened": 20, "next_step_date": 20, "clarity": 8}}
-        ),
+        json_response(score_payload(NO_CONTACT_CHECKS)),
     )
     deps = JudgementDeps(
         leads=leads,

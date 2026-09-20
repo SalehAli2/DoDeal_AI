@@ -20,7 +20,7 @@ from dodeal_ai.core.llm import FinishReason, LLMClient, LLMErrorReason, LLMProvi
 from dodeal_ai.core.llm.profiles import PROFILE_UNIT_A_SCORE
 from dodeal_ai.core.prompting import AssembledPrompt
 from dodeal_ai.units.structured_intelligence.config import get_tenant_config
-from dodeal_ai.units.structured_intelligence.schemas import ComponentName, NoteType
+from dodeal_ai.units.structured_intelligence.schemas import CheckName, NoteType
 from dodeal_ai.units.structured_intelligence.scoring import (
     SCORE_TEMPLATE,
     build_score_prompt,
@@ -36,6 +36,7 @@ from tests.helpers.fake_llm import (
     truncated,
 )
 from tests.helpers.scopes import TEST_SCOPE
+from tests.helpers.score_answers import score_payload
 
 PROMPT = AssembledPrompt(stable="S", variable="V")
 # These tests are about the SCRIPT, not about which profile was named --
@@ -53,16 +54,9 @@ VAGUE_ANSWER = {
     "clarification_prompt": "When are you following up with this client?",
     "reasoning": "No date was given for the next step.",
 }
-# The four components applicable to a discovery note under the shipped config
-# (deal_specifics is suppressed by Q13), each mark inside its weight.
-SCORE_ANSWER = {
-    "marks": {
-        "what_happened": 20,
-        "client_said": 15,
-        "next_step_date": 20,
-        "clarity": 8,
-    }
-}
+# The nine checks applicable to a discovery note under the shipped config
+# (deal_specifics is suppressed by Q13, so its three are not asked).
+SCORE_ANSWER = score_payload()
 
 
 def test_satisfies_protocol_statically_and_at_runtime() -> None:
@@ -152,7 +146,7 @@ async def test_template_answers_land_on_the_right_pass_in_either_gather_order(
         (vague_out, _), (score_out, _) = await asyncio.gather(vague, score)
 
     assert vague_out.is_vague is True
-    assert score_out.marks[ComponentName.WHAT_HAPPENED] == 20
+    assert score_out.checks[CheckName.WH_OUTCOME] is True
     assert fake.call_count == 2
 
 
@@ -164,7 +158,7 @@ async def test_template_queue_drains_in_order_across_a_reprompt() -> None:
         fake, NOTE, NOTE_TYPE, config=CONFIG, scope=TEST_SCOPE, settings=get_settings()
     )
 
-    assert out.marks[ComponentName.WHAT_HAPPENED] == 20
+    assert out.checks[CheckName.WH_OUTCOME] is True
     assert fake.call_count == 2
     # Why the second call stayed on this queue: with_tail changes the tail and
     # nothing else, so `stable` -- the key -- is the same string both times.
@@ -200,7 +194,7 @@ async def test_positional_still_serves_a_prompt_with_no_template_queue() -> None
     scored = await fake.complete(
         build_score_prompt(NOTE, NOTE_TYPE, CONFIG), profile=PROFILE
     )
-    assert "marks" in scored.text
+    assert "checks" in scored.text
 
 
 def test_still_satisfies_llmclient_with_a_template_queue_in_use() -> None:

@@ -1,32 +1,46 @@
-"""Scoring — pass three, and the arithmetic that turns marks into a judgement.
+"""Scoring — pass three, and the arithmetic that turns check answers into a
+judgement.
 
-THE DIVISION OF LABOUR IS THE WHOLE DESIGN. The model returns a mark per
-applicable component and knows nothing else: not what a component is worth, not
-what the marks add up to, not what the result is called. The total, the
-denominator and the band are computed HERE, from marks plus TenantConfig. A
-model cannot hand us a score, and the templates carry no weight, no threshold
-and no band for it to read.
+THE DIVISION OF LABOUR IS THE WHOLE DESIGN. The model answers yes or no to a
+fixed list of checks and knows nothing else: not which component a check
+belongs to, not what it is worth, not what the answers add up to, not what the
+result is called. The marks, the total, the denominator and the band are
+computed HERE, from check answers plus TenantConfig. A model cannot hand us a
+score, and the templates carry no weight, no threshold and no band for it to
+read.
+
+WHY CHECKS RATHER THAN MARKS (register item 131). A model asked for a whole
+number out of 25 cannot use that resolution consistently: the same note gets
+19 one day and 22 the next, and the rubric's own acceptance target is band
+agreement with a human. Binary criteria are the most reliable form of rubric
+judgement, so the model answers observable facts and the arithmetic stays where
+arithmetic belongs. It also makes a mark explainable: a salesperson can be
+shown which check failed, not just a number.
 
 Why that matters beyond tidiness: a band is a judgement about a salesperson's
 work, and the only thing that makes it defensible is that it is reproducible
-from the marks, the config and the four version stamps. The moment a band could
-arrive from a model, the same note could carry two different bands with no
-recorded reason.
+from the answers, the config and the four version stamps. The moment a band
+could arrive from a model, the same note could carry two different bands with
+no recorded reason.
 
 SUPPRESSION IS NOT A ZERO. A component that does not apply leaves the
 DENOMINATOR; it is not marked 0. Scoring a no_contact note 0 for "what the
 client said" would cap an honest note at 60/100 and teach salespeople to pad
 notes with invented conversation. `applicable_components` decides what counts,
-and everything downstream follows from it.
+`applicable_checks` decides what is even asked, and everything downstream
+follows from them.
 
-THE THREE WAYS MARKS CAN BE WRONG -- a mark for a component that does not apply,
-a missing mark for one that does, and a mark outside [0, weight] -- are all
+THE TWO WAYS AN ANSWER CAN BE WRONG -- an answer for a check that was not
+asked, and a missing answer for one that was -- are both
 `OutputValidationError`. They are enforced through `llm_call.parse_output`'s
-check hook, INSIDE the validated call, because the single reprompt is
-defined over that exception: a bound checked after the call returned would be a
-malformed answer that never earned its reprompt. And they cannot be schema
-constraints, because the bound is the TENANT's weight and `validate_output` has
-no context channel.
+check hook, INSIDE the validated call, because the single reprompt is defined
+over that exception: a fault found after the call returned would be a malformed
+answer that never earned its reprompt. And they cannot be schema constraints,
+because which checks apply depends on the TENANT's rubric and the note's type,
+and `validate_output` has no context channel.
+
+There is no third way. A bool cannot be out of range, which is one fault class
+that disappeared with the marks.
 """
 
 from __future__ import annotations
@@ -42,6 +56,7 @@ from dodeal_ai.schemas.lead import LeadNote
 from dodeal_ai.units.structured_intelligence.config import TenantConfig
 from dodeal_ai.units.structured_intelligence.llm_call import call_model, output_rejected
 from dodeal_ai.units.structured_intelligence.schemas import (
+    CheckName,
     ComponentName,
     NoteScore,
     NoteType,
@@ -49,17 +64,16 @@ from dodeal_ai.units.structured_intelligence.schemas import (
     ScoreOutput,
 )
 
-SCORE_TEMPLATE = "structured_intelligence/score_v1.txt"
+SCORE_TEMPLATE = "structured_intelligence/score_v2.txt"
 SCORE_LABEL = "llm.unit_a.score"
 
-# What this task's answer may cost (register item 15). Five fixed ASCII keys and
-# five whole numbers -- around 110 characters, or roughly twice that if the
-# model formats the object across lines. Like classification and unlike vague
-# detection, NOTHING in this answer comes back in the note's language, so the
-# ceiling does not move with Arabic. The headroom is for formatting and for a
+# What this task's answer may cost (register item 15, revised by 131). Twelve
+# fixed ASCII keys with true or false, plus one short sentence of reasoning.
+# The reasoning is written in English whatever the note's language, so the
+# ceiling does not move with Arabic; the headroom is for formatting and for a
 # fenced reply, which fits and is then rejected as malformed rather than
-# truncated: two faults that would otherwise be reported as one.
-SCORE_MAX_OUTPUT_TOKENS = 256
+# truncated.
+SCORE_MAX_OUTPUT_TOKENS = 384
 
 
 def applicable_components(
@@ -104,88 +118,117 @@ def applicable_components(
     )
 
 
-def validate_marks(
-    marks: Mapping[ComponentName, int], note_type: NoteType, config: TenantConfig
-) -> None:
-    """Reject marks that do not answer the question that was asked.
+def applicable_checks(
+    note_type: NoteType, config: TenantConfig
+) -> tuple[CheckName, ...]:
+    """The checks to ask about, for this type under this tenant's rubric.
 
-    Every problem is reported, not just the first: one reprompt is all a model
-    gets, so it should be told everything that was wrong with the answer rather
-    than being corrected one field at a time across attempts it will not have.
-
-    The component NAME appears in the error location. That is safe -- it is a
-    `ComponentName` member, fixed vocabulary, never free text -- and it is what
-    makes a rejected answer diagnosable without logging the answer.
+    A suppressed component's checks are never asked and never answered. The
+    model is not given a question whose answer is thrown away, and the reply
+    stays short.
     """
-    applicable = applicable_components(note_type, config)
+    return tuple(
+        check
+        for component in applicable_components(note_type, config)
+        for check in config.checks_by_component[component]
+    )
+
+
+def validate_checks(
+    checks: Mapping[CheckName, bool], note_type: NoteType, config: TenantConfig
+) -> None:
+    """Reject answers that do not answer the question that was asked.
+
+    Two faults, both reported together: a missing answer for a check that was
+    asked, and an answer for one that was not. There is no range fault any
+    more -- a bool cannot be out of range, which is one of the reasons the
+    checks replaced marks (register item 131).
+
+    The check NAME appears in the error location. Safe: it is a CheckName
+    member, fixed vocabulary, never free text.
+    """
+    applicable = set(applicable_checks(note_type, config))
     problems: list[tuple[str, str]] = []
 
-    for component in ComponentName:
-        location = f"marks.{component.value}"
-        mark = marks.get(component)
-        if component in applicable:
-            if mark is None:
-                # An unmarked applicable component is not a zero. Treating it as
-                # one would silently mark a note down for the model's omission.
-                problems.append((location, "missing_mark"))
-            elif not 0 <= mark <= config.weights[component]:
-                problems.append((location, "mark_out_of_range"))
-        elif mark is not None:
-            # The weight already left the denominator; accepting the mark would
-            # either be ignored (so why accept it) or quietly change the result.
-            problems.append((location, "mark_for_suppressed_component"))
+    for check in CheckName:
+        location = f"checks.{check.value}"
+        answered = check in checks
+        if check in applicable and not answered:
+            problems.append((location, "missing_check"))
+        elif check not in applicable and answered:
+            problems.append((location, "check_for_suppressed_component"))
 
     if problems:
         raise output_rejected(SCORE_LABEL, tuple(problems))
 
 
-def marks_check(
+def checks_check(
     note_type: NoteType, config: TenantConfig
 ) -> Callable[[ScoreOutput], None]:
     """The check hook `llm_call.call_model` runs inside the validated call, so a
-    bad mark fails exactly like a bad shape and earns the same single reprompt."""
+    bad answer fails exactly like a bad shape and earns the same single
+    reprompt."""
 
     def check(output: ScoreOutput) -> None:
-        validate_marks(output.marks, note_type, config)
+        validate_checks(output.checks, note_type, config)
 
     return check
 
 
+def _mark_for(
+    component: ComponentName,
+    checks: Mapping[CheckName, bool],
+    config: TenantConfig,
+) -> int:
+    """One component's mark, from how many of its checks came back true.
+
+    NEXT_STEP_DATE has one special rule: ns_closure true is full marks whatever
+    the other two say. A lead that ended, with a reason, has no next step to
+    name, and counting it as one true check out of three would mark a complete
+    note down for being complete.
+    """
+    component_checks = config.checks_by_component[component]
+    if (
+        component is ComponentName.NEXT_STEP_DATE
+        and checks.get(CheckName.NS_CLOSURE) is True
+    ):
+        return config.weights[component]
+    true_count = sum(1 for check in component_checks if checks.get(check) is True)
+    return config.marks_by_true_count[component][true_count]
+
+
 def compute_score(
-    marks: Mapping[ComponentName, int], note_type: NoteType, config: TenantConfig
+    checks: Mapping[CheckName, bool], note_type: NoteType, config: TenantConfig
 ) -> NoteScore:
-    """Marks -> total, denominator, band and the five-row breakdown.
+    """Check answers -> marks -> total, denominator, band and the breakdown.
 
     The arithmetic, in full:
 
         applicable  = components not suppressed by type and not suppressed by Q13
+        mark        = marks_by_true_count[component][how many of its checks are true]
         denominator = sum of the applicable weights   (100 / 80 / 60 today)
         raw         = sum of the applicable marks
         total       = (raw * 100 + denominator // 2) // denominator
 
     That last line is integer round-half-up, done in integers throughout: no
     float ever touches a score, so the result cannot depend on binary rounding
-    and two runs of the same marks cannot differ. 55/80 is 68.75 and becomes 69
-    (fair); 56/80 is 70.0 and becomes 70 (good) -- one mark either side of a band
-    boundary, which is exactly where a float would be an unpleasant surprise.
+    and two runs of the same answers cannot differ.
 
     `components` lists ALL FIVE in fixed order, suppressed ones carrying
     `mark: null, suppressed: true`. `suppressed` means the weight left the
-    denominator; it does not mean the mark was zero, and the two are different
-    outcomes.
+    denominator; it does not mean the mark was zero.
     """
-    validate_marks(marks, note_type, config)
+    validate_checks(checks, note_type, config)
     applicable = applicable_components(note_type, config)
 
     denominator = sum(config.weights[component] for component in applicable)
     if denominator == 0:
-        # Unreachable with any shipped TenantConfig -- clarity is suppressed by
-        # no type and is not Q13-gated. Loud rather than a ZeroDivisionError,
-        # because the only way here is a rubric that suppresses everything, and
-        # that is a configuration fault worth naming.
         raise ValueError("tenant rubric leaves no applicable component")
 
-    raw = sum(marks[component] for component in applicable)
+    marks = {
+        component: _mark_for(component, checks, config) for component in applicable
+    }
+    raw = sum(marks.values())
     total = (raw * 100 + denominator // 2) // denominator
 
     return NoteScore(
@@ -195,7 +238,7 @@ def compute_score(
         components=[
             ScoreComponent(
                 name=component,
-                mark=marks[component] if component in applicable else None,
+                mark=marks.get(component),
                 weight=config.weights[component],
                 suppressed=component not in applicable,
             )
@@ -204,34 +247,20 @@ def compute_score(
     )
 
 
-def _caller_data(
-    note: LeadNote, applicable: tuple[ComponentName, ...], config: TenantConfig
-) -> str:
-    """The untrusted section: which components to mark and their ceilings, then
-    the note.
+def _caller_data(applicable: tuple[CheckName, ...], note_text: str) -> str:
+    """The untrusted section: which checks to answer, then the note.
 
-    THE WEIGHTS TRAVEL IN THE CALLER DATA, NOT IN THE TEMPLATE, and that is not
-    an oversight. A weight in template text could not be changed without bumping
-    the prompt version, and a per-tenant rubric would need a per-tenant template.
-    Putting the numbers in the variable half keeps `.stable` byte-identical for
-    every tenant and every note type -- one cached prefix, one file to review.
+    No weights and no ceilings travel here any more (register item 131). The
+    model answers facts and is told nothing about what a fact is worth, so a
+    weight change needs no prompt change and a persuasive note has no number
+    to aim at.
 
-    They are ceilings, not scores: the model is told the highest mark each
-    component can take, never what the marks add up to or what the result is
-    called.
-
-    The components block goes FIRST and the note LAST, as in classification. A
-    note that names its own components is a note trying to mark itself, and the
-    template says in so many words that only the block above it counts. The
-    bound is enforced in code regardless -- `validate_marks` rejects anything
-    outside [0, weight] -- so a persuasive note cannot inflate a mark; the
-    ordering just means the model is not asked to arbitrate.
+    The checks block goes FIRST and the note LAST, as in classification. A note
+    that names its own checks is trying to mark itself, and the template says
+    only the block above it counts.
     """
-    ceilings = "\n".join(
-        f"{component.value}: 0 to {config.weights[component]}"
-        for component in applicable
-    )
-    return f"COMPONENTS TO MARK:\n{ceilings}\n\nNOTE:\n{note.note}"
+    listed = "\n".join(check.value for check in applicable)
+    return f"CHECKS TO ANSWER:\n{listed}\n\nNOTE:\n{note_text}"
 
 
 def build_score_prompt(
@@ -241,7 +270,7 @@ def build_score_prompt(
     what would be sent without scripting a response for it."""
     return build_prompt(
         SCORE_TEMPLATE,
-        _caller_data(note, applicable_components(note_type, config), config),
+        caller_data=_caller_data(applicable_checks(note_type, config), note.note),
     )
 
 
@@ -256,9 +285,9 @@ async def score_note(
     reprompt: bool = True,
 ) -> tuple[ScoreOutput, LLMResponse]:
     """One model call, or two if the first answer is malformed. Returns the
-    validated marks -- already bounded against this tenant's weights by the
-    check hook -- and the raw response, whose `model` the judgement is stamped
-    with."""
+    validated check answers -- already matched against the checks this type and
+    tenant asked for -- and the raw response, whose `model` the judgement is
+    stamped with."""
     return await call_model(
         client,
         build_score_prompt(note, note_type, config),
@@ -268,6 +297,6 @@ async def score_note(
         settings=settings,
         profile=PROFILE_UNIT_A_SCORE,
         max_output_tokens=SCORE_MAX_OUTPUT_TOKENS,
-        check=marks_check(note_type, config),
+        check=checks_check(note_type, config),
         reprompt=reprompt,
     )

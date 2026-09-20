@@ -59,6 +59,7 @@ from tests.helpers.fake_leads import FakeLeadsClient, lead, note
 from tests.helpers.fake_llm import FakeLLM, json_response, response
 from tests.helpers.fake_operational_redis import FakeOperationalRedis
 from tests.helpers.scopes import TEST_SCOPE, test_scope
+from tests.helpers.score_answers import score_payload
 
 JUDGE = "/api/v1/notes/judgements"
 LEAD_ID = 1656
@@ -87,16 +88,7 @@ def _vague_answer(is_vague: bool = True):
 
 
 def _score_answer():
-    return json_response(
-        {
-            "marks": {
-                "what_happened": 20,
-                "client_said": 15,
-                "next_step_date": 15,
-                "clarity": 5,
-            }
-        }
-    )
+    return json_response(score_payload())
 
 
 def _script(llm: FakeLLM, note_type: str = "discovery") -> None:

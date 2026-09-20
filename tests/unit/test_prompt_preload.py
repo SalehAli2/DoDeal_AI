@@ -36,6 +36,7 @@ from tests.helpers.fake_cost_redis import FakeCostRedis
 from tests.helpers.fake_leads import FakeLeadsClient, lead, note
 from tests.helpers.fake_llm import FakeLLM, json_response, response
 from tests.helpers.fake_operational_redis import FakeOperationalRedis
+from tests.helpers.score_answers import score_payload
 
 JUDGE = "/api/v1/notes/judgements"
 LEAD_ID = 1656
@@ -44,7 +45,7 @@ GOOD_NOTE = "Called the client, discussed the New Cairo 3BR, following up Tuesda
 
 # The one deliberately absent from the temporary prompts directory below. Any of
 # the nine would do; naming it once keeps the assertion honest if it is renamed.
-MISSING = "structured_intelligence/score_v1.txt"
+MISSING = "structured_intelligence/score_v2.txt"
 
 
 @pytest.fixture
@@ -148,16 +149,7 @@ def started_client(monkeypatch: pytest.MonkeyPatch):
                 "reasoning": "The follow-up has no date.",
             }
         ),
-        json_response(
-            {
-                "marks": {
-                    "what_happened": 20,
-                    "client_said": 15,
-                    "next_step_date": 15,
-                    "clarity": 5,
-                }
-            }
-        ),
+        json_response(score_payload()),
     )
     leads = FakeLeadsClient(
         leads={LEAD_ID: lead(LEAD_ID)},

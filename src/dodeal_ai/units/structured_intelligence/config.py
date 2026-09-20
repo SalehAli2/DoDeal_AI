@@ -44,6 +44,7 @@ from dodeal_ai.core.tenant_config import tenant_section
 from dodeal_ai.units.structured_intelligence.schemas import (
     MAX_NOTE_TEXT_CHARS,
     Band,
+    CheckName,
     ComponentName,
     MissingComponent,
     NoteType,
@@ -82,7 +83,57 @@ _BAND_BOUNDARIES: tuple[tuple[Band, int], ...] = (
     (Band.GOOD, 84),
     (Band.EXCELLENT, 100),
 )
+# Which checks belong to which component (register item 131). The model
+# answers facts; this table is what turns those facts into marks, and it
+# lives here for the same reason the weights do: a rubric decision the
+# business owns, in one place, never spread through the scoring code.
+_CHECKS_BY_COMPONENT: Mapping[ComponentName, tuple[CheckName, ...]] = MappingProxyType(
+    {
+        ComponentName.WHAT_HAPPENED: (
+            CheckName.WH_OUTCOME,
+            CheckName.WH_ACTION,
+        ),
+        ComponentName.CLIENT_SAID: (
+            CheckName.CS_PRESENT,
+            CheckName.CS_OWN_TERMS,
+        ),
+        ComponentName.NEXT_STEP_DATE: (
+            CheckName.NS_ACTION,
+            CheckName.NS_DATE,
+            CheckName.NS_CLOSURE,
+        ),
+        ComponentName.DEAL_SPECIFICS: (
+            CheckName.DS_FIGURES,
+            CheckName.DS_SUBJECT,
+            CheckName.DS_TIMING,
+        ),
+        ComponentName.CLARITY: (
+            CheckName.CL_READABLE,
+            CheckName.CL_SUBSTANCE,
+        ),
+    }
+)
 
+# The mark for a component, by how many of its checks came back true.
+# Index 0 is no checks true, index 1 is one true, and so on, so each
+# tuple is exactly one longer than that component's check list.
+#
+# The splits are even thirds and halves rather than measured values:
+# no split is defensible to a decimal, and an even one is what a
+# salesperson can be shown when they ask why (BRD principle P2).
+#
+# NEXT_STEP_DATE has its own rule in scoring.py: ns_closure true is
+# full marks whatever the other two say, because nothing follows a
+# closed lead and the note says so. This table covers the other case.
+_MARKS_BY_TRUE_COUNT: Mapping[ComponentName, tuple[int, ...]] = MappingProxyType(
+    {
+        ComponentName.WHAT_HAPPENED: (0, 13, 25),
+        ComponentName.CLIENT_SAID: (0, 10, 20),
+        ComponentName.NEXT_STEP_DATE: (0, 13, 25, 25),
+        ComponentName.DEAL_SPECIFICS: (0, 7, 13, 20),
+        ComponentName.CLARITY: (0, 5, 10),
+    }
+)
 # A no_contact note ("called, no answer") cannot report what the client said,
 # and has no deal specifics to give. Those components are SUPPRESSED for it --
 # their weight leaves the denominator entirely. Scoring them 0 instead would
@@ -128,6 +179,8 @@ class TenantConfig:
 
     weights: Mapping[ComponentName, int]
     band_boundaries: tuple[tuple[Band, int], ...]
+    checks_by_component: Mapping[ComponentName, tuple[CheckName, ...]]
+    marks_by_true_count: Mapping[ComponentName, tuple[int, ...]]
     suppressed_components_by_type: Mapping[NoteType, frozenset[ComponentName]]
     allowed_missing_by_type: Mapping[NoteType, frozenset[MissingComponent]]
 
@@ -219,6 +272,8 @@ class TenantConfig:
 _DEFAULT_CONFIG = TenantConfig(
     weights=_WEIGHTS,
     band_boundaries=_BAND_BOUNDARIES,
+    checks_by_component=_CHECKS_BY_COMPONENT,
+    marks_by_true_count=_MARKS_BY_TRUE_COUNT,
     suppressed_components_by_type=_SUPPRESSED_COMPONENTS_BY_TYPE,
     allowed_missing_by_type=_ALLOWED_MISSING_BY_TYPE,
     short_note_codes=frozenset({"na", "wa", "cb"}),
@@ -315,6 +370,21 @@ def _check(config: TenantConfig) -> None:
     ascending = uppers == sorted(set(uppers)) and uppers[0] >= 0
     if bands != list(Band) or not ascending or uppers[-1] != 100:
         raise ValueError("band_boundaries")
+    if set(config.checks_by_component) != set(ComponentName):
+        raise ValueError("checks_by_component")
+    if set(config.marks_by_true_count) != set(ComponentName):
+        raise ValueError("marks_by_true_count")
+    for component, checks in config.checks_by_component.items():
+        marks = config.marks_by_true_count[component]
+        if len(marks) != len(checks) + 1:
+            raise ValueError("marks_length")
+        if list(marks) != sorted(marks) or marks[0] != 0:
+            raise ValueError("marks_order")
+        if marks[-1] != config.weights[component]:
+            raise ValueError("marks_ceiling")
+    all_checks = [c for checks in config.checks_by_component.values() for c in checks]
+    if sorted(all_checks) != sorted(CheckName):
+        raise ValueError("checks_coverage")
     if not config.flag_threshold < config.accept_threshold:
         raise ValueError("thresholds")
     if not config.min_note_chars < config.max_note_chars:

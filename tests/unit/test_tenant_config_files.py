@@ -76,13 +76,7 @@ def test_a_valid_file_overrides_the_default_for_its_tenant_only(tmp_path):
             "accept_threshold": 75,
             "rate_limit_per_hour": 5,
             "enforcement_mode": "blocking",
-            "weights": {
-                "what_happened": 30,
-                "client_said": 20,
-                "next_step_date": 20,
-                "deal_specifics": 20,
-                "clarity": 10,
-            },
+            "short_note_codes": ["NA", "Cb"],
             "band_boundaries": [
                 ["poor", 29],
                 ["fair", 59],
@@ -99,7 +93,8 @@ def test_a_valid_file_overrides_the_default_for_its_tenant_only(tmp_path):
     assert (config.accept_threshold, config.flag_threshold) == (75, 40)
     assert config.rate_limit_per_hour == 5
     assert config.enforcement_mode is EnforcementMode.BLOCKING
-    assert config.weights[ComponentName.WHAT_HAPPENED] == 30
+    assert config.short_note_codes == frozenset({"na", "cb"})  # folded, not as written
+    assert config.weights == DEFAULT.weights
     assert config.band_for(60) is Band.GOOD
     assert config.suppressed_components_by_type == DEFAULT.suppressed_components_by_type
     assert get_tenant_config("tenant-b") is DEFAULT
@@ -148,6 +143,18 @@ def test_the_weights_stay_immutable(tmp_path):
         {
             "config_version": "v",
             "weights": {**{k.value: 30 for k in ComponentName}, "clarity": -20},
+        },
+        {
+            # Sums to 100, but the mark tables top out at the default weights
+            # (register item 131) and a file cannot set them: refused.
+            "config_version": "v",
+            "weights": {
+                "what_happened": 30,
+                "client_said": 20,
+                "next_step_date": 20,
+                "deal_specifics": 20,
+                "clarity": 10,
+            },
         },
         {
             "config_version": "v",
@@ -201,6 +208,7 @@ def test_the_weights_stay_immutable(tmp_path):
         "weights-sum",
         "weights-sum-low",
         "weights-negative",
+        "weights-not-marks-ceiling",
         "bands-order",
         "bands-descending",
         "bands-top",

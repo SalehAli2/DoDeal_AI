@@ -52,6 +52,7 @@ from tests.helpers.fake_leads import (
 )
 from tests.helpers.fake_llm import FakeLLM, json_response
 from tests.helpers.fake_operational_redis import FakeOperationalRedis
+from tests.helpers.score_answers import score_payload
 
 pytestmark = pytest.mark.eval
 
@@ -84,14 +85,7 @@ VAGUE_ANSWER = {
     "clarification_prompt": "When are you following up with this client?",
     "reasoning": "No date was given for the next step.",
 }
-SCORE_ANSWER = {
-    "marks": {
-        "what_happened": 20,
-        "client_said": 15,
-        "next_step_date": 15,
-        "clarity": 5,
-    }
-}
+SCORE_ANSWER = score_payload()
 # Every note is classified `discovery`. Not a claim about the corpus -- it is
 # the type whose rubric leaves all four unsuppressed components in play, so it
 # exercises the most of the scoring path per note.

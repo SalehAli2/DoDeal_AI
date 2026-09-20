@@ -44,6 +44,7 @@ from tests.helpers.fake_cost_redis import FakeCostRedis
 from tests.helpers.fake_leads import FakeLeadsClient, lead, note
 from tests.helpers.fake_llm import FakeLLM, json_response
 from tests.helpers.fake_operational_redis import FakeOperationalRedis
+from tests.helpers.score_answers import score_payload
 
 JUDGE = "/api/v1/notes/judgements"
 DIRECT = "/api/v1/notes/judgements/direct"
@@ -73,14 +74,7 @@ VAGUE_ANSWER = {
     "clarification_prompt": "Which Tuesday are you calling, and what will you cover?",
     "reasoning": "The follow-up has no date.",
 }
-SCORE_ANSWER = {
-    "marks": {
-        "what_happened": 20,
-        "client_said": 15,
-        "next_step_date": 15,
-        "clarity": 5,
-    }
-}
+SCORE_ANSWER = score_payload()
 
 
 def _script(llm: FakeLLM, judgements: int = 1) -> None:

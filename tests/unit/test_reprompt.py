@@ -51,19 +51,13 @@ from dodeal_ai.units.structured_intelligence.vague import (
 from tests.helpers.fake_leads import note
 from tests.helpers.fake_llm import FakeLLM, json_response, response, truncated
 from tests.helpers.scopes import TEST_SCOPE
+from tests.helpers.score_answers import score_payload
 
 CONFIG = get_tenant_config("tenant-a")
 NOTE_TEXT = "Called the client about the New Cairo 3BR; calling back Tuesday."
 
 GOOD_CLASSIFICATION = {"note_type": "discovery"}
-GOOD_MARKS = {
-    "marks": {
-        "what_happened": 20,
-        "client_said": 15,
-        "next_step_date": 20,
-        "clarity": 8,
-    }
-}
+GOOD_CHECKS = score_payload()
 GOOD_VAGUE = {
     "is_vague": True,
     "missing_components": ["next_step_with_date"],
@@ -350,10 +344,13 @@ async def test_a_rule_the_schema_cannot_hold_earns_the_reprompt_too():
     assert [c.value for c in output.missing_components] == ["next_step_with_date"]
 
 
-async def test_a_mark_above_its_weight_earns_the_reprompt():
+async def test_a_check_for_a_suppressed_component_earns_the_reprompt():
+    """deal_specifics is off (Q13), so an answer for its check is a malformed one."""
     client = FakeLLM(
-        json_response({"marks": {**GOOD_MARKS["marks"], "what_happened": 99}}),
-        json_response(GOOD_MARKS),
+        json_response(
+            {**GOOD_CHECKS, "checks": {**GOOD_CHECKS["checks"], "ds_figures": True}}
+        ),
+        json_response(GOOD_CHECKS),
     )
     output, _ = await score_note(
         client,
@@ -364,7 +361,8 @@ async def test_a_mark_above_its_weight_earns_the_reprompt():
         settings=get_settings(),
     )
     assert client.call_count == 2
-    assert [mark for mark in output.marks.values()] == [20, 15, 20, 8]
+    assert "ds_figures" not in {check.value for check in output.checks}
+    assert len(output.checks) == 9
 
 
 # --- per-task output ceilings (register item 15) ----------------------------
@@ -385,7 +383,7 @@ async def test_each_pass_states_its_own_ceiling():
     )
     assert vague_client.calls[0].max_output_tokens == VAGUE_MAX_OUTPUT_TOKENS
 
-    score_client = FakeLLM(json_response(GOOD_MARKS))
+    score_client = FakeLLM(json_response(GOOD_CHECKS))
     await score_note(
         score_client,
         _note(),

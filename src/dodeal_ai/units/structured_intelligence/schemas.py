@@ -39,6 +39,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StrictBool,
     StringConstraints,
     model_validator,
 )
@@ -108,6 +109,38 @@ class ComponentName(StrEnum):
     NEXT_STEP_DATE = "next_step_date"
     DEAL_SPECIFICS = "deal_specifics"
     CLARITY = "clarity"
+
+
+class CheckName(StrEnum):
+    """The twelve yes/no facts the model answers about a note.
+
+    Binary criteria, not marks: a model asked for a whole number out of
+    25 cannot use that resolution consistently, and the rubric's own
+    acceptance target is band agreement with a human. Each check is one
+    observable fact; the marks and the total are computed in code from
+    TenantConfig (register item 131).
+
+    Declaration order is component order, so a reader can see which
+    checks belong together without consulting the mapping.
+    """
+
+    # what_happened
+    WH_OUTCOME = "wh_outcome"
+    WH_ACTION = "wh_action"
+    # client_said
+    CS_PRESENT = "cs_present"
+    CS_OWN_TERMS = "cs_own_terms"
+    # next_step_date
+    NS_ACTION = "ns_action"
+    NS_DATE = "ns_date"
+    NS_CLOSURE = "ns_closure"
+    # deal_specifics
+    DS_FIGURES = "ds_figures"
+    DS_SUBJECT = "ds_subject"
+    DS_TIMING = "ds_timing"
+    # clarity
+    CL_READABLE = "cl_readable"
+    CL_SUBSTANCE = "cl_substance"
 
 
 class Band(StrEnum):
@@ -333,22 +366,22 @@ class VagueOutput(BaseModel):
 
 
 class ScoreOutput(BaseModel):
-    """Pass 3: a mark per component.
+    """Pass 3: one yes or no per check.
 
-    DELIBERATELY UNBOUNDED HERE. Each mark must satisfy 0 <= mark <= weight[c],
-    and the weights are per-tenant (TenantConfig), which validate_output cannot
-    see -- it takes a schema and a raw value and has no context channel. So the
-    bound is checked in the scoring code against the tenant's own weights, not
-    declared here against a constant that would be wrong for any tenant whose
-    weights differ. A `ge=0` here would look like the check and hide its
-    absence.
+    The model answers facts; it does not mark and it does not total.
+    Which checks are asked is decided per request from the tenant's
+    config and the note's type, so a suppressed component's checks are
+    never sent and never returned. That the returned set matches the
+    asked set is checked in the scoring code, not here: this schema has
+    no context channel, so the check is in scoring.py.
 
-    No `total` and no `band`: the model supplies marks only.
+    No `total` and no `band`, for the same reason as before.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    marks: dict[ComponentName, int]
+    checks: dict[CheckName, StrictBool]
+    reasoning: str
 
 
 # ---------------------------------------------------------------------------

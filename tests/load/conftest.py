@@ -59,6 +59,7 @@ from dodeal_ai.units.structured_intelligence.vague import template_for
 from tests.helpers import tokens
 from tests.helpers.fake_leads import FakeLeadsClient, load_fixture_client
 from tests.helpers.fake_llm import FakeLLM, json_response
+from tests.helpers.score_answers import score_payload
 from tests.redis_real.conftest import (
     _DEFAULTS,
     _SERVICE_DBS,
@@ -92,14 +93,7 @@ VAGUE_ANSWER = {
     "clarification_prompt": "Which day is the follow-up, and what will it cover?",
     "reasoning": "The follow-up has no date.",
 }
-SCORE_ANSWER = {
-    "marks": {
-        "what_happened": 20,
-        "client_said": 15,
-        "next_step_date": 15,
-        "clarity": 5,
-    }
-}
+SCORE_ANSWER = score_payload()
 
 
 @pytest.hookimpl(tryfirst=True)
