@@ -204,3 +204,19 @@ def test_enforcement_mode_is_advisory_by_default(config: TenantConfig) -> None:
     # Carried, never branched on: enforcement is the CRM's.
     assert config.enforcement_mode is EnforcementMode.ADVISORY
     assert [m.value for m in EnforcementMode] == ["advisory", "blocking"]
+
+
+def test_every_frozenset_str_field_is_stored_casefolded() -> None:
+    """Each frozenset[str] table on TenantConfig is folded, so a new one must join the fold."""
+    import typing
+
+    hints = typing.get_type_hints(TenantConfig)
+    tables = [name for name, hint in hints.items() if hint == frozenset[str]]
+    assert tables, "no frozenset[str] field found"
+    mixed = dataclasses.replace(
+        get_tenant_config("tenant-a"),
+        **{name: frozenset({"AbC", "Not INTERESTED"}) for name in tables},
+    )
+    for name in tables:
+        table = getattr(mixed, name)
+        assert table == frozenset(word.casefold() for word in table), name
