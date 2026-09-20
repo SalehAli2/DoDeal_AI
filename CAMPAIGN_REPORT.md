@@ -6668,3 +6668,16 @@ judgements from before and after a prompt edit as if the prompt had not moved;
 (2) the stamp is a string in one module, so a future edit can miss it again.
 Stress test: the meta/versions route and a judgement both assert the literal
 v3 string, so the stamp cannot move in one place and not the other.
+
+## Piece: register item 146, the prompt set digest
+
+Item 146 -- a test hashes the ten templates `UNIT_A_TEMPLATES` names and pins
+the digest beside `PROMPT_SET_VERSION`, so a prompt edit without a bump is a red
+build. The name is hashed with the text, so a template joining or leaving the
+tuple moves the digest too.
+Production failure modes: (1) the digest is over the SHIPPED files, so a
+deployment running a DODEAL_PROMPTS_DIR override is unguarded and can send text
+no stamp describes; (2) the pair is updated by hand, so a bump with a stale
+digest passes review and leaves the guard asserting the wrong claim.
+Stress test: append one byte to a template, watch the digest assertion fail
+naming both constants to move, restore.
