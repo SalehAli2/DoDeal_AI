@@ -28,8 +28,7 @@ RULES
 OUTPUT
 Return only this JSON object. No prose, no code fence.
 
-{"is_vague": true, "missing_components": ["..."],
- "clarification_prompt": "...", "reasoning": "..."}
+{"is_vague": true, "missing_components": ["..."], "clarification_prompt": "...", "reasoning": "..."}
 
 Both halves must agree:
 - is_vague true  -> missing_components non-empty, prompt written.

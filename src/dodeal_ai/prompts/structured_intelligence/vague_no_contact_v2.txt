@@ -13,17 +13,11 @@ Nothing else may be reported for this type.
 
 EXAMPLES
 Note: حاولت اتصل، مفيش رد.
-{"is_vague": true, "missing_components": ["next_step_with_date"],
- "clarification_prompt": "امتى بالظبط هتحاول تتصل بيه تاني؟",
- "reasoning": "The attempt is recorded but no next attempt is dated."}
+{"is_vague": true, "missing_components": ["next_step_with_date"], "clarification_prompt": "امتى بالظبط هتحاول تتصل بيه تاني؟", "reasoning": "The attempt is recorded but no next attempt is dated."}
 
 Note: Tried Mr. Tarek twice, phone off. Left a WhatsApp. Trying
 again Sunday afternoon.
-{"is_vague": false, "missing_components": [],
- "clarification_prompt": null,
- "reasoning": "Approach, outcome and a dated next attempt are present."}
+{"is_vague": false, "missing_components": [], "clarification_prompt": null, "reasoning": "Approach, outcome and a dated next attempt are present."}
 
 Note: called, no luck. will try
-{"is_vague": true, "missing_components": ["next_step_with_date"],
- "clarification_prompt": "When exactly will you try again?",
- "reasoning": "'Will try' names no day."}
+{"is_vague": true, "missing_components": ["next_step_with_date"], "clarification_prompt": "When exactly will you try again?", "reasoning": "'Will try' names no day."}

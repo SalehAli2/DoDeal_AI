@@ -11,19 +11,12 @@ MAY BE MISSING, report only from this list:
 
 EXAMPLES
 Note: عاين الوحدة امبارح. عجبته.
-{"is_vague": true, "missing_components": ["client_said", "next_step_with_date"],
- "clarification_prompt": "قال إيه عن الوحدة، إيه اللي عجبه وإيه اللي مضايقه، وإيه الخطوة الجاية وامتى؟",
- "reasoning": "The visit is recorded but not what he said, and nothing following is dated."}
+{"is_vague": true, "missing_components": ["client_said", "next_step_with_date"], "clarification_prompt": "قال إيه عن الوحدة، إيه اللي عجبه وإيه اللي مضايقه، وإيه الخطوة الجاية وامتى؟", "reasoning": "The visit is recorded but not what he said, and nothing following is dated."}
 
 Note: Took Mr. Sayed to the corner 2BR at Cedar Walk on Thursday.
 Liked the light, said the kitchen is smaller than another compound's
 and wants his wife to see it. Second viewing Friday next week.
-{"is_vague": false, "missing_components": [],
- "clarification_prompt": null,
- "reasoning": "The unit and date, his reaction in his words and a dated step are present."}
+{"is_vague": false, "missing_components": [], "clarification_prompt": null, "reasoning": "The unit and date, his reaction in his words and a dated step are present."}
 
 Note: viewng done, went ok, wil see
-{"is_vague": true, "missing_components": ["what_happened", "client_said", "next_step_with_date"],
- "clarification_prompt": "Which unit did you show and when, what did
- the client say about it, and what happens next and on what day?",
- "reasoning": "Neither property, reaction nor dated next step is recorded."}
+{"is_vague": true, "missing_components": ["what_happened", "client_said", "next_step_with_date"], "clarification_prompt": "Which unit did you show and when, what did the client say about it, and what happens next and on what day?", "reasoning": "Neither property, reaction nor dated next step is recorded."}

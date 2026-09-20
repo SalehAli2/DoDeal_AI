@@ -12,19 +12,12 @@ MAY BE MISSING, report only from this list:
 
 EXAMPLES
 Note: اتكلمت مع العميل النهاردة، مهتم بالكمبوند. هيرد عليا.
-{"is_vague": true, "missing_components": ["client_said", "next_step_with_date"],
- "clarification_prompt": "العميل قال إيه بالظبط عن الميزانية والمساحة، وامتى هتكلمه تاني؟",
- "reasoning": "Interest is noted but not her requirement, and no follow-up is dated."}
+{"is_vague": true, "missing_components": ["client_said", "next_step_with_date"], "clarification_prompt": "العميل قال إيه بالظبط عن الميزانية والمساحة، وامتى هتكلمه تاني؟", "reasoning": "Interest is noted but not her requirement, and no follow-up is dated."}
 
 Note: Called Ms. Hala. Wants 3BR in Zahra Gardens, up to 4.5M,
 handover within a year, for the family before school starts. Comparing
 two compounds on payment terms. Sending plans today, calling Sunday.
-{"is_vague": false, "missing_components": [],
- "clarification_prompt": null,
- "reasoning": "Discussion, her requirement in her terms and a dated step are present."}
+{"is_vague": false, "missing_components": [], "clarification_prompt": null, "reasoning": "Discussion, her requirement in her terms and a dated step are present."}
 
 Note: disc call done, client intersted, budget ok, will f/u
-{"is_vague": true, "missing_components": ["client_said", "next_step_with_date"],
- "clarification_prompt": "What did the client say they need, figure,
- area and unit type, and when exactly are you following up?",
- "reasoning": "'Budget ok' is the agent's verdict, and 'will f/u' names no day."}
+{"is_vague": true, "missing_components": ["client_said", "next_step_with_date"], "clarification_prompt": "What did the client say they need, figure, area and unit type, and when exactly are you following up?", "reasoning": "'Budget ok' is the agent's verdict, and 'will f/u' names no day."}

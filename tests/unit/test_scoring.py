@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import dataclasses
 import itertools
+import json
 import pathlib
 import re
 
@@ -32,8 +33,10 @@ from dodeal_ai.units.structured_intelligence.config import get_tenant_config
 from dodeal_ai.units.structured_intelligence.schemas import (
     Band,
     CheckName,
+    ClassificationOutput,
     ComponentName,
     NoteType,
+    VagueOutput,
 )
 from dodeal_ai.units.structured_intelligence.scoring import (
     SCORE_LABEL,
@@ -618,6 +621,73 @@ def test_no_template_contains_the_caller_data_delimiters(template):
     text = (_PROMPT_DIR / template).read_text(encoding="utf-8")
     assert _DATA_START not in text, template
     assert _DATA_END not in text, template
+
+
+# --- the worked examples a model copies -------------------------------------
+
+# The seven v2 templates that judge a note and therefore carry worked examples.
+# score_v2.txt is not one: its examples would have to be check answers for a
+# note, and the reprompt tail is a form instruction with nothing to illustrate.
+_EXAMPLE_COUNTS = {
+    "classify_v2.txt": 7,
+    "vague_callback_v2.txt": 3,
+    "vague_discovery_v2.txt": 3,
+    "vague_negotiation_v2.txt": 3,
+    "vague_no_contact_v2.txt": 3,
+    "vague_viewing_v2.txt": 3,
+    "vague_won_lost_v2.txt": 3,
+}
+
+
+def _brace_objects(text: str) -> list[str]:
+    """Every brace-balanced {...} run in the text, in order."""
+    found: list[str] = []
+    depth = start = 0
+    for index, char in enumerate(text):
+        if char == "{":
+            if depth == 0:
+                start = index
+            depth += 1
+        elif char == "}" and depth:
+            depth -= 1
+            if depth == 0:
+                found.append(text[start : index + 1])
+    return found
+
+
+def _worked_examples(template: str) -> list[str]:
+    """The objects under EXAMPLES: the answers a model reads before the note.
+
+    The OUTPUT contract is deliberately out of scope. It is a shape sketch with
+    placeholders -- score_v2.txt's carries a bare `...` -- and was never meant
+    to parse; an example is meant to be copied.
+    """
+    text = (_PROMPT_DIR / template).read_text(encoding="utf-8")
+    body = text[text.index("EXAMPLES") :]
+    end = body.find("\nOUTPUT\n")
+    return _brace_objects(body if end == -1 else body[:end])
+
+
+@pytest.mark.parametrize("template,count", sorted(_EXAMPLE_COUNTS.items()))
+def test_every_worked_example_parses_as_json(template, count):
+    # Register item 137. A clarification_prompt wrapped across a line break
+    # INSIDE its string literal is not JSON. The last worked answer a model
+    # reads before the note is the one it copies, so a copied line break spends
+    # the single reprompt and then 503s a judgement that was never in doubt.
+    # The count is pinned so an extraction that finds nothing cannot pass.
+    examples = _worked_examples(template)
+    assert len(examples) == count, template
+    for raw in examples:
+        json.loads(raw)
+
+
+@pytest.mark.parametrize("template", sorted(_EXAMPLE_COUNTS))
+def test_every_worked_example_is_an_answer_the_schema_accepts(template):
+    # Parsing is not enough: an example our own validator would reject teaches
+    # the model the one shape that earns a reprompt.
+    schema = ClassificationOutput if template.startswith("classify") else VagueOutput
+    for raw in _worked_examples(template):
+        schema.model_validate(json.loads(raw))
 
 
 def test_the_v1_set_is_still_present():
