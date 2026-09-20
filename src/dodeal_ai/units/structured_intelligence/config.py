@@ -136,8 +136,11 @@ class TenantConfig:
     # is judged, not asked "what happened". Codes take a trailing attempt number
     # (na1, cb2); phrases match the whole stripped note. Tables, not a model
     # call: over half of real notes are this short. Empty recognises nothing.
+    # Fillers ("tmrw", "am") may follow a code; every word must be a code or a
+    # filler. All three tables are stored casefolded (build() folds a tenant's).
     short_note_codes: frozenset[str]
     short_note_phrases: frozenset[str]
+    short_note_fillers: frozenset[str]
 
     accept_threshold: int
     flag_threshold: int
@@ -223,6 +226,9 @@ _DEFAULT_CONFIG = TenantConfig(
             "مش مهتم",
         }
     ),
+    short_note_fillers=frozenset(
+        {"tmrw", "today", "bkra", "bokra", "am", "pm", "again", "بكرة", "النهاردة"}
+    ),
     accept_threshold=70,
     flag_threshold=40,
     business_line_field=None,  # ASSUMPTION[Q13] -- see TenantConfig above
@@ -237,7 +243,7 @@ _DEFAULT_CONFIG = TenantConfig(
     attempt_ttl_seconds=21600,  # 6h
     idempotency_ttl_seconds=86400,  # 24h
     enforcement_mode=EnforcementMode.ADVISORY,
-    config_version="tenant-cfg-default-2",
+    config_version="tenant-cfg-default-3",
 )
 
 
@@ -259,6 +265,7 @@ class TenantConfigFile(BaseModel):
     band_boundaries: list[tuple[Band, int]] | None = None
     short_note_codes: frozenset[str] | None = None
     short_note_phrases: frozenset[str] | None = None
+    short_note_fillers: frozenset[str] | None = None
     accept_threshold: int | None = Field(default=None, ge=0, le=100)
     flag_threshold: int | None = Field(default=None, ge=0, le=100)
     min_note_chars: int | None = Field(default=None, ge=1)
@@ -283,6 +290,9 @@ class TenantConfigFile(BaseModel):
             updates["weights"] = MappingProxyType(dict(self.weights))
         if self.band_boundaries is not None:
             updates["band_boundaries"] = tuple(self.band_boundaries)
+        for table in ("short_note_codes", "short_note_phrases", "short_note_fillers"):
+            if table in updates:
+                updates[table] = frozenset(word.casefold() for word in updates[table])
         config = dataclasses.replace(_DEFAULT_CONFIG, **updates)
         _check(config)
         return config

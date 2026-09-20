@@ -58,3 +58,23 @@ def test_a_tenant_with_empty_tables_recognises_nothing() -> None:
     for text in ("na1", "cb1 tmrw", "not interested", "مش مهتم"):
         assert not _is_recognised_short_note(text, empty)
         assert _length_gate(_note(text), empty) is not None
+
+
+def test_every_word_must_be_a_code_or_a_filler() -> None:
+    """A code followed by ordinary words is a real note, not an outcome."""
+    assert _is_recognised_short_note("cb1 tmrw", CONFIG)
+    assert _is_recognised_short_note("na1", CONFIG)
+    assert not _is_recognised_short_note("na, client abusive, wants refund", CONFIG)
+
+
+def test_the_arabic_phrase_and_filler_are_recognised() -> None:
+    """The default Arabic phrase and filler match."""
+    assert _is_recognised_short_note("لا يرد", CONFIG)
+    assert _is_recognised_short_note("cb بكرة", CONFIG)
+
+
+def test_a_tenant_with_no_fillers_still_recognises_a_bare_code() -> None:
+    """An empty filler table drops the fillers only."""
+    bare = dataclasses.replace(CONFIG, short_note_fillers=frozenset())
+    assert _is_recognised_short_note("na1", bare)
+    assert not _is_recognised_short_note("cb1 tmrw", bare)

@@ -49,7 +49,7 @@ def test_containers_on_the_shared_default_are_immutable(config: TenantConfig) ->
 
 
 def test_config_version_is_stamped(config: TenantConfig) -> None:
-    assert config.config_version == "tenant-cfg-default-2"
+    assert config.config_version == "tenant-cfg-default-3"
 
 
 # --- weights ---------------------------------------------------------------

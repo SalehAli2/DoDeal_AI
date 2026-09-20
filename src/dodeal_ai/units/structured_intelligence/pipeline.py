@@ -401,18 +401,23 @@ def _suppressed(
 def _is_recognised_short_note(text: str, config: TenantConfig) -> bool:
     """Register item 132: is this below-floor note a known outcome?
 
-    Yes if the whole lowercased note is a tenant phrase, or if its first word is
-    a tenant code with an optional attempt number (na, cb1). Only the first word
-    is checked, so "cb1 tmrw" passes though "tmrw" is no code; the note is
-    already below the floor, which bounds what that lets through.
+    Yes if the whole lowercased note is a tenant phrase, or if EVERY word is a
+    tenant code (optional attempt number: na, cb1) or a filler (tmrw, am). The
+    tables are stored casefolded, so nothing is rebuilt per call.
     """
     words = " ".join(text.casefold().split())
     if not words:
         return False
-    if words in {phrase.casefold() for phrase in config.short_note_phrases}:
+    if words in config.short_note_phrases:
         return True
-    base = words.split(" ", 1)[0].rstrip("0123456789")
-    return bool(base) and base in {code.casefold() for code in config.short_note_codes}
+    return all(
+        word in config.short_note_fillers
+        or (
+            bool(word.rstrip("0123456789"))
+            and word.rstrip("0123456789") in config.short_note_codes
+        )
+        for word in words.split(" ")
+    )
 
 
 def _length_gate(
