@@ -107,7 +107,6 @@ _ALLOWED_MISSING_BY_TYPE: Mapping[NoteType, frozenset[MissingComponent]] = (
         {
             NoteType.NO_CONTACT: frozenset(
                 {
-                    MissingComponent.WHAT_HAPPENED,
                     MissingComponent.NEXT_STEP_WITH_DATE,
                 }
             ),

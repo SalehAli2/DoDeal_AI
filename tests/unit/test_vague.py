@@ -348,13 +348,21 @@ async def test_client_said_is_rejected_even_beside_an_allowed_component():
         )
 
 
-@pytest.mark.parametrize("component", ["what_happened", "next_step_with_date"])
-async def test_the_two_allowed_components_pass_for_no_contact(component):
+async def test_the_one_allowed_component_passes_for_no_contact():
     output, _, _ = await _detect(
-        _vague(missing=[component], prompt="A specific question."),
+        _vague(missing=["next_step_with_date"], prompt="A specific question."),
         NoteType.NO_CONTACT,
     )
-    assert output.missing_components == [MissingComponent(component)]
+    assert output.missing_components == [MissingComponent.NEXT_STEP_WITH_DATE]
+
+
+async def test_what_happened_is_rejected_for_no_contact():
+    """Register item 130: asking a no-contact note what happened is refused."""
+    with pytest.raises(MalformedOutputError):
+        await _detect(
+            _vague(missing=["what_happened"], prompt="What happened?"),
+            NoteType.NO_CONTACT,
+        )
 
 
 @pytest.mark.parametrize(
@@ -389,7 +397,7 @@ def test_the_restriction_comes_from_the_tenant_config_not_from_code():
     # A rubric decision like every other one: a tenant that wants a different
     # set changes config, not this module.
     assert CONFIG.allowed_missing_by_type[NoteType.NO_CONTACT] == frozenset(
-        {MissingComponent.WHAT_HAPPENED, MissingComponent.NEXT_STEP_WITH_DATE}
+        {MissingComponent.NEXT_STEP_WITH_DATE}
     )
 
 

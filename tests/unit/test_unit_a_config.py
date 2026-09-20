@@ -136,9 +136,12 @@ def test_only_no_contact_suppresses_components_by_type(config: TenantConfig) -> 
     assert set(config.suppressed_components_by_type) == {NoteType.NO_CONTACT}
 
 
-def test_no_contact_allows_only_two_missing_components(config: TenantConfig) -> None:
+def test_no_contact_may_only_be_asked_for_the_next_attempt_date(
+    config: TenantConfig,
+) -> None:
+    """Register item 130: what happened is not a question a no-contact note can owe."""
     assert config.allowed_missing_by_type[NoteType.NO_CONTACT] == frozenset(
-        {MissingComponent.WHAT_HAPPENED, MissingComponent.NEXT_STEP_WITH_DATE}
+        {MissingComponent.NEXT_STEP_WITH_DATE}
     )
 
 
