@@ -1,8 +1,8 @@
 NOTE TYPE: an attempt to reach the client that did not succeed.
 
-A useful one records how they were approached, what happened (no
-answer, busy, phone off, wrong number, message left), and when the
-next attempt will be.
+A useful one records when the next attempt will be. The attempt itself
+is all that happened, so nothing else is asked for and nothing else may
+be reported.
 
 MAY BE MISSING, report only from this list:
 - next_step_with_date   what happens next AND when, as a date or a

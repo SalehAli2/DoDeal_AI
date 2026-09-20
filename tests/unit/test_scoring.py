@@ -118,10 +118,11 @@ def test_a_scored_type_keeps_the_other_four_under_q13():
     assert applicable_components(NoteType.DISCOVERY, CONFIG) == (WH, CS, NSD, CL)
 
 
-def test_no_contact_also_drops_client_said():
-    # The client was never reached. Marking it 0 would cap an honest note and
-    # teach salespeople to invent conversation.
-    assert applicable_components(NoteType.NO_CONTACT, CONFIG) == (WH, NSD, CL)
+def test_no_contact_also_drops_client_said_and_what_happened():
+    # The client was never reached, and the attempt IS what happened. Marking
+    # either 0 would cap an honest note and teach salespeople to invent
+    # conversation (register item 137).
+    assert applicable_components(NoteType.NO_CONTACT, CONFIG) == (NSD, CL)
 
 
 def test_resolving_q13_restores_deal_specifics_where_the_type_allows_it():
@@ -137,7 +138,7 @@ def test_resolving_q13_restores_deal_specifics_where_the_type_allows_it():
 def test_resolving_q13_does_not_restore_it_for_no_contact():
     # Two independent reasons compose: Q13 is lifted, but the TYPE still
     # suppresses deal_specifics for a note where nobody was reached.
-    assert applicable_components(NoteType.NO_CONTACT, Q13_RESOLVED) == (WH, NSD, CL)
+    assert applicable_components(NoteType.NO_CONTACT, Q13_RESOLVED) == (NSD, CL)
 
 
 def test_the_order_is_the_declaration_order():
@@ -151,14 +152,13 @@ def test_the_order_is_the_declaration_order():
 
 def test_a_suppressed_components_checks_are_never_asked():
     asked = applicable_checks(NoteType.NO_CONTACT, CONFIG)
+    assert WH_O not in asked and WH_A not in asked
     assert CS_P not in asked and CS_T not in asked
     assert DS_F not in asked and DS_S not in asked and DS_T not in asked
 
 
 def test_the_checks_asked_follow_the_components_that_apply():
     assert applicable_checks(NoteType.NO_CONTACT, CONFIG) == (
-        WH_O,
-        WH_A,
         NS_A,
         NS_D,
         NS_C,
@@ -190,25 +190,27 @@ def test_denominator_80_under_q13():
     assert score.denominator == 80
 
 
-def test_denominator_60_for_no_contact_under_q13():
+def test_denominator_35_for_no_contact_under_q13():
+    # next_step_date (25) plus clarity (10). what_happened, client_said and
+    # deal_specifics all leave the denominator (register item 137).
     score = compute_score(
         _all_true(NoteType.NO_CONTACT, CONFIG), NoteType.NO_CONTACT, CONFIG
     )
-    assert score.denominator == 60
+    assert score.denominator == 35
 
 
-def test_denominator_for_no_contact_with_q13_resolved_is_still_60():
+def test_denominator_for_no_contact_with_q13_resolved_is_still_35():
     # The BRD predicts 75 here. It is not reachable from the weights: they are
-    # 25/20/25/20/10 and no_contact suppresses client_said AND deal_specifics by
-    # TYPE, so lifting Q13 changes nothing for it -- 25+25+10. 75 would need a
-    # single 25-weight component suppressed, which no rule does. See the Phase F
-    # report block; the tree is followed, as the campaign requires.
+    # 25/20/25/20/10 and no_contact suppresses what_happened, client_said AND
+    # deal_specifics by TYPE, so lifting Q13 changes nothing for it -- 25+10.
+    # See the Phase F report block; the tree is followed, as the campaign
+    # requires.
     score = compute_score(
         _all_true(NoteType.NO_CONTACT, Q13_RESOLVED),
         NoteType.NO_CONTACT,
         Q13_RESOLVED,
     )
-    assert score.denominator == 60
+    assert score.denominator == 35
 
 
 def test_all_checks_true_is_100_whatever_the_denominator():
@@ -420,15 +422,16 @@ def test_a_suppressed_component_is_null_not_zero():
 
 def test_an_applicable_component_carries_its_mark():
     score = compute_score(
-        _only(NoteType.NO_CONTACT, CONFIG, WH_O, WH_A, NS_A, NS_D, CL_R),
+        _only(NoteType.NO_CONTACT, CONFIG, NS_A, NS_D, CL_R),
         NoteType.NO_CONTACT,
         CONFIG,
     )
     rows = {c.name: c for c in score.components}
 
-    assert rows[WH].mark == 25
-    assert rows[WH].suppressed is False
+    assert rows[WH].mark is None
+    assert rows[WH].suppressed is True
     assert rows[NSD].mark == 25
+    assert rows[NSD].suppressed is False
     assert rows[CL].mark == 5
 
 
@@ -495,9 +498,9 @@ def test_compute_score_validates_before_it_computes():
 
 def test_the_caller_data_lists_only_the_applicable_checks():
     variable = build_score_prompt(_note(), NoteType.NO_CONTACT, CONFIG).variable
-    assert "wh_outcome" in variable
     assert "ns_closure" in variable
     assert "cl_substance" in variable
+    assert "wh_outcome" not in variable
     assert "cs_present" not in variable
     assert "ds_figures" not in variable
 

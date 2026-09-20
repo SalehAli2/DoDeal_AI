@@ -1173,9 +1173,10 @@ async def test_a_no_contact_note_is_scored_against_the_narrower_rubric(
     await judge_note(_scope(), _request(), resubmission=False, deps=deps)
 
     line = next(x for x in json_capture() if x["message"] == "judgement_completed")
-    # 48 of 60 -> 80, good. client_said and deal_specifics left the denominator.
-    assert line["denominator"] == 60
-    assert line["band"] == "good"
+    # 23 of 35 -> 66, fair. what_happened, client_said and deal_specifics all
+    # left the denominator (register item 137).
+    assert line["denominator"] == 35
+    assert line["band"] == "fair"
 
 
 # --- one pass fails, the other is cancelled (register item 63) --------------

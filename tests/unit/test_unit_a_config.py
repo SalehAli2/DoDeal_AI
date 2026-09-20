@@ -125,13 +125,18 @@ def test_accept_threshold_sits_above_the_flag_threshold(config: TenantConfig) ->
 # --- per-type suppression --------------------------------------------------
 
 
-def test_no_contact_suppresses_client_said_and_deal_specifics(
+def test_no_contact_suppresses_the_three_it_cannot_answer(
     config: TenantConfig,
 ) -> None:
-    # A "called, no answer" note cannot report what the client said. Scoring
-    # those 0 instead of removing them would cap an honest note at 60/100.
+    # A "called, no answer" note cannot report what the client said, has no
+    # deal specifics, and the attempt IS what happened. Scoring those 0 instead
+    # of removing them would cap an honest note (register item 137).
     assert config.suppressed_components_by_type[NoteType.NO_CONTACT] == frozenset(
-        {ComponentName.CLIENT_SAID, ComponentName.DEAL_SPECIFICS}
+        {
+            ComponentName.WHAT_HAPPENED,
+            ComponentName.CLIENT_SAID,
+            ComponentName.DEAL_SPECIFICS,
+        }
     )
 
 

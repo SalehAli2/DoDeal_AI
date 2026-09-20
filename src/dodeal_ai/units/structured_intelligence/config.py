@@ -8,8 +8,9 @@ changing the prompt version. So:
   - Weights, boundaries and thresholds live HERE and are read through
     get_tenant_config(). Scoring code reads config.weights; it never carries a
     literal 25.
-  - **Weights never appear in prompt text.** The model returns a mark per
-    component and does not know what a component is worth. If the rubric's
+  - **Weights never appear in prompt text.** The model answers yes or no to a
+    fixed list of checks; it is told neither what a component is worth nor
+    which component a check belongs to (register item 131). If the rubric's
     arithmetic were in the prompt, changing a weight would silently change what
     the model was asked to do, and every past judgement would become
     incomparable in a way no version stamp records.
@@ -150,22 +151,32 @@ def _derive_marks(
 
 
 # A no_contact note ("called, no answer") cannot report what the client said,
-# and has no deal specifics to give. Those components are SUPPRESSED for it --
-# their weight leaves the denominator entirely. Scoring them 0 instead would
-# cap an honest no-contact note at 60/100 and teach salespeople to pad notes.
+# has no deal specifics to give, and the attempt IS what happened -- there is
+# no outcome beyond it to record. Those components are SUPPRESSED for it --
+# their weight leaves the denominator entirely, which for no_contact is 35.
+# Scoring them 0 instead would cap an honest no-contact note and teach
+# salespeople to pad notes.
 _SUPPRESSED_COMPONENTS_BY_TYPE: Mapping[NoteType, frozenset[ComponentName]] = (
     MappingProxyType(
         {
             NoteType.NO_CONTACT: frozenset(
-                {ComponentName.CLIENT_SAID, ComponentName.DEAL_SPECIFICS}
+                {
+                    ComponentName.WHAT_HAPPENED,
+                    ComponentName.CLIENT_SAID,
+                    ComponentName.DEAL_SPECIFICS,
+                }
             ),
         }
     )
 )
 
 # Which components the vagueness pass may legitimately report missing, per
-# type. Same logic: asking a no_contact note "what did the client say?" is a
-# question its author cannot answer.
+# type. THE SAME RULE AS THE TABLE ABOVE, and it has to be: a component nobody
+# may be asked about is one nobody may be marked down on. no_contact's two
+# tables agree member for member (deal_specifics has no MissingComponent
+# counterpart), and they diverged once -- register item 130 narrowed this one
+# and left what_happened scored, which cost a no-contact note 25 of 60 on
+# something its author could never be asked to fix.
 _ALL_MISSING: frozenset[MissingComponent] = frozenset(MissingComponent)
 
 _ALLOWED_MISSING_BY_TYPE: Mapping[NoteType, frozenset[MissingComponent]] = (
