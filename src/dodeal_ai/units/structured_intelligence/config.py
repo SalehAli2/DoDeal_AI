@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from types import MappingProxyType
 
@@ -114,26 +114,41 @@ _CHECKS_BY_COMPONENT: Mapping[ComponentName, tuple[CheckName, ...]] = MappingPro
     }
 )
 
-# The mark for a component, by how many of its checks came back true.
-# Index 0 is no checks true, index 1 is one true, and so on, so each
-# tuple is exactly one longer than that component's check list.
-#
-# The splits are even thirds and halves rather than measured values:
-# no split is defensible to a decimal, and an even one is what a
-# salesperson can be shown when they ask why (BRD principle P2).
-#
-# NEXT_STEP_DATE has its own rule in scoring.py: ns_closure true is
-# full marks whatever the other two say, because nothing follows a
-# closed lead and the note says so. This table covers the other case.
-_MARKS_BY_TRUE_COUNT: Mapping[ComponentName, tuple[int, ...]] = MappingProxyType(
-    {
-        ComponentName.WHAT_HAPPENED: (0, 13, 25),
-        ComponentName.CLIENT_SAID: (0, 10, 20),
-        ComponentName.NEXT_STEP_DATE: (0, 13, 25, 25),
-        ComponentName.DEAL_SPECIFICS: (0, 7, 13, 20),
-        ComponentName.CLARITY: (0, 5, 10),
-    }
+# How many true checks earn a component its full weight, where that is not all
+# of them. NEXT_STEP_DATE has three checks but two ordinary ones: ns_closure is
+# a bypass (scoring.py gives full marks whatever the others say), so action plus
+# date already earns the full weight and closure adds nothing to a table entry.
+_FULL_MARKS_AT: Mapping[ComponentName, int] = MappingProxyType(
+    {ComponentName.NEXT_STEP_DATE: 2}
 )
+
+
+def _derive_marks(
+    weights: Mapping[ComponentName, int],
+    checks_by_component: Mapping[ComponentName, tuple[CheckName, ...]],
+) -> Mapping[ComponentName, tuple[int, ...]]:
+    """The mark for a component by how many of its checks came back true,
+    derived from its weight (register item 131).
+
+    An even split, rounded half up in integers: index 0 is 0, the full-marks
+    count is exactly the weight, and the tuple is one longer than the check
+    list. A tenant that changes a weight gets its marks with it, so the two
+    cannot drift and no mark table is a second thing to keep in step. A
+    component with no weight is skipped; _check refuses the weights first.
+    """
+    marks: dict[ComponentName, tuple[int, ...]] = {}
+    for component, checks in checks_by_component.items():
+        if component not in weights:
+            continue
+        weight = weights[component]
+        full = max(1, _FULL_MARKS_AT.get(component, len(checks)))
+        marks[component] = tuple(
+            (weight * min(true_count, full) * 2 + full) // (2 * full)
+            for true_count in range(len(checks) + 1)
+        )
+    return MappingProxyType(marks)
+
+
 # A no_contact note ("called, no answer") cannot report what the client said,
 # and has no deal specifics to give. Those components are SUPPRESSED for it --
 # their weight leaves the denominator entirely. Scoring them 0 instead would
@@ -180,7 +195,8 @@ class TenantConfig:
     weights: Mapping[ComponentName, int]
     band_boundaries: tuple[tuple[Band, int], ...]
     checks_by_component: Mapping[ComponentName, tuple[CheckName, ...]]
-    marks_by_true_count: Mapping[ComponentName, tuple[int, ...]]
+    # Derived from weights and checks in __post_init__, never set by a caller.
+    marks_by_true_count: Mapping[ComponentName, tuple[int, ...]] = field(init=False)
     suppressed_components_by_type: Mapping[NoteType, frozenset[ComponentName]]
     allowed_missing_by_type: Mapping[NoteType, frozenset[MissingComponent]]
 
@@ -247,6 +263,11 @@ class TenantConfig:
     config_version: str
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "marks_by_true_count",
+            _derive_marks(self.weights, self.checks_by_component),
+        )
         # The three short-note tables are folded here, the one place every
         # TenantConfig passes through, so a hand-built config matches too.
         for name in ("short_note_codes", "short_note_phrases", "short_note_fillers"):
@@ -273,7 +294,6 @@ _DEFAULT_CONFIG = TenantConfig(
     weights=_WEIGHTS,
     band_boundaries=_BAND_BOUNDARIES,
     checks_by_component=_CHECKS_BY_COMPONENT,
-    marks_by_true_count=_MARKS_BY_TRUE_COUNT,
     suppressed_components_by_type=_SUPPRESSED_COMPONENTS_BY_TYPE,
     allowed_missing_by_type=_ALLOWED_MISSING_BY_TYPE,
     short_note_codes=frozenset({"na", "wa", "cb"}),
@@ -372,16 +392,6 @@ def _check(config: TenantConfig) -> None:
         raise ValueError("band_boundaries")
     if set(config.checks_by_component) != set(ComponentName):
         raise ValueError("checks_by_component")
-    if set(config.marks_by_true_count) != set(ComponentName):
-        raise ValueError("marks_by_true_count")
-    for component, checks in config.checks_by_component.items():
-        marks = config.marks_by_true_count[component]
-        if len(marks) != len(checks) + 1:
-            raise ValueError("marks_length")
-        if list(marks) != sorted(marks) or marks[0] != 0:
-            raise ValueError("marks_order")
-        if marks[-1] != config.weights[component]:
-            raise ValueError("marks_ceiling")
     all_checks = [c for checks in config.checks_by_component.values() for c in checks]
     if sorted(all_checks) != sorted(CheckName):
         raise ValueError("checks_coverage")

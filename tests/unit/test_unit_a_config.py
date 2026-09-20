@@ -249,49 +249,6 @@ def _broken(config: TenantConfig, **changes: object) -> TenantConfig:
             "checks_by_component",
         ),
         (
-            "marks_by_true_count",
-            MappingProxyType(
-                {
-                    c: v
-                    for c, v in get_tenant_config(
-                        "tenant-a"
-                    ).marks_by_true_count.items()
-                    if c is not ComponentName.CLARITY
-                }
-            ),
-            "marks_by_true_count",
-        ),
-        (
-            "marks_by_true_count",
-            MappingProxyType(
-                {
-                    **get_tenant_config("tenant-a").marks_by_true_count,
-                    ComponentName.CLARITY: (0, 10),
-                }
-            ),
-            "marks_length",
-        ),
-        (
-            "marks_by_true_count",
-            MappingProxyType(
-                {
-                    **get_tenant_config("tenant-a").marks_by_true_count,
-                    ComponentName.CLARITY: (0, 10, 5),
-                }
-            ),
-            "marks_order",
-        ),
-        (
-            "marks_by_true_count",
-            MappingProxyType(
-                {
-                    **get_tenant_config("tenant-a").marks_by_true_count,
-                    ComponentName.CLARITY: (1, 5, 10),
-                }
-            ),
-            "marks_order",
-        ),
-        (
             "checks_by_component",
             MappingProxyType(
                 {
@@ -307,16 +264,51 @@ def _broken(config: TenantConfig, **changes: object) -> TenantConfig:
     ],
     ids=[
         "checks-missing-component",
-        "marks-missing-component",
-        "marks-length",
-        "marks-descending",
-        "marks-not-from-zero",
         "check-listed-twice",
     ],
 )
 def test_check_refuses_a_rubric_whose_checks_and_marks_do_not_line_up(
     config: TenantConfig, field: str, value: object, reason: str
 ) -> None:
-    """Register item 131: each mark-table invariant `_check` holds, refused by name."""
+    """Register item 131: a rubric whose checks do not line up is refused by name."""
     with pytest.raises(ValueError, match=f"^{reason}$"):
         _check(_broken(config, **{field: value}))
+
+
+def test_the_default_marks_derive_to_the_documented_tables(
+    config: TenantConfig,
+) -> None:
+    """Deriving from the weights reproduces the tables item 131 shipped."""
+    assert dict(config.marks_by_true_count) == {
+        ComponentName.WHAT_HAPPENED: (0, 13, 25),
+        ComponentName.CLIENT_SAID: (0, 10, 20),
+        ComponentName.NEXT_STEP_DATE: (0, 13, 25, 25),
+        ComponentName.DEAL_SPECIFICS: (0, 7, 13, 20),
+        ComponentName.CLARITY: (0, 5, 10),
+    }
+
+
+@pytest.mark.parametrize(
+    "weights",
+    [
+        None,
+        {
+            ComponentName.WHAT_HAPPENED: 30,
+            ComponentName.CLIENT_SAID: 15,
+            ComponentName.NEXT_STEP_DATE: 20,
+            ComponentName.DEAL_SPECIFICS: 20,
+            ComponentName.CLARITY: 15,
+        },
+    ],
+    ids=["default", "reweighted"],
+)
+def test_every_derived_table_runs_from_zero_to_its_weight(
+    config: TenantConfig, weights: dict[ComponentName, int] | None
+) -> None:
+    """The ceiling: the top mark is exactly the weight and the bottom is 0."""
+    built = config if weights is None else _broken(config, weights=weights)
+    for component, marks in built.marks_by_true_count.items():
+        assert marks[0] == 0, component
+        assert marks[-1] == built.weights[component], component
+        assert list(marks) == sorted(marks), component
+        assert len(marks) == len(built.checks_by_component[component]) + 1, component

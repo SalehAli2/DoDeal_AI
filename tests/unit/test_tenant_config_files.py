@@ -26,7 +26,15 @@ from dodeal_ai.units.structured_intelligence.config import (
     EnforcementMode,
     get_tenant_config,
 )
-from dodeal_ai.units.structured_intelligence.schemas import Band, ComponentName
+from dodeal_ai.units.structured_intelligence.schemas import (
+    Band,
+    ComponentName,
+    NoteType,
+)
+from dodeal_ai.units.structured_intelligence.scoring import (
+    applicable_checks,
+    compute_score,
+)
 from tests.helpers import tokens
 
 DEFAULT = get_tenant_config("tenant-a")
@@ -145,18 +153,6 @@ def test_the_weights_stay_immutable(tmp_path):
             "weights": {**{k.value: 30 for k in ComponentName}, "clarity": -20},
         },
         {
-            # Sums to 100, but the mark tables top out at the default weights
-            # (register item 131) and a file cannot set them: refused.
-            "config_version": "v",
-            "weights": {
-                "what_happened": 30,
-                "client_said": 20,
-                "next_step_date": 20,
-                "deal_specifics": 20,
-                "clarity": 10,
-            },
-        },
-        {
             "config_version": "v",
             "band_boundaries": [
                 ["fair", 39],
@@ -208,7 +204,6 @@ def test_the_weights_stay_immutable(tmp_path):
         "weights-sum",
         "weights-sum-low",
         "weights-negative",
-        "weights-not-marks-ceiling",
         "bands-order",
         "bands-descending",
         "bands-top",
@@ -422,3 +417,36 @@ def test_a_non_valueerror_from_a_parser_still_refuses_named(tmp_path):
     assert caught.value.__cause__ is None
     assert str(tmp_path) not in message
     assert bad_value not in message
+
+
+def test_a_file_that_changes_a_weight_is_accepted_and_marks_follow_it(tmp_path):
+    """Weights are changeable without a release: the mark table is derived."""
+    _write(
+        tmp_path,
+        "tenant-a",
+        {
+            "config_version": "tenant-a-cfg-3",
+            "weights": {
+                "what_happened": 30,
+                "client_said": 20,
+                "next_step_date": 20,
+                "deal_specifics": 20,
+                "clarity": 10,
+            },
+        },
+    )
+    _load(tmp_path)
+
+    config = get_tenant_config("tenant-a")
+    assert config.weights[ComponentName.WHAT_HAPPENED] == 30
+    assert config.marks_by_true_count[ComponentName.WHAT_HAPPENED] == (0, 15, 30)
+    assert config.marks_by_true_count[ComponentName.NEXT_STEP_DATE] == (0, 10, 20, 20)
+    # Untouched components keep the default marks.
+    assert (
+        config.marks_by_true_count[ComponentName.CLARITY]
+        == DEFAULT.marks_by_true_count[ComponentName.CLARITY]
+    )
+    all_true = dict.fromkeys(applicable_checks(NoteType.DISCOVERY, config), True)
+    score = compute_score(all_true, NoteType.DISCOVERY, config)
+    assert score.total == 100
+    assert [c.mark for c in score.components if not c.suppressed] == [30, 20, 20, 10]
