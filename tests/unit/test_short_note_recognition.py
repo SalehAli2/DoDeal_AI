@@ -1,4 +1,8 @@
-"""Register item 132: a short note that is a known outcome passes the length gate."""
+"""Register item 132: a short note that is a known outcome passes the length gate.
+
+Register item 137 tightened four things, and every one of them is tested in
+both scripts, because the corpus writes the same outcome in either.
+"""
 
 from __future__ import annotations
 
@@ -92,3 +96,48 @@ def test_mixed_case_tables_match_however_the_config_was_built() -> None:
     assert _is_recognised_short_note("NA1", mixed)
     assert _is_recognised_short_note("not interested", mixed)
     assert mixed.short_note_codes == frozenset({"na", "cb"})
+
+
+# --- register item 137 ------------------------------------------------------
+
+
+@pytest.mark.parametrize("text", ["tmrw", "again", "pm", "tmrw am", "بكرة", "النهاردة"])
+def test_fillers_alone_are_not_an_outcome(text: str) -> None:
+    """Every word a filler and no code records nothing, so it is not recognised."""
+    assert not _is_recognised_short_note(text, CONFIG)
+    assert _length_gate(_note(text), CONFIG) is not None
+
+
+@pytest.mark.parametrize("text", ["na.", "cb1,", "na!", "لا يرد.", "مش مهتم،"])
+def test_trailing_punctuation_does_not_hide_a_code_or_a_phrase(text: str) -> None:
+    """A note picks up a full stop or a comma; the outcome is the same."""
+    assert _is_recognised_short_note(text, CONFIG)
+    assert _length_gate(_note(text), CONFIG) is None
+
+
+@pytest.mark.parametrize("text", ["na 2", "cb 3 tmrw", "cb ٢", "na ٣ بكرة"])
+def test_a_bare_digit_is_an_attempt_number(text: str) -> None:
+    """The attempt number is written apart from the code as often as joined."""
+    assert _is_recognised_short_note(text, CONFIG)
+
+
+def test_a_bare_digit_alone_is_not_an_outcome() -> None:
+    """A number with no code beside it records nothing."""
+    assert not _is_recognised_short_note("2", CONFIG)
+    assert not _is_recognised_short_note("٢", CONFIG)
+
+
+@pytest.mark.parametrize(
+    "text", ["no answer tmrw", "not interested", "لا يرد بكرة", "مش مهتم النهاردة"]
+)
+def test_a_phrase_may_open_the_note_and_be_followed_by_fillers(text: str) -> None:
+    """A phrase plus a filler is the same outcome as the phrase alone."""
+    assert _is_recognised_short_note(text, CONFIG)
+
+
+@pytest.mark.parametrize(
+    "text", ["no answer client angry", "لا يرد وعايز يلغي", "no answer cb1"]
+)
+def test_a_phrase_followed_by_ordinary_words_is_a_real_note(text: str) -> None:
+    """Only fillers may follow the phrase; anything else is content to judge."""
+    assert not _is_recognised_short_note(text, CONFIG)

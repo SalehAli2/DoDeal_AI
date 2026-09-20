@@ -398,25 +398,58 @@ def _suppressed(
     )
 
 
+# Punctuation a note picks up in passing: "na," "no answer." "cb!". Stripped
+# from the END of a word only -- a leading character belongs to the word in
+# both scripts, and stripping both ends would let a stray bracket make a code.
+# Wrong value: too few and "na," stops being a code; too many and a word ending
+# in one is silently a different word.
+_TRAILING_PUNCTUATION = ".,!?;:…،؛؟"
+
+
+def _short_note_words(text: str) -> list[str]:
+    """The note as casefolded words with trailing punctuation removed."""
+    return [
+        stripped
+        for word in text.casefold().split()
+        if (stripped := word.rstrip(_TRAILING_PUNCTUATION))
+    ]
+
+
+def _is_short_note_code(word: str, config: TenantConfig) -> bool:
+    """A tenant code, with or without its trailing attempt number: na, cb1."""
+    bare = word.rstrip("0123456789")
+    return bool(bare) and bare in config.short_note_codes
+
+
 def _is_recognised_short_note(text: str, config: TenantConfig) -> bool:
     """Register item 132: is this below-floor note a known outcome?
 
-    Yes if the whole lowercased note is a tenant phrase, or if EVERY word is a
-    tenant code (optional attempt number: na, cb1) or a filler (tmrw, am). The
-    tables are stored casefolded, so nothing is rebuilt per call.
+    Yes if a tenant phrase OPENS the note and only fillers follow it, or if
+    every word is a tenant code, a bare attempt number or a filler AND AT LEAST
+    ONE OF THEM IS A CODE. That last clause is register item 137: without it
+    "tmrw", "again", "pm" and "بكرة" are each nothing but fillers, so a note
+    recording no outcome at all bought three paid calls.
+
+    The phrase matches a PREFIX rather than the whole note, so "لا يرد بكرة" is
+    the same outcome as "لا يرد". Only fillers may follow it: a phrase trailed
+    by ordinary words is a real note that happens to start with one.
+
+    The tables are stored casefolded, so nothing is rebuilt per call.
     """
-    words = " ".join(text.casefold().split())
+    words = _short_note_words(text)
     if not words:
         return False
-    if words in config.short_note_phrases:
-        return True
-    return all(
-        word in config.short_note_fillers
-        or (
-            bool(word.rstrip("0123456789"))
-            and word.rstrip("0123456789") in config.short_note_codes
-        )
-        for word in words.split(" ")
+    for phrase in config.short_note_phrases:
+        opening = phrase.split()
+        if words[: len(opening)] == opening and all(
+            word in config.short_note_fillers for word in words[len(opening) :]
+        ):
+            return True
+    return any(_is_short_note_code(word, config) for word in words) and all(
+        _is_short_note_code(word, config)
+        or word.isdigit()
+        or word in config.short_note_fillers
+        for word in words
     )
 
 
