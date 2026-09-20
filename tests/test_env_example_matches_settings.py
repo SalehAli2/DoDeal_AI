@@ -43,6 +43,7 @@ _NOT_SETTINGS: dict[str, str] = {
     # server. The service never reads it -- it is lane configuration, and it is
     # in the example so somebody running the lane knows the name.
     "DODEAL_REDIS_REAL_URL": "redis_real test lane, never the service",
+    "DODEAL_EVAL_SET_PATH": "eval scripts and lane, never the service",
 }
 
 # A row, set or commented out. The name is all that is captured -- the pattern

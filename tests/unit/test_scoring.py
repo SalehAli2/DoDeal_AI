@@ -553,7 +553,9 @@ RELATIVE_TIME_SENTENCE = (
     'Is a date or named day given? Relative times count: "tomorrow", '
     '"after 2 hrs", "next Tuesday".'
 )
-CLOSURE_SENTENCE = "Does the note state the lead has ended, with a reason?"
+# Both sentences, not just the question: register item 141 is the SECOND one.
+# An ending alone was scoring as a closure, so a reverted prompt reds this.
+CLOSURE_SENTENCE = "Does the note state the lead has ended AND why? Both are needed."
 
 
 def test_the_score_template_accepts_relative_times_and_closures():
