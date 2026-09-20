@@ -6681,3 +6681,17 @@ no stamp describes; (2) the pair is updated by hand, so a bump with a stale
 digest passes review and leaves the guard asserting the wrong claim.
 Stress test: append one byte to a template, watch the digest assertion fail
 naming both constants to move, restore.
+
+## Piece: register item 140, the eval runner and the model-failure event
+
+Item 140 -- `_expected_band` compares the marked check set with
+`applicable_checks` before calling `compute_score`, and excludes on a mismatch.
+It used to catch `OutputValidationError`, by which point `output_rejected` had
+already written `output_validation_failed` -- a MODEL failure event -- for a
+human marking error.
+Production failure modes: (1) an alert on that event spikes whenever somebody
+runs the eval over a half-marked set, and the alert is trained to be ignored;
+(2) the set test and `validate_checks` are two statements of one rule, so a
+third fault added to `validate_checks` would pass the pre-check and raise here.
+Stress test: a no_contact row marked with all five of its checks plus
+`wh_outcome` asserts no `output_validation_failed` record on `dodeal_ai.unit_a`.

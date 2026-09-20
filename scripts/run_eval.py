@@ -58,7 +58,6 @@ from dodeal_ai.core.llm.profiles import (
     PROFILE_UNIT_A_SCORE,
     PROFILE_UNIT_A_VAGUE,
 )
-from dodeal_ai.core.validation import OutputValidationError
 from dodeal_ai.units.structured_intelligence.config import (
     TenantConfig,
     get_tenant_config,
@@ -66,7 +65,10 @@ from dodeal_ai.units.structured_intelligence.config import (
 from dodeal_ai.units.structured_intelligence.eval_set import EvalRow
 from dodeal_ai.units.structured_intelligence.pipeline import _ARABIC_SCRIPT_PATTERN
 from dodeal_ai.units.structured_intelligence.schemas import NoteType
-from dodeal_ai.units.structured_intelligence.scoring import compute_score
+from dodeal_ai.units.structured_intelligence.scoring import (
+    applicable_checks,
+    compute_score,
+)
 from scripts.diagnose_notes import (
     DEFAULT_ASSUMED_TYPE,
     DEFAULT_TENANT,
@@ -171,16 +173,25 @@ def _expected_band(row: EvalRow, config: TenantConfig) -> str | None:
 
     Needs BOTH a type and a full set of check answers, because the denominator
     is chosen by the type: the same twelve answers are 100 under discovery and
-    35 under no_contact. `compute_score` refuses a set that does not match the
-    type's applicable checks, and that refusal is a marking error rather than a
-    disagreement -- so it returns None and the caller reports the exclusion.
+    35 under no_contact.
+
+    THE MISMATCH IS TESTED HERE, NOT CAUGHT FROM `compute_score` (register item
+    140). Its refusal goes through `output_rejected`, which writes
+    `output_validation_failed` -- the event that means A MODEL ANSWERED BADLY,
+    and the one an alert on the unit's health is built from. A human who marked
+    nine discovery checks on a no_contact row is not a model failure, and
+    letting that row raise put a spike on that alert every time somebody ran
+    the eval over a half-marked set. Comparing the two sets first costs one set
+    build and keeps the event meaning what it says.
+
+    A mismatch is a marking error rather than a disagreement, so it returns
+    None and the caller reports the exclusion.
     """
     if row.checks is None or not isinstance(row.note_type, NoteType):
         return None
-    try:
-        return compute_score(row.checks, row.note_type, config).band.value
-    except OutputValidationError:
+    if set(row.checks) != set(applicable_checks(row.note_type, config)):
         return None
+    return compute_score(row.checks, row.note_type, config).band.value
 
 
 def compare(row: EvalRow, run: PassRun, config: TenantConfig) -> NoteOutcome:
