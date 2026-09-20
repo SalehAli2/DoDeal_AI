@@ -136,6 +136,33 @@ class JudgementDeadlineExceeded(DodealError):
         super().__init__("judgement_deadline_exceeded", 503)
 
 
+class SubjectNotFoundError(DodealError):
+    """A brief was asked for somebody the user directory does not list.
+
+    404 and NOT 204 (register item 145). "Nothing to report about this person"
+    and "there is no such person" are different answers, and only the second
+    means the caller sent an id we could not use -- a 204 would let a CRM
+    sending a wrong id see a quiet day, every day, for ever.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("subject_not_found", 404)
+
+
+class BriefStoreUnavailable(DodealError):
+    """No judgement store or no user directory is configured (item 145).
+
+    The real store and the real directory are both backend asks, so this is the
+    ordinary state of a deployment today: 503, the same family as every other
+    "we could not produce an answer", and never an empty brief. A 204 here
+    would tell a manager they had a quiet month when in fact nobody had wired
+    the store up.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("brief_store_unavailable", 503)
+
+
 class LoadShed(DodealError):
     """Refused at the door: `max_inflight` are already inside the app.
 

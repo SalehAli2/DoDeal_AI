@@ -38,11 +38,13 @@ import json
 import os
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from functools import cache
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from dodeal_ai.core.errors import BriefStoreUnavailable
 from dodeal_ai.units.structured_intelligence.eval_set import REPO_ROOT
 from dodeal_ai.units.structured_intelligence.schemas import (
     Band,
@@ -314,3 +316,21 @@ class FileJudgementStore:
             if since <= row.note_created_at < until
             and (author_id is None or row.author_id == author_id)
         ]
+
+
+@cache
+def get_judgement_store() -> JudgementStore:
+    """The store this deployment has, for the routes that read one.
+
+    CACHED, so the file is read once per process and no request reads disk --
+    the same rule core/tenant_config.py holds. Tests override the FastAPI
+    dependency rather than clearing this, as they do for every other seam.
+
+    Unset is the ordinary state today and is a 503, never an empty answer: the
+    real store is a backend ask, and a brief computed over no rows would tell a
+    manager they had a quiet month when nobody had wired the store up.
+    """
+    path = configured_path()
+    if path is None:
+        raise BriefStoreUnavailable()
+    return FileJudgementStore.from_path(path)

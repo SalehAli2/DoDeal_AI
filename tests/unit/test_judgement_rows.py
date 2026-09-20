@@ -27,6 +27,7 @@ from pathlib import Path
 import pytest
 
 from dodeal_ai.core.config import Settings
+from dodeal_ai.core.errors import BriefStoreUnavailable
 from dodeal_ai.units.structured_intelligence.eval_set import REPO_ROOT
 from dodeal_ai.units.structured_intelligence.judgement_rows import (
     JUDGEMENT_ROWS_PATH_ENV,
@@ -35,6 +36,7 @@ from dodeal_ai.units.structured_intelligence.judgement_rows import (
     JudgementStore,
     JudgementStoreError,
     configured_path,
+    get_judgement_store,
 )
 from dodeal_ai.units.structured_intelligence.schemas import (
     Band,
@@ -379,3 +381,32 @@ def test_it_is_not_a_settings_field() -> None:
     .env.example, be copied into a deployment, and let the service be pointed
     at a file of invented judgements."""
     assert "judgement_rows_path" not in Settings.model_fields
+
+
+def test_no_store_configured_is_a_503_and_never_an_empty_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Register item 145. A brief computed over no rows would tell a manager
+    they had a quiet month when nobody had wired the store up."""
+    monkeypatch.delenv(JUDGEMENT_ROWS_PATH_ENV, raising=False)
+    get_judgement_store.cache_clear()
+    with pytest.raises(BriefStoreUnavailable) as caught:
+        get_judgement_store()
+    assert caught.value.http_status == 503
+    get_judgement_store.cache_clear()
+
+
+def test_the_provider_reads_the_file_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Cached, so no request reads disk -- the rule core/tenant_config.py holds
+    for tenant files. The file is deleted between the two calls."""
+    path = _outside(tmp_path, {"tenant-a": [_scored()]})
+    monkeypatch.setenv(JUDGEMENT_ROWS_PATH_ENV, str(path))
+    get_judgement_store.cache_clear()
+    try:
+        first = get_judgement_store()
+        path.unlink()
+        assert get_judgement_store() is first
+    finally:
+        get_judgement_store.cache_clear()
