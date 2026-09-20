@@ -184,12 +184,13 @@ def test_no_template_carries_a_weight_or_a_threshold(note_type):
         assert forbidden not in stable
 
 
-# The relative-time rule, which the five types that ask for a dated next step
-# carry (won_lost accepts an explicit closure instead). A template that
-# accepted only a calendar date or a named day would report next_step_with_date
-# missing on a note that says exactly when the next step is -- and "cb tmrw" is
-# how the corpus actually writes it.
-RELATIVE_TIME_TYPES = [t for t in SCORED_TYPES if t is not NoteType.WON_LOST]
+# The relative-time rule, which EVERY type carries because it lives in the
+# shared block (register item 137). A template that accepted only a calendar
+# date or a named day would report next_step_with_date missing on a note that
+# says exactly when the next step is -- and "cb tmrw" is how the corpus
+# actually writes it. won_lost lost the rule when item 133 split the blocks,
+# while its own second example ("Paperwork to admin tmrw") still relied on it;
+# the rule is type-independent, so it belongs in the shared half.
 
 
 def _collapsed(text: str) -> str:
@@ -199,7 +200,7 @@ def _collapsed(text: str) -> str:
     return " ".join(text.split())
 
 
-@pytest.mark.parametrize("note_type", RELATIVE_TIME_TYPES)
+@pytest.mark.parametrize("note_type", SCORED_TYPES)
 def test_every_dated_next_step_template_accepts_a_relative_time(note_type):
     collapsed = _collapsed(build_vague_prompt(_note(), note_type).stable).lower()
     assert "relative time" in collapsed

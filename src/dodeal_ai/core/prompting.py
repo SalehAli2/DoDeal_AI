@@ -170,7 +170,7 @@ def build_prompt(*template_names: str, caller_data: str) -> AssembledPrompt:
     data. The caller can only ever contribute to the data section.
 
     SEVERAL NAMES, JOINED IN ORDER. The vague pass ships a shared block plus a
-    per-type block (register item 131's sibling rewrite): the shared text is
+    per-type block (register item 133's prompt rewrite): the shared text is
     written once instead of six times, and the join happens here so the
     stable half stays one string and the caching order stays the caller's
     decision rather than this module's. Put the least variable block first --

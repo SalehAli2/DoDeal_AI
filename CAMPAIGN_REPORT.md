@@ -6560,3 +6560,36 @@ The tables are casefolded in `TenantConfig.__post_init__`, so JSON-built and han
 - **Failure mode 1:** a mixed-case table on a hand-built config silently never matched; the fold lived only in `TenantConfigFile.build`.
 - **Failure mode 2:** a table added later without joining the fold list drifts back to the same defect.
 - **Stress test:** a config built with `NA`, `Cb`, `Not Interested` and `TMRW` recognises "cb1 tmrw", "NA1" and "not interested".
+
+## Register item 130: a no-contact note may only be asked for the next attempt date
+
+`1ad3571`. `what_happened` leaves `allowed_missing_by_type` for `no_contact`: the attempt IS what happened, so its author cannot be asked to record more of it.
+
+- **Failure mode 1:** the allowed-missing and suppressed tables are separate maps. Narrowing one and not the other leaves a note marked down on something nobody may ask it about -- which is what happened here, and what item 137 repaired.
+- **Failure mode 2:** a model that reports `what_happened` for a no_contact note now fails validation and spends the note's single reprompt, so a template that still invites the component turns every such note into two paid calls.
+- **Stress test:** every `MissingComponent` but `next_step_with_date`, returned for a no_contact note, is rejected inside the validated call.
+
+## Register item 131: score a note by binary checks, not numeric marks
+
+`b8c715d`, then `9977dbb` deriving the mark table from the weight. The model answers twelve yes/no checks; the marks, total, denominator and band are computed in code.
+
+- **Failure mode 1:** a model asked for a whole number out of 25 cannot use that resolution consistently -- the same note scores 19 one day and 22 the next, and the rubric's acceptance target is band agreement with a human.
+- **Failure mode 2:** the mark table and the weights were two things to keep in step, so a tenant that changed a weight scored against the old table. `9977dbb` derives one from the other; a component with no weight is skipped and `_check` refuses the weights first.
+- **Stress test:** every derived table runs from 0 to exactly the weight and is non-decreasing, for the default rubric and for a reweighted one.
+
+## Register item 133: rewrite the Unit A prompts as a shared block plus type blocks
+
+`2e92fbc`. `build_prompt` takes several template names and joins them in order; the vague pass ships one shared block and six type blocks.
+
+- **Failure mode 1:** six copies of the same rules drift, and a rule fixed in one template stays broken in the other five. The relative-time rule did exactly that -- won_lost lost it while its own example still relied on it (item 137).
+- **Failure mode 2:** the shared block is the cacheable prefix, so putting the variable block first would lose the prefix cache on every note. The split also left the OUTPUT contract in the shared half, which made a worked example the last thing the model read (item 137).
+- **Stress test:** `build_prompt` joins in the order given and the reversed order differs; each type's stable half is byte-identical across ten corpus notes.
+
+## Register item 137: fix the defects an Opus review found in items 130 to 133
+
+Six commits: `548add4` (parseable examples), `1ed5852` (no_contact off `what_happened`), `67c902d` (a recognised short note carries a code), `c1313e5` (`_check` refuses a rubric with no applicable weight), `7be737e` (the version stamps), and this one (the prompts say what the code does).
+
+- **Failure mode 1:** an unparseable worked example is the last answer a model reads before the note, so a copied line break spends the one reprompt and then 503s a judgement that was never in doubt. Every judging template's examples now parse and validate against the schema that accepts them.
+- **Failure mode 2:** a below-floor note of nothing but fillers ("tmrw", "again", "بكرة") was recognised as a known outcome and bought three paid calls. Recognition now requires at least one tenant code, or a phrase opening the note with only fillers after it.
+- **Stress test:** every JSON object under EXAMPLES in all seven v2 judging templates parses with `json.loads` and validates as the pass's output schema, with the per-template count pinned so an extraction that finds nothing cannot pass.
+

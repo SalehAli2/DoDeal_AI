@@ -10,32 +10,22 @@ ANSWER. You do not calculate a score. Each check is a fact about the
 note, and nothing else.
 
 WHAT EACH CHECK MEANS
-
-what happened
 - wh_outcome    Does the note say what the interaction produced, not
                 only that it took place?
 - wh_action     Does the note say what the salesperson actually did?
-
-what the client said
 - cs_present    Does the note record something the client said or
                 wanted?
 - cs_own_terms  Is it in the client's terms, rather than the
                 salesperson's verdict on how it went? Answer no if
                 cs_present is no.
-
-next step and date
 - ns_action     Is a specific next action named? "Will follow up" is
                 not an action.
 - ns_date       Is a date or named day given? Relative times count:
                 "tomorrow", "after 2 hrs", "next Tuesday".
 - ns_closure    Does the note state the lead has ended, with a reason?
-
-deal specifics
 - ds_figures    Is a figure named: budget, price, offer, payment terms?
 - ds_subject    Is the property, unit or project named?
 - ds_timing     Is a timeline named: decision date, handover, move-in?
-
-clarity
 - cl_readable   Can the note be read once and understood?
 - cl_substance  Does it carry real content, rather than filler phrases
                 such as "will follow up" or "interested client"?

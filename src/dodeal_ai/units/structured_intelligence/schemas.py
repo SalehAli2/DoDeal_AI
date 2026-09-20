@@ -21,9 +21,9 @@ Three groups live here, and the boundary between them is the point:
                 Decision / Versions / Judgement. What the CRM receives.
 
 THE RULE THIS FILE ENFORCES STRUCTURALLY: no REQUEST and no model-output schema
-has a `band` or a `total` field. The model supplies marks and a classification;
-the total, the denominator, the band and the decision are computed in code from
-TenantConfig. Neither a model nor a caller can hand us a score. A test asserts
+has a `band` or a `total` field. The model supplies a classification and yes/no
+check answers (register item 131); the marks, the total, the denominator, the
+band and the decision are computed in code from TenantConfig. Neither a model nor a caller can hand us a score. A test asserts
 this by introspecting model_fields, so adding such a field to either kind of
 schema fails the suite rather than silently moving the arithmetic into the
 prompt -- or into the CRM's payload, which is why the direct route's body is

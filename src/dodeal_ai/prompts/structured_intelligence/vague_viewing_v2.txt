@@ -7,7 +7,7 @@ MAY BE MISSING, report only from this list:
 - what_happened      what the salesperson did and what came of it.
 - client_said        what the CLIENT said, in their terms.
 - next_step_with_date  what happens next AND when. "Will follow up"
-  is not a next step. Relative times count: "tomorrow", "next Tuesday".
+  is not a next step.
 
 EXAMPLES
 Note: عاين الوحدة امبارح. عجبته.
@@ -20,3 +20,15 @@ and wants his wife to see it. Second viewing Friday next week.
 
 Note: viewng done, went ok, wil see
 {"is_vague": true, "missing_components": ["what_happened", "client_said", "next_step_with_date"], "clarification_prompt": "Which unit did you show and when, what did the client say about it, and what happens next and on what day?", "reasoning": "Neither property, reaction nor dated next step is recorded."}
+END OF EXAMPLES
+
+OUTPUT
+Return only this JSON object. No prose, no code fence.
+
+{"is_vague": true, "missing_components": ["..."], "clarification_prompt": "...", "reasoning": "..."}
+
+Both halves must agree:
+- is_vague true  -> missing_components non-empty, prompt written.
+- is_vague false -> missing_components empty, prompt null.
+
+"reasoning" is one or two sentences, for our records only.

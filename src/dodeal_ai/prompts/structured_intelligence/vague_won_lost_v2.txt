@@ -22,3 +22,15 @@ admin tmrw, handover walkthrough on the 12th next month.
 
 Note: lead droped, not intrested anymore
 {"is_vague": true, "missing_components": ["client_said", "next_step_with_date"], "clarification_prompt": "What did the client say when they lost interest, and is anything still to be done or is it closed for good?", "reasoning": "The outcome is stated without a reason or an explicit closure."}
+END OF EXAMPLES
+
+OUTPUT
+Return only this JSON object. No prose, no code fence.
+
+{"is_vague": true, "missing_components": ["..."], "clarification_prompt": "...", "reasoning": "..."}
+
+Both halves must agree:
+- is_vague true  -> missing_components non-empty, prompt written.
+- is_vague false -> missing_components empty, prompt null.
+
+"reasoning" is one or two sentences, for our records only.

@@ -693,6 +693,53 @@ def test_every_worked_example_is_an_answer_the_schema_accepts(template):
         schema.model_validate(json.loads(raw))
 
 
+@pytest.mark.parametrize("template", sorted(_EXAMPLE_COUNTS))
+def test_every_judging_template_carries_examples_before_the_return_line(template):
+    # Restored from the v1 set (register item 137). After the rules, before the
+    # answer shape: an example that followed the return line would be the last
+    # thing read and could be copied out whole. Item 133's split left the
+    # contract in the shared block and the examples in the type block, so every
+    # assembled vague prompt ended on an example with no fence around it.
+    text = (_PROMPT_DIR / template).read_text(encoding="utf-8")
+    assert "EXAMPLES" in text, template
+    assert "END OF EXAMPLES" in text, template
+    assert text.index("EXAMPLES") < text.index("Return only this JSON object")
+    assert text.index("END OF EXAMPLES") < text.index("Return only this JSON object")
+
+
+def test_the_seven_judging_templates_are_the_ones_that_carry_examples():
+    # score_v2.txt is not one: its examples would have to be check answers for
+    # a note nobody wrote, and the reprompt tail has nothing to illustrate.
+    assert sorted(_EXAMPLE_COUNTS) == [
+        "classify_v2.txt",
+        "vague_callback_v2.txt",
+        "vague_discovery_v2.txt",
+        "vague_negotiation_v2.txt",
+        "vague_no_contact_v2.txt",
+        "vague_viewing_v2.txt",
+        "vague_won_lost_v2.txt",
+    ]
+
+
+# The five headings register item 133 grouped the checks under, plus the plain
+# spelling of every component name, so a heading that comes back in either form
+# fails here.
+_COMPONENT_HEADINGS = frozenset(
+    {c.value.replace("_", " ") for c in ComponentName}
+    | {"what the client said", "next step and date"}
+)
+
+
+def test_the_score_template_never_names_the_component_a_check_belongs_to():
+    # scoring.py's contract: the model answers facts and knows nothing else --
+    # not which component a check belongs to, not what it is worth. A heading
+    # over a group of checks tells it the first of those, and the division of
+    # labour is the whole design.
+    text = (_PROMPT_DIR / "score_v2.txt").read_text(encoding="utf-8")
+    for line in text.splitlines():
+        assert line.strip().lower() not in _COMPONENT_HEADINGS, line
+
+
 def test_the_v1_set_is_still_present():
     # The v1 files are kept: a judgement stamped unit_a_prompts_v1 must remain
     # readable against the text that produced it. The exact set of shipped files

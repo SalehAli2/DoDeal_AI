@@ -6,8 +6,7 @@ be reported.
 
 MAY BE MISSING, report only from this list:
 - next_step_with_date   what happens next AND when, as a date or a
-  named day. "Will follow up" is not a next step. A relative time
-  counts: "tomorrow", "after 2 hrs", "next Tuesday".
+  named day. "Will follow up" is not a next step.
 
 Nothing else may be reported for this type.
 
@@ -21,3 +20,15 @@ again Sunday afternoon.
 
 Note: called, no luck. will try
 {"is_vague": true, "missing_components": ["next_step_with_date"], "clarification_prompt": "When exactly will you try again?", "reasoning": "'Will try' names no day."}
+END OF EXAMPLES
+
+OUTPUT
+Return only this JSON object. No prose, no code fence.
+
+{"is_vague": true, "missing_components": ["..."], "clarification_prompt": "...", "reasoning": "..."}
+
+Both halves must agree:
+- is_vague true  -> missing_components non-empty, prompt written.
+- is_vague false -> missing_components empty, prompt null.
+
+"reasoning" is one or two sentences, for our records only.
