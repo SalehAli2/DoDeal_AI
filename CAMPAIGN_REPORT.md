@@ -6695,3 +6695,18 @@ runs the eval over a half-marked set, and the alert is trained to be ignored;
 third fault added to `validate_checks` would pass the pre-check and raise here.
 Stress test: a no_contact row marked with all five of its checks plus
 `wh_outcome` asserts no `output_validation_failed` record on `dodeal_ai.unit_a`.
+
+## Piece: register item 132, recognised_short on the outcome lines
+
+Item 132 -- `recognised_short` is a bool on `judgement_completed` and
+`judgement_suppressed`, true only where the note was below the floor and the
+tenant table let it through. `_below_floor` is now one statement of the floor
+that both the gate and `_recognised_short` ask, and `diagnose_notes.run_passes`
+calls the shared helper instead of testing the phrase table on every note.
+Production failure modes: (1) the flag is computed before the gate and carried
+to whichever line is reached, so a new early return between them would log a
+judgement with no flag at all; (2) it is a per-judgement bool with no counter
+behind it -- a floor decision needs the lines aggregated, and nobody is doing
+that yet.
+Stress test: a full note opening with a tenant phrase ("not interested tmrw
+again") clears both floors and must read false, which the old column did not.

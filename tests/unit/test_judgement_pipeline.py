@@ -1514,6 +1514,62 @@ async def test_a_classification_suppression_times_the_pass_that_ran(
     assert line["score_ms"] is None
 
 
+# --- register item 132: recognised_short on both outcome lines --------------
+#
+# The flag answers the one question a floor change is decided on: how often is
+# the tenant's table carrying a note the floor would have refused. Nothing in
+# the response says it -- a recognised note comes back looking like any other --
+# so the outcome line is the only place it can be counted.
+
+
+async def test_a_normal_length_note_is_not_a_recognised_short_note(
+    deps, operational, json_capture
+):
+    """A note the floor never touched logs false, never null."""
+    await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+
+    assert _outcome(json_capture)["recognised_short"] is False
+
+
+async def test_a_recognised_short_note_says_so_on_the_completed_line(
+    operational, json_capture, llm
+):
+    """ "na1" is below the floor, recognised by the tenant's codes, and judged."""
+    deps = JudgementDeps(
+        leads=FakeLeadsClient(
+            leads={LEAD_ID: lead(LEAD_ID)}, notes={LEAD_ID: [note(NOTE_ID, "na1")]}
+        ),
+        llm=llm,
+        config=get_tenant_config("tenant-a"),
+        settings=get_settings(),
+    )
+
+    judgement = await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+    assert judgement.suppressed is None
+
+    assert _outcome(json_capture)["recognised_short"] is True
+
+
+async def test_an_unrecognised_short_note_says_false_on_the_suppressed_line(
+    operational, json_capture
+):
+    """The other outcome line: below the floor and recognised by nothing."""
+    deps = JudgementDeps(
+        leads=FakeLeadsClient(
+            leads={LEAD_ID: lead(LEAD_ID)}, notes={LEAD_ID: [note(NOTE_ID, "too thin")]}
+        ),
+        llm=FakeLLM(),
+        config=get_tenant_config("tenant-a"),
+        settings=get_settings(),
+    )
+
+    judgement = await judge_note(_scope(), _request(), resubmission=False, deps=deps)
+    assert judgement.suppressed is not None
+
+    line = _outcome(json_capture, "judgement_suppressed")
+    assert line["recognised_short"] is False
+
+
 async def test_the_numbers_are_the_only_thing_added_to_the_line(
     deps, operational, json_capture
 ):

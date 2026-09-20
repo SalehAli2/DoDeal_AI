@@ -469,6 +469,32 @@ def _is_recognised_short_note(text: str, config: TenantConfig) -> bool:
     )
 
 
+def _below_floor(text: str, config: TenantConfig) -> bool:
+    """Below the character floor OR the token floor, on the stripped text.
+
+    ONE statement of the floor, because two things ask it: the gate below, and
+    `_recognised_short`, which reports whether the gate let a short note
+    through. A second copy is how the two start disagreeing about what "the
+    text" is -- the fault the gate's own docstring names.
+    """
+    return (
+        len(text) < config.min_note_chars or len(text.split()) < config.min_note_tokens
+    )
+
+
+def _recognised_short(note: LeadNote, config: TenantConfig) -> bool:
+    """Register item 132: did the too-short branch RECOGNISE this note?
+
+    True only for a note the floor would have suppressed and the tenant's
+    phrases or codes let through. False for a note the floor never touched: a
+    full note that happens to open with "not interested" is not a recognised
+    short note, and a flag that said otherwise would put the wrong notes in
+    front of whoever is deciding where the floor belongs.
+    """
+    text = note.note.strip()
+    return _below_floor(text, config) and _is_recognised_short_note(text, config)
+
+
 def _length_gate(
     note: LeadNote, config: TenantConfig
 ) -> tuple[SuppressedReason, SuppressedDetail] | None:
@@ -496,7 +522,7 @@ def _length_gate(
     refusing to score it is an answer about the note, not about the request.
     """
     text = note.note.strip()
-    if len(text) < config.min_note_chars or len(text.split()) < config.min_note_tokens:
+    if _below_floor(text, config):
         # Register item 132: a short note that is a known outcome carries on.
         if _is_recognised_short_note(text, config):
             return None
@@ -927,6 +953,11 @@ async def _judge(
     prompt_note = note.model_copy(update={"note": redaction.text})
 
     # --- length: before any reservation, before any spend -------------------
+    # Register item 132: read once, here, and carried to whichever outcome line
+    # this judgement reaches. A note the floor would have suppressed and the
+    # tenant's table let through is the one input a floor change moves, and it
+    # is invisible in the response -- the judgement looks like any other.
+    recognised_short = _recognised_short(note, config)
     gated = _length_gate(note, config)
     if gated is not None:
         gate_reason, gate_detail = gated
@@ -957,6 +988,7 @@ async def _judge(
             timings=_Timings(elapsed_ms=_ms_since(started)),
             redaction=redaction,
             request_ids=_no_request_ids(),
+            recognised_short=recognised_short,
             author_differs_from_subject=author_differs_from_subject,
         )
         return judgement
@@ -1246,6 +1278,7 @@ async def _judge(
         ),
         redaction=redaction,
         request_ids=request_ids,
+        recognised_short=recognised_short,
         author_differs_from_subject=author_differs_from_subject,
     )
     return judgement
@@ -1392,6 +1425,7 @@ def _log_outcome(
     timings: _Timings,
     redaction: Redaction,
     request_ids: dict[str, str | None],
+    recognised_short: bool,
     author_differs_from_subject: bool | None = None,
 ) -> None:
     """One structured line per judgement.
@@ -1433,6 +1467,15 @@ def _log_outcome(
     being. See `_Timings` for why null is the right value for a pass that did
     not run, and for why the three do not add up to `elapsed_ms`.
 
+    `recognised_short` (register item 132) is a bool on BOTH outcome lines: true
+    only when the note was below the floor and the tenant's phrases or codes
+    recognised it, so it was judged rather than suppressed. It answers the only
+    question a floor change is decided on -- how often is the table carrying a
+    note the floor would have refused -- and nothing in the response says it: a
+    recognised note comes back looking like any other. False, never null, on
+    every note the floor never touched, because "was not recognised" and "was
+    never short" are the same answer to "did the table do anything here".
+
     `author_differs_from_subject` appears on DIRECT-ROUTE lines only, where the
     body carries a claimed author to compare with the token's subject; it is
     omitted entirely on the fetch route, which has nothing to compare. A bool,
@@ -1460,6 +1503,7 @@ def _log_outcome(
                 "suppressed_reason": judgement.suppressed.reason.value,
                 "suppressed_detail": judgement.suppressed.detail_code.value,
                 "model_passes": model_passes,
+                "recognised_short": recognised_short,
                 **timings.fields(),
                 **redaction.fields(),
                 **request_ids,
@@ -1483,6 +1527,7 @@ def _log_outcome(
             "prompt_withheld": withheld.value if withheld is not None else None,
             "attempt": judgement.decision.attempt,
             "model_passes": model_passes,
+            "recognised_short": recognised_short,
             **timings.fields(),
             **redaction.fields(),
             **request_ids,
