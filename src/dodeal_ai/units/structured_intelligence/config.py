@@ -396,6 +396,17 @@ def _check(config: TenantConfig) -> None:
         raise ValueError("weights")
     if sum(config.weights.values()) != 100:
         raise ValueError("weights_sum")
+    # Summing to 100 is not enough (register item 137). deal_specifics is
+    # suppressed for EVERY type while Q13 is open, so a rubric that puts all
+    # 100 on it leaves every judgement with a denominator of 0 -- accepted at
+    # startup, then a ValueError on every note. Refused here instead.
+    if not any(
+        weight
+        for component, weight in config.weights.items()
+        if component is not ComponentName.DEAL_SPECIFICS
+        or config.deal_specifics_applicable
+    ):
+        raise ValueError("weights_applicable")
     bands = [band for band, _ in config.band_boundaries]
     uppers = [upper for _, upper in config.band_boundaries]
     ascending = uppers == sorted(set(uppers)) and uppers[0] >= 0

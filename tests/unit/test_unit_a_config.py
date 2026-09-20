@@ -280,6 +280,39 @@ def test_check_refuses_a_rubric_whose_checks_and_marks_do_not_line_up(
         _check(_broken(config, **{field: value}))
 
 
+# Every weight on the one component Q13 suppresses for every type. It sums to
+# 100, so the older checks pass it.
+_ALL_ON_DEAL_SPECIFICS = MappingProxyType(
+    {c: (100 if c is ComponentName.DEAL_SPECIFICS else 0) for c in ComponentName}
+)
+
+
+def test_check_refuses_a_rubric_with_no_applicable_weight(
+    config: TenantConfig,
+) -> None:
+    """Register item 137: a denominator of 0 is refused at startup, not at noon."""
+    with pytest.raises(ValueError, match="^weights_applicable$"):
+        _check(_broken(config, weights=_ALL_ON_DEAL_SPECIFICS))
+
+
+def test_the_same_rubric_is_accepted_once_q13_is_resolved(
+    config: TenantConfig,
+) -> None:
+    """It is deal_specifics being OFF that empties the denominator, not the map.
+
+    Flipping the Q13 switch makes the component applicable again, so the same
+    weights are a rubric this service can actually score against.
+    """
+    _check(
+        _broken(
+            config,
+            weights=_ALL_ON_DEAL_SPECIFICS,
+            business_line_field="leadFor",
+            deal_specifics_applicable=True,
+        )
+    )
+
+
 def test_the_default_marks_derive_to_the_documented_tables(
     config: TenantConfig,
 ) -> None:

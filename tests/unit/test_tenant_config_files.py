@@ -188,6 +188,10 @@ def test_the_weights_stay_immutable(tmp_path):
                 ["excellent", 100],
             ],
         },
+        {
+            "config_version": "v",
+            "weights": {**{k.value: 0 for k in ComponentName}, "deal_specifics": 100},
+        },
         {"config_version": "v", "flag_threshold": 70},
         {"config_version": "v", "min_note_chars": 2000},
         "{not json",
@@ -208,6 +212,7 @@ def test_the_weights_stay_immutable(tmp_path):
         "bands-descending",
         "bands-top",
         "bands-negative",
+        "weights-all-on-a-suppressed-component",
         "flag-not-below-accept",
         "min-not-below-max",
         "bad-json",
