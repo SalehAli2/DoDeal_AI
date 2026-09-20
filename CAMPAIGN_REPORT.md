@@ -6593,3 +6593,11 @@ Six commits: `548add4` (parseable examples), `1ed5852` (no_contact off `what_hap
 - **Failure mode 2:** a below-floor note of nothing but fillers ("tmrw", "again", "بكرة") was recognised as a known outcome and bought three paid calls. Recognition now requires at least one tenant code, or a phrase opening the note with only fillers after it.
 - **Stress test:** every JSON object under EXAMPLES in all seven v2 judging templates parses with `json.loads` and validates as the pass's output schema, with the per-template count pinned so an extraction that finds nothing cannot pass.
 
+
+## Register item 138: the scored-set loader and its format
+
+`src/dodeal_ai/units/structured_intelligence/eval_set.py`. One JSON object per line; `DODEAL_EVAL_SET_PATH` is an environment variable and not a `Settings` field; a path inside the repository is refused before the file is opened.
+
+- **Failure mode 1:** an absent expected field defaulted rather than carried through as None manufactures agreement out of unfinished marking -- and the number it manufactures is the one the business is asked to accept. Every expected field is `| None`, and an empty `missing_components` list is a mark while an absent one is not.
+- **Failure mode 2:** a refusal that quotes the row puts a real salesperson's note on a terminal, in a CI log and in a pasted ticket. A bad row names its LINE NUMBER plus pydantic's field locations and error types (`include_input=False`), never a value.
+- **Stress test:** the committed fixture of invented notes is refused where it lies and loads only once copied outside the repository; `..` in the path cannot walk back in, because the refusal resolves first.
