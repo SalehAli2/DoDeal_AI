@@ -31,7 +31,11 @@ from dodeal_ai.core.cost import limiter
 from dodeal_ai.units.structured_intelligence import state
 from dodeal_ai.units.structured_intelligence.classify import CLASSIFY_TEMPLATE
 from dodeal_ai.units.structured_intelligence.config import get_tenant_config
-from dodeal_ai.units.structured_intelligence.pipeline import JudgementDeps, judge_note
+from dodeal_ai.units.structured_intelligence.pipeline import (
+    JudgementDeps,
+    _is_recognised_short_note,
+    judge_note,
+)
 from dodeal_ai.units.structured_intelligence.schemas import (
     JudgementRequest,
     NoteType,
@@ -61,12 +65,16 @@ TIMELINE_COUNT = 27
 # min_note_chars 15 / min_note_tokens 3, applied to the stripped text. Counted
 # from the fixture, not predicted. If a regenerated corpus changes it, this
 # fails and says by how much -- which is the point of pinning it.
-NOTE_TOO_SHORT_COUNT = 9
+#
+# Nine notes are below the floor, and one of them ("not interested") is a
+# recognised outcome (register item 132), so it is judged like any other note
+# and is not counted here: eight are suppressed with the fixed question.
+NOTE_TOO_SHORT_COUNT = 8
 # max_note_chars 2000, the other end of the same gate (Piece K). Three corpus
 # notes are over 5,000 characters and every other note is under 400, so this
 # count is not sensitive to where between 400 and 5,000 the limit is set -- it
 # would take a real change in the corpus to move it, which is what makes it
-# worth pinning. UNCHANGED at 9 above: none of the three is also thin.
+# worth pinning. None of the three is also thin.
 NOTE_TOO_LONG_COUNT = 3
 SCORED_COUNT = NOTE_COUNT - NOTE_TOO_SHORT_COUNT - NOTE_TOO_LONG_COUNT
 
@@ -186,7 +194,7 @@ async def test_every_corpus_note_yields_a_judgement_or_a_suppression(operational
 
 
 async def test_the_thin_notes_are_suppressed_before_any_model_call(operational):
-    """The nine short notes cost nothing: no reservation, no model call.
+    """The eight unrecognised short notes cost nothing: no reservation, no model call.
 
     Run on their own with an EMPTY model, so any call at all raises
     FakeLLMExhausted instead of quietly succeeding.
@@ -196,8 +204,11 @@ async def test_the_thin_notes_are_suppressed_before_any_model_call(operational):
         (lid, n)
         for lid, notes in client.notes.items()
         for n in notes
-        if len(n.note.strip()) < CONFIG.min_note_chars
-        or len(n.note.strip().split()) < CONFIG.min_note_tokens
+        if (
+            len(n.note.strip()) < CONFIG.min_note_chars
+            or len(n.note.strip().split()) < CONFIG.min_note_tokens
+        )
+        and not _is_recognised_short_note(n.note.strip(), CONFIG)
     ]
     assert len(thin) == NOTE_TOO_SHORT_COUNT
 
