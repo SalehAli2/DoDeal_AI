@@ -6609,3 +6609,11 @@ Six commits: `548add4` (parseable examples), `1ed5852` (no_contact off `what_hap
 - **Failure mode 1:** a harness that retried a failed call turns a provider having a bad day into an unbounded bill from a script nobody is watching. It never retries and never loops: a failed note is ONE row carrying the exception TYPE, and the run continues. `--live` refuses over 20 notes and prints the call count before it spends any of it.
 - **Failure mode 2:** a paid call placed by accident. The guard has two independent halves, like `real_fetch_check.py` -- the dry-run branch never builds a provider client, and `_guard_against_accidental_live_call` refuses immediately before the client is built even when that branch is wrong.
 - **Stress test:** five invented notes end to end against the real provider, then the dry-run branch inverted so a flagless run reaches the live path: the second guard refuses with exit 3 and writes no CSV.
+
+## Register item 140: the eval runner
+
+`scripts/run_eval.py`. Agreement with the hand marks per pass -- classify, `is_vague`, `missing_components`, check answers -- broken down by note type and by language, plus reprompt rate, p50/p95 latency and tokens per pass. The BAND figure is printed last, on its own line.
+
+- **Failure mode 1:** a note nobody has marked counted as agreement turns unfinished marking into a business result. An unmarked field leaves that figure's denominator entirely; a MARKED note whose pass did not run is a disagreement, not an exclusion, because the human and the pipeline really do disagree about it.
+- **Failure mode 2:** an expected band read from the file rather than computed would be a second source for the one number the unit exists to justify. The scored set holds no band field; both sides go through `compute_score`, and a row whose marks do not fit its type's applicable set is excluded and COUNTED as excluded on the terminal.
+- **Stress test:** a fake model scripted to the marks gives 100 % on every figure over exactly the marked notes (4/4, 4/4, 4/4, 23/23 checks, 3/3 bands); changing one classification drops classify to 3/4 and leaves the band alone, because callback and discovery share a denominator.
