@@ -83,7 +83,7 @@ def test_a_valid_file_overrides_the_default_for_its_tenant_only(tmp_path):
             "config_version": "tenant-a-cfg-1",
             "accept_threshold": 75,
             "rate_limit_per_hour": 5,
-            "enforcement_mode": "blocking",
+            "enforcement_mode": "strict",
             "short_note_codes": ["NA", "Cb"],
             "band_boundaries": [
                 ["poor", 29],
@@ -100,7 +100,7 @@ def test_a_valid_file_overrides_the_default_for_its_tenant_only(tmp_path):
     assert config.config_version == "tenant-a-cfg-1"
     assert (config.accept_threshold, config.flag_threshold) == (75, 40)
     assert config.rate_limit_per_hour == 5
-    assert config.enforcement_mode is EnforcementMode.BLOCKING
+    assert config.enforcement_mode is EnforcementMode.STRICT
     assert config.short_note_codes == frozenset({"na", "cb"})  # folded, not as written
     assert config.weights == DEFAULT.weights
     assert config.band_for(60) is Band.GOOD

@@ -542,7 +542,7 @@ def test_a_judgement_carries_all_four_versions(client):
         # A classifier RAN, so the stamp is what it reported -- not the
         # configured pin, and not "".
         "model_version": FAKE_MODEL,
-        "config_version": "tenant-cfg-default-3",
+        "config_version": "tenant-cfg-default-4",
     }
 
 
@@ -618,6 +618,7 @@ def test_resubmission_returns_the_same_shape(client):
         "score",
         "decision",
         "suppressed",
+        "enforcement",
         "versions",
         "request_id",
     }
@@ -673,7 +674,7 @@ def test_meta_versions_returns_the_four_strings(client):
         "rubric_version": "note_rubric_v2",
         "prompt_version": "unit_a_prompts_v2",
         "model_version": "",  # the configured pin; no model is pinned yet
-        "config_version": "tenant-cfg-default-3",
+        "config_version": "tenant-cfg-default-4",
     }
 
 

@@ -52,7 +52,10 @@ def test_containers_on_the_shared_default_are_immutable(config: TenantConfig) ->
 
 
 def test_config_version_is_stamped(config: TenantConfig) -> None:
-    assert config.config_version == "tenant-cfg-default-3"
+    # -4 at register item 142: EnforcementMode's vocabulary changed, so a file
+    # saying "blocking" no longer parses. RUBRIC_VERSION did not move with it --
+    # what a judgement CARRIES changed, not how it is scored.
+    assert config.config_version == "tenant-cfg-default-4"
 
 
 # --- weights ---------------------------------------------------------------
@@ -212,9 +215,11 @@ def test_ttls(config: TenantConfig) -> None:
 
 
 def test_enforcement_mode_is_advisory_by_default(config: TenantConfig) -> None:
-    # Carried, never branched on: enforcement is the CRM's.
+    # Register item 142: every tenant launches advisory, and no team moves to
+    # strict before a calibration target nothing here can check. The mode
+    # BRANCHES now -- decide.py::enforcement, tests/unit/test_enforcement.py.
     assert config.enforcement_mode is EnforcementMode.ADVISORY
-    assert [m.value for m in EnforcementMode] == ["advisory", "blocking"]
+    assert [m.value for m in EnforcementMode] == ["off", "advisory", "strict"]
 
 
 def test_every_frozenset_str_field_is_stored_casefolded() -> None:

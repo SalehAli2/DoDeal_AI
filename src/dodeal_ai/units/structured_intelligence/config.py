@@ -25,10 +25,11 @@ default remain identifiable and are never rescored.
 The values are placeholders in the same sense as the cost caps in core/config.py
 (ASSUMPTIONS §8.1): structurally correct, numerically provisional.
 
-`enforcement_mode` is carried but does not branch: advisory and blocking behave
-identically here, because ENFORCEMENT IS THE CRM'S. We return a decision; what
-the CRM does with `prompt_clarification` is its own policy. The field exists so
-a tenant's intent is recorded on the judgement rather than inferred later.
+`enforcement_mode` (register item 142) is the tenant's setting and the ONLY
+place a mode is chosen. It BRANCHES now: decide.py::enforcement derives the
+verdict on every judgement from it, and the mode is stamped on the judgement so
+a tenant that changes it later does not change what an old judgement meant.
+The vocabulary itself lives in schemas.py, with the other codes the CRM reads.
 """
 
 from __future__ import annotations
@@ -36,7 +37,6 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from enum import StrEnum
 from types import MappingProxyType
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -47,17 +47,15 @@ from dodeal_ai.units.structured_intelligence.schemas import (
     Band,
     CheckName,
     ComponentName,
+    EnforcementMode,
     MissingComponent,
     NoteType,
 )
 
-
-class EnforcementMode(StrEnum):
-    """Whether the tenant treats a clarification request as advice or as a
-    block. Identical behaviour in this service -- see the module docstring."""
-
-    ADVISORY = "advisory"
-    BLOCKING = "blocking"
+# Re-exported: EnforcementMode is a response vocabulary and lives in
+# schemas.py, but config.py is where a tenant's mode is chosen and where every
+# caller has always imported it from. Named here so ruff keeps the import.
+__all__ = ["UNIT_A_SECTION", "EnforcementMode", "TenantConfig", "get_tenant_config"]
 
 
 # Weights sum to 100 so the full-applicability denominator IS 100 and a total
@@ -270,6 +268,9 @@ class TenantConfig:
     attempt_ttl_seconds: int
     idempotency_ttl_seconds: int
 
+    # Register item 142: what the tenant asked us to do with a judgement it
+    # does not like. Read once per judgement and stamped on the block; a
+    # tenant that moves to strict never changes an old judgement's meaning.
     enforcement_mode: EnforcementMode
     config_version: str
 
@@ -334,8 +335,15 @@ _DEFAULT_CONFIG = TenantConfig(
     rate_limit_window_seconds=3600,
     attempt_ttl_seconds=21600,  # 6h
     idempotency_ttl_seconds=86400,  # 24h
+    # Every tenant launches advisory and no team moves to strict before the
+    # calibration target is met, which nothing in this service can check. So
+    # advisory is the default and only a tenant file may say otherwise.
     enforcement_mode=EnforcementMode.ADVISORY,
-    config_version="tenant-cfg-default-3",
+    # -4: register item 142 changed the enforcement_mode vocabulary, so a file
+    # saying "blocking" no longer parses. The rubric did not move and
+    # RUBRIC_VERSION did not either -- this stamp is what makes an old
+    # judgement, made under the old vocabulary, still identifiable.
+    config_version="tenant-cfg-default-4",
 )
 
 

@@ -151,7 +151,11 @@ from dodeal_ai.units.structured_intelligence.classify import (
     suppression_for,
 )
 from dodeal_ai.units.structured_intelligence.config import TenantConfig
-from dodeal_ai.units.structured_intelligence.decide import decide, withheld_reason
+from dodeal_ai.units.structured_intelligence.decide import (
+    decide,
+    enforcement,
+    withheld_reason,
+)
 from dodeal_ai.units.structured_intelligence.schemas import (
     Decision,
     DirectJudgementRequest,
@@ -383,6 +387,11 @@ def _suppressed(
     `clarification_prompt`/`prompt_withheld` (register item 64) are null for
     every suppression except a note below the length floor, which carries a
     fixed question instead of a model-written one.
+
+    THE ENFORCEMENT BLOCK IS HERE TOO (register item 142), derived from the
+    detail: a suppressed judgement has no Decision, and that is exactly why it
+    needs the block -- the CRM has no action to read and must not be left to
+    infer one from an absent field.
     """
     return Judgement(
         note_id=request.note_id,
@@ -397,6 +406,7 @@ def _suppressed(
             clarification_prompt=clarification_prompt,
             prompt_withheld=prompt_withheld,
         ),
+        enforcement=enforcement(config, detail=detail),
         versions=_versions(config, model_version),
         request_id=scope.request_id,
     )
@@ -1155,6 +1165,11 @@ async def _judge(
                 score=score,
                 decision=decision,
                 suppressed=None,
+                # From the ACTION, not the total and not the band: the action
+                # is what the two thresholds already decided, and deriving the
+                # verdict from the total again would be a second place for the
+                # thresholds to be read (register item 142).
+                enforcement=enforcement(config, action=decision.action),
                 # The SCORING pass's model, not the classifier's: the marks are
                 # what the judgement is, and on a reprompted pass it is the
                 # second response -- the call the marks actually came from.
