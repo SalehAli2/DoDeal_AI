@@ -268,6 +268,17 @@ class TenantConfig:
     attempt_ttl_seconds: int
     idempotency_ttl_seconds: int
 
+    # Register item 144. How many rows a per-rep measure needs before it is
+    # reported at all; below it the measure is SUPPRESSED with a reason. 10 is
+    # provisional and deliberately not small: the measure it protects is shown
+    # to a manager as a standard. Too low and a rep with three notes is given
+    # an average that is noise; too high and a real team never sees one.
+    measure_evidence_floor: int
+    # The rolling window every per-rep measure is computed over, in days. 30 as
+    # the business document asks. Too short and a quiet week suppresses
+    # everything; too long and a rep who improved last week still reads badly.
+    rolling_window_days: int
+
     # Register item 142: what the tenant asked us to do with a judgement it
     # does not like. Read once per judgement and stamped on the block; a
     # tenant that moves to strict never changes an old judgement's meaning.
@@ -335,6 +346,8 @@ _DEFAULT_CONFIG = TenantConfig(
     rate_limit_window_seconds=3600,
     attempt_ttl_seconds=21600,  # 6h
     idempotency_ttl_seconds=86400,  # 24h
+    measure_evidence_floor=10,  # provisional -- see the field's comment
+    rolling_window_days=30,
     # Every tenant launches advisory and no team moves to strict before the
     # calibration target is met, which nothing in this service can check. So
     # advisory is the default and only a tenant file may say otherwise.
@@ -377,6 +390,12 @@ class TenantConfigFile(BaseModel):
     rate_limit_window_seconds: int | None = Field(default=None, gt=0)
     attempt_ttl_seconds: int | None = Field(default=None, gt=0)
     idempotency_ttl_seconds: int | None = Field(default=None, gt=0)
+    # Register item 144. ge=1, not ge=0: a floor of 0 reports a measure over no
+    # rows at all, which is the exact thing the floor exists to refuse. These
+    # two are refused HERE and not in _check -- the field bound is the whole
+    # invariant, and a second copy in _check would be a line no input reaches.
+    measure_evidence_floor: int | None = Field(default=None, ge=1)
+    rolling_window_days: int | None = Field(default=None, gt=0)
     enforcement_mode: EnforcementMode | None = None
 
     def build(self) -> TenantConfig:
