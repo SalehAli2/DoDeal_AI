@@ -22,7 +22,9 @@ WHAT EACH CHECK MEANS
                 not an action.
 - ns_date       Is a date or named day given? Relative times count:
                 "tomorrow", "after 2 hrs", "next Tuesday".
-- ns_closure    Does the note state the lead has ended, with a reason?
+- ns_closure    Does the note state the lead has ended AND why? Both are
+                needed. "Not interested" alone is an ending with no
+                reason: answer no.
 - ds_figures    Is a figure named: budget, price, offer, payment terms?
 - ds_subject    Is the property, unit or project named?
 - ds_timing     Is a timeline named: decision date, handover, move-in?
