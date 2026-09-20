@@ -537,8 +537,8 @@ def test_counter_stores_down_do_not_fail_the_request(client, operational):
 def test_a_judgement_carries_all_four_versions(client):
     versions = client.post(JUDGE, json=_body(), headers=_headers()).json()["versions"]
     assert versions == {
-        "rubric_version": "note_rubric_v1",
-        "prompt_version": "unit_a_prompts_v1",
+        "rubric_version": "note_rubric_v2",
+        "prompt_version": "unit_a_prompts_v2",
         # A classifier RAN, so the stamp is what it reported -- not the
         # configured pin, and not "".
         "model_version": FAKE_MODEL,
@@ -670,8 +670,8 @@ def test_meta_versions_returns_the_four_strings(client):
 
     assert r.status_code == 200
     assert r.json() == {
-        "rubric_version": "note_rubric_v1",
-        "prompt_version": "unit_a_prompts_v1",
+        "rubric_version": "note_rubric_v2",
+        "prompt_version": "unit_a_prompts_v2",
         "model_version": "",  # the configured pin; no model is pinned yet
         "config_version": "tenant-cfg-default-3",
     }
