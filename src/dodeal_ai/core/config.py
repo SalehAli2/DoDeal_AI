@@ -164,6 +164,10 @@ class Settings(BaseSettings):
     # unit (register item 97). None = every unit's default for every tenant. A
     # wrong directory or an invalid file refuses startup, naming the tenant.
     tenant_config_dir: Path | None = None
+    # How long each process trusts the runtime override it last read from db2
+    # before reading it again (register item 97). 30 s is how late a changed rule
+    # reaches the other pods; too high and an administrator's change looks lost.
+    tenant_config_cache_seconds: float = Field(default=30.0, gt=0)
     # --- Watchdog: timeout + retry policy for external calls (§6) -----------
     # Placeholder values; tune per real LLM/tool latency later.
     external_call_timeout_seconds: float = 10.0

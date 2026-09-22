@@ -31,6 +31,7 @@ import pytest
 
 from dodeal_ai import main
 from dodeal_ai.core import redis as redis_module
+from dodeal_ai.core import tenant_config
 from dodeal_ai.core.breaker import reset_breakers
 from dodeal_ai.core.config import Settings, get_settings
 from dodeal_ai.core.cost import limiter
@@ -43,7 +44,7 @@ from tests.helpers.fake_operational_redis import FakeOperationalRedis
 # real: its own tests inspect the pool it builds. tests/test_hermetic_fakes.py
 # fails if a src module imports a factory by name and is missing here.
 _COST_CLIENT_HOLDERS = (limiter, main)
-_OPERATIONAL_CLIENT_HOLDERS = (state, main)
+_OPERATIONAL_CLIENT_HOLDERS = (state, main, tenant_config)
 
 # A closed port on loopback. db 1 and db 2 are kept so each URL still names the
 # store it stands in for; tests/unit/test_redis.py asserts the two differ and
@@ -144,6 +145,17 @@ def redis_fakes(
     reset_breakers()
     redis_module.get_cost_client.cache_clear()
     redis_module.get_operational_client.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _tenant_config_overrides() -> Iterator[None]:
+    """Every test starts with no cached runtime override and with the section
+    parsers the lifespan registers (register item 97), which most route tests
+    never run. A test's override cannot outlive it in the per-process cache."""
+    tenant_config.reset_override_cache()
+    tenant_config.register_section_parsers(main.TENANT_CONFIG_SECTIONS)
+    yield
+    tenant_config.reset_override_cache()
 
 
 @pytest.fixture(scope="session", autouse=True)

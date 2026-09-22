@@ -6801,3 +6801,19 @@ compose stack and the minter drift apart again and every service call 401s as
 invalid_signature.
 Stress test: a token the minter prints for each service route verifies with
 `ServiceTokenVerifier` built from the same settings.
+
+## Piece: register item 97, tenant rules at runtime
+
+Item 97 -- three service-chain routes (`PUT`/`GET /api/v1/admin/tenant-config`,
+`GET .../history`) store a `unit_a` section validated by the file's own parser,
+stamped `tenant-cfg-<tenant>-<YYYYMMDD>-<n>`, in db2 under `tenant_cfg:{t}` and
+a 50-long `tenant_cfg_history:{t}`, both with no TTL, written by one
+compare-and-set script. `core/tenant_config.resolve_section` is the one order
+(override, file, default), cached `tenant_config_cache_seconds` per process and
+failing safe; every route resolves once at entry and hands the config down.
+Production failure modes: (1) pods see a change up to 30 s apart, so two
+judgements of one minute carry different stamps and thresholds; (2) db2 is
+flushed and every tenant silently drops back to its file with no alert beyond
+the missing version.
+Stress test: with a tenant file loaded, a PUT's version must win over the file's
+on the next resolve, and a refused PUT must leave that version in force.

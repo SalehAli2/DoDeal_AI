@@ -521,3 +521,18 @@ async def test_the_history_token_script_moves_one_counter_with_a_window(client):
     await client.persist(key)
     await _add_history_tokens_with_window(client, key, 1, _WINDOW)
     assert await client.ttl(key) > 0
+
+
+async def test_the_tenant_config_script_writes_only_over_what_was_read(client):
+    """Register item 97: compare-and-set, LPUSH newest first, LTRIM to the cap."""
+    from dodeal_ai.core.tenant_config import _SET_OVERRIDE_SCRIPT
+
+    keys = ("tenant_cfg:tenant-a", "tenant_cfg_history:tenant-a")
+    assert await client.eval(_SET_OVERRIDE_SCRIPT, 2, *keys, "", "v1", 2) == 1
+    assert await client.eval(_SET_OVERRIDE_SCRIPT, 2, *keys, "", "stale", 2) == 0
+    assert await client.eval(_SET_OVERRIDE_SCRIPT, 2, *keys, "v1", "v2", 2) == 1
+    assert await client.eval(_SET_OVERRIDE_SCRIPT, 2, *keys, "v2", "v3", 2) == 1
+    assert await client.get(keys[0]) == "v3"
+    assert await client.lrange(keys[1], 0, -1) == ["v3", "v2"]
+    assert await client.ttl(keys[0]) == -1
+    assert await client.ttl(keys[1]) == -1

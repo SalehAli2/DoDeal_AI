@@ -183,6 +183,30 @@ class LoadShed(DodealError):
         super().__init__("load_shed", 503)
 
 
+class InvalidTenantConfig(DodealError):
+    """A tenant-config PUT the section parser refused (register item 97). The
+    body names no field and quotes no value: the parser's message could."""
+
+    def __init__(self) -> None:
+        super().__init__("invalid_tenant_config", 422)
+
+
+class TenantConfigUnavailable(DodealError):
+    """The runtime override store could not be written or listed (item 97).
+    Judgements are unaffected: their resolution falls back on its own."""
+
+    def __init__(self) -> None:
+        super().__init__("tenant_config_unavailable", 503)
+
+
+class TenantConfigConflict(DodealError):
+    """Concurrent PUTs for one tenant kept winning the race (item 97); the
+    caller retries with the version now in force in view."""
+
+    def __init__(self) -> None:
+        super().__init__("tenant_config_conflict", 409)
+
+
 class HistoryLoadShed(DodealError):
     """The history bulkhead is full (register item 127): `history_max_inflight`
     history judgements are already running in this process.

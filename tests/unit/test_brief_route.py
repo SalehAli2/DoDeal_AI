@@ -259,9 +259,14 @@ def test_the_window_is_the_tenants_rolling_days(client, monkeypatch, store) -> N
     """A row older than the window is outside it, and a rep with only old rows
     has nothing to report."""
     # Patched on the ROUTE module: it imported the name, so patching the
-    # config module would leave the route holding the original reference.
+    # config module would leave the route holding the original reference. The
+    # route resolves its rules with resolve_tenant_config since register item 97.
     short = dataclasses.replace(get_tenant_config("tenant-a"), rolling_window_days=1)
-    monkeypatch.setattr(judgement_routes, "get_tenant_config", lambda _tenant: short)
+
+    async def _short(_tenant: str):
+        return short
+
+    monkeypatch.setattr(judgement_routes, "resolve_tenant_config", _short)
     stale = JudgementRow.model_validate(
         _row(501, 1).model_dump(mode="json")
         | {"note_created_at": (datetime.now(UTC) - timedelta(days=5)).isoformat()}

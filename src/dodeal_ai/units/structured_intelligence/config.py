@@ -37,11 +37,16 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from enum import Enum
 from types import MappingProxyType
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from dodeal_ai.core.tenant_config import tenant_section
+from dodeal_ai.core.tenant_config import (
+    ResolvedSection,
+    resolve_section,
+    tenant_section,
+)
 from dodeal_ai.units.structured_intelligence.schemas import (
     MAX_NOTE_TEXT_CHARS,
     Band,
@@ -55,7 +60,15 @@ from dodeal_ai.units.structured_intelligence.schemas import (
 # Re-exported: EnforcementMode is a response vocabulary and lives in
 # schemas.py, but config.py is where a tenant's mode is chosen and where every
 # caller has always imported it from. Named here so ruff keeps the import.
-__all__ = ["UNIT_A_SECTION", "EnforcementMode", "TenantConfig", "get_tenant_config"]
+__all__ = [
+    "UNIT_A_SECTION",
+    "EnforcementMode",
+    "TenantConfig",
+    "config_of",
+    "get_tenant_config",
+    "resolve_tenant_config",
+    "section_of",
+]
 
 
 # Weights sum to 100 so the full-applicability denominator IS 100 and a total
@@ -457,10 +470,46 @@ def parse_unit_a_section(raw: object) -> TenantConfig:
 
 
 def get_tenant_config(tenant: str) -> TenantConfig:
-    """This tenant's rubric and limits: its `unit_a` section, else the default.
+    """This tenant's STARTUP rules: its file's `unit_a` section, else the default.
 
-    The pipeline's config is chosen here by the request's tenant (register item
-    97), the same tenant the scope carries.
+    For the scripts, which run with no store. A route never calls this: it
+    resolves once at entry with `resolve_tenant_config`, which puts the
+    runtime override first (register item 97), and hands the result down.
     """
     section = tenant_section(tenant, UNIT_A_SECTION)
     return section if isinstance(section, TenantConfig) else _DEFAULT_CONFIG
+
+
+def config_of(resolved: ResolvedSection) -> TenantConfig:
+    """A resolved `unit_a` section as this unit's config; the default when the
+    resolution found neither an override nor a file."""
+    value = resolved.value
+    return value if isinstance(value, TenantConfig) else _DEFAULT_CONFIG
+
+
+async def resolve_tenant_config(tenant: str) -> TenantConfig:
+    """The rules in force for `tenant`: the runtime override, else the file,
+    else the default (register item 97). Called once per request, at entry."""
+    return config_of(await resolve_section(tenant, UNIT_A_SECTION))
+
+
+def section_of(config: TenantConfig) -> dict[str, object]:
+    """A config as the `unit_a` section that produces it -- every field the
+    section may set, as plain JSON. What the admin route shows as in force;
+    parse_unit_a_section(section_of(config)) gives the same config back."""
+    return {
+        name: _plain(getattr(config, name)) for name in TenantConfigFile.model_fields
+    }
+
+
+def _plain(value: object) -> object:
+    """Enums to their values, mappings to dicts, sets to sorted lists."""
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, Mapping):
+        return {str(_plain(key)): _plain(item) for key, item in value.items()}
+    if isinstance(value, frozenset):
+        return sorted(str(_plain(item)) for item in value)
+    if isinstance(value, tuple):
+        return [_plain(item) for item in value]
+    return value

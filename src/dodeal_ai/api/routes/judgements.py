@@ -60,7 +60,10 @@ from dodeal_ai.core.inflight import history_counter
 from dodeal_ai.core.llm import LLMClient, get_llm_client
 from dodeal_ai.tools.leads import LeadsClient, get_leads_client
 from dodeal_ai.units.structured_intelligence.brief import build_brief
-from dodeal_ai.units.structured_intelligence.config import get_tenant_config
+from dodeal_ai.units.structured_intelligence.config import (
+    TenantConfig,
+    resolve_tenant_config,
+)
 from dodeal_ai.units.structured_intelligence.judgement_rows import (
     JudgementStore,
     get_judgement_store,
@@ -106,23 +109,22 @@ def _answer(judgement: Judgement, response: Response) -> Judgement:
 
 
 def _deps(
-    context: RequestContext,
+    config: TenantConfig,
     leads: LeadsClient | None,
     llm: LLMClient,
     settings: Settings,
 ) -> JudgementDeps:
     """The pipeline's four seams for this request.
 
+    `config` is the tenant's rules, resolved ONCE at the route's entry
+    (register item 97) -- nothing below the route resolves them again, so one
+    judgement can never be scored under two versions.
+
     `leads` is None on the direct routes: they do not fetch, so there is no
     client to hand them and saying so is more honest than passing one they must
     not call. See JudgementDeps.
     """
-    return JudgementDeps(
-        leads=leads,
-        llm=llm,
-        config=get_tenant_config(context.tenant),
-        settings=settings,
-    )
+    return JudgementDeps(leads=leads, llm=llm, config=config, settings=settings)
 
 
 @router.post("/notes/judgements")
@@ -139,7 +141,7 @@ async def create_judgement(
         context.scope(),
         request,
         resubmission=False,
-        deps=_deps(context, leads, llm, settings),
+        deps=_deps(await resolve_tenant_config(context.tenant), leads, llm, settings),
     )
     return _answer(judgement, response)
 
@@ -167,7 +169,7 @@ async def create_resubmission_judgement(
         context.scope(),
         request,
         resubmission=True,
-        deps=_deps(context, leads, llm, settings),
+        deps=_deps(await resolve_tenant_config(context.tenant), leads, llm, settings),
     )
     return _answer(judgement, response)
 
@@ -194,7 +196,7 @@ async def create_direct_judgement(
         context.scope_for_author(request.author_id),
         request,
         resubmission=False,
-        deps=_deps(context, None, llm, settings),
+        deps=_deps(await resolve_tenant_config(context.tenant), None, llm, settings),
     )
     return _answer(judgement, response)
 
@@ -220,7 +222,7 @@ async def create_direct_resubmission_judgement(
         context.scope_for_author(request.author_id),
         request,
         resubmission=True,
-        deps=_deps(context, None, llm, settings),
+        deps=_deps(await resolve_tenant_config(context.tenant), None, llm, settings),
     )
     return _answer(judgement, response)
 
@@ -269,7 +271,7 @@ async def create_history_judgement(
     judgement = await judge_note_history(
         context.scope_for_author(request.author_id, budget="history"),
         request,
-        deps=_deps(context, None, llm, settings),
+        deps=_deps(await resolve_tenant_config(context.tenant), None, llm, settings),
     )
     return _answer(judgement, response)
 
@@ -295,7 +297,7 @@ async def read_versions(
         rubric_version=RUBRIC_VERSION,
         prompt_version=PROMPT_SET_VERSION,
         model_version=settings.llm_model,
-        config_version=get_tenant_config(context.tenant).config_version,
+        config_version=(await resolve_tenant_config(context.tenant)).config_version,
     )
 
 
@@ -343,7 +345,7 @@ async def read_brief(
     may read whose. The chain still holds the tenant -- Host match, tenant cost
     counter -- so a brief never crosses one.
     """
-    config = get_tenant_config(context.tenant)
+    config = await resolve_tenant_config(context.tenant)
     since, until = rolling_window(datetime.now(UTC), config)
 
     users = list(await directory.users(context.tenant))

@@ -6,7 +6,7 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
-from dodeal_ai.api.routes import judgements
+from dodeal_ai.api.routes import admin, judgements
 from dodeal_ai.core import metrics as service_metrics
 from dodeal_ai.core.config import (
     REDIS_POOL_HEADROOM,
@@ -24,7 +24,11 @@ from dodeal_ai.core.redis import (
     get_cost_client,
     get_operational_client,
 )
-from dodeal_ai.core.tenant_config import clear_tenant_configs, load_tenant_configs
+from dodeal_ai.core.tenant_config import (
+    clear_tenant_configs,
+    load_tenant_configs,
+    register_section_parsers,
+)
 from dodeal_ai.middleware.body_limit import BodyLimitMiddleware
 from dodeal_ai.middleware.inflight import InflightMiddleware
 from dodeal_ai.middleware.request_id import RequestIDMiddleware
@@ -77,7 +81,9 @@ async def lifespan(app: FastAPI):
     # here, not on the first paid call days later. Read once for the app's life
     # so no judgement makes a disk read on the event loop (register item 85).
     preload_templates(UNIT_A_TEMPLATES)
-    # Register item 97: every tenant file validated before any socket exists.
+    # Register item 97: the section parsers the runtime override store parses
+    # with, then every tenant file validated before any socket exists.
+    register_section_parsers(TENANT_CONFIG_SECTIONS)
     if settings.tenant_config_dir is not None:
         try:
             load_tenant_configs(settings.tenant_config_dir, TENANT_CONFIG_SECTIONS)
@@ -284,6 +290,7 @@ def create_app() -> FastAPI:
     application.add_middleware(BodyLimitMiddleware)
 
     application.include_router(judgements.router)
+    application.include_router(admin.router)
     application.add_api_route("/health", health, methods=["GET"])
     register_error_handlers(application)
     application.add_api_route("/ready", ready, methods=["GET"])

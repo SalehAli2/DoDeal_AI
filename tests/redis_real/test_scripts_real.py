@@ -652,3 +652,22 @@ async def test_the_history_token_script_moves_one_counter_with_a_window(
     _assert_window(await real_redis.ttl(key))
     await _add_history_tokens_with_window(real_redis, key, 1, _WINDOW * 100)
     assert await real_redis.ttl(key) <= _WINDOW
+
+
+async def test_the_tenant_config_script_is_a_compare_and_set_with_no_ttl(
+    real_redis: redis_async.Redis, key_prefix: str
+) -> None:
+    """Counterpart: test_the_tenant_config_script_writes_only_over_what_was_read."""
+    from dodeal_ai.core.tenant_config import _SET_OVERRIDE_SCRIPT
+
+    keys = (
+        f"{key_prefix}tenant_cfg:{_TENANT}",
+        f"{key_prefix}tenant_cfg_history:{_TENANT}",
+    )
+    assert await real_redis.eval(_SET_OVERRIDE_SCRIPT, 2, *keys, "", "v1", 2) == 1
+    assert await real_redis.eval(_SET_OVERRIDE_SCRIPT, 2, *keys, "", "stale", 2) == 0
+    assert await real_redis.eval(_SET_OVERRIDE_SCRIPT, 2, *keys, "v1", "v2", 2) == 1
+    assert await real_redis.eval(_SET_OVERRIDE_SCRIPT, 2, *keys, "v2", "v3", 2) == 1
+    assert await real_redis.lrange(keys[1], 0, -1) == ["v3", "v2"]
+    assert await real_redis.ttl(keys[0]) == _TTL_NO_EXPIRY
+    assert await real_redis.ttl(keys[1]) == _TTL_NO_EXPIRY

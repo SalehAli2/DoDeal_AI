@@ -27,12 +27,16 @@ running, which is how each of the three failure policies gets exercised.
 
 `aclose` is not a command and is not among the four: main.py's lifespan closes
 both clients on shutdown, and the root conftest hands this fake to main.py too.
+
+The runtime tenant-config override (register item 97, core/tenant_config.py)
+adds its compare-and-set EVAL and LRANGE; its history list lives in `lists`.
 """
 
 from __future__ import annotations
 
 import redis
 
+from dodeal_ai.core.tenant_config import _SET_OVERRIDE_SCRIPT
 from dodeal_ai.units.structured_intelligence.state import (
     _SLOTS_ALLOWED,
     _SLOTS_DENIED_BY_ATTEMPT,
@@ -48,6 +52,8 @@ class FakeOperationalRedis:
     def __init__(self, *, raise_on: set[str] | None = None) -> None:
         self.store: dict[str, str] = {}
         self.ttls: dict[str, int] = {}
+        # List keys (the tenant-config history), newest first as LPUSH leaves them.
+        self.lists: dict[str, list[str]] = {}
         self.raise_on: set[str] = set(raise_on or ())
         # Ordered record of (command, first key) for the few assertions that
         # are genuinely about sequencing -- e.g. that a take is one EVAL.
@@ -102,6 +108,8 @@ class FakeOperationalRedis:
         keys = tuple(str(k) for k in keys_and_args[:numkeys])
         if script == _TAKE_OVER_SCRIPT:
             return self._take_over(script, keys, keys_and_args[numkeys:])
+        if script == _SET_OVERRIDE_SCRIPT:
+            return self._set_override(script, keys, keys_and_args[numkeys:])
         attempt_key, rate_key, rate_day_key = keys
         self._guard("eval", attempt_key)
         cap, attempt_ttl, limit, rate_ttl, limit_day, rate_ttl_day = (
@@ -141,6 +149,26 @@ class FakeOperationalRedis:
             self.ttls[key] = int(ttl)
         self.evals.append((script, keys, taken))
         return taken
+
+    def _set_override(
+        self, script: str, keys: tuple[str, ...], args: tuple[object, ...]
+    ) -> int:
+        """The tenant-config compare-and-set: write the record and push it onto
+        the capped history only if the version key still holds what was read."""
+        version_key, history_key = keys
+        self._guard("eval", version_key)
+        expected, record, cap = (str(arg) for arg in args)
+        written = int(self.store.get(version_key, "") == expected)
+        if written:
+            self.store[version_key] = record
+            history = [record, *self.lists.get(history_key, [])]
+            self.lists[history_key] = history[: int(cap)]
+        self.evals.append((script, keys, written))
+        return written
+
+    async def lrange(self, name: str, start: int, end: int) -> list[str]:
+        self._guard("lrange", name)
+        return self.lists.get(name, [])[start : end + 1]
 
     async def delete(self, *names: str) -> int:
         removed = 0
