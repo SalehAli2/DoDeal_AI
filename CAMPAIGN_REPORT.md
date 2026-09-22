@@ -6710,3 +6710,21 @@ behind it -- a floor decision needs the lines aggregated, and nobody is doing
 that yet.
 Stress test: a full note opening with a tenant phrase ("not interested tmrw
 again") clears both floors and must read false, which the old column did not.
+
+## Batch: Unit A Part 1 (D1 ... 74), one commit per item
+
+Baseline at b3ecab5: 1993 passed, 2 skipped, 50 deselected. The recorded 1999
+at f3223eb counted six more tests from score_v3.txt, an untracked byte copy of
+score_v2.txt in prompts/structured_intelligence/ that the lead deleted before
+this run (each template there parametrises six tests).
+
+## Piece: register item D1, the service token verifier
+
+Item D1 -- `core/auth/service.py::ServiceTokenVerifier` verifies the CRM's
+service token (iss, aud, subdomain, iat, exp; lifetime at most 300 s; previous
+key for rotation) with a distinct audit code per refusal.
+Production failure modes: (1) CRM and service clocks drift past the leeway and
+every service call 401s as token_not_yet_valid; (2) a rotation leaves the
+previous key set forever, so a retired key keeps verifying.
+Stress test: a token with iat ten seconds old and exp 295 s ahead must refuse
+as lifetime_exceeded although exp is still in the future.

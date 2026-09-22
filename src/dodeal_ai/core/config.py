@@ -20,7 +20,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, SecretStr, ValidationError
+from pydantic import BaseModel, Field, SecretStr, ValidationError, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic_settings.exceptions import SettingsError
 
@@ -95,6 +95,29 @@ class Settings(BaseSettings):
     # SecretStr, so repr(settings) prints `**********` (register item 91). Read
     # in exactly ONE place: JwtVerifier.verify, with .get_secret_value().
     jwt_signing_key: SecretStr
+
+    # --- The CRM's service token (core/auth/service.py, register item D1) ---
+    # The algorithm the CRM signs its service token with. RS256 by default so
+    # we hold only a public key; HS256 means a shared secret that can mint.
+    # A value the CRM does not sign with refuses every service call (401).
+    service_jwt_algorithm: Literal["RS256", "ES256", "HS256"] = "RS256"
+    # Verifies the service token: a public PEM for RS/ES (one line with \n
+    # escapes is accepted), the shared secret for HS. None = no service routes:
+    # /ready 503s and every direct, brief and admin call is 401.
+    service_jwt_signing_key: SecretStr | None = None
+    # The key being rotated out, tried only when the current one fails the
+    # signature. None outside a rotation; left set after one, a retired key
+    # still verifies tokens for as long as it stays here.
+    service_jwt_previous_signing_key: SecretStr | None = None
+    # The `iss` the CRM puts on a service token. Fixed by agreement with the
+    # backend; a mismatch refuses every service call with invalid_issuer.
+    service_jwt_issuer: str = Field(default="dodeal-crm", min_length=1)
+    # The `aud` a service token must name: this service. It stops a token minted
+    # for another CRM consumer being replayed here; a mismatch refuses them all.
+    service_jwt_audience: str = Field(default="dodeal-ai", min_length=1)
+    # The longest exp minus iat accepted, in seconds. 300 keeps a stolen token
+    # worth five minutes; too low refuses the CRM's own tokens as lifetime_exceeded.
+    service_jwt_max_lifetime_seconds: int = Field(default=300, gt=0)
 
     # --- Claim-name mapping: the ONE place (read by core/auth/claims.py) ---
     # Tymon JWT carries sub (user id) + subdomain (tenant) +
@@ -298,6 +321,18 @@ class Settings(BaseSettings):
     # resilience, validation, ...). Third-party libraries are unaffected --
     # they stay at the root logger's WARNING default.
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+
+    @model_validator(mode="after")
+    def _service_key_is_not_the_user_key(self) -> Settings:
+        """An HS256 service secret equal to the user key would let anyone who
+        can mint a user token mint a service token too (register item D1).
+        Compared as SecretStr, so neither value is read out here."""
+        if self.service_jwt_algorithm == "HS256" and self.jwt_signing_key in (
+            self.service_jwt_signing_key,
+            self.service_jwt_previous_signing_key,
+        ):
+            raise ValueError("service_jwt_signing_key")
+        return self
 
     @property
     def redis_pool_size(self) -> int:

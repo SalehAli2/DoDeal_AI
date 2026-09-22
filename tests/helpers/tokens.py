@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from functools import cache
 
 import jwt  # PyJWT
+import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
@@ -70,6 +71,49 @@ def mint_token(
 
 def mint_expired_token(**overrides) -> str:
     return mint_token(TokenClaims(ttl_seconds=-60), **overrides)
+
+
+# --- the CRM's service token (register item D1) ----------------------------
+# A second, unrelated HS256 secret: Settings refuses a service key equal to the
+# user key, so the two can never be the same value in a test either.
+SERVICE_TEST_SECRET = secrets.token_hex(32)
+SERVICE_ISSUER = "dodeal-crm"
+SERVICE_AUDIENCE = "dodeal-ai"
+
+
+def service_claims(
+    *, subdomain: str = "tenant-a", ttl_seconds: int = 300, **overrides: object
+) -> dict:
+    """The claim set a service token must carry: iss, aud, subdomain, iat, exp."""
+    now = int(time.time())
+    claims: dict = {
+        "iss": SERVICE_ISSUER,
+        "aud": SERVICE_AUDIENCE,
+        "subdomain": subdomain,
+        "iat": now,
+        "exp": now + ttl_seconds,
+    }
+    claims.update(overrides)
+    return claims
+
+
+def mint_service_token(
+    *,
+    secret: str = SERVICE_TEST_SECRET,
+    alg: str = TEST_ALG,
+    subdomain: str = "tenant-a",
+    ttl_seconds: int = 300,
+    **overrides: object,
+) -> str:
+    """A signed service token; keyword claims override service_claims()."""
+    claims = service_claims(subdomain=subdomain, ttl_seconds=ttl_seconds, **overrides)
+    return jwt.encode(claims, secret, algorithm=alg)
+
+
+def service_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Configure the process Settings for HS256 service tokens from this module."""
+    monkeypatch.setenv("DODEAL_SERVICE_JWT_ALGORITHM", TEST_ALG)
+    monkeypatch.setenv("DODEAL_SERVICE_JWT_SIGNING_KEY", SERVICE_TEST_SECRET)
 
 
 """

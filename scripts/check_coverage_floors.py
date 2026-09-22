@@ -63,6 +63,9 @@ _COVERAGE_JSON = Path("coverage.json")
 # glob pattern (forward slashes, repo-relative) -> minimum percent covered
 _FLOORS: dict[str, float] = {
     "src/dodeal_ai/core/auth/**": 95,
+    # The CRM's service token (register item D1): every refusal is a reason code
+    # a test can reach, and a gap is a service call admitted on a path nobody ran.
+    "src/dodeal_ai/core/auth/service.py": 100,
     "src/dodeal_ai/core/tenancy.py": 100,
     "src/dodeal_ai/core/cost/**": 95,
     # The two counters, the two scripts, and the only place a judgement is
