@@ -43,7 +43,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import math
-import re
 import statistics
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -63,7 +62,7 @@ from dodeal_ai.units.structured_intelligence.config import (
     get_tenant_config,
 )
 from dodeal_ai.units.structured_intelligence.eval_set import EvalRow
-from dodeal_ai.units.structured_intelligence.pipeline import _ARABIC_SCRIPT_PATTERN
+from dodeal_ai.units.structured_intelligence.language import language_of
 from dodeal_ai.units.structured_intelligence.schemas import NoteType
 from dodeal_ai.units.structured_intelligence.scoring import (
     applicable_checks,
@@ -91,12 +90,6 @@ from scripts.diagnose_notes import (
 # gate and make people stop running it.
 BAND_TARGET_PERCENT = 85
 
-# The other half of "which language is this note", beside pipeline.py's Arabic
-# pattern. Latin letters only -- this decides a three-way bucket for a report,
-# not a linguistic fact. A wrong value mislabels a bucket and changes no
-# judgement anywhere.
-_LATIN_SCRIPT_PATTERN = re.compile("[A-Za-z]")
-
 # The note-type bucket for a note nobody typed by hand and that never reached
 # the classifier. Named rather than blank so a reader does not take an empty
 # cell for a missing row.
@@ -112,24 +105,6 @@ _PASSES: tuple[tuple[str, str], ...] = (
     ("vague", PROFILE_UNIT_A_VAGUE),
     ("score", PROFILE_UNIT_A_SCORE),
 )
-
-
-def language_of(text: str) -> str:
-    """arabic, english or mixed, decided by script.
-
-    The Arabic half is pipeline.py's own pattern -- imported, not copied, so
-    "does this note contain Arabic" has ONE answer in this repo and the report
-    cannot disagree with the fixed clarification question about it.
-
-    Text with neither script (digits and punctuation only) reads as english.
-    It is the residual bucket, not a claim about the note; nothing downstream
-    branches on it.
-    """
-    arabic = bool(_ARABIC_SCRIPT_PATTERN.search(text))
-    latin = bool(_LATIN_SCRIPT_PATTERN.search(text))
-    if arabic and latin:
-        return "mixed"
-    return "arabic" if arabic else "english"
 
 
 @dataclass(slots=True)

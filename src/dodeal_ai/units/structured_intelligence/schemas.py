@@ -46,6 +46,8 @@ from pydantic import (
     model_validator,
 )
 
+from dodeal_ai.units.structured_intelligence.language import Language
+
 # ---------------------------------------------------------------------------
 # Vocabularies
 # ---------------------------------------------------------------------------
@@ -472,7 +474,9 @@ class NoteAnalysis(BaseModel):
     """The analysis half of a judgement. On a suppressed judgement every field
     is null/empty except note_type, which carries the classifier's answer when
     there was one (including "unclassifiable") and null when we stopped before
-    classifying.
+    classifying, and `language`, which every judgement carries (register item
+    34): arabic, english or mixed, by script, from language.py. Null only on a
+    judgement stored before the field existed.
 
     `checks` (register item 148) is the scoring pass's yes/no answers, as
     validated -- the facts the marks were computed from, so a salesperson can
@@ -486,6 +490,7 @@ class NoteAnalysis(BaseModel):
     clarification_prompt: str | None = None
     reasoning: str | None = None
     checks: dict[CheckName, bool] | None = None
+    language: Language | None = None
 
 
 class ScoreComponent(BaseModel):

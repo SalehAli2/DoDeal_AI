@@ -6945,3 +6945,16 @@ screen; (2) a replayed pre-field judgement shows no checks and reads as a
 different kind of answer.
 Stress test: a stored judgement with `checks` stripped out replays 200 with
 `checks: null` and no model call.
+
+## Piece: register item 34, the note's language on every judgement
+
+Item 34 -- `units/structured_intelligence/language.py` holds the one script rule
+(the Arabic pattern moved from pipeline.py, the Latin one from run_eval.py);
+`NoteAnalysis.language` is arabic, english or mixed on every judgement, scored
+or suppressed, from the note's own text; the fixed question and run_eval both
+import it.
+Production failure modes: (1) a note in Latin-script Arabic (Arabizi) reads as
+english, so per-language figures overstate English; (2) a single Arabic word in
+an English note makes it mixed, so the mixed bucket fills with English notes.
+Stress test: "لا" is arabic and draws the Arabic fixed question; "ok" is english
+and draws the English one.

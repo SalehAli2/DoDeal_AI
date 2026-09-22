@@ -564,6 +564,8 @@ def test_the_analysis_carries_all_three_passes(client):
         "reasoning": "The follow-up has no date.",
         # Register item 148: the validated check answers the marks came from.
         "checks": FAIR_CHECKS,
+        # Register item 34: the note's script, on every judgement.
+        "language": "english",
     }
 
 
@@ -577,6 +579,7 @@ def test_a_thin_note_has_no_note_type_at_all(client, leads):
         "clarification_prompt": None,
         "reasoning": None,
         "checks": None,
+        "language": "english",
     }
 
 

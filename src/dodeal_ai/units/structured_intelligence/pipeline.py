@@ -103,7 +103,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
-import re
 import time
 from collections.abc import Awaitable, Iterator
 from contextlib import contextmanager
@@ -155,6 +154,10 @@ from dodeal_ai.units.structured_intelligence.decide import (
     decide,
     enforcement,
     withheld_reason,
+)
+from dodeal_ai.units.structured_intelligence.language import (
+    has_arabic,
+    language_of,
 )
 from dodeal_ai.units.structured_intelligence.schemas import (
     Decision,
@@ -211,10 +214,8 @@ IDEMPOTENCY_INFLIGHT_MULTIPLIER = 4
 RATE_LIMIT_DAY_WINDOW_SECONDS = 86400
 
 # Register item 64: a note below the length floor still gets a question, with
-# no model call to write one. Matched on any Arabic-script letter in the note's
-# OWN text (never the redacted copy, which is what the length gate itself
-# reads) rather than a full language model, since this is a two-way switch.
-_ARABIC_SCRIPT_PATTERN = re.compile("[؀-ۿ]")
+# no model call to write one. Its script is language.py's one rule (register
+# item 34), on the note's OWN text, never the redacted copy.
 _FIXED_CLARIFICATION_PROMPT_AR = (
     "ماذا حدث، وماذا قال العميل، وما الخطوة التالية مع موعدها؟"
 )
@@ -227,7 +228,7 @@ def _fixed_clarification_prompt(text: str) -> str:
     """The length gate's fixed question, in the note's own script."""
     return (
         _FIXED_CLARIFICATION_PROMPT_AR
-        if _ARABIC_SCRIPT_PATTERN.search(text)
+        if has_arabic(text)
         else _FIXED_CLARIFICATION_PROMPT_EN
     )
 
@@ -370,7 +371,7 @@ def _suppressed(
     reason: SuppressedReason,
     detail: SuppressedDetail,
     config: TenantConfig,
-    analysis: NoteAnalysis | None = None,
+    analysis: NoteAnalysis,
     model_version: str = NO_MODEL,
     clarification_prompt: str | None = None,
     prompt_withheld: PromptWithheld | None = None,
@@ -402,7 +403,7 @@ def _suppressed(
         note_id=request.note_id,
         lead_id=request.lead_id,
         author_id=author_id,
-        analysis=analysis or NoteAnalysis(),
+        analysis=analysis,
         score=None,
         decision=None,
         suppressed=Suppressed(
@@ -1005,6 +1006,8 @@ async def _judge(
     """
     config = deps.config
     operation = state.JUDGE_HISTORY if history else state.JUDGE_NOTE
+    # Register item 34: the note's script, on its own text, on every judgement.
+    language = language_of(note.note)
     # Register item 59: the key is the ORIGINAL text's fingerprint; only the
     # three prompts read the redacted copy. Counts reach the outcome line.
     fingerprint = state.note_fingerprint(note.note)
@@ -1036,6 +1039,7 @@ async def _judge(
             reason=gate_reason,
             detail=gate_detail,
             config=config,
+            analysis=NoteAnalysis(language=language),
             clarification_prompt=clarification_prompt,
             prompt_withheld=prompt_withheld,
             stage_change=stage_change,
@@ -1146,7 +1150,9 @@ async def _judge(
                 reason=SuppressedReason.NOT_SCORABLE,
                 detail=detail,
                 config=config,
-                analysis=NoteAnalysis(note_type=classification.note_type),
+                analysis=NoteAnalysis(
+                    note_type=classification.note_type, language=language
+                ),
                 model_version=classify_response.model,
                 stage_change=stage_change,
                 resubmission=resubmission,
@@ -1205,6 +1211,7 @@ async def _judge(
                 clarification_prompt=vague_output.clarification_prompt,
                 reasoning=vague_output.reasoning,
                 checks=dict(score_output.checks),
+                language=language,
             )
             score = compute_score(score_output.checks, note_type, config)
             # decide() is PURE, so it is asked twice: once with the window
