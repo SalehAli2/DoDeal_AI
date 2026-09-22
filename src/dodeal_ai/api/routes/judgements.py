@@ -1,11 +1,13 @@
 """Unit A's HTTP surface: judge a note, resubmit a note, read the versions,
 read a role brief.
 
-Every route depends on gate4_cost, which is the WHOLE live chain -- Gate 1
-(auth) -> Gate 2 (tenancy) -> Gate 4 (cost). Gate 3 is parked; see
-core/auth/dependencies.py. One Depends, not a stack: the gates chain through
-nested Depends, so listing them individually here would be a second, silently
-divergent copy of the order.
+TWO CHAINS (register item D1). The fetch routes depend on gate4_cost, the WHOLE
+user chain -- Gate 1 (auth) -> Gate 2 (tenancy) -> Gate 4 (cost). The direct
+routes depend on service_gate4_cost, the CRM's service chain, and a user token
+is 401 there. /meta/versions takes either through gate4_either_principal. Gate
+3 is parked; see core/auth/dependencies.py. One Depends, not a stack: the gates
+chain through nested Depends, so listing them individually here would be a
+second, silently divergent copy of the order.
 
 The route hands the pipeline a TenantScope, never the RequestContext (design
 note 0001, D1). Nothing below re-reads a tenant from anywhere.
@@ -18,11 +20,14 @@ and, because core/errors.py replaces FastAPI's stock validation handler, that
 
 THE TWO DIRECT ROUTES ARE THE ONE EXCEPTION (DECISION[DIRECT_ROUTE]). They take
 DirectJudgementRequest, which carries the saved note's text, because the CRM's
-read surface has been unavailable for six weeks and the CRM can send the note
-server-side after the save. They sit behind the SAME gate chain, and
-`get_leads_client` is deliberately NOT in their dependency chain: there is
-nothing to fetch, so no backend key is resolved and no tool call can be made.
-The fetch routes remain the contract; see ASSUMPTIONS.md, DECISION[DIRECT_ROUTE].
+read surface has been unavailable and the CRM can send the note server-side
+after the save. They sit behind the SERVICE chain (register item 92): the CRM
+calls with its own token and names the author, and the scope is built with
+`scope_for_author(request.author_id)`, so question caps and the per-user token
+budget key on that author. `get_leads_client` is deliberately NOT in their
+dependency chain: there is nothing to fetch, so no backend key is resolved and
+no tool call can be made. The fetch routes remain the contract; see
+ASSUMPTIONS.md, DECISION[DIRECT_ROUTE].
 
 THE BRIEF ROUTE IS A GET AND ANSWERS 204 (register item 145). It is the one
 route here that can succeed with no body: a brief every measure was suppressed
@@ -40,7 +45,11 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Path, Response
 from fastapi.responses import PlainTextResponse
 
-from dodeal_ai.core.auth.dependencies import gate4_cost
+from dodeal_ai.core.auth.dependencies import (
+    gate4_cost,
+    gate4_either_principal,
+    service_gate4_cost,
+)
 from dodeal_ai.core.config import Settings, get_settings
 from dodeal_ai.core.context import RequestContext
 from dodeal_ai.core.errors import SubjectNotFoundError
@@ -159,21 +168,22 @@ async def create_resubmission_judgement(
 async def create_direct_judgement(
     request: DirectJudgementRequest,
     response: Response,
-    context: Annotated[RequestContext, Depends(gate4_cost)],
+    context: Annotated[RequestContext, Depends(service_gate4_cost)],
     llm: Annotated[LLMClient, Depends(get_llm_client)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> Judgement:
     """Judge a note the CRM has just saved and sent us. DECISION[DIRECT_ROUTE].
 
-    Same gates, same response, and the same pipeline from the length check
-    down. The body carries the saved note's text, its three ids and the four
-    lead fields the classifier reads; nothing else is accepted (extra="forbid"),
-    and note_text over 4,000 characters is a 422 before the pipeline is entered.
+    The service chain, the same response, and the same pipeline from the
+    length check down. The body carries the saved note's text, its three ids
+    and the four lead fields the classifier reads; nothing else is accepted
+    (extra="forbid"), and note_text over 4,000 characters is a 422 before the
+    pipeline is entered. The scope names the body's author (register item 92).
 
     No LeadsClient in the signature, deliberately -- there is nothing to fetch.
     """
     judgement = await judge_note_direct(
-        context.scope(),
+        context.scope_for_author(request.author_id),
         request,
         resubmission=False,
         deps=_deps(context, None, llm, settings),
@@ -185,7 +195,7 @@ async def create_direct_judgement(
 async def create_direct_resubmission_judgement(
     request: DirectJudgementRequest,
     response: Response,
-    context: Annotated[RequestContext, Depends(gate4_cost)],
+    context: Annotated[RequestContext, Depends(service_gate4_cost)],
     llm: Annotated[LLMClient, Depends(get_llm_client)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> Judgement:
@@ -199,7 +209,7 @@ async def create_direct_resubmission_judgement(
     text itself.
     """
     judgement = await judge_note_direct(
-        context.scope(),
+        context.scope_for_author(request.author_id),
         request,
         resubmission=True,
         deps=_deps(context, None, llm, settings),
@@ -209,7 +219,7 @@ async def create_direct_resubmission_judgement(
 
 @router.get("/meta/versions")
 async def read_versions(
-    context: Annotated[RequestContext, Depends(gate4_cost)],
+    context: Annotated[RequestContext, Depends(gate4_either_principal)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> Versions:
     """The four version strings a judgement is stamped with.
@@ -220,8 +230,9 @@ async def read_versions(
     (DODEAL_LLM_MODEL) -- what WOULD run. It is "" until a model is configured,
     which is honest: no model is pinned yet.
 
-    Behind the gates like the other two, so version strings are not a public
-    fingerprint of the deployment.
+    Behind the gates like the others, so version strings are not a public
+    fingerprint of the deployment -- either principal's, since the CRM reads
+    them with its service token and a person's client with theirs.
     """
     return Versions(
         rubric_version=RUBRIC_VERSION,

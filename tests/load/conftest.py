@@ -224,6 +224,14 @@ def _headers() -> dict[str, str]:
     }
 
 
+def _service_headers() -> dict[str, str]:
+    """The CRM's service token: the direct route's credential (item 92)."""
+    return {
+        "Authorization": f"Bearer {tokens.mint_service_token(subdomain=TENANT)}",
+        "Host": HOST,
+    }
+
+
 @dataclass
 class Lane:
     """The served app and the fakes behind it, with the lane's two stores."""
@@ -269,7 +277,7 @@ class Lane:
                 "status": None,
             },
         }
-        return await self.client.post(DIRECT, json=body, headers=_headers())
+        return await self.client.post(DIRECT, json=body, headers=_service_headers())
 
 
 async def _close_service_clients() -> None:
@@ -289,6 +297,7 @@ async def lane(
 ) -> AsyncIterator[Lane]:
     """The app served in process on the lane's databases, with fresh fakes."""
     monkeypatch.setenv("DODEAL_JWT_SIGNING_KEY", tokens.TEST_SECRET)
+    tokens.service_settings_env(monkeypatch)
     monkeypatch.setenv("DODEAL_REDIS_COST_URL", stores.cost_url)
     monkeypatch.setenv("DODEAL_REDIS_OPERATIONAL_URL", operational_url)
     get_settings.cache_clear()

@@ -799,15 +799,12 @@ async def judge_note_direct(
     and one made by judge_note over the same text are identical but for the
     request id.
 
-    CREDENTIAL: the CRM forwards the note author's own user JWT, so this route
-    sits behind exactly the gate chain the fetch route does, and the per-user
-    cost cap and the clarification rate limit key on `sub` as built.
-    `request.author_id` is the CRM's STORED author and is trusted as that; it is
-    NOT checked against `sub`, and a difference never rejects the request -- it
-    is ASSUMPTION[Q7]'s two id spaces, and refusing on it would refuse every
-    judgement the moment the CRM's ids and the token's ids stop coinciding. The
-    difference is recorded on the outcome line (ids only, never text) so that
-    "the CRM is sending someone else's JWT" is visible rather than inferred.
+    CREDENTIAL (register item 92): the CRM calls with its SERVICE token, and
+    the route builds `scope` with `scope_for_author(request.author_id)`. So the
+    scope's subject is `author:<id>` -- the CRM's stored author, asserted by
+    the CRM and marked so -- and the clarification caps and the per-user token
+    budget key on that author with no change here. There is no token `sub` on
+    this route to compare the author with, so nothing is compared.
     """
     # As on the fetch route, the first statement in the function -- so the two
     # routes' elapsed_ms mean the same thing, minus the fetch this one does not
@@ -860,7 +857,6 @@ async def _judge_sent(
                 resubmission=resubmission,
                 deps=deps,
                 started=started,
-                author_differs_from_subject=str(request.author_id) != scope.subject,
             )
     except TimeoutError:
         raise _deadline_exceeded(scope, started) from None
@@ -925,7 +921,6 @@ async def _judge(
     resubmission: bool,
     deps: JudgementDeps,
     started: float,
-    author_differs_from_subject: bool | None = None,
 ) -> Judgement:
     """Every step from the length gate down, for both entry points.
 
@@ -933,12 +928,6 @@ async def _judge(
     LeadNote were obtained; everything that costs money, everything that
     reserves, everything that decides and everything that is logged is here, so
     the two routes cannot drift into judging the same text differently.
-
-    `author_differs_from_subject` is None on the fetch route -- there is no
-    claimed author to compare, the backend's is the only one -- and a bool on
-    the direct route, where the body carries one. It reaches the outcome line
-    and nothing else: it is not a gate, not a rejection and not an input to any
-    decision.
 
     `started` is the entry point's `time.monotonic()` reading, taken there and
     not here so that the fetch route's two backend calls are inside its
@@ -989,7 +978,6 @@ async def _judge(
             redaction=redaction,
             request_ids=_no_request_ids(),
             recognised_short=recognised_short,
-            author_differs_from_subject=author_differs_from_subject,
         )
         return judgement
 
@@ -1279,7 +1267,6 @@ async def _judge(
         redaction=redaction,
         request_ids=request_ids,
         recognised_short=recognised_short,
-        author_differs_from_subject=author_differs_from_subject,
     )
     return judgement
 
@@ -1361,8 +1348,9 @@ async def _rate_limit_trip(
 
     Returns (attempts, rate_allowed, rate_count) for the second decide().
     """
-    # ASSUMPTION[Q7]: keyed on scope.subject -- who is ASKING -- not on the
-    # note's author_id; the person we would pester is the one making the request.
+    # ASSUMPTION[Q7]: keyed on scope.subject, never compared with author_id. On
+    # the fetch routes that is the verified `sub`; on the direct routes it is
+    # `author:<id>` (register item 92), so each author has their own caps.
     if provisional.prompt_sent:
         return await state.take_prompt_slots(
             scope.tenant,
@@ -1426,7 +1414,6 @@ def _log_outcome(
     redaction: Redaction,
     request_ids: dict[str, str | None],
     recognised_short: bool,
-    author_differs_from_subject: bool | None = None,
 ) -> None:
     """One structured line per judgement.
 
@@ -1475,24 +1462,7 @@ def _log_outcome(
     recognised note comes back looking like any other. False, never null, on
     every note the floor never touched, because "was not recognised" and "was
     never short" are the same answer to "did the table do anything here".
-
-    `author_differs_from_subject` appears on DIRECT-ROUTE lines only, where the
-    body carries a claimed author to compare with the token's subject; it is
-    omitted entirely on the fetch route, which has nothing to compare. A bool,
-    never the two ids and never anything derived from the note -- it answers
-    "is the CRM sending us someone else's JWT, or are these simply two id
-    spaces (ASSUMPTION[Q7])?", which is a question about a deployment and not
-    about a note. It is recorded, never enforced: no request is refused for it.
     """
-    # Present only when there is something to say: the fetch route passes None
-    # and the key never reaches the line at all, so a collector filtering on it
-    # sees direct-route judgements and nothing else.
-    author_field = (
-        {}
-        if author_differs_from_subject is None
-        else {"author_differs_from_subject": author_differs_from_subject}
-    )
-
     if judgement.suppressed is not None:
         _logger.info(
             "judgement_suppressed",
@@ -1507,7 +1477,6 @@ def _log_outcome(
                 **timings.fields(),
                 **redaction.fields(),
                 **request_ids,
-                **author_field,
             },
         )
         return
@@ -1531,6 +1500,5 @@ def _log_outcome(
             **timings.fields(),
             **redaction.fields(),
             **request_ids,
-            **author_field,
         },
     )

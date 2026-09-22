@@ -31,6 +31,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
+import jwt
 from fastapi import Depends, Header, HTTPException, Request
 
 from dodeal_ai.core.audit.logger import audit
@@ -296,6 +297,42 @@ async def build_service_context(
         request_id=request_id,
         principal="service",
     )
+
+
+def _names_this_service(token: str, settings: Settings) -> bool:
+    """Does the UNVERIFIED token name this service as its audience? It only
+    picks which chain verifies the token, and each chain verifies it in full,
+    so a forged `aud` routes a token to a chain that then refuses it."""
+    try:
+        audience = jwt.decode(token, options={"verify_signature": False}).get("aud")
+    except jwt.InvalidTokenError:
+        return False
+    names = audience if isinstance(audience, list) else [audience]
+    return settings.service_jwt_audience in names
+
+
+async def gate4_either_principal(
+    request: Request,
+    token: Annotated[str, Depends(_bearer_token)],
+    user_verifier: Annotated[TokenVerifier, Depends(get_verifier)],
+    service_verifier: Annotated[ServiceTokenVerifier, Depends(get_service_verifier)],
+    host: Annotated[str | None, Header()] = None,
+) -> RequestContext:
+    """ONE dependency for a route either principal may call (/meta/versions).
+
+    A token addressed to this service takes the whole service chain; anything
+    else takes the whole user chain. Same gates, same audit lines, same
+    refusals as the chain alone -- this only chooses between them.
+    """
+    if _names_this_service(token, service_verifier.settings):
+        identity = await service_gate1_identity(request, token, service_verifier)
+        identity = await service_gate2_tenant(request, identity, host)
+        return await service_gate4_cost(
+            request, await build_service_context(request, identity)
+        )
+    identity = await gate1_identity(request, token, user_verifier)
+    identity = await gate2_tenant(request, identity, host)
+    return await gate4_cost(request, await build_context(request, identity))
 
 
 async def service_gate4_cost(

@@ -11,8 +11,9 @@ judged on one route a duplicate on the other.
 
 Everything after those two is the direct route's own behaviour at the points the
 fetch route has a stop: the length gate at both ends, the reservation, the
-resubmission variant, and the two things the route must NOT do -- fetch anything,
-or refuse a request because the body's author is not the token's subject.
+resubmission variant, the thing the route must NOT do -- fetch anything -- and,
+since register item 92, the credential: the CRM's service token only, with the
+prompt caps keyed on the author the body names.
 """
 
 from __future__ import annotations
@@ -141,6 +142,7 @@ def leads() -> _ExplodingLeadsClient:
 def client(monkeypatch, leads, llm, operational, cost):
     """The gate chain plus the three seams, with a leads client that raises."""
     monkeypatch.setenv("DODEAL_JWT_SIGNING_KEY", tokens.TEST_SECRET)
+    tokens.service_settings_env(monkeypatch)
     get_settings.cache_clear()
     test_settings = Settings(
         _env_file=None,
@@ -171,6 +173,7 @@ def fetch_client(monkeypatch, llm, operational, cost):
     letting a direct-route test fetch by accident.
     """
     monkeypatch.setenv("DODEAL_JWT_SIGNING_KEY", tokens.TEST_SECRET)
+    tokens.service_settings_env(monkeypatch)
     get_settings.cache_clear()
     test_settings = Settings(
         _env_file=None,
@@ -215,9 +218,18 @@ def _lines(stream: io.StringIO) -> list[dict]:
     return [json.loads(line) for line in stream.getvalue().splitlines()]
 
 
-def _headers(subdomain: str = "tenant-a", sub: int = SUBJECT) -> dict:
+def _user_headers(subdomain: str = "tenant-a", sub: int = SUBJECT) -> dict:
+    """A person's token: the fetch routes' credential."""
     return {
         "Authorization": f"Bearer {tokens.mint_token(subdomain=subdomain, sub=sub)}",
+        "Host": f"{subdomain}.dodealcrm.com",
+    }
+
+
+def _headers(subdomain: str = "tenant-a") -> dict:
+    """The CRM's service token: the direct routes' only credential (item 92)."""
+    return {
+        "Authorization": f"Bearer {tokens.mint_service_token(subdomain=subdomain)}",
         "Host": f"{subdomain}.dodealcrm.com",
     }
 
@@ -236,6 +248,11 @@ def _direct_body(text: str = GOOD_NOTE, **overrides) -> dict:
 
 def _fetch_body() -> dict:
     return {"lead_id": LEAD_ID, "note_id": NOTE_ID}
+
+
+def _note_keys(operational: FakeOperationalRedis) -> set[str]:
+    """Every db2 key that belongs to the NOTE, not to whoever is asking."""
+    return {key for key in operational.store if not key.startswith("ratelimit")}
 
 
 def _without_request_id(judgement: dict) -> dict:
@@ -277,7 +294,7 @@ def test_the_direct_route_produces_the_same_judgement_as_the_fetch_route(
     """
     _script(llm, judgements=2)
 
-    fetched = fetch_client.post(JUDGE, json=_fetch_body(), headers=_headers())
+    fetched = fetch_client.post(JUDGE, json=_fetch_body(), headers=_user_headers())
     assert fetched.status_code == 200
 
     # The same note text is a duplicate of itself, so the reservation from the
@@ -305,14 +322,18 @@ def test_the_same_text_gives_the_same_fingerprint_on_both_routes(
     """
     _script(llm, judgements=2)
 
-    fetch_client.post(JUDGE, json=_fetch_body(), headers=_headers())
-    fetched_keys = set(operational.store)
+    fetch_client.post(JUDGE, json=_fetch_body(), headers=_user_headers())
+    fetched_keys = _note_keys(operational)
 
     operational.store.clear()
     fetch_client.post(DIRECT, json=_direct_body(), headers=_headers())
-    direct_keys = set(operational.store)
+    direct_keys = _note_keys(operational)
 
+    # The note's keys match across routes. The rate-limit keys legitimately do
+    # not since register item 92: they name the token's sub on one route and
+    # author:<id> on the other.
     assert fetched_keys == direct_keys
+    assert any(key.startswith("idem:") for key in direct_keys)
     expected = state.note_fingerprint(GOOD_NOTE)
     assert any(expected in key for key in direct_keys)
     # The text itself is nowhere near the key.
@@ -327,7 +348,9 @@ def test_a_note_judged_on_the_fetch_route_is_a_duplicate_on_the_direct_route(
     _script(llm, judgements=1)
 
     assert (
-        fetch_client.post(JUDGE, json=_fetch_body(), headers=_headers()).status_code
+        fetch_client.post(
+            JUDGE, json=_fetch_body(), headers=_user_headers()
+        ).status_code
         == 200
     )
     second = fetch_client.post(DIRECT, json=_direct_body(), headers=_headers())
@@ -573,68 +596,52 @@ def test_the_direct_resubmission_reads_the_original_fingerprint(client, llm):
     assert decision["attempt"] == 1  # read, never incremented
 
 
-# --- the author the CRM says wrote it ---------------------------------------
+# --- the author the CRM names (register item 92) ----------------------------
 
 
-def test_an_author_that_differs_from_the_subject_is_judged_normally(
-    client, llm, json_log
-):
-    """ASSUMPTION[Q7]: `sub` and `author_id` are different id spaces.
+AUTHOR_A = 27
+AUTHOR_B = 28
 
-    So a difference is not a signal of anything on its own, and the request is
-    never rejected for it. It is RECORDED -- ids only, never text -- because
-    "the CRM is forwarding someone else's JWT" is a real thing to be able to
-    see, and the correction path (keying the rate limit on author_id for this
-    route) needs evidence before it is taken.
-    """
+
+def test_the_outcome_line_carries_no_author_comparison(client, llm, json_log):
+    """No token sub reaches this route, so nothing is compared or logged."""
     _script(llm)
-    body = _direct_body(author_id=AUTHOR_ID)
-    assert str(AUTHOR_ID) != str(SUBJECT)
-
-    r = client.post(DIRECT, json=body, headers=_headers(sub=SUBJECT))
+    r = client.post(DIRECT, json=_direct_body(), headers=_headers())
 
     assert r.status_code == 200
     assert r.json()["author_id"] == AUTHOR_ID
-
     line = next(x for x in _lines(json_log) if x["message"] == "judgement_completed")
-    assert line["author_differs_from_subject"] is True
-    # The note is not on the line, and neither are the two ids.
+    assert "author_differs_from_subject" not in line
     assert GOOD_NOTE not in json.dumps(line)
 
 
-def test_a_matching_author_is_recorded_as_not_differing(client, llm, json_log):
+def test_one_authors_fourth_question_in_an_hour_is_withheld_not_anothers(client, llm):
+    """Under ONE service token the caps key on each author: A's fourth vague
+    note in the hour is rate_limited while B is still asked."""
+    _script(llm, judgements=5)
+    headers = _headers()
+
+    def judge(author_id: int, note_id: int) -> dict:
+        body = _direct_body(author_id=author_id, note_id=note_id)
+        response = client.post(DIRECT, json=body, headers=headers)
+        assert response.status_code == 200
+        return response.json()["decision"]
+
+    for note_id in (101, 102, 103):
+        assert judge(AUTHOR_A, note_id)["prompt_sent"] is True
+    fourth = judge(AUTHOR_A, 104)
+    assert (fourth["prompt_sent"], fourth["prompt_withheld"]) == (False, "rate_limited")
+    assert judge(AUTHOR_B, 105)["prompt_sent"] is True
+
+
+def test_the_attempt_key_names_the_note_and_not_the_author(client, llm, operational):
+    """Attempt keys stay tenant and note id only; the rate keys name the author."""
     _script(llm)
-    r = client.post(
-        DIRECT, json=_direct_body(author_id=SUBJECT), headers=_headers(sub=SUBJECT)
-    )
+    client.post(DIRECT, json=_direct_body(author_id=AUTHOR_A), headers=_headers())
 
-    assert r.status_code == 200
-    line = next(x for x in _lines(json_log) if x["message"] == "judgement_completed")
-    assert line["author_differs_from_subject"] is False
-
-
-def test_the_fetch_route_carries_no_author_comparison_at_all(
-    fetch_client, llm, json_log
-):
-    # There is no claimed author on that route to compare, so the field is
-    # absent rather than false -- a collector filtering on it sees direct-route
-    # judgements and nothing else.
-    _script(llm)
-    fetch_client.post(JUDGE, json=_fetch_body(), headers=_headers())
-
-    line = next(x for x in _lines(json_log) if x["message"] == "judgement_completed")
-    assert "author_differs_from_subject" not in line
-
-
-def test_a_suppressed_direct_judgement_also_carries_the_comparison(client, json_log):
-    # The suppressed line is the other outcome line, and it takes the field for
-    # the same reason: a route that only records this when it happens to score
-    # would under-report exactly the case worth watching.
-    r = client.post(DIRECT, json=_direct_body("ok"), headers=_headers())
-    assert r.status_code == 200
-
-    line = next(x for x in _lines(json_log) if x["message"] == "judgement_suppressed")
-    assert line["author_differs_from_subject"] is True
+    assert f"attempt:tenant-a:{NOTE_ID}" in operational.store
+    assert f"ratelimit:tenant-a:author:{AUTHOR_A}" in operational.store
+    assert not any(key.startswith("ratelimit:tenant-a:42") for key in operational.store)
 
 
 # --- the gates, on the new routes -------------------------------------------
@@ -643,6 +650,14 @@ def test_a_suppressed_direct_judgement_also_carries_the_comparison(client, json_
 def test_both_direct_routes_are_gated(client):
     assert client.post(DIRECT, json=_direct_body()).status_code == 401
     assert client.post(DIRECT_RESUBMIT, json=_direct_body()).status_code == 401
+
+
+@pytest.mark.parametrize("path", [DIRECT, DIRECT_RESUBMIT])
+def test_a_user_token_is_401_on_both_direct_routes(client, llm, path):
+    """Register item 92: a person's token may not post a note as anyone."""
+    r = client.post(path, json=_direct_body(), headers=_user_headers())
+    assert r.status_code == 401
+    assert llm.call_count == 0
 
 
 def test_a_cross_tenant_host_is_403_on_the_direct_route(client, llm):
@@ -700,7 +715,7 @@ def test_a_suppressed_direct_judgement_carries_them_too(client, json_log):
 
 def test_the_fetch_route_carries_the_same_five(fetch_client, llm, json_log):
     _script(llm)
-    fetch_client.post(JUDGE, json=_fetch_body(), headers=_headers())
+    fetch_client.post(JUDGE, json=_fetch_body(), headers=_user_headers())
 
     line = next(x for x in _lines(json_log) if x["message"] == "judgement_completed")
     _assert_numbers(line, passes_ran=True)

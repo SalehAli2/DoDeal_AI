@@ -3,7 +3,8 @@
   idempotency  Has this exact judgement already been done? Reserved once, per
                (tenant, note, note-text fingerprint).
   rate limit   How many clarification prompts has this USER been sent in the
-               window? Keyed on the subject asking, never on the note's author.
+               window? Keyed on the scope's subject: the token's `sub`, or the
+               author the CRM names on the direct routes.
   attempts     How many clarification prompts has THIS note already drawn, and
                -- beside the counter, on the same TTL and the same fail-open
                policy -- WHICH note text the first of them was sent about
@@ -436,9 +437,10 @@ async def take_prompt_slots(
 async def read_rate_limit(tenant: str, subject: str, *, request_id: str) -> int:
     """How many clarification prompts this subject has been sent this window.
 
-    ASSUMPTION[Q7]: keyed on the JWT subject -- who is ASKING -- not on the
-    note's author_id. The limit exists to stop us pestering one person, and the
-    person we would pester is the one making the request.
+    ASSUMPTION[Q7]: keyed on the scope's subject -- the verified JWT `sub` on
+    the fetch routes, `author:<id>` on the direct routes (register item 92) --
+    and never on a comparison of the two. The limit exists to stop us pestering
+    one person, and the subject is who that person is on each route.
 
     READ-ONLY, for a judgement with no question: an exhausted window still
     reports `rate_limited`, and no slot is taken for a prompt nobody receives.

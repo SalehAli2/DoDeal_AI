@@ -6741,3 +6741,16 @@ busy integration exhausts the tenant's request cap for all routes; (2) a key
 missing on one pod only takes that pod out of rotation, which reads as flapping.
 Stress test: two service calls leave the cost store holding exactly
 `{"cost:tenant:tenant-a": 2}` and no `cost:user:*` key.
+
+## Piece: register item 92, the direct routes on the service chain
+
+Item 92 -- both direct routes depend on `service_gate4_cost` and judge under
+`scope_for_author(request.author_id)`, so the question caps and the per-user
+token budget key on `author:<id>`; `author_differs_from_subject` is gone from
+the pipeline and its outcome lines; `/meta/versions` takes either principal
+through `gate4_either_principal`. Fetch routes stay user-only.
+Production failure modes: (1) the CRM sends a wrong or stale author_id, and the
+caps and budget land on the wrong person with nothing to contradict it; (2) a
+service token leak lets its holder post any note as any author until expiry.
+Stress test: under one service token, author A's fourth vague note in the hour
+is `rate_limited` while author B's first is still asked.

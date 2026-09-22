@@ -333,10 +333,9 @@ class DirectJudgementRequest(BaseModel):
     surface has been unavailable for six weeks. The fetch route is still the
     contract; see ASSUMPTIONS.md.
 
-    `author_id` is the CRM's STORED author for the note, trusted as such and
-    never checked against the token's `sub` -- they are different id spaces
-    (ASSUMPTION[Q7]) and the request is never rejected for a difference. The
-    outcome line records that they differed; nothing else changes.
+    `author_id` is the CRM's STORED author for the note, trusted as such. The
+    route reaches the service chain only, so there is no user `sub` beside it:
+    the scope's subject IS this author, `author:<id>` (register item 92).
 
     NO SCORE-SHAPED FIELD, and there never may be one. This is a request body
     the CRM controls, so a `band`, a `total`, a `score` or a `mark` here would

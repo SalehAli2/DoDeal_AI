@@ -683,6 +683,40 @@ def test_meta_versions_is_behind_the_gates(client):
     assert r.status_code == 401
 
 
+def test_meta_versions_takes_a_service_token_through_the_same_dependency(
+    client, monkeypatch, cost
+):
+    """Register item 92: either principal reads the versions, and the service
+    one is charged on the tenant counter alone."""
+    tokens.service_settings_env(monkeypatch)
+    get_settings.cache_clear()
+    service = {
+        "Authorization": f"Bearer {tokens.mint_service_token()}",
+        "Host": "tenant-a.dodealcrm.com",
+    }
+
+    r = client.get(VERSIONS, headers=service)
+
+    assert r.status_code == 200
+    assert r.json()["config_version"] == "tenant-cfg-default-4"
+    assert set(cost.store) == {"cost:tenant:tenant-a"}
+
+
+def test_meta_versions_still_refuses_what_either_chain_refuses(client, monkeypatch):
+    """A forged audience is 401 from the service chain; a wrong Host is 403;
+    garbage falls to the user chain and is 401 there."""
+    tokens.service_settings_env(monkeypatch)
+    get_settings.cache_clear()
+    forged = tokens.mint_service_token(secret="z" * 64, aud=["other", "dodeal-ai"])
+    for token, host, status in (
+        (forged, "tenant-a", 401),
+        (tokens.mint_service_token(), "tenant-b", 403),
+        ("not-a-token", "tenant-a", 401),
+    ):
+        headers = {"Authorization": f"Bearer {token}", "Host": f"{host}.dodealcrm.com"}
+        assert client.get(VERSIONS, headers=headers).status_code == status
+
+
 # --- classification's two stops, through HTTP -------------------------------
 
 

@@ -492,8 +492,9 @@ def cost() -> FakeCostRedis:
 
 @pytest.fixture
 def direct_client(monkeypatch, cost):
-    """The direct route behind the real gate chain, with every seam faked."""
+    """The direct route behind the real service chain, with every seam faked."""
     monkeypatch.setenv("DODEAL_JWT_SIGNING_KEY", tokens.TEST_SECRET)
+    tokens.service_settings_env(monkeypatch)
     get_settings.cache_clear()
     test_settings = Settings(
         _env_file=None,
@@ -546,8 +547,9 @@ def _fail_the_model() -> None:
 
 
 def _direct_headers() -> dict:
+    """The CRM's service token: the direct route's credential (item 92)."""
     return {
-        "Authorization": f"Bearer {tokens.mint_token(subdomain='tenant-a', sub=42)}",
+        "Authorization": f"Bearer {tokens.mint_service_token(subdomain='tenant-a')}",
         "Host": "tenant-a.dodealcrm.com",
     }
 
@@ -639,7 +641,8 @@ def test_the_token_events_carry_no_note_text(
         if x.get("message") == "token_budget_warning"
     )
     assert warned["level"] == "WARNING"
-    assert warned["key"] == "tokens:user:tenant-a:42"
+    # Register item 92: the direct route charges the AUTHOR, not a token sub.
+    assert warned["key"] == "tokens:user:tenant-a:author:27"
     assert isinstance(warned["warning_ratio"], float)
 
 
