@@ -294,11 +294,20 @@ def test_the_brief_is_text_period_lines_and_flagged_ids(client, store) -> None:
     """Four keys; the period in local dates; each line its three measures."""
     store._rows["tenant-a"][0] = _row(501, 100, flagged=True)
     body = client.get(f"{BRIEFS}/rep/501", headers=_headers()).json()
-    assert set(body) == {"text", "period", "lines", "flagged_note_ids"}
+    # Register item 145 added the three id lists beside C5's four keys.
+    assert set(body) == {
+        "text",
+        "period",
+        "lines",
+        "flagged_note_ids",
+        "signals",
+        "flagged_yesterday",
+        "coaching",
+    }
     assert set(body["period"]) == {"first_day", "last_day", "days"}
     assert body["period"]["days"] == 30
-    (line,) = body["lines"]
-    assert line["name"] == "Idris Vale"
+    line = body["lines"][0]
+    assert (line["name"], line["period"]) == ("Idris Vale", "rolling")
     assert line["average_band"]["band"] == "good"
     assert line["flagged_share"]["counted"] == 1
     assert body["flagged_note_ids"] == [100]

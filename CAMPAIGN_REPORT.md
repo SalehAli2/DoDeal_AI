@@ -6887,3 +6887,19 @@ is shared with judgements, so a 25 s brief holds an in-flight slot as long as a
 judgement does.
 Stress test: a store that sleeps past a 0.05 s deadline answers 503
 brief_deadline_exceeded, not a hung request.
+
+## Piece: register item 145, the brief content the business asked for
+
+Item 145 -- from judgement rows, under the evidence floor and the not-sent rule:
+the rep's yesterday (band and flag count) and signals (viewing, negotiation,
+won_lost); the team leader's week against last week, people flagged yesterday
+with their note ids, and the team's signals; the head of sales's teams week on
+week and a coaching list of people poor or fair in each of the last two weeks,
+each over the floor. Yesterday is the last whole local day, a week the last
+seven; the store read widens to two weeks (`brief_window`). Ids ride in the
+JSON (`signals`, `flagged_yesterday`, `coaching`), never in the text.
+Production failure modes: (1) at a floor of 10 a rep's yesterday is usually
+suppressed, so the section managers expect rarely appears; (2) a person who
+changes team mid-fortnight is coached against the team they are in today.
+Stress test: a person poor this week and excellent last week is not on the
+coaching list; poor in both weeks, each over the floor, is.

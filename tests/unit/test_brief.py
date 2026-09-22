@@ -21,13 +21,15 @@ tests/unit/test_measures.py.
 from __future__ import annotations
 
 import dataclasses
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 
-from dodeal_ai.units.structured_intelligence.brief import build_brief
+from dodeal_ai.units.structured_intelligence.brief import brief_window, build_brief
 from dodeal_ai.units.structured_intelligence.config import get_tenant_config
 from dodeal_ai.units.structured_intelligence.judgement_rows import JudgementRow
+from dodeal_ai.units.structured_intelligence.measures import rolling_window
 from dodeal_ai.units.structured_intelligence.user_directory import Role, User
 
 CONFIG = dataclasses.replace(get_tenant_config("tenant-a"), measure_evidence_floor=3)
@@ -318,3 +320,114 @@ def test_flagged_ids_are_newest_first_distinct_and_at_most_fifty() -> None:
     assert len(ids) == MAX_NOTE_IDS
     assert ids[0] == 59
     assert len(set(ids)) == len(ids)
+
+
+# --- what the business asked for (register item 145) -------------------------
+#
+# Bounds from the real window: at 10:00 in Dubai on 2026-09-20, yesterday is
+# the local 19th, this week the 13th to the 19th, last week the 6th to the 12th.
+
+NOW = datetime(2026, 9, 20, 6, tzinfo=UTC)
+DUBAI = ZoneInfo("Asia/Dubai")
+
+
+def _on(day: int, **kwargs: object) -> JudgementRow:
+    """A row written at 09:00 local on the given day of September 2026."""
+    row = _row(**kwargs)  # type: ignore[arg-type]
+    return row.model_copy(
+        update={"note_created_at": datetime(2026, 9, day, 9, tzinfo=DUBAI)}
+    )
+
+
+def _full(role: Role, subject: User, rows, users=EVERYONE):
+    since, until = rolling_window(NOW, CONFIG)
+    return build_brief(
+        role, subject, users=users, rows=rows, since=since, until=until, config=CONFIG
+    )
+
+
+def _many(day: int, author_id: int, count: int, first: int, **kwargs: object):
+    return [
+        _on(day, author_id=author_id, note_id=first + n, **kwargs) for n in range(count)
+    ]
+
+
+def test_a_rep_with_rows_only_last_week_gets_no_yesterday_line() -> None:
+    """Nothing written yesterday is no yesterday section, not a zero."""
+    brief = _full(Role.REP, IDRIS, _many(8, 501, 4, 1))
+    assert brief is not None
+    assert "Yesterday" not in brief.text
+    assert [line.period for line in brief.lines] == ["rolling"]
+
+
+def test_a_rep_sees_yesterdays_band_flag_count_and_signals() -> None:
+    """Band and flag count in the text; the signals by id and type in the data."""
+    rows = _many(19, 501, 3, 1, flagged=True) + [
+        _on(19, author_id=501, note_id=10).model_copy(update={"note_type": "viewing"}),
+    ]
+    rows[0] = rows[0].model_copy(update={"note_type": "negotiation"})
+    brief = _full(Role.REP, IDRIS, rows)
+    assert brief is not None
+    assert "Yesterday\n  Typical note           good over 4 notes" in brief.text
+    assert "  Flagged                3 of 4 (75%)" in brief.text
+    assert "Signals yesterday: 1 negotiation, 1 viewing." in brief.text
+    assert {(s.note_id, s.note_type) for s in brief.signals} == {
+        (1, "negotiation"),
+        (10, "viewing"),
+    }
+    assert "10" not in brief.text.split("Signals")[1]
+
+
+def test_a_team_leader_sees_the_weeks_the_flagged_people_and_signals() -> None:
+    """This week against last week, who was flagged yesterday, and by which notes."""
+    rows = (
+        _many(15, 501, 3, 1)
+        + _many(8, 502, 3, 20, total=30)
+        + [_on(19, author_id=502, note_id=40, flagged=True)]
+    )
+    brief = _full(Role.TEAM_LEADER, LEADER, rows)
+    assert brief is not None
+    assert "This week against last week" in brief.text
+    periods = [line.period for line in brief.lines]
+    assert "this_week" in periods and "last_week" in periods
+    assert [(p.name, p.note_ids) for p in brief.flagged_yesterday] == [
+        ("Noor Adeyemi", [40])
+    ]
+    assert "Noor Adeyemi          1 notes" in brief.text
+
+
+def test_the_coaching_list_needs_both_weeks() -> None:
+    """Poor in both weeks is coaching; poor in one week only is not."""
+    both = _many(8, 501, 3, 1, total=30) + _many(15, 501, 3, 10, total=30)
+    one = _many(15, 503, 3, 30, total=30) + _many(8, 503, 3, 40, total=90)
+    brief = _full(Role.HEAD_OF_SALES, HEAD, both + one)
+    assert brief is not None
+    assert brief.coaching == ["Idris Vale"]
+    assert "Coaching\n  Idris Vale" in brief.text
+    assert "Each team, this week against last week" in brief.text
+
+
+def test_a_week_under_the_floor_keeps_a_person_off_the_coaching_list() -> None:
+    """Two poor notes in a week is not evidence, whatever the band says."""
+    rows = _many(8, 501, 3, 1, total=30) + _many(15, 501, 2, 10, total=30)
+    brief = _full(Role.HEAD_OF_SALES, HEAD, rows)
+    assert brief is not None
+    assert brief.coaching == []
+
+
+def test_empty_everything_is_still_not_sent() -> None:
+    """No rows at all: no section, no figure, no brief (204 on the route)."""
+    for role, subject in (
+        (Role.REP, IDRIS),
+        (Role.TEAM_LEADER, LEADER),
+        (Role.HEAD_OF_SALES, HEAD),
+    ):
+        assert _full(role, subject, []) is None
+
+
+def test_the_read_window_reaches_back_two_weeks_for_a_short_rolling_window() -> None:
+    """A tenant with a 7-day window still gets last week's rows read."""
+    short = dataclasses.replace(CONFIG, rolling_window_days=7)
+    since, until = brief_window(NOW, short)
+    assert until - since == timedelta(days=14)
+    assert since == datetime(2026, 9, 6, tzinfo=DUBAI)

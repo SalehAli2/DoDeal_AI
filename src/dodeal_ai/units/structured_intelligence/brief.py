@@ -6,6 +6,13 @@ teams. They are the same three measures rendered at three altitudes, not three
 different sets of figures, so a rep and their manager can never be looking at
 numbers that disagree.
 
+WHAT THE BUSINESS ASKED FOR (register item 145), all from judgement rows and
+all under the evidence floor: the rep's yesterday (band, flag count, signals);
+the team leader's week against last week, who was flagged yesterday and the
+team's signals; the head of sales's teams week on week and a coaching list.
+"Yesterday" is the last whole local day, a week the last seven. Ids travel in
+the JSON, never in the text.
+
 NO MODEL TOUCHES A BRIEF. Every number is arithmetic from measures.py and every
 sentence is a template in this file. A brief is read as fact -- it is the thing
 a manager acts on before they have spoken to anyone -- and a model asked to
@@ -36,9 +43,10 @@ as a low band and never as 0%.
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass
-from datetime import date, datetime
+from dataclasses import asdict, dataclass, field
+from datetime import date, datetime, timedelta
 
 from dodeal_ai.units.structured_intelligence.config import TenantConfig
 from dodeal_ai.units.structured_intelligence.judgement_rows import JudgementRow
@@ -50,13 +58,33 @@ from dodeal_ai.units.structured_intelligence.measures import (
     flagged_share,
     improved_share,
     local_dates,
+    local_midnight,
+    local_today,
+    rolling_window,
 )
-from dodeal_ai.units.structured_intelligence.schemas import EnforcementVerdict
+from dodeal_ai.units.structured_intelligence.schemas import (
+    Band,
+    EnforcementVerdict,
+    NoteType,
+)
 from dodeal_ai.units.structured_intelligence.user_directory import Role, User
 
 # The most note ids any one list in a brief carries, newest first. A list
 # longer than this is not read; the CRM links to the rest.
 MAX_NOTE_IDS = 50
+
+# The note types a manager wants to hear about the next morning: the ones that
+# move a deal (register item 145). Their notes are listed by id and type.
+SIGNAL_TYPES: frozenset[str] = frozenset(
+    {NoteType.VIEWING, NoteType.NEGOTIATION, NoteType.WON_LOST}
+)
+
+# A person is on the head of sales's coaching list when their typical note was
+# one of these in EACH of the last two weeks (register item 145).
+COACHING_BANDS: frozenset[Band] = frozenset({Band.POOR, Band.FAIR})
+
+# A "week" is this many whole local days, compared with the same before it.
+WEEK_DAYS = 7
 
 # How wide a name column is before the figures start. Fixed rather than
 # computed from the longest name, so two briefs a week apart line up in a
@@ -66,17 +94,19 @@ _NAME_WIDTH = 22
 
 @dataclass(frozen=True, slots=True)
 class BriefLine:
-    """One named subject and its three measures, ready to render.
+    """One named subject and its three measures over one period, ready to render.
 
     The team's own roll-up and each person in it are the SAME shape, which is
     what keeps a team total and the rows under it from being computed two
-    different ways.
+    different ways. `period` says which stretch of days (register item 145):
+    "rolling", "yesterday", "this_week" or "last_week".
     """
 
     name: str
     average_band: BandMeasure
     flagged_share: ShareMeasure
     improved_share: ShareMeasure
+    period: str = "rolling"
 
     @property
     def has_a_figure(self) -> bool:
@@ -90,9 +120,26 @@ class BriefLine:
 
 
 @dataclass(frozen=True, slots=True)
+class Signal:
+    """A note of a type worth hearing about the next morning: its id and type."""
+
+    note_id: int
+    note_type: str
+
+
+@dataclass(frozen=True, slots=True)
+class FlaggedPerson:
+    """Somebody with flagged notes yesterday, and which notes, newest first."""
+
+    name: str
+    note_ids: list[int]
+
+
+@dataclass(frozen=True, slots=True)
 class Brief:
     """One brief as the route answers it: the text a person reads, and the
-    same content as data the CRM can render or link from."""
+    same content as data the CRM can render or link from. Ids travel here and
+    never in the text (see test_no_brief_ever_prints_an_id)."""
 
     text: str
     first_day: date
@@ -100,6 +147,9 @@ class Brief:
     days: int
     lines: list[BriefLine]
     flagged_note_ids: list[int]
+    signals: list[Signal] = field(default_factory=list)
+    flagged_yesterday: list[FlaggedPerson] = field(default_factory=list)
+    coaching: list[str] = field(default_factory=list)
 
     def body(self) -> dict[str, object]:
         """The JSON body. Ids and figures only: no row carries note text."""
@@ -112,7 +162,31 @@ class Brief:
             },
             "lines": [asdict(line) for line in self.lines],
             "flagged_note_ids": self.flagged_note_ids,
+            "signals": [asdict(signal) for signal in self.signals],
+            "flagged_yesterday": [asdict(person) for person in self.flagged_yesterday],
+            "coaching": [{"name": name} for name in self.coaching],
         }
+
+
+@dataclass(frozen=True, slots=True)
+class _Days:
+    """The whole local days the business's sections are about (item 145)."""
+
+    yesterday: tuple[datetime, datetime]
+    this_week: tuple[datetime, datetime]
+    last_week: tuple[datetime, datetime]
+
+
+@dataclass(slots=True)
+class _Parts:
+    """What one role's builder produced, before the not-sent rule is applied."""
+
+    text: list[str]
+    lines: list[BriefLine]
+    covered: list[JudgementRow]
+    signals: list[Signal] = field(default_factory=list)
+    flagged_yesterday: list[FlaggedPerson] = field(default_factory=list)
+    coaching: list[str] = field(default_factory=list)
 
 
 def newest_note_ids(rows: Sequence[JudgementRow]) -> list[int]:
@@ -138,13 +212,61 @@ def _flagged(rows: Sequence[JudgementRow]) -> list[int]:
     )
 
 
-def _line(name: str, rows: Sequence[JudgementRow], config: TenantConfig) -> BriefLine:
+def _signals(rows: Sequence[JudgementRow]) -> list[Signal]:
+    """The signal notes among `rows`, newest first, at most MAX_NOTE_IDS."""
+    type_of = {row.note_id: row.note_type for row in rows}
+    return [
+        Signal(note_id=note_id, note_type=str(type_of[note_id]))
+        for note_id in newest_note_ids(
+            [row for row in rows if row.note_type in SIGNAL_TYPES]
+        )
+    ]
+
+
+def _within(
+    rows: Sequence[JudgementRow], bounds: tuple[datetime, datetime]
+) -> list[JudgementRow]:
+    since, until = bounds
+    return [row for row in rows if since <= row.note_created_at < until]
+
+
+def _days(since: datetime, until: datetime, config: TenantConfig) -> _Days:
+    """Yesterday and the two weeks, ending where the rolling window ends."""
+    today = local_dates(since, until, config)[1] + timedelta(days=1)
+
+    def midnight(days_back: int) -> datetime:
+        return local_midnight(today - timedelta(days=days_back), config)
+
+    return _Days(
+        yesterday=(midnight(1), midnight(0)),
+        this_week=(midnight(WEEK_DAYS), midnight(0)),
+        last_week=(midnight(2 * WEEK_DAYS), midnight(WEEK_DAYS)),
+    )
+
+
+def brief_window(now: datetime, config: TenantConfig) -> tuple[datetime, datetime]:
+    """The store read a brief takes: the rolling window, widened when needed
+    to cover the two weeks the sections compare (register item 145)."""
+    since, until = rolling_window(now, config)
+    earliest = local_midnight(
+        local_today(now, config) - timedelta(days=2 * WEEK_DAYS), config
+    )
+    return min(since, earliest), until
+
+
+def _line(
+    name: str,
+    rows: Sequence[JudgementRow],
+    config: TenantConfig,
+    period: str = "rolling",
+) -> BriefLine:
     """The three measures over one set of rows, under one name."""
     return BriefLine(
         name=name,
         average_band=average_band(rows, config),
         flagged_share=flagged_share(rows, config),
         improved_share=improved_share(rows, config),
+        period=period,
     )
 
 
@@ -190,10 +312,10 @@ def _block(line: BriefLine, config: TenantConfig) -> list[str]:
     ]
 
 
-def _row_line(line: BriefLine, config: TenantConfig) -> str:
+def _row_line(line: BriefLine, config: TenantConfig, label: str | None = None) -> str:
     """One subject on one line, for the lists under a team or an org brief."""
     return (
-        f"  {line.name:<{_NAME_WIDTH}}"
+        f"  {label or line.name:<{_NAME_WIDTH}}"
         f"typical {_band_phrase(line.average_band, config)}"
         f" · flagged {_flagged_phrase(line.flagged_share, config)}"
         f" · improved {_improved_phrase(line.improved_share, config)}"
@@ -213,23 +335,52 @@ def _by_author(rows: Sequence[JudgementRow], author_id: int) -> list[JudgementRo
     return [row for row in rows if row.author_id == author_id]
 
 
+def _signal_sentence(signals: list[Signal]) -> list[str]:
+    """How many signal notes of each type yesterday -- counts, never ids."""
+    counts = Counter(signal.note_type for signal in signals)
+    listed = ", ".join(f"{counts[name]} {name}" for name in sorted(counts))
+    return ["", f"Signals yesterday: {listed}."]
+
+
+def _weeks(
+    name: str, rows: Sequence[JudgementRow], days: _Days, config: TenantConfig
+) -> tuple[BriefLine, BriefLine]:
+    return (
+        _line(name, _within(rows, days.this_week), config, period="this_week"),
+        _line(name, _within(rows, days.last_week), config, period="last_week"),
+    )
+
+
 def _rep_brief(
     subject: User,
     rows: Sequence[JudgementRow],
     since: datetime,
     until: datetime,
     config: TenantConfig,
-) -> tuple[list[str], list[BriefLine], list[JudgementRow]]:
-    """The rep's own day. `rows` are already theirs -- the route narrows the
+    days: _Days,
+) -> _Parts:
+    """The rep's own work: the rolling measures, yesterday's band and flag count,
+    and yesterday's signals. `rows` are already theirs -- the route narrows the
     store read by author, so nothing is filtered twice."""
-    line = _line(subject.name, rows, config)
+    rolling = _within(rows, (since, until))
+    line = _line(subject.name, rolling, config)
     text = [
         f"Note quality for {subject.name}.",
         _period(since, until, config),
         "",
         *_block(line, config),
     ]
-    return text, [line], list(rows)
+    lines = [line]
+    yesterday_rows = _within(rows, days.yesterday)
+    yesterday = _line(subject.name, yesterday_rows, config, period="yesterday")
+    if yesterday.has_a_figure:
+        # The band and the flag count; improvement is not a one-day figure.
+        text += ["", "Yesterday", *_block(yesterday, config)[:2]]
+        lines.append(yesterday)
+    signals = _signals(yesterday_rows)
+    if signals:
+        text += _signal_sentence(signals)
+    return _Parts(text, lines, rolling, signals=signals)
 
 
 def _team_brief(
@@ -239,8 +390,11 @@ def _team_brief(
     since: datetime,
     until: datetime,
     config: TenantConfig,
-) -> tuple[list[str], list[BriefLine], list[JudgementRow]]:
-    """The team leader's team: the team as a whole, then each person in it.
+    days: _Days,
+) -> _Parts:
+    """The team leader's team: the team as a whole, then each person in it,
+    then this week against last week, who was flagged yesterday, and the
+    team's signals.
 
     The team's roll-up is computed over the team's rows POOLED, not averaged
     from the per-person figures. Averaging averages would weight a rep with two
@@ -251,18 +405,22 @@ def _team_brief(
         # A team brief for somebody who is in no team. There is no team to
         # report on, and inventing one would be worse than saying nothing: no
         # lines means no figures, which build_brief turns into a 204.
-        return [], [], []
+        return _Parts([], [], [])
 
     # The leader is in their own team and appears in the list. They write notes
     # too, and a team figure their own work is inside should say so.
-    members = [user for user in users if user.team == subject.team]
+    members = sorted(
+        (user for user in users if user.team == subject.team),
+        key=lambda user: user.name,
+    )
     member_ids = {user.user_id for user in members}
-    team_rows = [row for row in rows if row.author_id in member_ids]
+    all_team_rows = [row for row in rows if row.author_id in member_ids]
+    team_rows = _within(all_team_rows, (since, until))
 
     team = _line(f"Team {subject.team}", team_rows, config)
     people = [
         _line(user.name, _by_author(team_rows, user.user_id), config)
-        for user in sorted(members, key=lambda user: user.name)
+        for user in members
     ]
 
     text = [
@@ -274,7 +432,54 @@ def _team_brief(
     ]
     if people:
         text += ["", "Each person", *(_row_line(line, config) for line in people)]
-    return text, [team, *people], team_rows
+    lines = [team, *people]
+
+    this_week, last_week = _weeks(f"Team {subject.team}", all_team_rows, days, config)
+    if this_week.has_a_figure or last_week.has_a_figure:
+        text += [
+            "",
+            "This week against last week",
+            _row_line(this_week, config, label="This week"),
+            _row_line(last_week, config, label="Last week"),
+        ]
+        lines += [this_week, last_week]
+
+    yesterday_rows = _within(all_team_rows, days.yesterday)
+    flagged_people = [
+        FlaggedPerson(name=user.name, note_ids=ids)
+        for user in members
+        if (ids := _flagged(_by_author(yesterday_rows, user.user_id)))
+    ]
+    if flagged_people:
+        text += [
+            "",
+            "Flagged yesterday",
+            *(
+                f"  {person.name:<{_NAME_WIDTH}}{len(person.note_ids)} notes"
+                for person in flagged_people
+            ),
+        ]
+    signals = _signals(yesterday_rows)
+    if signals:
+        text += _signal_sentence(signals)
+    return _Parts(
+        text,
+        lines,
+        team_rows,
+        signals=signals,
+        flagged_yesterday=flagged_people,
+    )
+
+
+def _coached(
+    user: User, rows: Sequence[JudgementRow], days: _Days, config: TenantConfig
+) -> bool:
+    """Poor or fair in EACH of the last two weeks, each week over the floor."""
+    theirs = _by_author(rows, user.user_id)
+    return all(
+        average_band(_within(theirs, week), config).band in COACHING_BANDS
+        for week in (days.this_week, days.last_week)
+    )
 
 
 def _org_brief(
@@ -284,15 +489,17 @@ def _org_brief(
     since: datetime,
     until: datetime,
     config: TenantConfig,
-) -> tuple[list[str], list[BriefLine], list[JudgementRow]]:
-    """The head of sales, across teams. Teams, not people: naming every rep in
-    the company is a list nobody reads, and the team leader's brief already
-    does it for the people it is about."""
+    days: _Days,
+) -> _Parts:
+    """The head of sales, across teams: every team this week against last week,
+    and the people whose notes need coaching. Teams, not people, otherwise:
+    naming every rep in the company is a list nobody reads."""
     team_of = {user.user_id: user.team for user in users if user.team is not None}
     teams = sorted({team for team in team_of.values()})
 
-    everything = [row for row in rows if row.author_id in team_of]
-    unattributed = len(rows) - len(everything)
+    attributed = [row for row in rows if row.author_id in team_of]
+    everything = _within(attributed, (since, until))
+    unattributed = len(_within(rows, (since, until))) - len(everything)
 
     total = _line("All teams", everything, config)
     by_team = [
@@ -313,6 +520,29 @@ def _org_brief(
     ]
     if by_team:
         text += ["", "Each team", *(_row_line(line, config) for line in by_team)]
+    lines = [total, *by_team]
+
+    weekly: list[str] = []
+    for team in teams:
+        team_rows = [row for row in attributed if team_of[row.author_id] == team]
+        this_week, last_week = _weeks(team, team_rows, days, config)
+        if this_week.has_a_figure or last_week.has_a_figure:
+            weekly += [
+                _row_line(this_week, config, label=f"{team}, this week"),
+                _row_line(last_week, config, label=f"{team}, last week"),
+            ]
+            lines += [this_week, last_week]
+    if weekly:
+        text += ["", "Each team, this week against last week", *weekly]
+
+    coaching = sorted(
+        user.name
+        for user in users
+        if user.team is not None and _coached(user, attributed, days, config)
+    )
+    if coaching:
+        text += ["", "Coaching", *(f"  {name}" for name in coaching)]
+
     if unattributed:
         # A real signal and not clutter: notes by an author the directory does
         # not list are work nobody is accountable for, and the usual cause is a
@@ -321,7 +551,7 @@ def _org_brief(
             "",
             f"{unattributed} notes are by people the directory does not list.",
         ]
-    return text, [total, *by_team], everything
+    return _Parts(text, lines, everything, coaching=coaching)
 
 
 def build_brief(
@@ -339,29 +569,35 @@ def build_brief(
     Pure: no I/O, no clock, no model. The route reads the store and the
     directory, chooses the window, and hands everything in -- so a brief can be
     tested by writing rows, which is the only way the "not sent" rule can be
-    tested at all.
+    tested at all. `rows` may reach back before `since` (see `brief_window`):
+    the rolling measures read only [since, until), the weeks their own days.
 
     `role` is what was ASKED FOR, not `subject.role`. A head of sales may want
     the rep view of one of their people, and the CRM asks for the brief it
     wants rather than being told what the subject's title entitles them to.
     """
+    days = _days(since, until, config)
     if role is Role.REP:
-        text, lines, covered = _rep_brief(subject, rows, since, until, config)
+        parts = _rep_brief(subject, rows, since, until, config, days)
     elif role is Role.TEAM_LEADER:
-        text, lines, covered = _team_brief(subject, users, rows, since, until, config)
+        parts = _team_brief(subject, users, rows, since, until, config, days)
     else:
-        text, lines, covered = _org_brief(subject, users, rows, since, until, config)
+        parts = _org_brief(subject, users, rows, since, until, config, days)
 
     # THE RULE THAT MATTERS. Not "no rows" -- no FIGURE: a brief whose every
-    # measure is suppressed says nothing, however many rows it looked at.
-    if not any(line.has_a_figure for line in lines):
+    # measure is suppressed says nothing, however many rows it looked at. An id
+    # list alone (signals, flagged people) is not a figure and sends nothing.
+    if not any(line.has_a_figure for line in parts.lines):
         return None
     first_day, last_day = local_dates(since, until, config)
     return Brief(
-        text="\n".join(text) + "\n",
+        text="\n".join(parts.text) + "\n",
         first_day=first_day,
         last_day=last_day,
         days=config.rolling_window_days,
-        lines=lines,
-        flagged_note_ids=_flagged(covered),
+        lines=parts.lines,
+        flagged_note_ids=_flagged(parts.covered),
+        signals=parts.signals,
+        flagged_yesterday=parts.flagged_yesterday,
+        coaching=parts.coaching,
     )

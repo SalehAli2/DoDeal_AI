@@ -65,7 +65,11 @@ from dodeal_ai.core.errors import (
 from dodeal_ai.core.inflight import history_counter
 from dodeal_ai.core.llm import LLMClient, get_llm_client
 from dodeal_ai.tools.leads import LeadsClient, get_leads_client
-from dodeal_ai.units.structured_intelligence.brief import Brief, build_brief
+from dodeal_ai.units.structured_intelligence.brief import (
+    Brief,
+    brief_window,
+    build_brief,
+)
 from dodeal_ai.units.structured_intelligence.config import (
     TenantConfig,
     resolve_tenant_config,
@@ -399,8 +403,12 @@ async def _brief(
     directory: UserDirectory,
     config: TenantConfig,
 ) -> Brief | None:
-    """The brief's reads and its arithmetic, under the route's deadline."""
-    since, until = rolling_window(datetime.now(UTC), config)
+    """The brief's reads and its arithmetic, under the route's deadline. The
+    store read reaches back far enough for the two weeks the sections compare
+    (register item 145); the rolling measures still read their own window."""
+    now = datetime.now(UTC)
+    since, until = rolling_window(now, config)
+    read_since, _ = brief_window(now, config)
 
     users = list(await directory.users(context.tenant))
     subject = _subject(users, subject_id)
@@ -409,7 +417,7 @@ async def _brief(
     # whole tenant's window, because they roll up across people and teams.
     rows = await store.rows_between(
         context.tenant,
-        since=since,
+        since=read_since,
         until=until,
         author_id=subject.user_id if role is Role.REP else None,
     )
