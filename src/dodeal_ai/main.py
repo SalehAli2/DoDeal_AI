@@ -6,7 +6,7 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
-from dodeal_ai.api.routes import admin, judgements
+from dodeal_ai.api.routes import admin, judgements, measures
 from dodeal_ai.core import metrics as service_metrics
 from dodeal_ai.core.config import (
     REDIS_POOL_HEADROOM,
@@ -341,6 +341,7 @@ def create_app() -> FastAPI:
 
     application.include_router(judgements.router)
     application.include_router(admin.router)
+    application.include_router(measures.router)
     application.add_api_route("/health", health, methods=["GET"])
     register_error_handlers(application)
     application.add_api_route("/ready", ready, methods=["GET"])

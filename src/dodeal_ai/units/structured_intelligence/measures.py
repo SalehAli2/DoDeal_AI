@@ -217,21 +217,14 @@ def average_band(rows: Sequence[JudgementRow], config: TenantConfig) -> BandMeas
     Suppressed rows carry no band and cannot be averaged into anything; they
     are not in the denominator and are not a zero.
     """
-    scored = [row for row in _rep_notes(rows) if row.total is not None]
-    if not scored:
+    comparable, excluded = _comparable(rows)
+    if not comparable and not excluded:
         return BandMeasure(
             band=None,
             suppressed=MeasureSuppressed.NOTHING_TO_MEASURE,
             notes=0,
             excluded=0,
         )
-
-    latest = scored[-1]
-    stamp = (latest.rubric_version, latest.config_version)
-    comparable = [
-        row for row in scored if (row.rubric_version, row.config_version) == stamp
-    ]
-    excluded = len(scored) - len(comparable)
 
     suppressed = _suppression(len(comparable), config)
     if suppressed is not None:
@@ -242,14 +235,41 @@ def average_band(rows: Sequence[JudgementRow], config: TenantConfig) -> BandMeas
             excluded=excluded,
         )
 
-    totals = [row.total for row in comparable if row.total is not None]
-    mean = (sum(totals) * 2 + len(totals)) // (2 * len(totals))
     return BandMeasure(
-        band=config.band_for(mean),
+        band=config.band_for(_mean(comparable)),
         suppressed=None,
         notes=len(comparable),
         excluded=excluded,
     )
+
+
+def _comparable(rows: Sequence[JudgementRow]) -> tuple[list[JudgementRow], int]:
+    """The scored rows under the latest scored row's (rubric, config) pair, and
+    how many scored rows were left out as not comparable."""
+    scored = [row for row in _rep_notes(rows) if row.total is not None]
+    if not scored:
+        return [], 0
+    latest = scored[-1]
+    stamp = (latest.rubric_version, latest.config_version)
+    comparable = [
+        row for row in scored if (row.rubric_version, row.config_version) == stamp
+    ]
+    return comparable, len(scored) - len(comparable)
+
+
+def _mean(rows: Sequence[JudgementRow]) -> int:
+    """The whole-number mean total, round half up in integers."""
+    totals = [row.total for row in rows if row.total is not None]
+    return (sum(totals) * 2 + len(totals)) // (2 * len(totals))
+
+
+def average_total(rows: Sequence[JudgementRow], config: TenantConfig) -> int | None:
+    """The mean total behind the average band (register item 144): the same
+    comparable rows, the same floor, and None -- never 0 -- below it."""
+    comparable, _excluded = _comparable(rows)
+    if _suppression(len(comparable), config) is not None:
+        return None
+    return _mean(comparable)
 
 
 def flagged_share(rows: Sequence[JudgementRow], config: TenantConfig) -> ShareMeasure:
@@ -365,3 +385,39 @@ def measure_rep(
         flagged_share=flagged_share(rows, config),
         improved_share=improved_share(rows, config),
     )
+
+
+def measure_body(measure: BandMeasure | ShareMeasure, config: TenantConfig) -> dict:
+    """One measure as the measures routes answer it (register item 144):
+    value, state, n, floor, excluded. A suppressed measure's value is null and
+    its state names why -- never a 0 and never a low band."""
+    if isinstance(measure, BandMeasure):
+        value: object = None if measure.band is None else measure.band.value
+        n, excluded = measure.notes, measure.excluded
+    else:
+        value, n, excluded = measure.percent, measure.of, 0
+    return {
+        "value": value,
+        "state": "reported" if measure.suppressed is None else measure.suppressed.value,
+        "n": n,
+        "floor": config.measure_evidence_floor,
+        "excluded": excluded,
+    }
+
+
+def figures(rows: Sequence[JudgementRow], config: TenantConfig) -> dict:
+    """The three measures and the average total over one set of rows."""
+    return {
+        "measures": {
+            MeasureName.AVERAGE_BAND.value: measure_body(
+                average_band(rows, config), config
+            ),
+            MeasureName.FLAGGED_SHARE.value: measure_body(
+                flagged_share(rows, config), config
+            ),
+            MeasureName.IMPROVED_SHARE.value: measure_body(
+                improved_share(rows, config), config
+            ),
+        },
+        "average_total": average_total(rows, config),
+    }

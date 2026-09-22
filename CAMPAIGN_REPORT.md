@@ -6903,3 +6903,17 @@ suppressed, so the section managers expect rarely appears; (2) a person who
 changes team mid-fortnight is coached against the team they are in today.
 Stress test: a person poor this week and excellent last week is not on the
 coaching list; poor in both weeks, each over the floor, is.
+
+## Piece: register item 144, the measures routes
+
+Item 144 -- `GET /api/v1/measures/reps/{author_id}` and
+`GET /api/v1/measures/teams/{team}` (service chain, the rep-numbers switch,
+the judgement deadline, the brief's store and directory) answer the three
+measures as `{value, state, n, floor, excluded}`, `average_total` (the same
+comparable rows and floor as the band) and the window; the team route pools
+its members' rows, then lists each member. Unknown author or team is 404.
+Production failure modes: (1) the team route reads the whole tenant's window
+and filters in code, so a large tenant pays a full read per team asked for;
+(2) a person moved between teams is counted in their current team only.
+Stress test: a rep with four notes under a floor of ten reads null values and
+state below_evidence_floor on every measure, and a null average total.
