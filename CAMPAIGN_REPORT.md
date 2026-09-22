@@ -6536,3 +6536,124 @@ that no sabotage survived. No sabotage in F1b: it changes no code.
 | `CAMPAIGN_REPORT.md` | backfill: this block |
 | `test_judgement_pipeline.py` | `3edbd57`: `_FakeClock` on whole milliseconds and refusing other attributes; one new test |
 | `test_prompt_preload.py` | `1935d01`: four new tests, (a) to (d) |
+
+## Register item 132: recognise a short note before the length floor
+
+`ba23669`. A note below the floor that is a known code (na1, cb2) or phrase ("not interested") is judged, not asked.
+
+- **Failure mode 1:** a first-word-only rule let "na, client abusive, wants refund" through to three model passes.
+- **Failure mode 2:** a tenant that adds a common word to a table makes junk notes pass and spend model calls.
+- **Stress test:** every default phrase and code as a below-floor note reaches classification; "ok", "done" and "spoke" still get the fixed question.
+
+## Register item 132, follow-up 1: tighten recognition and bump the config version
+
+`f2084a3`. Every word must be a code or a filler (`short_note_fillers`); `config_version` is `tenant-cfg-default-3`.
+
+- **Failure mode 1:** a filler such as "ok" added by a tenant makes "na ok" pass without a question.
+- **Failure mode 2:** the two `test_judgement_routes.py` pins could not be run green under the item 131 red tree, so they are unverified.
+- **Stress test:** "cb1 tmrw" recognised, "na, client abusive, wants refund" not, and an empty filler table still recognises "na1".
+
+## Register item 132, follow-up 2: fold the short-note tables inside TenantConfig
+
+The tables are casefolded in `TenantConfig.__post_init__`, so JSON-built and hand-built configs match alike.
+
+- **Failure mode 1:** a mixed-case table on a hand-built config silently never matched; the fold lived only in `TenantConfigFile.build`.
+- **Failure mode 2:** a table added later without joining the fold list drifts back to the same defect.
+- **Stress test:** a config built with `NA`, `Cb`, `Not Interested` and `TMRW` recognises "cb1 tmrw", "NA1" and "not interested".
+
+## Register item 130: a no-contact note may only be asked for the next attempt date
+
+`1ad3571`. `what_happened` leaves `allowed_missing_by_type` for `no_contact`: the attempt IS what happened, so its author cannot be asked to record more of it.
+
+- **Failure mode 1:** the allowed-missing and suppressed tables are separate maps. Narrowing one and not the other leaves a note marked down on something nobody may ask it about -- which is what happened here, and what item 137 repaired.
+- **Failure mode 2:** a model that reports `what_happened` for a no_contact note now fails validation and spends the note's single reprompt, so a template that still invites the component turns every such note into two paid calls.
+- **Stress test:** every `MissingComponent` but `next_step_with_date`, returned for a no_contact note, is rejected inside the validated call.
+
+## Register item 131: score a note by binary checks, not numeric marks
+
+`b8c715d`, then `9977dbb` deriving the mark table from the weight. The model answers twelve yes/no checks; the marks, total, denominator and band are computed in code.
+
+- **Failure mode 1:** a model asked for a whole number out of 25 cannot use that resolution consistently -- the same note scores 19 one day and 22 the next, and the rubric's acceptance target is band agreement with a human.
+- **Failure mode 2:** the mark table and the weights were two things to keep in step, so a tenant that changed a weight scored against the old table. `9977dbb` derives one from the other; a component with no weight is skipped and `_check` refuses the weights first.
+- **Stress test:** every derived table runs from 0 to exactly the weight and is non-decreasing, for the default rubric and for a reweighted one.
+
+## Register item 133: rewrite the Unit A prompts as a shared block plus type blocks
+
+`2e92fbc`. `build_prompt` takes several template names and joins them in order; the vague pass ships one shared block and six type blocks.
+
+- **Failure mode 1:** six copies of the same rules drift, and a rule fixed in one template stays broken in the other five. The relative-time rule did exactly that -- won_lost lost it while its own example still relied on it (item 137).
+- **Failure mode 2:** the shared block is the cacheable prefix, so putting the variable block first would lose the prefix cache on every note. The split also left the OUTPUT contract in the shared half, which made a worked example the last thing the model read (item 137).
+- **Stress test:** `build_prompt` joins in the order given and the reversed order differs; each type's stable half is byte-identical across ten corpus notes.
+
+## Register item 137: fix the defects an Opus review found in items 130 to 133
+
+Six commits: `548add4` (parseable examples), `1ed5852` (no_contact off `what_happened`), `67c902d` (a recognised short note carries a code), `c1313e5` (`_check` refuses a rubric with no applicable weight), `7be737e` (the version stamps), and this one (the prompts say what the code does).
+
+- **Failure mode 1:** an unparseable worked example is the last answer a model reads before the note, so a copied line break spends the one reprompt and then 503s a judgement that was never in doubt. Every judging template's examples now parse and validate against the schema that accepts them.
+- **Failure mode 2:** a below-floor note of nothing but fillers ("tmrw", "again", "بكرة") was recognised as a known outcome and bought three paid calls. Recognition now requires at least one tenant code, or a phrase opening the note with only fillers after it.
+- **Stress test:** every JSON object under EXAMPLES in all seven v2 judging templates parses with `json.loads` and validates as the pass's output schema, with the per-template count pinned so an extraction that finds nothing cannot pass.
+
+
+## Register item 138: the scored-set loader and its format
+
+`src/dodeal_ai/units/structured_intelligence/eval_set.py`. One JSON object per line; `DODEAL_EVAL_SET_PATH` is an environment variable and not a `Settings` field; a path inside the repository is refused before the file is opened.
+
+- **Failure mode 1:** an absent expected field defaulted rather than carried through as None manufactures agreement out of unfinished marking -- and the number it manufactures is the one the business is asked to accept. Every expected field is `| None`, and an empty `missing_components` list is a mark while an absent one is not.
+- **Failure mode 2:** a refusal that quotes the row puts a real salesperson's note on a terminal, in a CI log and in a pasted ticket. A bad row names its LINE NUMBER plus pydantic's field locations and error types (`include_input=False`), never a value.
+- **Stress test:** the committed fixture of invented notes is refused where it lies and loads only once copied outside the repository; `..` in the path cannot walk back in, because the refusal resolves first.
+
+## Register item 139: the diagnostic harness
+
+`scripts/diagnose_notes.py`. One note in, one CSV row out: the gate, item 132's recognition, the classified type, `is_vague`, the missing components, the clarification question, all twelve check answers, the five marks, the denominator, the total, the band, and the milliseconds per pass. `--live` or nothing is sent.
+
+- **Failure mode 1:** a harness that retried a failed call turns a provider having a bad day into an unbounded bill from a script nobody is watching. It never retries and never loops: a failed note is ONE row carrying the exception TYPE, and the run continues. `--live` refuses over 20 notes and prints the call count before it spends any of it.
+- **Failure mode 2:** a paid call placed by accident. The guard has two independent halves, like `real_fetch_check.py` -- the dry-run branch never builds a provider client, and `_guard_against_accidental_live_call` refuses immediately before the client is built even when that branch is wrong.
+- **Stress test:** five invented notes end to end against the real provider, then the dry-run branch inverted so a flagless run reaches the live path: the second guard refuses with exit 3 and writes no CSV.
+
+## Register item 140: the eval runner
+
+`scripts/run_eval.py`. Agreement with the hand marks per pass -- classify, `is_vague`, `missing_components`, check answers -- broken down by note type and by language, plus reprompt rate, p50/p95 latency and tokens per pass. The BAND figure is printed last, on its own line.
+
+- **Failure mode 1:** a note nobody has marked counted as agreement turns unfinished marking into a business result. An unmarked field leaves that figure's denominator entirely; a MARKED note whose pass did not run is a disagreement, not an exclusion, because the human and the pipeline really do disagree about it.
+- **Failure mode 2:** an expected band read from the file rather than computed would be a second source for the one number the unit exists to justify. The scored set holds no band field; both sides go through `compute_score`, and a row whose marks do not fit its type's applicable set is excluded and COUNTED as excluded on the terminal.
+- **Stress test:** a fake model scripted to the marks gives 100 % on every figure over exactly the marked notes (4/4, 4/4, 4/4, 23/23 checks, 3/3 bands); changing one classification drops classify to 3/4 and leaves the band alone, because callback and discovery share a denominator.
+
+## Register item 141: ns_closure requires a reason, not only an ending
+
+`score_v2.txt` landed at `d1b4146`; this commit finishes the piece it interrupted. The check now reads "ended AND why? Both are needed", and `tests/unit/test_scoring.py::CLOSURE_SENTENCE` was still pinning the old sentence. `SCORE_MAX_OUTPUT_TOKENS` was left at 1024 in the working tree from an abandoned reasoning-model trial and is back to 384. `.env.example`'s `DODEAL_EVAL_SET_PATH` row and its exemption in `tests/test_env_example_matches_settings.py` are the same interrupted change and go with it -- committing either alone reds `test_the_exemptions_are_all_still_needed`.
+
+- **Failure mode 1:** a prompt change that leaves its test pinning the old sentence is a green suite that proves nothing about the rule it was changed for. The constant now carries "Both are needed" -- the whole of item 141 -- so reverting the prompt reds the test rather than passing on the unchanged half of the line.
+- **Failure mode 2:** the scoring pass's output ceiling above the vague pass's inverts the one rule the ceilings encode: only vague detection answers in the note's own language, so only it needs Arabic headroom. A scoring ceiling raised to fit a reasoning model spends tokens on a pass whose answer is fixed ASCII keys, and hides the day the vague pass starts truncating.
+- **Stress test:** `test_the_pass_that_answers_in_the_notes_language_has_the_largest_ceiling` asserts the strict ordering rather than either number, so any future rise in the scoring ceiling reds it whatever value is chosen.
+
+## Register item 142: the enforcement block on every judgement
+
+`Judgement.enforcement` (`schemas.py`), derived by `decide.py::enforcement` and attached at both build sites in `pipeline.py`. `EnforcementMode` becomes `off`/`advisory`/`strict` and moves to `schemas.py`; the verdict is `allow`/`flag`/`block`, with `applies_to` null exactly when nothing is flagged. Strict is built and recorded, never enabled: blocking is scoped to a stage change and the request carries no field for it. `config_version` bumped to `tenant-cfg-default-4`; `RUBRIC_VERSION` did not move, because what a judgement CARRIES changed, not how it is scored.
+
+- **Failure mode 1:** an optional field with a default is a field the CRM reads as absent and infers around -- which is exactly the guessing the piece exists to end. `enforcement` has NO default, so every construction site must supply one and a judgement without a block cannot be built. The one real consequence is the idempotency store: a judgement written before this deploy no longer validates, and `_existing_judgement` already logs `idempotency_replay_invalid`, takes the key over and judges again rather than replaying a block-less body.
+- **Failure mode 2:** a verdict derived from the total rather than from the action would read the two thresholds in a second place, and the day a threshold moves the flag and the advice disagree about the same note. The scored site passes `decision.action`; the suppressed site passes the detail, and `accept_silent` is deliberately absent from `_FLAGGED_ACTIONS`.
+- **Stress test:** every mode against every action AND every suppression, asserting no combination returns `block` today and that `applies_to is None` is true exactly when the verdict is `allow`; then `prompt_clarification` removed from `_FLAGGED_ACTIONS`, which reds the two advisory/strict cases and nothing else.
+
+## Register item 143: the judgement-row contract and its fake store
+
+`src/dodeal_ai/units/structured_intelligence/judgement_rows.py`. `JudgementRow` is fifteen fields and NO note text: three ids, the note's `created_at`, the note type, the scored half (band/total/denominator), the suppressed reason, `prompt_sent`, the enforcement verdict and the four version stamps. `JudgementStore` is a Protocol with one read -- a tenant's rows over a half-open window, optionally one author. `FileJudgementStore` is the fake: invented rows from a JSON file whose path is `DODEAL_JUDGEMENT_ROWS_PATH`, refused inside the repository, read once at construction. The real store is a backend ask and is not written here.
+
+- **Failure mode 1:** a row that carried a note body would make this service a second copy of the CRM's data -- a second place to breach, a second deletion to honour, a second thing to keep in step with an edit. `extra="forbid"` plus an exact-field-set test means a body cannot arrive under `note`, `note_text`, `text`, `body` or `content`, at the model or through the loader.
+- **Failure mode 2:** a half-filled row -- a band beside a suppression, or a suppression with a total -- would be averaged into item 144's measures as if somebody had judged it. `_exactly_one_half` refuses both shapes at parse time, so a malformed row is a refusal naming its position and never a quiet contribution to a rep's average.
+- **Stress test:** the two rows for note 1002 carry the same `note_created_at` and differ only in position and band; a test asserts file order survives the read, because the resubmission measure in item 144 has nothing else to order by. Tiling `[day one, day two)` and `[day two, day three)` returns every row exactly once.
+
+## Register item 144: the three per-rep measures
+
+`src/dodeal_ai/units/structured_intelligence/measures.py`, pure over item 143's rows. The rolling average band (totals averaged, band derived through `config.band_for`), the share of notes flagged, and the share of ASKED notes that came back with a better band. Two new `TenantConfig` fields: `measure_evidence_floor` (10) and `rolling_window_days` (30) -- nothing else in the unit may carry those numbers. `config_version` deliberately did NOT move: neither field changes what a judgement carries or means, and a bump would make every stored row incomparable with every new one and suppress every average the day this ships.
+
+- **Failure mode 1:** a measure reported as a low number instead of suppressed is a manager acting on noise, and the rep it is about cannot tell the difference. Below the floor `band` and `percent` are None beside a reason, and the floor is applied to EACH measure's own denominator -- a rep with thirty notes and two prompts has an average and no improvement figure. A zero denominator carries `nothing_to_measure` rather than `below_evidence_floor`, because "nobody asked you anything" is good news and "not enough yet" is a wait.
+- **Failure mode 2:** totals made under a different `rubric_version` or `config_version` are percentages of a denominator a different rubric chose, and averaging them silently is a figure nobody can reproduce. The most recent scored row's pair wins and the rest are excluded AND COUNTED; exclusions can push a measure below the floor, which is the honest outcome. `model_version` is deliberately not in the pair -- fragmenting on it would suppress every measure the day a provider rolls a point release.
+- **Stress test:** a resubmission table where note 1 goes fair -> excellent, note 2 goes fair -> fair, and note 3 never comes back gives 1 of 3; reversing the order of note 1's two rows drops it to 0, which is what pins the store's recorded-order promise. A better total inside the same band is not an improvement.
+
+## Register item 145: the three role briefs and an on-demand route
+
+`brief.py` (three templates over item 144's measures, no model call), `user_directory.py` (the second backend ask: `User` is user_id/name/role/team, `UserDirectory` is one read, `FileUserDirectory` is the fake over `DODEAL_USER_DIRECTORY_PATH`, refused inside the repo), and `GET /api/v1/briefs/{role}/{subject_id}` behind the same gate chain as every other route. Four answers: 200 text/plain, 204 when there is nothing to say, 404 `subject_not_found`, 503 `brief_store_unavailable`. No scheduler -- the CRM calls at 07:30 and whether this service needs its own clock is open.
+
+- **Failure mode 1:** an empty daily email trains people to ignore the channel within a fortnight, and then the one that matters is ignored with the rest. `build_brief` returns None and the route answers 204 when no line carries a single FIGURE -- not when there are no rows. A brief that looked at eight notes and can say nothing about any of them is still an empty email. A 204 is reserved for that: an unknown subject is 404 and an unwired store is 503, because both would otherwise read as a quiet day for ever.
+- **Failure mode 2:** a model asked to narrate figures will eventually produce one that is not in them, and a brief is read as fact. Every number here is `measures.py` arithmetic and every sentence is a template in `brief.py`; a suppressed measure renders as "not enough yet (4 of 10)" and never as a band or a 0%. The team roll-up is computed over the team's rows POOLED, not averaged from per-person averages, so a rep with three notes cannot weigh the same as one with nine.
+- **Stress test:** every role against a subject with two notes under a floor of three returns None; raising it to three returns text containing "nothing was asked about" and no band anywhere in the improvement line. A team of nine notes at 30 and three at 75 renders "fair over 12 notes" (pooled mean 41), where averaging the averages would have said "good".

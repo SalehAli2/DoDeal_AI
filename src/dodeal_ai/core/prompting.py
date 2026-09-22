@@ -165,14 +165,22 @@ def _load_template(name: str) -> str:
     return _read_template_file(name)
 
 
-def build_prompt(template_name: str, caller_data: str) -> AssembledPrompt:
-    """Assemble the final prompt: trusted system template + delimited caller
+def build_prompt(*template_names: str, caller_data: str) -> AssembledPrompt:
+    """Assemble the final prompt: trusted system templates + delimited caller
     data. The caller can only ever contribute to the data section.
 
-    Any delimiter-like text inside caller_data is neutralised (see below) so a
-    caller cannot forge an early END marker to 'escape' the data section.
+    SEVERAL NAMES, JOINED IN ORDER. The vague pass ships a shared block plus a
+    per-type block (register item 133's prompt rewrite): the shared text is
+    written once instead of six times, and the join happens here so the
+    stable half stays one string and the caching order stays the caller's
+    decision rather than this module's. Put the least variable block first --
+    the shared block is identical for every note, the type block changes with
+    the type, so that order gives the longest cacheable prefix.
+
+    Any delimiter-like text inside caller_data is neutralised so a caller
+    cannot forge an early END marker to escape the data section.
     """
-    system = _load_template(template_name)
+    system = _SECTION_SEP.join(_load_template(name) for name in template_names)
     safe_data = _neutralise_delimiters(caller_data)
     return AssembledPrompt(
         stable=system,

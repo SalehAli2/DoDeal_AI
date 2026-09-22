@@ -26,6 +26,7 @@ from dodeal_ai.units.structured_intelligence.schemas import JudgementRequest
 from tests.helpers import breakers
 from tests.helpers.fake_leads import FakeLeadsClient, lead, note
 from tests.helpers.fake_llm import FakeLLM, json_response, response
+from tests.helpers.score_answers import score_payload
 
 LEAD_ID = 1656
 NOTE_ID = 10
@@ -48,16 +49,7 @@ def _happy() -> list:
                 "reasoning": "Complete.",
             }
         ),
-        json_response(
-            {
-                "marks": {
-                    "what_happened": 20,
-                    "client_said": 15,
-                    "next_step_date": 15,
-                    "clarity": 5,
-                }
-            }
-        ),
+        json_response(score_payload()),
     ]
 
 

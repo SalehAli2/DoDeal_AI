@@ -26,7 +26,15 @@ from dodeal_ai.units.structured_intelligence.config import (
     EnforcementMode,
     get_tenant_config,
 )
-from dodeal_ai.units.structured_intelligence.schemas import Band, ComponentName
+from dodeal_ai.units.structured_intelligence.schemas import (
+    Band,
+    ComponentName,
+    NoteType,
+)
+from dodeal_ai.units.structured_intelligence.scoring import (
+    applicable_checks,
+    compute_score,
+)
 from tests.helpers import tokens
 
 DEFAULT = get_tenant_config("tenant-a")
@@ -75,14 +83,8 @@ def test_a_valid_file_overrides_the_default_for_its_tenant_only(tmp_path):
             "config_version": "tenant-a-cfg-1",
             "accept_threshold": 75,
             "rate_limit_per_hour": 5,
-            "enforcement_mode": "blocking",
-            "weights": {
-                "what_happened": 30,
-                "client_said": 20,
-                "next_step_date": 20,
-                "deal_specifics": 20,
-                "clarity": 10,
-            },
+            "enforcement_mode": "strict",
+            "short_note_codes": ["NA", "Cb"],
             "band_boundaries": [
                 ["poor", 29],
                 ["fair", 59],
@@ -98,8 +100,9 @@ def test_a_valid_file_overrides_the_default_for_its_tenant_only(tmp_path):
     assert config.config_version == "tenant-a-cfg-1"
     assert (config.accept_threshold, config.flag_threshold) == (75, 40)
     assert config.rate_limit_per_hour == 5
-    assert config.enforcement_mode is EnforcementMode.BLOCKING
-    assert config.weights[ComponentName.WHAT_HAPPENED] == 30
+    assert config.enforcement_mode is EnforcementMode.STRICT
+    assert config.short_note_codes == frozenset({"na", "cb"})  # folded, not as written
+    assert config.weights == DEFAULT.weights
     assert config.band_for(60) is Band.GOOD
     assert config.suppressed_components_by_type == DEFAULT.suppressed_components_by_type
     assert get_tenant_config("tenant-b") is DEFAULT
@@ -185,6 +188,10 @@ def test_the_weights_stay_immutable(tmp_path):
                 ["excellent", 100],
             ],
         },
+        {
+            "config_version": "v",
+            "weights": {**{k.value: 0 for k in ComponentName}, "deal_specifics": 100},
+        },
         {"config_version": "v", "flag_threshold": 70},
         {"config_version": "v", "min_note_chars": 2000},
         "{not json",
@@ -205,6 +212,7 @@ def test_the_weights_stay_immutable(tmp_path):
         "bands-descending",
         "bands-top",
         "bands-negative",
+        "weights-all-on-a-suppressed-component",
         "flag-not-below-accept",
         "min-not-below-max",
         "bad-json",
@@ -414,3 +422,36 @@ def test_a_non_valueerror_from_a_parser_still_refuses_named(tmp_path):
     assert caught.value.__cause__ is None
     assert str(tmp_path) not in message
     assert bad_value not in message
+
+
+def test_a_file_that_changes_a_weight_is_accepted_and_marks_follow_it(tmp_path):
+    """Weights are changeable without a release: the mark table is derived."""
+    _write(
+        tmp_path,
+        "tenant-a",
+        {
+            "config_version": "tenant-a-cfg-3",
+            "weights": {
+                "what_happened": 30,
+                "client_said": 20,
+                "next_step_date": 20,
+                "deal_specifics": 20,
+                "clarity": 10,
+            },
+        },
+    )
+    _load(tmp_path)
+
+    config = get_tenant_config("tenant-a")
+    assert config.weights[ComponentName.WHAT_HAPPENED] == 30
+    assert config.marks_by_true_count[ComponentName.WHAT_HAPPENED] == (0, 15, 30)
+    assert config.marks_by_true_count[ComponentName.NEXT_STEP_DATE] == (0, 10, 20, 20)
+    # Untouched components keep the default marks.
+    assert (
+        config.marks_by_true_count[ComponentName.CLARITY]
+        == DEFAULT.marks_by_true_count[ComponentName.CLARITY]
+    )
+    all_true = dict.fromkeys(applicable_checks(NoteType.DISCOVERY, config), True)
+    score = compute_score(all_true, NoteType.DISCOVERY, config)
+    assert score.total == 100
+    assert [c.mark for c in score.components if not c.suppressed] == [30, 20, 20, 10]

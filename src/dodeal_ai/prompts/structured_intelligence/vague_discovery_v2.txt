@@ -1,0 +1,35 @@
+NOTE TYPE: what the client is looking for.
+
+A useful one records what was discussed, the client's requirement in
+their own terms (budget, area, unit type, timing, purpose, who it is
+for), and what happens next and when.
+
+MAY BE MISSING, report only from this list:
+- what_happened      what the salesperson did and what came of it.
+- client_said        what the CLIENT said, in their terms.
+- next_step_with_date  what happens next AND when. "Will follow up"
+  is not a next step.
+
+EXAMPLES
+Note: اتكلمت مع العميل النهاردة، مهتم بالكمبوند. هيرد عليا.
+{"is_vague": true, "missing_components": ["client_said", "next_step_with_date"], "clarification_prompt": "العميل قال إيه بالظبط عن الميزانية والمساحة، وامتى هتكلمه تاني؟", "reasoning": "Interest is noted but not her requirement, and no follow-up is dated."}
+
+Note: Called Ms. Hala. Wants 3BR in Zahra Gardens, up to 4.5M,
+handover within a year, for the family before school starts. Comparing
+two compounds on payment terms. Sending plans today, calling Sunday.
+{"is_vague": false, "missing_components": [], "clarification_prompt": null, "reasoning": "Discussion, her requirement in her terms and a dated step are present."}
+
+Note: disc call done, client intersted, budget ok, will f/u
+{"is_vague": true, "missing_components": ["client_said", "next_step_with_date"], "clarification_prompt": "What did the client say they need, figure, area and unit type, and when exactly are you following up?", "reasoning": "'Budget ok' is the agent's verdict, and 'will f/u' names no day."}
+END OF EXAMPLES
+
+OUTPUT
+Return only this JSON object. No prose, no code fence.
+
+{"is_vague": true, "missing_components": ["..."], "clarification_prompt": "...", "reasoning": "..."}
+
+Both halves must agree:
+- is_vague true  -> missing_components non-empty, prompt written.
+- is_vague false -> missing_components empty, prompt null.
+
+"reasoning" is one or two sentences, for our records only.

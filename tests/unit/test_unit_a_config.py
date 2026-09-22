@@ -6,16 +6,19 @@ switched off.
 from __future__ import annotations
 
 import dataclasses
+from types import MappingProxyType
 
 import pytest
 
 from dodeal_ai.units.structured_intelligence.config import (
     EnforcementMode,
     TenantConfig,
+    _check,
     get_tenant_config,
 )
 from dodeal_ai.units.structured_intelligence.schemas import (
     Band,
+    CheckName,
     ComponentName,
     MissingComponent,
     NoteType,
@@ -49,7 +52,10 @@ def test_containers_on_the_shared_default_are_immutable(config: TenantConfig) ->
 
 
 def test_config_version_is_stamped(config: TenantConfig) -> None:
-    assert config.config_version == "tenant-cfg-default-2"
+    # -4 at register item 142: EnforcementMode's vocabulary changed, so a file
+    # saying "blocking" no longer parses. RUBRIC_VERSION did not move with it --
+    # what a judgement CARRIES changed, not how it is scored.
+    assert config.config_version == "tenant-cfg-default-4"
 
 
 # --- weights ---------------------------------------------------------------
@@ -122,13 +128,18 @@ def test_accept_threshold_sits_above_the_flag_threshold(config: TenantConfig) ->
 # --- per-type suppression --------------------------------------------------
 
 
-def test_no_contact_suppresses_client_said_and_deal_specifics(
+def test_no_contact_suppresses_the_three_it_cannot_answer(
     config: TenantConfig,
 ) -> None:
-    # A "called, no answer" note cannot report what the client said. Scoring
-    # those 0 instead of removing them would cap an honest note at 60/100.
+    # A "called, no answer" note cannot report what the client said, has no
+    # deal specifics, and the attempt IS what happened. Scoring those 0 instead
+    # of removing them would cap an honest note (register item 137).
     assert config.suppressed_components_by_type[NoteType.NO_CONTACT] == frozenset(
-        {ComponentName.CLIENT_SAID, ComponentName.DEAL_SPECIFICS}
+        {
+            ComponentName.WHAT_HAPPENED,
+            ComponentName.CLIENT_SAID,
+            ComponentName.DEAL_SPECIFICS,
+        }
     )
 
 
@@ -136,9 +147,12 @@ def test_only_no_contact_suppresses_components_by_type(config: TenantConfig) -> 
     assert set(config.suppressed_components_by_type) == {NoteType.NO_CONTACT}
 
 
-def test_no_contact_allows_only_two_missing_components(config: TenantConfig) -> None:
+def test_no_contact_may_only_be_asked_for_the_next_attempt_date(
+    config: TenantConfig,
+) -> None:
+    """Register item 130: what happened is not a question a no-contact note can owe."""
     assert config.allowed_missing_by_type[NoteType.NO_CONTACT] == frozenset(
-        {MissingComponent.WHAT_HAPPENED, MissingComponent.NEXT_STEP_WITH_DATE}
+        {MissingComponent.NEXT_STEP_WITH_DATE}
     )
 
 
@@ -201,6 +215,143 @@ def test_ttls(config: TenantConfig) -> None:
 
 
 def test_enforcement_mode_is_advisory_by_default(config: TenantConfig) -> None:
-    # Carried, never branched on: enforcement is the CRM's.
+    # Register item 142: every tenant launches advisory, and no team moves to
+    # strict before a calibration target nothing here can check. The mode
+    # BRANCHES now -- decide.py::enforcement, tests/unit/test_enforcement.py.
     assert config.enforcement_mode is EnforcementMode.ADVISORY
-    assert [m.value for m in EnforcementMode] == ["advisory", "blocking"]
+    assert [m.value for m in EnforcementMode] == ["off", "advisory", "strict"]
+
+
+def test_every_frozenset_str_field_is_stored_casefolded() -> None:
+    """Each frozenset[str] table on TenantConfig is folded, so a new one must join the fold."""
+    import typing
+
+    hints = typing.get_type_hints(TenantConfig)
+    tables = [name for name, hint in hints.items() if hint == frozenset[str]]
+    assert tables, "no frozenset[str] field found"
+    mixed = dataclasses.replace(
+        get_tenant_config("tenant-a"),
+        **{name: frozenset({"AbC", "Not INTERESTED"}) for name in tables},
+    )
+    for name in tables:
+        table = getattr(mixed, name)
+        assert table == frozenset(word.casefold() for word in table), name
+
+
+def _broken(config: TenantConfig, **changes: object) -> TenantConfig:
+    return dataclasses.replace(config, **changes)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "reason"),
+    [
+        (
+            "checks_by_component",
+            MappingProxyType(
+                {
+                    c: v
+                    for c, v in get_tenant_config(
+                        "tenant-a"
+                    ).checks_by_component.items()
+                    if c is not ComponentName.CLARITY
+                }
+            ),
+            "checks_by_component",
+        ),
+        (
+            "checks_by_component",
+            MappingProxyType(
+                {
+                    **get_tenant_config("tenant-a").checks_by_component,
+                    ComponentName.WHAT_HAPPENED: (
+                        CheckName.WH_OUTCOME,
+                        CheckName.CL_READABLE,
+                    ),
+                }
+            ),
+            "checks_coverage",
+        ),
+    ],
+    ids=[
+        "checks-missing-component",
+        "check-listed-twice",
+    ],
+)
+def test_check_refuses_a_rubric_whose_checks_and_marks_do_not_line_up(
+    config: TenantConfig, field: str, value: object, reason: str
+) -> None:
+    """Register item 131: a rubric whose checks do not line up is refused by name."""
+    with pytest.raises(ValueError, match=f"^{reason}$"):
+        _check(_broken(config, **{field: value}))
+
+
+# Every weight on the one component Q13 suppresses for every type. It sums to
+# 100, so the older checks pass it.
+_ALL_ON_DEAL_SPECIFICS = MappingProxyType(
+    {c: (100 if c is ComponentName.DEAL_SPECIFICS else 0) for c in ComponentName}
+)
+
+
+def test_check_refuses_a_rubric_with_no_applicable_weight(
+    config: TenantConfig,
+) -> None:
+    """Register item 137: a denominator of 0 is refused at startup, not at noon."""
+    with pytest.raises(ValueError, match="^weights_applicable$"):
+        _check(_broken(config, weights=_ALL_ON_DEAL_SPECIFICS))
+
+
+def test_the_same_rubric_is_accepted_once_q13_is_resolved(
+    config: TenantConfig,
+) -> None:
+    """It is deal_specifics being OFF that empties the denominator, not the map.
+
+    Flipping the Q13 switch makes the component applicable again, so the same
+    weights are a rubric this service can actually score against.
+    """
+    _check(
+        _broken(
+            config,
+            weights=_ALL_ON_DEAL_SPECIFICS,
+            business_line_field="leadFor",
+            deal_specifics_applicable=True,
+        )
+    )
+
+
+def test_the_default_marks_derive_to_the_documented_tables(
+    config: TenantConfig,
+) -> None:
+    """Deriving from the weights reproduces the tables item 131 shipped."""
+    assert dict(config.marks_by_true_count) == {
+        ComponentName.WHAT_HAPPENED: (0, 13, 25),
+        ComponentName.CLIENT_SAID: (0, 10, 20),
+        ComponentName.NEXT_STEP_DATE: (0, 13, 25, 25),
+        ComponentName.DEAL_SPECIFICS: (0, 7, 13, 20),
+        ComponentName.CLARITY: (0, 5, 10),
+    }
+
+
+@pytest.mark.parametrize(
+    "weights",
+    [
+        None,
+        {
+            ComponentName.WHAT_HAPPENED: 30,
+            ComponentName.CLIENT_SAID: 15,
+            ComponentName.NEXT_STEP_DATE: 20,
+            ComponentName.DEAL_SPECIFICS: 20,
+            ComponentName.CLARITY: 15,
+        },
+    ],
+    ids=["default", "reweighted"],
+)
+def test_every_derived_table_runs_from_zero_to_its_weight(
+    config: TenantConfig, weights: dict[ComponentName, int] | None
+) -> None:
+    """The ceiling: the top mark is exactly the weight and the bottom is 0."""
+    built = config if weights is None else _broken(config, weights=weights)
+    for component, marks in built.marks_by_true_count.items():
+        assert marks[0] == 0, component
+        assert marks[-1] == built.weights[component], component
+        assert list(marks) == sorted(marks), component
+        assert len(marks) == len(built.checks_by_component[component]) + 1, component

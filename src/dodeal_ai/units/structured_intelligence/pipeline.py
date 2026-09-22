@@ -151,7 +151,11 @@ from dodeal_ai.units.structured_intelligence.classify import (
     suppression_for,
 )
 from dodeal_ai.units.structured_intelligence.config import TenantConfig
-from dodeal_ai.units.structured_intelligence.decide import decide, withheld_reason
+from dodeal_ai.units.structured_intelligence.decide import (
+    decide,
+    enforcement,
+    withheld_reason,
+)
 from dodeal_ai.units.structured_intelligence.schemas import (
     Decision,
     DirectJudgementRequest,
@@ -177,8 +181,12 @@ _logger = logging.getLogger("dodeal_ai.unit_a")
 # Version stamps. RUBRIC and PROMPT_SET move when the rubric or the prompt
 # files change; both are stamped on EVERY judgement, scored or suppressed, so
 # two judgements are only ever compared when all four stamps match.
-RUBRIC_VERSION = "note_rubric_v1"
-PROMPT_SET_VERSION = "unit_a_prompts_v1"
+# v2 of both: register item 131 replaced the five marks with twelve checks, and
+# item 133 rewrote the prompt set as a shared block plus type blocks. Keeping
+# the v1 prompt files readable is only worth anything if the stamp moves with
+# them -- a judgement stamped v1 must be reproducible from the v1 text.
+RUBRIC_VERSION = "note_rubric_v2"
+PROMPT_SET_VERSION = "unit_a_prompts_v2"
 
 # No model ran, so there is nothing the provider reported. Deliberately NOT
 # settings.llm_model: core/llm/client.py is explicit that `model` is what the
@@ -379,6 +387,11 @@ def _suppressed(
     `clarification_prompt`/`prompt_withheld` (register item 64) are null for
     every suppression except a note below the length floor, which carries a
     fixed question instead of a model-written one.
+
+    THE ENFORCEMENT BLOCK IS HERE TOO (register item 142), derived from the
+    detail: a suppressed judgement has no Decision, and that is exactly why it
+    needs the block -- the CRM has no action to read and must not be left to
+    infer one from an absent field.
     """
     return Judgement(
         note_id=request.note_id,
@@ -393,8 +406,64 @@ def _suppressed(
             clarification_prompt=clarification_prompt,
             prompt_withheld=prompt_withheld,
         ),
+        enforcement=enforcement(config, detail=detail),
         versions=_versions(config, model_version),
         request_id=scope.request_id,
+    )
+
+
+# Punctuation a note picks up in passing: "na," "no answer." "cb!". Stripped
+# from the END of a word only -- a leading character belongs to the word in
+# both scripts, and stripping both ends would let a stray bracket make a code.
+# Wrong value: too few and "na," stops being a code; too many and a word ending
+# in one is silently a different word.
+_TRAILING_PUNCTUATION = ".,!?;:…،؛؟"
+
+
+def _short_note_words(text: str) -> list[str]:
+    """The note as casefolded words with trailing punctuation removed."""
+    return [
+        stripped
+        for word in text.casefold().split()
+        if (stripped := word.rstrip(_TRAILING_PUNCTUATION))
+    ]
+
+
+def _is_short_note_code(word: str, config: TenantConfig) -> bool:
+    """A tenant code, with or without its trailing attempt number: na, cb1."""
+    bare = word.rstrip("0123456789")
+    return bool(bare) and bare in config.short_note_codes
+
+
+def _is_recognised_short_note(text: str, config: TenantConfig) -> bool:
+    """Register item 132: is this below-floor note a known outcome?
+
+    Yes if a tenant phrase OPENS the note and only fillers follow it, or if
+    every word is a tenant code, a bare attempt number or a filler AND AT LEAST
+    ONE OF THEM IS A CODE. That last clause is register item 137: without it
+    "tmrw", "again", "pm" and "بكرة" are each nothing but fillers, so a note
+    recording no outcome at all bought three paid calls.
+
+    The phrase matches a PREFIX rather than the whole note, so "لا يرد بكرة" is
+    the same outcome as "لا يرد". Only fillers may follow it: a phrase trailed
+    by ordinary words is a real note that happens to start with one.
+
+    The tables are stored casefolded, so nothing is rebuilt per call.
+    """
+    words = _short_note_words(text)
+    if not words:
+        return False
+    for phrase in config.short_note_phrases:
+        opening = phrase.split()
+        if words[: len(opening)] == opening and all(
+            word in config.short_note_fillers for word in words[len(opening) :]
+        ):
+            return True
+    return any(_is_short_note_code(word, config) for word in words) and all(
+        _is_short_note_code(word, config)
+        or word.isdigit()
+        or word in config.short_note_fillers
+        for word in words
     )
 
 
@@ -426,6 +495,9 @@ def _length_gate(
     """
     text = note.note.strip()
     if len(text) < config.min_note_chars or len(text.split()) < config.min_note_tokens:
+        # Register item 132: a short note that is a known outcome carries on.
+        if _is_recognised_short_note(text, config):
+            return None
         return (SuppressedReason.INSUFFICIENT_EVIDENCE, SuppressedDetail.NOTE_TOO_SHORT)
     if len(text) > config.max_note_chars:
         return (SuppressedReason.NOT_SCORABLE, SuppressedDetail.NOTE_TOO_LONG)
@@ -1030,7 +1102,7 @@ async def _judge(
                 clarification_prompt=vague_output.clarification_prompt,
                 reasoning=vague_output.reasoning,
             )
-            score = compute_score(score_output.marks, note_type, config)
+            score = compute_score(score_output.checks, note_type, config)
             # decide() is PURE, so it is asked twice: once with the window
             # assumed open, whose answer says which db2 trip (if any) the two
             # guards owe, and once with what the store actually said.
@@ -1093,6 +1165,11 @@ async def _judge(
                 score=score,
                 decision=decision,
                 suppressed=None,
+                # From the ACTION, not the total and not the band: the action
+                # is what the two thresholds already decided, and deriving the
+                # verdict from the total again would be a second place for the
+                # thresholds to be read (register item 142).
+                enforcement=enforcement(config, action=decision.action),
                 # The SCORING pass's model, not the classifier's: the marks are
                 # what the judgement is, and on a reprompted pass it is the
                 # second response -- the call the marks actually came from.

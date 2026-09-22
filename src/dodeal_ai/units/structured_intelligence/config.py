@@ -8,8 +8,9 @@ changing the prompt version. So:
   - Weights, boundaries and thresholds live HERE and are read through
     get_tenant_config(). Scoring code reads config.weights; it never carries a
     literal 25.
-  - **Weights never appear in prompt text.** The model returns a mark per
-    component and does not know what a component is worth. If the rubric's
+  - **Weights never appear in prompt text.** The model answers yes or no to a
+    fixed list of checks; it is told neither what a component is worth nor
+    which component a check belongs to (register item 131). If the rubric's
     arithmetic were in the prompt, changing a weight would silently change what
     the model was asked to do, and every past judgement would become
     incomparable in a way no version stamp records.
@@ -24,18 +25,18 @@ default remain identifiable and are never rescored.
 The values are placeholders in the same sense as the cost caps in core/config.py
 (ASSUMPTIONS §8.1): structurally correct, numerically provisional.
 
-`enforcement_mode` is carried but does not branch: advisory and blocking behave
-identically here, because ENFORCEMENT IS THE CRM'S. We return a decision; what
-the CRM does with `prompt_clarification` is its own policy. The field exists so
-a tenant's intent is recorded on the judgement rather than inferred later.
+`enforcement_mode` (register item 142) is the tenant's setting and the ONLY
+place a mode is chosen. It BRANCHES now: decide.py::enforcement derives the
+verdict on every judgement from it, and the mode is stamped on the judgement so
+a tenant that changes it later does not change what an old judgement meant.
+The vocabulary itself lives in schemas.py, with the other codes the CRM reads.
 """
 
 from __future__ import annotations
 
 import dataclasses
 from collections.abc import Mapping
-from dataclasses import dataclass
-from enum import StrEnum
+from dataclasses import dataclass, field
 from types import MappingProxyType
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -44,18 +45,17 @@ from dodeal_ai.core.tenant_config import tenant_section
 from dodeal_ai.units.structured_intelligence.schemas import (
     MAX_NOTE_TEXT_CHARS,
     Band,
+    CheckName,
     ComponentName,
+    EnforcementMode,
     MissingComponent,
     NoteType,
 )
 
-
-class EnforcementMode(StrEnum):
-    """Whether the tenant treats a clarification request as advice or as a
-    block. Identical behaviour in this service -- see the module docstring."""
-
-    ADVISORY = "advisory"
-    BLOCKING = "blocking"
+# Re-exported: EnforcementMode is a response vocabulary and lives in
+# schemas.py, but config.py is where a tenant's mode is chosen and where every
+# caller has always imported it from. Named here so ruff keeps the import.
+__all__ = ["UNIT_A_SECTION", "EnforcementMode", "TenantConfig", "get_tenant_config"]
 
 
 # Weights sum to 100 so the full-applicability denominator IS 100 and a total
@@ -82,24 +82,99 @@ _BAND_BOUNDARIES: tuple[tuple[Band, int], ...] = (
     (Band.GOOD, 84),
     (Band.EXCELLENT, 100),
 )
+# Which checks belong to which component (register item 131). The model
+# answers facts; this table is what turns those facts into marks, and it
+# lives here for the same reason the weights do: a rubric decision the
+# business owns, in one place, never spread through the scoring code.
+_CHECKS_BY_COMPONENT: Mapping[ComponentName, tuple[CheckName, ...]] = MappingProxyType(
+    {
+        ComponentName.WHAT_HAPPENED: (
+            CheckName.WH_OUTCOME,
+            CheckName.WH_ACTION,
+        ),
+        ComponentName.CLIENT_SAID: (
+            CheckName.CS_PRESENT,
+            CheckName.CS_OWN_TERMS,
+        ),
+        ComponentName.NEXT_STEP_DATE: (
+            CheckName.NS_ACTION,
+            CheckName.NS_DATE,
+            CheckName.NS_CLOSURE,
+        ),
+        ComponentName.DEAL_SPECIFICS: (
+            CheckName.DS_FIGURES,
+            CheckName.DS_SUBJECT,
+            CheckName.DS_TIMING,
+        ),
+        ComponentName.CLARITY: (
+            CheckName.CL_READABLE,
+            CheckName.CL_SUBSTANCE,
+        ),
+    }
+)
+
+# How many true checks earn a component its full weight, where that is not all
+# of them. NEXT_STEP_DATE has three checks but two ordinary ones: ns_closure is
+# a bypass (scoring.py gives full marks whatever the others say), so action plus
+# date already earns the full weight and closure adds nothing to a table entry.
+_FULL_MARKS_AT: Mapping[ComponentName, int] = MappingProxyType(
+    {ComponentName.NEXT_STEP_DATE: 2}
+)
+
+
+def _derive_marks(
+    weights: Mapping[ComponentName, int],
+    checks_by_component: Mapping[ComponentName, tuple[CheckName, ...]],
+) -> Mapping[ComponentName, tuple[int, ...]]:
+    """The mark for a component by how many of its checks came back true,
+    derived from its weight (register item 131).
+
+    An even split, rounded half up in integers: index 0 is 0, the full-marks
+    count is exactly the weight, and the tuple is one longer than the check
+    list. A tenant that changes a weight gets its marks with it, so the two
+    cannot drift and no mark table is a second thing to keep in step. A
+    component with no weight is skipped; _check refuses the weights first.
+    """
+    marks: dict[ComponentName, tuple[int, ...]] = {}
+    for component, checks in checks_by_component.items():
+        if component not in weights:
+            continue
+        weight = weights[component]
+        full = max(1, _FULL_MARKS_AT.get(component, len(checks)))
+        marks[component] = tuple(
+            (weight * min(true_count, full) * 2 + full) // (2 * full)
+            for true_count in range(len(checks) + 1)
+        )
+    return MappingProxyType(marks)
+
 
 # A no_contact note ("called, no answer") cannot report what the client said,
-# and has no deal specifics to give. Those components are SUPPRESSED for it --
-# their weight leaves the denominator entirely. Scoring them 0 instead would
-# cap an honest no-contact note at 60/100 and teach salespeople to pad notes.
+# has no deal specifics to give, and the attempt IS what happened -- there is
+# no outcome beyond it to record. Those components are SUPPRESSED for it --
+# their weight leaves the denominator entirely, which for no_contact is 35.
+# Scoring them 0 instead would cap an honest no-contact note and teach
+# salespeople to pad notes.
 _SUPPRESSED_COMPONENTS_BY_TYPE: Mapping[NoteType, frozenset[ComponentName]] = (
     MappingProxyType(
         {
             NoteType.NO_CONTACT: frozenset(
-                {ComponentName.CLIENT_SAID, ComponentName.DEAL_SPECIFICS}
+                {
+                    ComponentName.WHAT_HAPPENED,
+                    ComponentName.CLIENT_SAID,
+                    ComponentName.DEAL_SPECIFICS,
+                }
             ),
         }
     )
 )
 
 # Which components the vagueness pass may legitimately report missing, per
-# type. Same logic: asking a no_contact note "what did the client say?" is a
-# question its author cannot answer.
+# type. THE SAME RULE AS THE TABLE ABOVE, and it has to be: a component nobody
+# may be asked about is one nobody may be marked down on. no_contact's two
+# tables agree member for member (deal_specifics has no MissingComponent
+# counterpart), and they diverged once -- register item 130 narrowed this one
+# and left what_happened scored, which cost a no-contact note 25 of 60 on
+# something its author could never be asked to fix.
 _ALL_MISSING: frozenset[MissingComponent] = frozenset(MissingComponent)
 
 _ALLOWED_MISSING_BY_TYPE: Mapping[NoteType, frozenset[MissingComponent]] = (
@@ -107,7 +182,6 @@ _ALLOWED_MISSING_BY_TYPE: Mapping[NoteType, frozenset[MissingComponent]] = (
         {
             NoteType.NO_CONTACT: frozenset(
                 {
-                    MissingComponent.WHAT_HAPPENED,
                     MissingComponent.NEXT_STEP_WITH_DATE,
                 }
             ),
@@ -129,8 +203,21 @@ class TenantConfig:
 
     weights: Mapping[ComponentName, int]
     band_boundaries: tuple[tuple[Band, int], ...]
+    checks_by_component: Mapping[ComponentName, tuple[CheckName, ...]]
+    # Derived from weights and checks in __post_init__, never set by a caller.
+    marks_by_true_count: Mapping[ComponentName, tuple[int, ...]] = field(init=False)
     suppressed_components_by_type: Mapping[NoteType, frozenset[ComponentName]]
     allowed_missing_by_type: Mapping[NoteType, frozenset[MissingComponent]]
+
+    # Register item 132: a note below the length floor that is a known outcome
+    # is judged, not asked "what happened". Codes take a trailing attempt number
+    # (na1, cb2); phrases match the whole stripped note. Tables, not a model
+    # call: over half of real notes are this short. Empty recognises nothing.
+    # Fillers ("tmrw", "am") may follow a code; every word must be a code or a
+    # filler. All three tables are stored casefolded (__post_init__ folds them).
+    short_note_codes: frozenset[str]
+    short_note_phrases: frozenset[str]
+    short_note_fillers: frozenset[str]
 
     accept_threshold: int
     flag_threshold: int
@@ -181,8 +268,34 @@ class TenantConfig:
     attempt_ttl_seconds: int
     idempotency_ttl_seconds: int
 
+    # Register item 144. How many rows a per-rep measure needs before it is
+    # reported at all; below it the measure is SUPPRESSED with a reason. 10 is
+    # provisional and deliberately not small: the measure it protects is shown
+    # to a manager as a standard. Too low and a rep with three notes is given
+    # an average that is noise; too high and a real team never sees one.
+    measure_evidence_floor: int
+    # The rolling window every per-rep measure is computed over, in days. 30 as
+    # the business document asks. Too short and a quiet week suppresses
+    # everything; too long and a rep who improved last week still reads badly.
+    rolling_window_days: int
+
+    # Register item 142: what the tenant asked us to do with a judgement it
+    # does not like. Read once per judgement and stamped on the block; a
+    # tenant that moves to strict never changes an old judgement's meaning.
     enforcement_mode: EnforcementMode
     config_version: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "marks_by_true_count",
+            _derive_marks(self.weights, self.checks_by_component),
+        )
+        # The three short-note tables are folded here, the one place every
+        # TenantConfig passes through, so a hand-built config matches too.
+        for name in ("short_note_codes", "short_note_phrases", "short_note_fillers"):
+            table = getattr(self, name)
+            object.__setattr__(self, name, frozenset(w.casefold() for w in table))
 
     def band_for(self, total: int) -> Band:
         """Derive the band from a total. THE only way a band is produced --
@@ -203,8 +316,23 @@ class TenantConfig:
 _DEFAULT_CONFIG = TenantConfig(
     weights=_WEIGHTS,
     band_boundaries=_BAND_BOUNDARIES,
+    checks_by_component=_CHECKS_BY_COMPONENT,
     suppressed_components_by_type=_SUPPRESSED_COMPONENTS_BY_TYPE,
     allowed_missing_by_type=_ALLOWED_MISSING_BY_TYPE,
+    short_note_codes=frozenset({"na", "wa", "cb"}),
+    short_note_phrases=frozenset(
+        {
+            "not interested",
+            "no answer",
+            "no reply",
+            "wrong number",
+            "لا يرد",
+            "مش مهتم",
+        }
+    ),
+    short_note_fillers=frozenset(
+        {"tmrw", "today", "bkra", "bokra", "am", "pm", "again", "بكرة", "النهاردة"}
+    ),
     accept_threshold=70,
     flag_threshold=40,
     business_line_field=None,  # ASSUMPTION[Q13] -- see TenantConfig above
@@ -218,8 +346,17 @@ _DEFAULT_CONFIG = TenantConfig(
     rate_limit_window_seconds=3600,
     attempt_ttl_seconds=21600,  # 6h
     idempotency_ttl_seconds=86400,  # 24h
+    measure_evidence_floor=10,  # provisional -- see the field's comment
+    rolling_window_days=30,
+    # Every tenant launches advisory and no team moves to strict before the
+    # calibration target is met, which nothing in this service can check. So
+    # advisory is the default and only a tenant file may say otherwise.
     enforcement_mode=EnforcementMode.ADVISORY,
-    config_version="tenant-cfg-default-2",
+    # -4: register item 142 changed the enforcement_mode vocabulary, so a file
+    # saying "blocking" no longer parses. The rubric did not move and
+    # RUBRIC_VERSION did not either -- this stamp is what makes an old
+    # judgement, made under the old vocabulary, still identifiable.
+    config_version="tenant-cfg-default-4",
 )
 
 
@@ -239,6 +376,9 @@ class TenantConfigFile(BaseModel):
     config_version: str = Field(min_length=1)
     weights: dict[ComponentName, int] | None = None
     band_boundaries: list[tuple[Band, int]] | None = None
+    short_note_codes: frozenset[str] | None = None
+    short_note_phrases: frozenset[str] | None = None
+    short_note_fillers: frozenset[str] | None = None
     accept_threshold: int | None = Field(default=None, ge=0, le=100)
     flag_threshold: int | None = Field(default=None, ge=0, le=100)
     min_note_chars: int | None = Field(default=None, ge=1)
@@ -250,6 +390,12 @@ class TenantConfigFile(BaseModel):
     rate_limit_window_seconds: int | None = Field(default=None, gt=0)
     attempt_ttl_seconds: int | None = Field(default=None, gt=0)
     idempotency_ttl_seconds: int | None = Field(default=None, gt=0)
+    # Register item 144. ge=1, not ge=0: a floor of 0 reports a measure over no
+    # rows at all, which is the exact thing the floor exists to refuse. These
+    # two are refused HERE and not in _check -- the field bound is the whole
+    # invariant, and a second copy in _check would be a line no input reaches.
+    measure_evidence_floor: int | None = Field(default=None, ge=1)
+    rolling_window_days: int | None = Field(default=None, gt=0)
     enforcement_mode: EnforcementMode | None = None
 
     def build(self) -> TenantConfig:
@@ -277,11 +423,27 @@ def _check(config: TenantConfig) -> None:
         raise ValueError("weights")
     if sum(config.weights.values()) != 100:
         raise ValueError("weights_sum")
+    # Summing to 100 is not enough (register item 137). deal_specifics is
+    # suppressed for EVERY type while Q13 is open, so a rubric that puts all
+    # 100 on it leaves every judgement with a denominator of 0 -- accepted at
+    # startup, then a ValueError on every note. Refused here instead.
+    if not any(
+        weight
+        for component, weight in config.weights.items()
+        if component is not ComponentName.DEAL_SPECIFICS
+        or config.deal_specifics_applicable
+    ):
+        raise ValueError("weights_applicable")
     bands = [band for band, _ in config.band_boundaries]
     uppers = [upper for _, upper in config.band_boundaries]
     ascending = uppers == sorted(set(uppers)) and uppers[0] >= 0
     if bands != list(Band) or not ascending or uppers[-1] != 100:
         raise ValueError("band_boundaries")
+    if set(config.checks_by_component) != set(ComponentName):
+        raise ValueError("checks_by_component")
+    all_checks = [c for checks in config.checks_by_component.values() for c in checks]
+    if sorted(all_checks) != sorted(CheckName):
+        raise ValueError("checks_coverage")
     if not config.flag_threshold < config.accept_threshold:
         raise ValueError("thresholds")
     if not config.min_note_chars < config.max_note_chars:

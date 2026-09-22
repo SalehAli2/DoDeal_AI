@@ -1,4 +1,5 @@
-"""Unit A's HTTP surface: judge a note, resubmit a note, read the versions.
+"""Unit A's HTTP surface: judge a note, resubmit a note, read the versions,
+read a role brief.
 
 Every route depends on gate4_cost, which is the WHOLE live chain -- Gate 1
 (auth) -> Gate 2 (tenancy) -> Gate 4 (cost). Gate 3 is parked; see
@@ -22,20 +23,36 @@ server-side after the save. They sit behind the SAME gate chain, and
 `get_leads_client` is deliberately NOT in their dependency chain: there is
 nothing to fetch, so no backend key is resolved and no tool call can be made.
 The fetch routes remain the contract; see ASSUMPTIONS.md, DECISION[DIRECT_ROUTE].
+
+THE BRIEF ROUTE IS A GET AND ANSWERS 204 (register item 145). It is the one
+route here that can succeed with no body: a brief every measure was suppressed
+on is NOT SENT, because an empty daily email trains people to ignore the
+channel. It reads the judgement store and the user directory, both of which are
+fakes over invented files until the backend answers, and both of which are a
+503 when nothing is configured -- never an empty brief.
 """
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Path, Response
+from fastapi.responses import PlainTextResponse
 
 from dodeal_ai.core.auth.dependencies import gate4_cost
 from dodeal_ai.core.config import Settings, get_settings
 from dodeal_ai.core.context import RequestContext
+from dodeal_ai.core.errors import SubjectNotFoundError
 from dodeal_ai.core.llm import LLMClient, get_llm_client
 from dodeal_ai.tools.leads import LeadsClient, get_leads_client
+from dodeal_ai.units.structured_intelligence.brief import build_brief
 from dodeal_ai.units.structured_intelligence.config import get_tenant_config
+from dodeal_ai.units.structured_intelligence.judgement_rows import (
+    JudgementStore,
+    get_judgement_store,
+)
+from dodeal_ai.units.structured_intelligence.measures import rolling_window
 from dodeal_ai.units.structured_intelligence.pipeline import (
     PROMPT_SET_VERSION,
     RUBRIC_VERSION,
@@ -49,6 +66,12 @@ from dodeal_ai.units.structured_intelligence.schemas import (
     Judgement,
     JudgementRequest,
     Versions,
+)
+from dodeal_ai.units.structured_intelligence.user_directory import (
+    Role,
+    User,
+    UserDirectory,
+    get_user_directory,
 )
 
 router = APIRouter(prefix="/api/v1", tags=["unit-a"])
@@ -206,3 +229,78 @@ async def read_versions(
         model_version=settings.llm_model,
         config_version=get_tenant_config(context.tenant).config_version,
     )
+
+
+def _subject(users: list[User], subject_id: int) -> User:
+    """The person this brief is about, or a 404.
+
+    NOT a 204. "There is no such person" and "nothing to report about this
+    person" are different answers, and a CRM sending a wrong id would read a
+    204 as a quiet day, every day, for ever.
+    """
+    for user in users:
+        if user.user_id == subject_id:
+            return user
+    raise SubjectNotFoundError()
+
+
+@router.get(
+    "/briefs/{role}/{subject_id}",
+    response_class=PlainTextResponse,
+    responses={204: {"description": "Nothing to report; no brief is sent."}},
+)
+async def read_brief(
+    role: Role,
+    context: Annotated[RequestContext, Depends(gate4_cost)],
+    store: Annotated[JudgementStore, Depends(get_judgement_store)],
+    directory: Annotated[UserDirectory, Depends(get_user_directory)],
+    subject_id: Annotated[int, Path(ge=1)],
+) -> Response:
+    """One role brief, on demand. Register item 145.
+
+    NO SCHEDULER. The CRM calls at 07:30; whether this service needs a clock of
+    its own is an open question, and a scheduler built before the answer would
+    be a second thing sending briefs.
+
+    204 WHEN THERE IS NOTHING TO SAY, and it is the rule the piece is for: an
+    empty daily email trains people to ignore the channel within a fortnight.
+    A 204 means every measure was suppressed, not that the request was wrong --
+    an unknown subject is a 404 and an unwired store is a 503.
+
+    `role` is what the CALLER asked for, not what the subject's title entitles
+    them to: a head of sales may want the rep view of one of their people.
+
+    WHO MAY ASK FOR WHOSE BRIEF IS GATE 3's QUESTION, and Gate 3 is parked
+    (core/auth/dependencies.py). This route sits behind the same live chain as
+    every other -- auth, tenancy, cost -- so it cannot cross a tenant; within
+    one, it does not check that the caller is the subject or their manager. It
+    cannot: the token's `sub` and the CRM's author ids are different id spaces
+    (ASSUMPTION[Q7]) and are never compared. Recorded for the lead.
+    """
+    config = get_tenant_config(context.tenant)
+    since, until = rolling_window(datetime.now(UTC), config)
+
+    users = list(await directory.users(context.tenant))
+    subject = _subject(users, subject_id)
+
+    # The rep brief narrows the store read by author; the other two need the
+    # whole tenant's window, because they roll up across people and teams.
+    rows = await store.rows_between(
+        context.tenant,
+        since=since,
+        until=until,
+        author_id=subject.user_id if role is Role.REP else None,
+    )
+
+    text = build_brief(
+        role,
+        subject,
+        users=users,
+        rows=rows,
+        since=since,
+        until=until,
+        config=config,
+    )
+    if text is None:
+        return Response(status_code=204)
+    return PlainTextResponse(text)

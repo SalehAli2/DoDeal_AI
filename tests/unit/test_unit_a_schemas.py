@@ -14,6 +14,7 @@ from dodeal_ai.units.structured_intelligence.schemas import (
     MAX_NOTE_TEXT_CHARS,
     UNCLASSIFIABLE,
     Band,
+    CheckName,
     ClassificationOutput,
     ComponentName,
     Decision,
@@ -166,7 +167,7 @@ def test_judgement_request_forbids_extra_fields() -> None:
 
 
 def test_no_output_schema_carries_a_band_or_a_total() -> None:
-    # The structural guarantee: a model supplies marks and a classification.
+    # The structural guarantee: a model supplies check answers and a classification.
     # total/denominator/band/decision are computed in code from TenantConfig.
     for schema in _OUTPUT_SCHEMAS:
         fields = set(schema.model_fields)
@@ -279,23 +280,31 @@ def test_classification_rejects_an_invented_type() -> None:
         ClassificationOutput(note_type="probably_a_viewing")
 
 
-def test_score_output_takes_marks_and_nothing_else() -> None:
-    parsed = ScoreOutput(marks={"what_happened": 20, "clarity": 5})
-    assert parsed.marks[ComponentName.WHAT_HAPPENED] == 20
-
-
-def test_score_output_leaves_mark_bounds_to_the_scoring_code() -> None:
-    # 0 <= mark <= weight[c] is per-tenant and validate_output has no context
-    # channel, so the bound is checked against TenantConfig where the score is
-    # computed -- not declared here against a constant that would be wrong for
-    # any tenant whose weights differ.
-    assert ScoreOutput(marks={"clarity": 900}).marks[ComponentName.CLARITY] == 900
-    assert ScoreOutput(marks={"clarity": -4}).marks[ComponentName.CLARITY] == -4
-
-
-def test_score_output_rejects_an_unknown_component() -> None:
+def test_score_output_takes_checks_and_a_reason_and_nothing_else() -> None:
+    parsed = ScoreOutput(
+        checks={"wh_outcome": True, "cl_readable": False}, reasoning="Scripted."
+    )
+    assert parsed.checks[CheckName.WH_OUTCOME] is True
+    assert parsed.checks[CheckName.CL_READABLE] is False
     with pytest.raises(ValidationError):
-        ScoreOutput(marks={"enthusiasm": 5})
+        ScoreOutput(marks={"clarity": 5}, reasoning="Scripted.")  # type: ignore[call-arg]
+
+
+def test_score_output_leaves_which_checks_are_asked_to_the_scoring_code() -> None:
+    # Which checks apply is per-tenant and per-type, and validate_output has no
+    # context channel, so completeness is checked against TenantConfig where the
+    # score is computed (scoring.validate_checks) -- not declared here.
+    assert ScoreOutput(checks={}, reasoning="").checks == {}
+    assert len(ScoreOutput(checks={"ds_figures": True}, reasoning="").checks) == 1
+
+
+def test_score_output_rejects_an_unknown_check_and_a_non_bool_answer() -> None:
+    with pytest.raises(ValidationError):
+        ScoreOutput(checks={"enthusiasm": True}, reasoning="")
+    with pytest.raises(ValidationError):
+        ScoreOutput(checks={"wh_outcome": 1}, reasoning="")  # a bool, strictly
+    with pytest.raises(ValidationError):
+        ScoreOutput(checks={"wh_outcome": "yes"}, reasoning="")
 
 
 # --- the vagueness biconditional, both directions --------------------------

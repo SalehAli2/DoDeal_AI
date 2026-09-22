@@ -103,7 +103,7 @@ async def _detect(payload_or_response, note_type: NoteType = NoteType.DISCOVERY)
 @pytest.mark.parametrize("note_type", SCORED_TYPES)
 def test_every_scored_type_has_its_own_template(note_type):
     assert template_for(note_type) == (
-        f"structured_intelligence/vague_{note_type.value}_v1.txt"
+        f"structured_intelligence/vague_{note_type.value}_v2.txt"
     )
 
 
@@ -129,8 +129,9 @@ def test_the_templates_plus_system_event_are_exactly_the_vocabulary():
 @pytest.mark.parametrize("note_type", SCORED_TYPES)
 def test_each_template_loads_and_names_its_own_bar(note_type):
     stable = build_vague_prompt(_note(), note_type).stable
-    assert "THE FLOOR TEST" in stable
-    assert "THIS NOTE RECORDS" in stable
+    assert "floor test" in stable.lower()
+    assert "NOTE TYPE:" in stable
+    assert "MAY BE MISSING" in stable
 
 
 @pytest.mark.parametrize("note_type", SCORED_TYPES)
@@ -183,15 +184,13 @@ def test_no_template_carries_a_weight_or_a_threshold(note_type):
         assert forbidden not in stable
 
 
-# The relative-time sentence, in the words all six templates carry it in. A
-# template that accepted only a calendar date or a named day would report
-# next_step_with_date missing on a note that says exactly when the next step is
-# -- and "cb tmrw" is how the corpus actually writes it.
-RELATIVE_TIME_SENTENCE = (
-    "A relative time anchored to when the note was written also counts as a "
-    'date — for example "tomorrow", "after 2 hrs", "next Tuesday", '
-    '"end of the week".'
-)
+# The relative-time rule, which EVERY type carries because it lives in the
+# shared block (register item 137). A template that accepted only a calendar
+# date or a named day would report next_step_with_date missing on a note that
+# says exactly when the next step is -- and "cb tmrw" is how the corpus
+# actually writes it. won_lost lost the rule when item 133 split the blocks,
+# while its own second example ("Paperwork to admin tmrw") still relied on it;
+# the rule is type-independent, so it belongs in the shared half.
 
 
 def _collapsed(text: str) -> str:
@@ -202,9 +201,10 @@ def _collapsed(text: str) -> str:
 
 
 @pytest.mark.parametrize("note_type", SCORED_TYPES)
-def test_every_template_accepts_a_relative_time_as_a_date(note_type):
-    stable = build_vague_prompt(_note(), note_type).stable
-    assert RELATIVE_TIME_SENTENCE in _collapsed(stable)
+def test_every_dated_next_step_template_accepts_a_relative_time(note_type):
+    collapsed = _collapsed(build_vague_prompt(_note(), note_type).stable).lower()
+    assert "relative time" in collapsed
+    assert '"tomorrow"' in collapsed
 
 
 @pytest.mark.parametrize("note_type", SCORED_TYPES)
@@ -212,8 +212,9 @@ def test_every_template_forbids_the_generic_question(note_type):
     # The one string this unit shows a human. "Please improve this note" tells
     # its author nothing they did not already know.
     stable = build_vague_prompt(_note(), note_type).stable
-    assert "please improve this note" in stable.lower()
-    assert "NEVER write a generic instruction" in stable
+    collapsed = _collapsed(stable).lower()
+    assert "please improve this note" in collapsed
+    assert "never write" in collapsed
 
 
 @pytest.mark.parametrize("note_type", SCORED_TYPES)
@@ -348,13 +349,21 @@ async def test_client_said_is_rejected_even_beside_an_allowed_component():
         )
 
 
-@pytest.mark.parametrize("component", ["what_happened", "next_step_with_date"])
-async def test_the_two_allowed_components_pass_for_no_contact(component):
+async def test_the_one_allowed_component_passes_for_no_contact():
     output, _, _ = await _detect(
-        _vague(missing=[component], prompt="A specific question."),
+        _vague(missing=["next_step_with_date"], prompt="A specific question."),
         NoteType.NO_CONTACT,
     )
-    assert output.missing_components == [MissingComponent(component)]
+    assert output.missing_components == [MissingComponent.NEXT_STEP_WITH_DATE]
+
+
+async def test_what_happened_is_rejected_for_no_contact():
+    """Register item 130: asking a no-contact note what happened is refused."""
+    with pytest.raises(MalformedOutputError):
+        await _detect(
+            _vague(missing=["what_happened"], prompt="What happened?"),
+            NoteType.NO_CONTACT,
+        )
 
 
 @pytest.mark.parametrize(
@@ -389,7 +398,7 @@ def test_the_restriction_comes_from_the_tenant_config_not_from_code():
     # A rubric decision like every other one: a tenant that wants a different
     # set changes config, not this module.
     assert CONFIG.allowed_missing_by_type[NoteType.NO_CONTACT] == frozenset(
-        {MissingComponent.WHAT_HAPPENED, MissingComponent.NEXT_STEP_WITH_DATE}
+        {MissingComponent.NEXT_STEP_WITH_DATE}
     )
 
 

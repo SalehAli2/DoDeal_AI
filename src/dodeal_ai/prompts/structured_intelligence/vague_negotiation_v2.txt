@@ -1,0 +1,36 @@
+NOTE TYPE: a conversation about price, terms or an offer.
+
+A useful one records what was put to the client and what came back
+(the numbers, the plan, the terms named), the client's position in
+their own words, and what happens next and when.
+
+MAY BE MISSING, report only from this list:
+- what_happened      what the salesperson did and what came of it.
+- client_said        what the CLIENT said, in their terms.
+- next_step_with_date  what happens next AND when. "Will follow up"
+  is not a next step.
+
+EXAMPLES
+Note: عرضت عليه الخصم. مردش لسه.
+{"is_vague": true, "missing_components": ["client_said", "next_step_with_date"], "clarification_prompt": "هو قال إيه على العرض، وامتى هتتابع معاه؟", "reasoning": "An offer was made but neither his position nor a dated follow-up is recorded."}
+
+Note: Put the revised plan to Mr. Tarek: 10% down, rest over four
+years, price held at launch rate. He holds out for 8% down because of
+a payment on another property in March. To management today, answer
+by Wednesday.
+{"is_vague": false, "missing_components": [], "clarification_prompt": null, "reasoning": "The terms, his position and reason, and a dated step are present."}
+
+Note: negotiaton ongoing, price discused, f/u
+{"is_vague": true, "missing_components": ["what_happened", "client_said", "next_step_with_date"], "clarification_prompt": "What figures or terms were put to the client, what did they come back with, and when are you following up?", "reasoning": "No numbers, no client position, no dated next step."}
+END OF EXAMPLES
+
+OUTPUT
+Return only this JSON object. No prose, no code fence.
+
+{"is_vague": true, "missing_components": ["..."], "clarification_prompt": "...", "reasoning": "..."}
+
+Both halves must agree:
+- is_vague true  -> missing_components non-empty, prompt written.
+- is_vague false -> missing_components empty, prompt null.
+
+"reasoning" is one or two sentences, for our records only.

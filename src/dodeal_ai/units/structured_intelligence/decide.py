@@ -23,10 +23,12 @@ this note; the rate limit is about this person; "nothing to ask" is about the
 answer we got. Reporting the rate limit to someone whose note was a
 resubmission would send them to the wrong explanation.
 
-ENFORCEMENT IS THE CRM'S. `prompt_clarification` is advice; nothing here blocks
-a save, and `enforcement_mode` does not branch (see config.py). What this
-function controls is only whether WE send a question and whether the counters
-that limit our questions move.
+THE ENFORCEMENT BLOCK IS THE THIRD QUESTION, and `enforcement()` below answers
+it for EVERY judgement -- scored or suppressed. It is separate from decide()
+because a suppressed note has no Decision to hang a verdict on and still needs
+one: the CRM must never infer what to do from an action that is not there.
+Nothing here blocks a save today; `strict` is built and recorded, never
+enabled, and the mode comes from the tenant's config and nowhere else.
 
 NO MODEL OUTPUT REACHES A DECISION. The inputs are a computed NoteScore, one
 integer and one flag from db2, the tenant's config, and one boolean from the
@@ -41,9 +43,14 @@ from dodeal_ai.units.structured_intelligence.config import TenantConfig
 from dodeal_ai.units.structured_intelligence.schemas import (
     Decision,
     DecisionAction,
+    Enforcement,
+    EnforcementMode,
+    EnforcementTarget,
+    EnforcementVerdict,
     NoteAnalysis,
     NoteScore,
     PromptWithheld,
+    SuppressedDetail,
 )
 
 
@@ -58,6 +65,68 @@ def _action(total: int, config: TenantConfig) -> DecisionAction:
     if total >= config.flag_threshold:
         return DecisionAction.ACCEPT_FLAG_PROMPT
     return DecisionAction.PROMPT_CLARIFICATION
+
+
+# The two actions that mean we have something to say about the note: one
+# accepts it with a flag, the other wants to ask about it. accept_silent is
+# absent deliberately -- a note we would not ask about is not flagged.
+_FLAGGED_ACTIONS: frozenset[DecisionAction] = frozenset(
+    {DecisionAction.ACCEPT_FLAG_PROMPT, DecisionAction.PROMPT_CLARIFICATION}
+)
+
+# The one suppression that is still a complaint ABOUT THE NOTE: it is below the
+# length floor, so the salesperson wrote too little. Every other suppression is
+# a statement about what we can judge -- a machine timeline entry, a note the
+# classifier could not place, a note too long to be one interaction -- and
+# flagging a salesperson for one would be flagging them for our own limits.
+_FLAGGED_SUPPRESSION: SuppressedDetail = SuppressedDetail.NOTE_TOO_SHORT
+
+
+def enforcement(
+    config: TenantConfig,
+    *,
+    action: DecisionAction | None = None,
+    detail: SuppressedDetail | None = None,
+) -> Enforcement:
+    """The enforcement block, for every judgement this service returns.
+
+    Pure, and derived from TWO things only: the tenant's mode and what we
+    already decided about the note. No model output reaches it -- there is no
+    field on any output schema it could read -- and neither does the CRM's
+    payload. A caller cannot hand us a verdict any more than it can hand us a
+    band.
+
+    Exactly one of `action` and `detail` is given: `action` on a scored
+    judgement, `detail` on a suppressed one. Both defaulting to None is not an
+    invitation to pass neither -- a judgement with neither is not a shape the
+    pipeline can produce, and if it were, "nothing was decided about this note"
+    is honestly an allow.
+
+    OFF short-circuits before anything else is looked at: a tenant that has
+    turned enforcement off gets `allow` whatever the action was. The judgement
+    is still made and still reported in full -- off is about what the CRM does
+    with it, not about whether we do the work.
+    """
+    if config.enforcement_mode is EnforcementMode.OFF:
+        return Enforcement(
+            mode=EnforcementMode.OFF,
+            verdict=EnforcementVerdict.ALLOW,
+            applies_to=None,
+        )
+
+    # STRICT DOES NOT BLOCK, and must not until the blocking work lands.
+    # Blocking is scoped to a STAGE CHANGE, and the request carries no field
+    # saying the lead is moving stage -- that field is an ask to the backend
+    # and a register item of its own. Until it exists there is no moment to
+    # block at, so strict is advisory plus a recorded intent: a tenant may set
+    # it, and the mode on the judgement says so, but the verdict is the same.
+    flagged = action in _FLAGGED_ACTIONS or detail is _FLAGGED_SUPPRESSION
+    return Enforcement(
+        mode=config.enforcement_mode,
+        verdict=EnforcementVerdict.FLAG if flagged else EnforcementVerdict.ALLOW,
+        # Null exactly when nothing is flagged: `allow` has nothing to be about.
+        applies_to=EnforcementTarget.NOTE if flagged else None,
+    )
 
 
 def withheld_reason(

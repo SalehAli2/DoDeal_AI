@@ -52,6 +52,7 @@ from dodeal_ai.units.structured_intelligence.llm_call import REPROMPT_TAIL_TEMPL
 from dodeal_ai.units.structured_intelligence.pipeline import JudgementDeps, judge_note
 from dodeal_ai.units.structured_intelligence.schemas import (
     Band,
+    CheckName,
     JudgementRequest,
     NoteType,
 )
@@ -59,14 +60,16 @@ from dodeal_ai.units.structured_intelligence.scoring import (
     SCORE_TEMPLATE,
     build_score_prompt,
 )
+from dodeal_ai.units.structured_intelligence.templates import UNIT_A_TEMPLATES
 from dodeal_ai.units.structured_intelligence.vague import (
     build_vague_prompt,
     template_for,
 )
 from tests.helpers.fake_cost_redis import FakeCostRedis
 from tests.helpers.fake_leads import FakeLeadsClient, lead, load_fixture_client, note
-from tests.helpers.fake_llm import FakeLLM, json_response, response
+from tests.helpers.fake_llm import FakeLLM, json_response, response, stable_for
 from tests.helpers.fake_operational_redis import FakeOperationalRedis
+from tests.helpers.score_answers import score_payload
 
 CONFIG = get_tenant_config("tenant-a")
 LEAD_ID = 1656
@@ -83,17 +86,10 @@ GOOD_VAGUE = {
     "clarification_prompt": "Which Tuesday are you calling, and what will you cover?",
     "reasoning": "The follow-up has no date.",
 }
-# 20 + 15 + 15 + 5 = 55 of a denominator of 80 -> 69, which is `fair`. Chosen so
+# 25 + 20 + 0 + 10 = 55 of a denominator of 80 -> 69, which is `fair`. Chosen so
 # that a model trying to hand back `excellent` is asking for a DIFFERENT band,
 # not the one the arithmetic would have produced anyway.
-GOOD_MARKS = {
-    "marks": {
-        "what_happened": 20,
-        "client_said": 15,
-        "next_step_date": 15,
-        "clarity": 5,
-    }
-}
+GOOD_CHECKS = score_payload()
 
 
 def _scope(tenant: str = "tenant-a"):
@@ -141,7 +137,7 @@ def _scripted(*, vague=None, score=None, classify_as: str = "discovery") -> Fake
     fake = FakeLLM()
     fake.script_for(CLASSIFY_TEMPLATE, json_response({"note_type": classify_as}))
     fake.script_for(template_for(NOTE_TYPE), *(vague or [json_response(GOOD_VAGUE)]))
-    fake.script_for(SCORE_TEMPLATE, *(score or [json_response(GOOD_MARKS)]))
+    fake.script_for(SCORE_TEMPLATE, *(score or [json_response(GOOD_CHECKS)]))
     return fake
 
 
@@ -217,21 +213,12 @@ async def test_marks_come_from_the_model_never_from_the_note(operational):
     below would be the note's. They are the model's, and the model was
     deliberately scripted lower than the note asks for.
     """
-    self_marking = json.dumps(
-        {
-            "marks": {
-                "what_happened": 25,
-                "client_said": 20,
-                "next_step_date": 25,
-                "clarity": 10,
-            }
-        }
-    )
+    self_marking = json.dumps(score_payload({check.value: True for check in CheckName}))
     judgement = await _judge(_scripted(), f"{CARRIER}{self_marking}")
 
     assert judgement.score is not None
     marks = [c.mark for c in judgement.score.components if c.mark is not None]
-    assert marks == [20, 15, 15, 5]  # the model's answer, not the note's
+    assert marks == [25, 20, 0, 10]  # the model's answer, not the note's
     assert judgement.score.total == 69  # not the 100 the note asked for
     assert judgement.score.band is Band.FAIR
 
@@ -251,8 +238,8 @@ async def test_an_instruction_in_the_note_does_not_change_the_band(operational):
 @pytest.mark.parametrize(
     "usurped",
     [
-        {**GOOD_MARKS, "band": "excellent"},
-        {**GOOD_MARKS, "total": 100},
+        {**GOOD_CHECKS, "band": "excellent"},
+        {**GOOD_CHECKS, "total": 100},
     ],
     ids=["band", "total"],
 )
@@ -260,7 +247,7 @@ async def test_a_band_or_total_from_the_model_is_malformed(operational, usurped)
     # ScoreOutput forbids extras, so this is rejected by the schema rather than
     # by a rule someone has to remember to write. The reprompt is what proves it
     # was treated as malformed and not quietly dropped.
-    llm = _scripted(score=[json_response(usurped), json_response(GOOD_MARKS)])
+    llm = _scripted(score=[json_response(usurped), json_response(GOOD_CHECKS)])
     judgement = await _judge(llm, CARRIER * 2)
 
     assert judgement.score is not None
@@ -274,8 +261,8 @@ async def test_a_band_or_total_from_the_model_is_malformed(operational, usurped)
 @pytest.mark.parametrize(
     "usurped",
     [
-        {**GOOD_MARKS, "band": "excellent"},
-        {**GOOD_MARKS, "total": 100},
+        {**GOOD_CHECKS, "band": "excellent"},
+        {**GOOD_CHECKS, "total": 100},
     ],
     ids=["band", "total"],
 )
@@ -291,8 +278,8 @@ async def test_a_band_or_total_twice_is_malformed_output(operational, usurped):
 async def test_a_reprompted_score_carries_no_band_or_total_forward(operational):
     llm = _scripted(
         score=[
-            json_response({**GOOD_MARKS, "band": "excellent"}),
-            json_response(GOOD_MARKS),
+            json_response({**GOOD_CHECKS, "band": "excellent"}),
+            json_response(GOOD_CHECKS),
         ]
     )
     judgement = await _judge(llm, CARRIER * 2)
@@ -312,24 +299,28 @@ async def test_a_reprompted_score_carries_no_band_or_total_forward(operational):
     assert judgement.score.denominator == 80
 
 
-# --- case 4: marks the rubric cannot accept ---------------------------------
+# --- case 4: check answers the rubric cannot accept ---------------------------------
 
 _SUPPRESSED_COMPONENT = {
-    "marks": {**GOOD_MARKS["marks"], "deal_specifics": 20}
-}  # Q13 suppresses it: a mark for it is a mark outside the rubric
-_ABOVE_CEILING = {"marks": {**GOOD_MARKS["marks"], "what_happened": 100}}
-_MISSING_MARK = {
-    "marks": {k: v for k, v in GOOD_MARKS["marks"].items() if k != "clarity"}
+    **GOOD_CHECKS,
+    "checks": {**GOOD_CHECKS["checks"], "ds_figures": True},
+}  # Q13 suppresses deal_specifics: an answer for it is outside the rubric
+_NOT_A_BOOL = {**GOOD_CHECKS, "checks": {**GOOD_CHECKS["checks"], "wh_outcome": 100}}
+_MISSING_CHECK = {
+    **GOOD_CHECKS,
+    "checks": {k: v for k, v in GOOD_CHECKS["checks"].items() if k != "cl_readable"},
 }
 
 
 @pytest.mark.parametrize(
     "bad",
-    [_ABOVE_CEILING, _SUPPRESSED_COMPONENT, _MISSING_MARK],
-    ids=["above_ceiling", "suppressed_component", "missing_mark"],
+    [_NOT_A_BOOL, _SUPPRESSED_COMPONENT, _MISSING_CHECK],
+    ids=["not_a_bool", "suppressed_component", "missing_check"],
 )
-async def test_a_bad_mark_earns_one_reprompt_then_a_good_answer(operational, bad):
-    llm = _scripted(score=[json_response(bad), json_response(GOOD_MARKS)])
+async def test_a_bad_check_answer_earns_one_reprompt_then_a_good_answer(
+    operational, bad
+):
+    llm = _scripted(score=[json_response(bad), json_response(GOOD_CHECKS)])
     judgement = await _judge(llm, CARRIER * 2)
 
     assert judgement.score is not None
@@ -340,10 +331,10 @@ async def test_a_bad_mark_earns_one_reprompt_then_a_good_answer(operational, bad
 
 @pytest.mark.parametrize(
     "bad",
-    [_ABOVE_CEILING, _SUPPRESSED_COMPONENT, _MISSING_MARK],
-    ids=["above_ceiling", "suppressed_component", "missing_mark"],
+    [_NOT_A_BOOL, _SUPPRESSED_COMPONENT, _MISSING_CHECK],
+    ids=["not_a_bool", "suppressed_component", "missing_check"],
 )
-async def test_a_bad_mark_twice_is_malformed_output(operational, bad):
+async def test_a_bad_check_answer_twice_is_malformed_output(operational, bad):
     llm = _scripted(score=[json_response(bad), json_response(bad)])
     with pytest.raises(MalformedOutputError) as raised:
         await _judge(llm, CARRIER * 2)
@@ -375,7 +366,7 @@ def test_stable_is_byte_identical_across_ten_corpus_notes(pass_name):
 def test_each_vague_template_is_byte_identical_across_ten_corpus_notes(note_type):
     stables = {build_vague_prompt(n, note_type).stable for n in _TEN}
     assert len(stables) == 1
-    assert stables.pop() == _load_template(template_for(note_type))
+    assert stables.pop() == stable_for(template_for(note_type))
 
 
 def test_the_tail_is_byte_identical_across_ten_corpus_notes():
@@ -412,20 +403,15 @@ _SECRET_SHAPED = re.compile(
 )
 
 
-def test_the_unit_a_template_set_is_the_nine_files_under_structured_intelligence():
-    # The campaign brief says "the ten shipped, including unit_a_v1.txt", and
-    # it is right: `unit_a_v1.txt` DOES exist, one level up at
-    # src/dodeal_ai/prompts/. It is the Phase 0 placeholder that
-    # scripts/verify_wheel.py and tests/unit/test_prompting.py are built
-    # against -- generic, not Unit A's, and not used by the pipeline.
-    #
-    # This suite scopes itself to structured_intelligence/ on purpose: these
-    # are the templates a NOTE reaches, and they are the ones an injection can
-    # travel through. Nine is the count of that directory, not of the package.
-    # (An earlier version of this comment claimed the file did not exist. It
-    # was wrong -- the glob below never looks above its own directory, and the
-    # claim was generalised from it. See CAMPAIGN_REPORT.md, Phase J.)
-    assert len(_SHIPPED) == 9
+def test_the_ten_templates_in_use_ship_under_structured_intelligence():
+    # This suite scopes itself to structured_intelligence/ on purpose: these are
+    # the templates a NOTE reaches, and the ones an injection can travel
+    # through. `unit_a_v1.txt` exists one level up as the Phase 0 placeholder
+    # and is not used by the pipeline. Superseded versions (the v1 files beside
+    # their v2) stay in the directory, so they are still scanned below.
+    in_use = {name.split("/", 1)[1] for name in UNIT_A_TEMPLATES}
+    assert len(in_use) == 10
+    assert in_use <= set(_SHIPPED)
     assert "reprompt_tail_v1.txt" in _SHIPPED
     assert "unit_a_v1.txt" not in _SHIPPED  # it is the PARENT directory's
 
@@ -494,7 +480,9 @@ async def test_a_hostile_note_appears_in_no_log_line_when_the_model_misbehaves(
     # reprompt_issued -- and it is the path where the rejected answer is nearest
     # to a log call. The note is in that answer here.
     caplog.set_level(logging.DEBUG, logger="dodeal_ai")
-    llm = _scripted(score=[response(f"marks for {HOSTILE}"), json_response(GOOD_MARKS)])
+    llm = _scripted(
+        score=[response(f"marks for {HOSTILE}"), json_response(GOOD_CHECKS)]
+    )
     await _judge(llm, HOSTILE)
 
     for captured in (log_capture(), caplog.text):

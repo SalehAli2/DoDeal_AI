@@ -52,7 +52,7 @@ from dodeal_ai.core.llm.profiles import (
     PROFILE_UNIT_A_VAGUE,
 )
 from dodeal_ai.core.logging_config import JsonFormatter
-from dodeal_ai.core.prompting import AssembledPrompt, build_prompt
+from dodeal_ai.core.prompting import AssembledPrompt
 from dodeal_ai.core.resilience import ExternalCallError
 from dodeal_ai.tools.errors import (
     BackendForbidden,
@@ -93,8 +93,9 @@ from dodeal_ai.units.structured_intelligence.vague import (
 from tests.helpers import breakers
 from tests.helpers.fake_cost_redis import FakeCostRedis
 from tests.helpers.fake_leads import FakeLeadsClient, lead, note
-from tests.helpers.fake_llm import FakeLLM, json_response, response
+from tests.helpers.fake_llm import FakeLLM, json_response, response, stable_for
 from tests.helpers.fake_operational_redis import FakeOperationalRedis
+from tests.helpers.score_answers import NO_CONTACT_CHECKS, score_payload
 
 LEAD_ID = 1656
 NOTE_ID = 10
@@ -131,21 +132,12 @@ def _vague_answer(
     )
 
 
-def _score_answer(**marks: int):
-    """The scoring pass's answer. The default marks sum to 55 of a denominator of
+def _score_answer(**checks: bool):
+    """The scoring pass's answer. The default checks give 55 of a denominator of
     80 -- 69, `fair` -- which is one mark below the accept threshold and so the
-    most interesting default to carry into Phase H."""
-    return json_response(
-        {
-            "marks": {
-                "what_happened": 20,
-                "client_said": 15,
-                "next_step_date": 15,
-                "clarity": 5,
-                **marks,
-            }
-        }
-    )
+    most interesting default to carry into Phase H. Keyword overrides flip
+    individual checks (tests/helpers/score_answers.py)."""
+    return json_response(score_payload(**checks))
 
 
 def _happy_path(note_type: str = "discovery"):
@@ -1169,9 +1161,7 @@ async def test_a_no_contact_note_is_scored_against_the_narrower_rubric(
     llm = FakeLLM(
         _classified("no_contact"),
         _vague_answer(missing=["next_step_with_date"]),
-        json_response(
-            {"marks": {"what_happened": 20, "next_step_date": 20, "clarity": 8}}
-        ),
+        json_response(score_payload(NO_CONTACT_CHECKS)),
     )
     deps = JudgementDeps(
         leads=leads,
@@ -1183,9 +1173,10 @@ async def test_a_no_contact_note_is_scored_against_the_narrower_rubric(
     await judge_note(_scope(), _request(), resubmission=False, deps=deps)
 
     line = next(x for x in json_capture() if x["message"] == "judgement_completed")
-    # 48 of 60 -> 80, good. client_said and deal_specifics left the denominator.
-    assert line["denominator"] == 60
-    assert line["band"] == "good"
+    # 23 of 35 -> 66, fair. what_happened, client_said and deal_specifics all
+    # left the denominator (register item 137).
+    assert line["denominator"] == 35
+    assert line["band"] == "fair"
 
 
 # --- one pass fails, the other is cancelled (register item 63) --------------
@@ -1220,8 +1211,8 @@ class _OnePassHeld:
 
     def __init__(self, inner: FakeLLM, *, held: str, failing: str) -> None:
         self._inner = inner
-        self._held = build_prompt(held, "").stable
-        self._failing = build_prompt(failing, "").stable
+        self._held = stable_for(held)
+        self._failing = stable_for(failing)
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
         self.held_calls = 0
@@ -2058,7 +2049,7 @@ async def test_each_pass_names_its_own_profile(operational, leads):
     assert judgement.suppressed is None and judgement.score is not None
 
     stable_to_profile = {
-        build_prompt(template, "").stable: profile
+        stable_for(template): profile
         for template, profile in _PROFILE_BY_TEMPLATE.items()
     }
     paired = {stable_to_profile[call.prompt.stable]: call.profile for call in llm.calls}
@@ -2082,7 +2073,7 @@ async def test_the_reprompt_runs_on_the_same_profile(operational, leads):
         _scope(), _request(), resubmission=False, deps=_deps_with(llm, leads)
     )
 
-    vague_stable = build_prompt(VAGUE_TEMPLATE, "").stable
+    vague_stable = stable_for(VAGUE_TEMPLATE)
     vague_calls = [c for c in llm.calls if c.prompt.stable == vague_stable]
     assert len(vague_calls) == 2
     assert {c.profile for c in vague_calls} == {PROFILE_UNIT_A_VAGUE}
@@ -2101,7 +2092,7 @@ async def test_each_pass_sends_its_own_task_ceiling(operational, leads):
     )
 
     ceilings = {
-        build_prompt(template, "").stable: ceiling
+        stable_for(template): ceiling
         for template, ceiling in (
             (CLASSIFY_TEMPLATE, CLASSIFY_MAX_OUTPUT_TOKENS),
             (VAGUE_TEMPLATE, VAGUE_MAX_OUTPUT_TOKENS),

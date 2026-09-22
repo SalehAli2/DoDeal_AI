@@ -1,0 +1,13 @@
+{
+  "tenant-a": [
+    {"user_id": 401, "name": "Ayla Brook", "role": "head_of_sales", "team": null},
+    {"user_id": 402, "name": "Hana Reyes", "role": "team_leader", "team": "north"},
+    {"user_id": 501, "name": "Idris Vale", "role": "rep", "team": "north"},
+    {"user_id": 502, "name": "Noor Adeyemi", "role": "rep", "team": "north"},
+    {"user_id": 403, "name": "Teo Lindqvist", "role": "team_leader", "team": "south"},
+    {"user_id": 503, "name": "Sana Okafor", "role": "rep", "team": "south"}
+  ],
+  "tenant-b": [
+    {"user_id": 901, "name": "Mira Solberg", "role": "rep", "team": "east"}
+  ]
+}

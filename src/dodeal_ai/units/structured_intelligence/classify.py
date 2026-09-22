@@ -50,7 +50,7 @@ from dodeal_ai.units.structured_intelligence.schemas import (
     SuppressedDetail,
 )
 
-CLASSIFY_TEMPLATE = "structured_intelligence/classify_v1.txt"
+CLASSIFY_TEMPLATE = "structured_intelligence/classify_v2.txt"
 CLASSIFY_LABEL = "llm.unit_a.classify"
 
 # What this task's answer may cost (register item 15). The answer is one object
@@ -100,7 +100,7 @@ def _caller_data(note: LeadNote, lead: Lead) -> str:
 def build_classification_prompt(note: LeadNote, lead: Lead) -> AssembledPrompt:
     """The assembled classification prompt. Separate from the call so a test can
     inspect what would be sent without scripting a response for it."""
-    return build_prompt(CLASSIFY_TEMPLATE, _caller_data(note, lead))
+    return build_prompt(CLASSIFY_TEMPLATE, caller_data=_caller_data(note, lead))
 
 
 async def classify(

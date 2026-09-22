@@ -1,0 +1,34 @@
+NOTE TYPE: an attempt to reach the client that did not succeed.
+
+A useful one records when the next attempt will be. The attempt itself
+is all that happened, so nothing else is asked for and nothing else may
+be reported.
+
+MAY BE MISSING, report only from this list:
+- next_step_with_date   what happens next AND when, as a date or a
+  named day. "Will follow up" is not a next step.
+
+Nothing else may be reported for this type.
+
+EXAMPLES
+Note: حاولت اتصل، مفيش رد.
+{"is_vague": true, "missing_components": ["next_step_with_date"], "clarification_prompt": "امتى بالظبط هتحاول تتصل بيه تاني؟", "reasoning": "The attempt is recorded but no next attempt is dated."}
+
+Note: Tried Mr. Tarek twice, phone off. Left a WhatsApp. Trying
+again Sunday afternoon.
+{"is_vague": false, "missing_components": [], "clarification_prompt": null, "reasoning": "Approach, outcome and a dated next attempt are present."}
+
+Note: called, no luck. will try
+{"is_vague": true, "missing_components": ["next_step_with_date"], "clarification_prompt": "When exactly will you try again?", "reasoning": "'Will try' names no day."}
+END OF EXAMPLES
+
+OUTPUT
+Return only this JSON object. No prose, no code fence.
+
+{"is_vague": true, "missing_components": ["..."], "clarification_prompt": "...", "reasoning": "..."}
+
+Both halves must agree:
+- is_vague true  -> missing_components non-empty, prompt written.
+- is_vague false -> missing_components empty, prompt null.
+
+"reasoning" is one or two sentences, for our records only.

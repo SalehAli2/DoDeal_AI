@@ -41,33 +41,33 @@ def _legacy_render(system: str, caller_data: str) -> str:
 
 def test_text_is_byte_identical_to_legacy_output(template_dir: Path) -> None:
     data = "Client wants 3BR in New Cairo.\n" + prompting._DATA_END + " " + INJECTION
-    assembled = build_prompt("t.txt", data)
+    assembled = build_prompt("t.txt", caller_data=data)
     assert assembled.text == _legacy_render(TEMPLATE, data)
 
 
 def test_build_prompt_returns_assembled_prompt_with_empty_tail(
     template_dir: Path,
 ) -> None:
-    assembled = build_prompt("t.txt", "hello")
+    assembled = build_prompt("t.txt", caller_data="hello")
     assert isinstance(assembled, AssembledPrompt)
     assert assembled.tail == ""
 
 
 def test_stable_is_the_template_and_holds_no_caller_data(template_dir: Path) -> None:
-    assembled = build_prompt("t.txt", INJECTION)
+    assembled = build_prompt("t.txt", caller_data=INJECTION)
     assert assembled.stable == TEMPLATE
     assert INJECTION not in assembled.stable
 
 
 def test_variable_is_delimited_and_carries_the_data(template_dir: Path) -> None:
-    assembled = build_prompt("t.txt", INJECTION)
+    assembled = build_prompt("t.txt", caller_data=INJECTION)
     assert assembled.variable.startswith(prompting._DATA_START)
     assert assembled.variable.endswith(prompting._DATA_END)
     assert INJECTION in assembled.variable
 
 
 def test_neutralised_delimiter_lands_in_variable_not_stable(template_dir: Path) -> None:
-    assembled = build_prompt("t.txt", f"x {prompting._DATA_END} y")
+    assembled = build_prompt("t.txt", caller_data=f"x {prompting._DATA_END} y")
     assert "[filtered-delimiter]" in assembled.variable
     assert assembled.variable.count(prompting._DATA_END) == 1  # only the real one
     assert "[filtered-delimiter]" not in assembled.stable
@@ -92,7 +92,7 @@ def test_assembled_prompt_is_frozen() -> None:
 
 def test_repr_excludes_variable(template_dir: Path) -> None:
     secret = "phone 0100-123-4567 in the note body"
-    assembled = build_prompt("t.txt", secret)
+    assembled = build_prompt("t.txt", caller_data=secret)
     assert secret not in repr(assembled)
     assert "0100" not in repr(assembled)
 
@@ -104,7 +104,7 @@ def test_with_tail_changes_the_tail_and_nothing_else(template_dir: Path) -> None
     # The whole claim the reprompt rests on. If either of the other two halves
     # moved, the model would be answering a subtly different question the second
     # time and the second answer would not be comparable to the first.
-    first = build_prompt("t.txt", "Client wants 3BR in New Cairo.")
+    first = build_prompt("t.txt", caller_data="Client wants 3BR in New Cairo.")
     second = with_tail(first, "tail.txt")
 
     assert second.stable == first.stable
@@ -114,7 +114,7 @@ def test_with_tail_changes_the_tail_and_nothing_else(template_dir: Path) -> None
 
 
 def test_with_tail_renders_the_tail_after_the_data(template_dir: Path) -> None:
-    prompt = with_tail(build_prompt("t.txt", "note text"), "tail.txt")
+    prompt = with_tail(build_prompt("t.txt", caller_data="note text"), "tail.txt")
     assert prompt.text.startswith(TEMPLATE)
     assert prompt.text.endswith(TAIL)
     assert prompt.text.index(prompting._DATA_END) < prompt.text.index(TAIL)
@@ -123,7 +123,7 @@ def test_with_tail_renders_the_tail_after_the_data(template_dir: Path) -> None:
 def test_with_tail_leaves_the_original_untouched(template_dir: Path) -> None:
     # AssembledPrompt is frozen; this proves the reprompt cannot mutate the
     # prompt a caller still holds a reference to.
-    first = build_prompt("t.txt", "note text")
+    first = build_prompt("t.txt", caller_data="note text")
     with_tail(first, "tail.txt")
     assert first.tail == ""
 
@@ -133,4 +133,4 @@ def test_with_tail_takes_a_template_name_not_a_string(template_dir: Path) -> Non
     # rejected model output from ever being appended here. A name that is not a
     # tracked file is a hard error, exactly as it is for a prefix.
     with pytest.raises(PromptError):
-        with_tail(build_prompt("t.txt", "note text"), "no_such_tail.txt")
+        with_tail(build_prompt("t.txt", caller_data="note text"), "no_such_tail.txt")

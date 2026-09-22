@@ -10,6 +10,7 @@ import pytest
 
 from dodeal_ai.core.errors import (
     BackendUnavailableError,
+    BriefStoreUnavailable,
     DodealError,
     DuplicateRequestError,
     IdempotencyUnavailableResponse,
@@ -20,6 +21,7 @@ from dodeal_ai.core.errors import (
     MalformedOutputError,
     ModelUnavailableError,
     NoteNotFoundError,
+    SubjectNotFoundError,
     _unit_error_body,
     dodeal_error_response,
 )
@@ -41,6 +43,10 @@ _CODES = [
     # instead. It is in the taxonomy so that the code, the status and the body
     # shape are the same ones every other refusal uses.
     (LoadShed, "load_shed", 503),
+    # Register item 145. 404 rather than 204: "no such person" is not "nothing
+    # to report", and 503 rather than an empty brief when no store is wired up.
+    (SubjectNotFoundError, "subject_not_found", 404),
+    (BriefStoreUnavailable, "brief_store_unavailable", 503),
 ]
 
 

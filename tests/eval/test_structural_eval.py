@@ -28,10 +28,15 @@ import pytest
 from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.context import RequestContext
 from dodeal_ai.core.cost import limiter
+from dodeal_ai.core.prompting import build_prompt
 from dodeal_ai.units.structured_intelligence import state
 from dodeal_ai.units.structured_intelligence.classify import CLASSIFY_TEMPLATE
 from dodeal_ai.units.structured_intelligence.config import get_tenant_config
-from dodeal_ai.units.structured_intelligence.pipeline import JudgementDeps, judge_note
+from dodeal_ai.units.structured_intelligence.pipeline import (
+    JudgementDeps,
+    _is_recognised_short_note,
+    judge_note,
+)
 from dodeal_ai.units.structured_intelligence.schemas import (
     JudgementRequest,
     NoteType,
@@ -48,6 +53,7 @@ from tests.helpers.fake_leads import (
 )
 from tests.helpers.fake_llm import FakeLLM, json_response
 from tests.helpers.fake_operational_redis import FakeOperationalRedis
+from tests.helpers.score_answers import score_payload
 
 pytestmark = pytest.mark.eval
 
@@ -61,12 +67,16 @@ TIMELINE_COUNT = 27
 # min_note_chars 15 / min_note_tokens 3, applied to the stripped text. Counted
 # from the fixture, not predicted. If a regenerated corpus changes it, this
 # fails and says by how much -- which is the point of pinning it.
-NOTE_TOO_SHORT_COUNT = 9
+#
+# Nine notes are below the floor, and one of them ("not interested") is a
+# recognised outcome (register item 132), so it is judged like any other note
+# and is not counted here: eight are suppressed with the fixed question.
+NOTE_TOO_SHORT_COUNT = 8
 # max_note_chars 2000, the other end of the same gate (Piece K). Three corpus
 # notes are over 5,000 characters and every other note is under 400, so this
 # count is not sensitive to where between 400 and 5,000 the limit is set -- it
 # would take a real change in the corpus to move it, which is what makes it
-# worth pinning. UNCHANGED at 9 above: none of the three is also thin.
+# worth pinning. None of the three is also thin.
 NOTE_TOO_LONG_COUNT = 3
 SCORED_COUNT = NOTE_COUNT - NOTE_TOO_SHORT_COUNT - NOTE_TOO_LONG_COUNT
 
@@ -76,14 +86,7 @@ VAGUE_ANSWER = {
     "clarification_prompt": "When are you following up with this client?",
     "reasoning": "No date was given for the next step.",
 }
-SCORE_ANSWER = {
-    "marks": {
-        "what_happened": 20,
-        "client_said": 15,
-        "next_step_date": 15,
-        "clarity": 5,
-    }
-}
+SCORE_ANSWER = score_payload()
 # Every note is classified `discovery`. Not a claim about the corpus -- it is
 # the type whose rubric leaves all four unsuppressed components in play, so it
 # exercises the most of the scoring path per note.
@@ -186,7 +189,7 @@ async def test_every_corpus_note_yields_a_judgement_or_a_suppression(operational
 
 
 async def test_the_thin_notes_are_suppressed_before_any_model_call(operational):
-    """The nine short notes cost nothing: no reservation, no model call.
+    """The eight unrecognised short notes cost nothing: no reservation, no model call.
 
     Run on their own with an EMPTY model, so any call at all raises
     FakeLLMExhausted instead of quietly succeeding.
@@ -196,8 +199,11 @@ async def test_the_thin_notes_are_suppressed_before_any_model_call(operational):
         (lid, n)
         for lid, notes in client.notes.items()
         for n in notes
-        if len(n.note.strip()) < CONFIG.min_note_chars
-        or len(n.note.strip().split()) < CONFIG.min_note_tokens
+        if (
+            len(n.note.strip()) < CONFIG.min_note_chars
+            or len(n.note.strip().split()) < CONFIG.min_note_tokens
+        )
+        and not _is_recognised_short_note(n.note.strip(), CONFIG)
     ]
     assert len(thin) == NOTE_TOO_SHORT_COUNT
 
@@ -298,7 +304,8 @@ async def test_every_timeline_event_is_suppressed_as_not_scorable(operational):
     # Every call that was made was a CLASSIFICATION call. This is the assertion
     # that "system_event costs one pass, not three" is worth: two more passes
     # per event is two more paid calls for text nobody wrote.
-    classify_calls = [p for p in llm.prompts if "classify" in p.stable[:400].lower()]
+    classify_stable = build_prompt(CLASSIFY_TEMPLATE, caller_data="").stable
+    classify_calls = [p for p in llm.prompts if p.stable == classify_stable]
     assert len(llm.prompts) == reached_model
     assert len(classify_calls) == len(llm.prompts)
 

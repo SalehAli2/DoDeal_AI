@@ -18,12 +18,13 @@ Three groups live here, and the boundary between them is the point:
                 fields and we do not control it.)
 
   RESPONSE      NoteAnalysis / ScoreComponent / NoteScore / Suppressed /
-                Decision / Versions / Judgement. What the CRM receives.
+                Decision / Enforcement / Versions / Judgement. What the CRM
+                receives.
 
 THE RULE THIS FILE ENFORCES STRUCTURALLY: no REQUEST and no model-output schema
-has a `band` or a `total` field. The model supplies marks and a classification;
-the total, the denominator, the band and the decision are computed in code from
-TenantConfig. Neither a model nor a caller can hand us a score. A test asserts
+has a `band` or a `total` field. The model supplies a classification and yes/no
+check answers (register item 131); the marks, the total, the denominator, the
+band and the decision are computed in code from TenantConfig. Neither a model nor a caller can hand us a score. A test asserts
 this by introspecting model_fields, so adding such a field to either kind of
 schema fails the suite rather than silently moving the arithmetic into the
 prompt -- or into the CRM's payload, which is why the direct route's body is
@@ -39,6 +40,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StrictBool,
     StringConstraints,
     model_validator,
 )
@@ -110,6 +112,38 @@ class ComponentName(StrEnum):
     CLARITY = "clarity"
 
 
+class CheckName(StrEnum):
+    """The twelve yes/no facts the model answers about a note.
+
+    Binary criteria, not marks: a model asked for a whole number out of
+    25 cannot use that resolution consistently, and the rubric's own
+    acceptance target is band agreement with a human. Each check is one
+    observable fact; the marks and the total are computed in code from
+    TenantConfig (register item 131).
+
+    Declaration order is component order, so a reader can see which
+    checks belong together without consulting the mapping.
+    """
+
+    # what_happened
+    WH_OUTCOME = "wh_outcome"
+    WH_ACTION = "wh_action"
+    # client_said
+    CS_PRESENT = "cs_present"
+    CS_OWN_TERMS = "cs_own_terms"
+    # next_step_date
+    NS_ACTION = "ns_action"
+    NS_DATE = "ns_date"
+    NS_CLOSURE = "ns_closure"
+    # deal_specifics
+    DS_FIGURES = "ds_figures"
+    DS_SUBJECT = "ds_subject"
+    DS_TIMING = "ds_timing"
+    # clarity
+    CL_READABLE = "cl_readable"
+    CL_SUBSTANCE = "cl_substance"
+
+
 class Band(StrEnum):
     """The qualitative label derived from the total. Derived in code from
     TenantConfig.band_boundaries, never accepted from a model or a caller."""
@@ -121,11 +155,62 @@ class Band(StrEnum):
 
 
 class DecisionAction(StrEnum):
-    """What the CRM is told to do. Enforcement is the CRM's; we advise."""
+    """What the CRM is told to do about the clarification prompt. The
+    enforcement verdict is derived from it; see EnforcementVerdict."""
 
     ACCEPT_SILENT = "accept_silent"
     ACCEPT_FLAG_PROMPT = "accept_flag_prompt"
     PROMPT_CLARIFICATION = "prompt_clarification"
+
+
+class EnforcementMode(StrEnum):
+    """What a tenant has asked us to do with a judgement it does not like.
+
+    THE VOCABULARY, not the behaviour: the verdict is derived from the mode in
+    decide.py::enforcement, and `strict` does not block anything today. It
+    lives here rather than in config.py because it is now a code the CRM reads
+    off every judgement, which is what this section of the file is for;
+    config.py imports it back and is still the only place a tenant's mode is
+    chosen.
+
+    off       we judge and report, and nothing is ever flagged.
+    advisory  a note we would ask about is flagged. EVERY TENANT LAUNCHES
+              HERE, and it is config.py's default.
+    strict    advisory plus blocking at a stage change, which is not built.
+              A team moves here only once the calibration target is met, and
+              nothing in this service can check that, so this service never
+              enables it -- a tenant file does.
+    """
+
+    OFF = "off"
+    ADVISORY = "advisory"
+    STRICT = "strict"
+
+
+class EnforcementVerdict(StrEnum):
+    """What the CRM should DO, stated rather than inferred.
+
+    Three, and the CRM never has to guess between them: `allow` lets the note
+    through, `flag` marks it for the salesperson or their manager, `block`
+    refuses the transition it applies to. A MISSING VERDICT IS NOT ALLOW --
+    the field is required on every judgement, scored or suppressed, so an
+    absent block is a malformed judgement and not a quiet permission.
+    """
+
+    ALLOW = "allow"
+    FLAG = "flag"
+    BLOCK = "block"
+
+
+class EnforcementTarget(StrEnum):
+    """What a verdict is about. One member today: the note itself.
+
+    A separate vocabulary rather than a bare string because the blocking work
+    (a stage change) will add a second member, and a caller matching on
+    `applies_to` must keep working when it does.
+    """
+
+    NOTE = "note"
 
 
 class PromptWithheld(StrEnum):
@@ -333,22 +418,22 @@ class VagueOutput(BaseModel):
 
 
 class ScoreOutput(BaseModel):
-    """Pass 3: a mark per component.
+    """Pass 3: one yes or no per check.
 
-    DELIBERATELY UNBOUNDED HERE. Each mark must satisfy 0 <= mark <= weight[c],
-    and the weights are per-tenant (TenantConfig), which validate_output cannot
-    see -- it takes a schema and a raw value and has no context channel. So the
-    bound is checked in the scoring code against the tenant's own weights, not
-    declared here against a constant that would be wrong for any tenant whose
-    weights differ. A `ge=0` here would look like the check and hide its
-    absence.
+    The model answers facts; it does not mark and it does not total.
+    Which checks are asked is decided per request from the tenant's
+    config and the note's type, so a suppressed component's checks are
+    never sent and never returned. That the returned set matches the
+    asked set is checked in the scoring code, not here: this schema has
+    no context channel, so the check is in scoring.py.
 
-    No `total` and no `band`: the model supplies marks only.
+    No `total` and no `band`, for the same reason as before.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    marks: dict[ComponentName, int]
+    checks: dict[CheckName, StrictBool]
+    reasoning: str
 
 
 # ---------------------------------------------------------------------------
@@ -445,6 +530,34 @@ class Decision(BaseModel):
     original_note_fingerprint: str | None = None
 
 
+class Enforcement(BaseModel):
+    """What the CRM should do, on EVERY judgement -- scored or suppressed.
+
+    The point of the block is that the CRM never infers. Before it, a caller
+    read `decision.action` and decided for itself what a flag was; a suppressed
+    judgement carried no action at all, so it decided from nothing. Here the
+    mode in force and the verdict are both stated, and the field is required:
+    there is no judgement without one, so an absent block is a bug and never a
+    quiet allow.
+
+    `mode` is the TENANT'S, read off TenantConfig at judgement time and
+    recorded here rather than looked up later -- a tenant that moves from
+    advisory to strict must not change what an old judgement meant.
+
+    `applies_to` is what the verdict is about, and it is null exactly when the
+    verdict is `allow`: nothing is flagged, so there is nothing for the flag to
+    be about. It is NOT the note id -- it says which THING is being judged, and
+    the blocking work adds the second member.
+
+    Derived in decide.py::enforcement from the mode and the action alone. No
+    model output reaches it and no request field does.
+    """
+
+    mode: EnforcementMode
+    verdict: EnforcementVerdict
+    applies_to: EnforcementTarget | None = None
+
+
 class Versions(BaseModel):
     """Stamped on EVERY judgement, scored or suppressed.
 
@@ -467,6 +580,11 @@ class Judgement(BaseModel):
     Exactly one of `score`/`decision` and `suppressed` is populated: a scored
     judgement has score + decision with suppressed null; a suppressed one has
     suppressed set with score and decision null.
+
+    `enforcement` and `versions` are the two blocks that are on BOTH. Which is
+    the whole reason `enforcement` has no default: a caller reads one field to
+    know what to do, on a judgement of either shape, and never reconstructs it
+    from the branch it happens to be looking at.
     """
 
     note_id: int
@@ -476,5 +594,6 @@ class Judgement(BaseModel):
     score: NoteScore | None = None
     decision: Decision | None = None
     suppressed: Suppressed | None = None
+    enforcement: Enforcement
     versions: Versions
     request_id: str

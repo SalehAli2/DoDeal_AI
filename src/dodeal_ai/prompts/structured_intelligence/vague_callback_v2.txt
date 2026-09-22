@@ -1,0 +1,35 @@
+NOTE TYPE: contact made only to agree a later conversation.
+
+A useful one records that the client was reached and in what state
+(busy, travelling, not ready), what they asked for in their own
+words, and the agreed time as a date or named day.
+
+MAY BE MISSING, report only from this list:
+- what_happened      what the salesperson did and what came of it.
+- client_said        what the CLIENT said, in their terms.
+- next_step_with_date  what happens next AND when. "Will follow up"
+  is not a next step.
+
+EXAMPLES
+Note: كلمته، قالي مشغول دلوقتي. هيرد عليا.
+{"is_vague": true, "missing_components": ["next_step_with_date"], "clarification_prompt": "اتفقتوا على ميعاد محدد للمكالمة الجاية إمتى؟", "reasoning": "He was reached and said he was busy, but no time is agreed."}
+
+Note: Reached Ms. Nour, travelling and could not talk. Asked to be
+called Saturday morning to go through the payment plan. Calling
+Saturday 10am.
+{"is_vague": false, "missing_components": [], "clarification_prompt": null, "reasoning": "Her state, her request and the agreed day are recorded."}
+
+Note: cb1 tmrw
+{"is_vague": true, "missing_components": ["what_happened", "client_said"], "clarification_prompt": "Did you reach the client, and what did they say about why they could not talk now?", "reasoning": "A time is set but nothing records contact or what she said."}
+END OF EXAMPLES
+
+OUTPUT
+Return only this JSON object. No prose, no code fence.
+
+{"is_vague": true, "missing_components": ["..."], "clarification_prompt": "...", "reasoning": "..."}
+
+Both halves must agree:
+- is_vague true  -> missing_components non-empty, prompt written.
+- is_vague false -> missing_components empty, prompt null.
+
+"reasoning" is one or two sentences, for our records only.
