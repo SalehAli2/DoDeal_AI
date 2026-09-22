@@ -103,6 +103,7 @@ def directory() -> FileUserDirectory:
 def client(monkeypatch, store, directory):
     """The gate-chain wiring, plus the two seams this route reads."""
     monkeypatch.setenv("DODEAL_JWT_SIGNING_KEY", tokens.TEST_SECRET)
+    tokens.service_settings_env(monkeypatch)
     get_settings.cache_clear()
     test_settings = Settings(
         _env_file=None,
@@ -121,9 +122,10 @@ def client(monkeypatch, store, directory):
     get_settings.cache_clear()
 
 
-def _headers(subdomain: str = "tenant-a", sub: int = 42) -> dict:
+def _headers(subdomain: str = "tenant-a") -> dict:
+    """The CRM's service token: the brief route's only credential (item 153)."""
     return {
-        "Authorization": f"Bearer {tokens.mint_token(subdomain=subdomain, sub=sub)}",
+        "Authorization": f"Bearer {tokens.mint_service_token(subdomain=subdomain)}",
         "Host": f"{subdomain}.dodealcrm.com",
     }
 
@@ -134,6 +136,15 @@ def _headers(subdomain: str = "tenant-a", sub: int = 42) -> dict:
 def test_no_token_is_401(client) -> None:
     r = client.get(f"{BRIEFS}/rep/501", headers={"Host": "tenant-a.dodealcrm.com"})
     assert r.status_code == 401
+
+
+def test_a_user_token_is_401(client) -> None:
+    """Register item 153: a person's token cannot read anyone's brief."""
+    user = {
+        "Authorization": f"Bearer {tokens.mint_token(subdomain='tenant-a', sub=42)}",
+        "Host": "tenant-a.dodealcrm.com",
+    }
+    assert client.get(f"{BRIEFS}/rep/501", headers=user).status_code == 401
 
 
 def test_a_token_for_another_tenant_is_403(client) -> None:

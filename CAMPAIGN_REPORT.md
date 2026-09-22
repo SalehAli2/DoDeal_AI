@@ -6754,3 +6754,14 @@ caps and budget land on the wrong person with nothing to contradict it; (2) a
 service token leak lets its holder post any note as any author until expiry.
 Stress test: under one service token, author A's fourth vague note in the hour
 is `rate_limited` while author B's first is still asked.
+
+## Piece: register item 153, the brief route on the service chain
+
+Item 153 -- `GET /api/v1/briefs/{role}/{subject_id}` depends on
+`service_gate4_cost` only; a person's token is 401, and who may read whose
+brief is decided by the CRM before it asks.
+Production failure modes: (1) the CRM forwards a brief to the wrong reader,
+and nothing here can tell; (2) a burst of 07:30 brief calls shares the tenant
+request counter with judgements and can cap them for the window.
+Stress test: a valid user token for the same tenant and Host is 401 on the
+brief route.

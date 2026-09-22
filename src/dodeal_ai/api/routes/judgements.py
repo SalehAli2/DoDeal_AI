@@ -29,7 +29,8 @@ dependency chain: there is nothing to fetch, so no backend key is resolved and
 no tool call can be made. The fetch routes remain the contract; see
 ASSUMPTIONS.md, DECISION[DIRECT_ROUTE].
 
-THE BRIEF ROUTE IS A GET AND ANSWERS 204 (register item 145). It is the one
+THE BRIEF ROUTE IS A GET AND ANSWERS 204 (register item 145), behind the
+service chain only (register item 153). It is the one
 route here that can succeed with no body: a brief every measure was suppressed
 on is NOT SENT, because an empty daily email trains people to ignore the
 channel. It reads the judgement store and the user directory, both of which are
@@ -262,7 +263,7 @@ def _subject(users: list[User], subject_id: int) -> User:
 )
 async def read_brief(
     role: Role,
-    context: Annotated[RequestContext, Depends(gate4_cost)],
+    context: Annotated[RequestContext, Depends(service_gate4_cost)],
     store: Annotated[JudgementStore, Depends(get_judgement_store)],
     directory: Annotated[UserDirectory, Depends(get_user_directory)],
     subject_id: Annotated[int, Path(ge=1)],
@@ -281,12 +282,10 @@ async def read_brief(
     `role` is what the CALLER asked for, not what the subject's title entitles
     them to: a head of sales may want the rep view of one of their people.
 
-    WHO MAY ASK FOR WHOSE BRIEF IS GATE 3's QUESTION, and Gate 3 is parked
-    (core/auth/dependencies.py). This route sits behind the same live chain as
-    every other -- auth, tenancy, cost -- so it cannot cross a tenant; within
-    one, it does not check that the caller is the subject or their manager. It
-    cannot: the token's `sub` and the CRM's author ids are different id spaces
-    (ASSUMPTION[Q7]) and are never compared. Recorded for the lead.
+    THE SERVICE CHAIN ONLY (register item 153). A person's token is 401 here:
+    the CRM asks for a brief with its own token and decides, on its side, who
+    may read whose. The chain still holds the tenant -- Host match, tenant cost
+    counter -- so a brief never crosses one.
     """
     config = get_tenant_config(context.tenant)
     since, until = rolling_window(datetime.now(UTC), config)
