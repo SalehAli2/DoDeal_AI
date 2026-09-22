@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -32,6 +33,7 @@ from dodeal_ai.units.structured_intelligence.user_directory import (
     UserDirectoryError,
     configured_path,
     get_user_directory,
+    load_configured_directory,
 )
 
 FIXTURE = Path("tests/fixtures/user_directory/invented_users.json")
@@ -176,8 +178,10 @@ def test_a_document_that_is_not_an_object_is_refused(tmp_path: Path) -> None:
 
 
 def test_a_tenant_whose_value_is_not_a_list_is_refused(tmp_path: Path) -> None:
-    with pytest.raises(UserDirectoryError, match="tenant-a is not a list"):
+    # Register item 155: the refusal names no tenant key and no file.
+    with pytest.raises(UserDirectoryError, match="a tenant is not a list") as caught:
         FileUserDirectory.from_path(_outside(tmp_path, {"tenant-a": _entry()}))
+    assert "tenant-a" not in str(caught.value)
 
 
 def test_a_bad_entry_names_its_position_and_never_a_name(tmp_path: Path) -> None:
@@ -189,7 +193,8 @@ def test_a_bad_entry_names_its_position_and_never_a_name(tmp_path: Path) -> None
     with pytest.raises(UserDirectoryError) as caught:
         FileUserDirectory.from_path(path)
     message = str(caught.value)
-    assert "tenant-a entry 2" in message
+    # Register item 155: its position and the exception type, not its tenant.
+    assert message == "user directory: entry 2: ValidationError"
     assert "Wren Halloway" not in message
 
 
@@ -222,30 +227,31 @@ def test_it_is_not_a_settings_field() -> None:
     assert "user_directory_path" not in Settings.model_fields
 
 
-def test_no_directory_configured_is_a_503_and_never_an_empty_one(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_no_directory_loaded_is_a_503_and_never_an_empty_one() -> None:
     """A brief that fell back to printing ids would be forwarded to somebody
     who had to look every one of them up."""
-    monkeypatch.delenv(USER_DIRECTORY_PATH_ENV, raising=False)
-    get_user_directory.cache_clear()
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
     with pytest.raises(BriefStoreUnavailable) as caught:
-        get_user_directory()
+        get_user_directory(request)  # type: ignore[arg-type]
     assert caught.value.http_status == 503
-    get_user_directory.cache_clear()
 
 
-def test_the_provider_reads_the_file_once(
+def test_the_provider_hands_out_what_the_lifespan_loaded() -> None:
+    """Register item 155: the dependency reads app.state and nothing else."""
+    directory = FileUserDirectory({})
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(user_directory=directory))
+    )
+    assert get_user_directory(request) is directory  # type: ignore[arg-type]
+
+
+def test_the_loader_is_none_when_unset_and_a_directory_when_set(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Cached, so no request reads disk -- the rule core/tenant_config.py holds
-    for tenant files."""
-    path = _outside(tmp_path, {"tenant-a": [_entry()]})
-    monkeypatch.setenv(USER_DIRECTORY_PATH_ENV, str(path))
-    get_user_directory.cache_clear()
-    try:
-        first = get_user_directory()
-        path.unlink()
-        assert get_user_directory() is first
-    finally:
-        get_user_directory.cache_clear()
+    """The lifespan's one read: nothing when the variable is unset."""
+    monkeypatch.delenv(USER_DIRECTORY_PATH_ENV, raising=False)
+    assert load_configured_directory() is None
+    monkeypatch.setenv(
+        USER_DIRECTORY_PATH_ENV, str(_outside(tmp_path, {"tenant-a": [_entry()]}))
+    )
+    assert isinstance(load_configured_directory(), FileUserDirectory)

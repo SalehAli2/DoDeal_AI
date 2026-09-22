@@ -36,7 +36,15 @@ from dodeal_ai.units.structured_intelligence.config import (
     UNIT_A_SECTION,
     parse_unit_a_section,
 )
+from dodeal_ai.units.structured_intelligence.judgement_rows import (
+    JudgementStoreError,
+    load_configured_store,
+)
 from dodeal_ai.units.structured_intelligence.templates import UNIT_A_TEMPLATES
+from dodeal_ai.units.structured_intelligence.user_directory import (
+    UserDirectoryError,
+    load_configured_directory,
+)
 
 # Model calls one judgement can have in flight AT ONCE: classify runs alone,
 # then vague and score are gathered (units/structured_intelligence/pipeline.py).
@@ -72,6 +80,24 @@ def _crm_client(settings: Settings) -> httpx.AsyncClient:
     )
 
 
+def _load_brief_sources(app: FastAPI) -> None:
+    """The judgement store and the user directory, read once here (register
+    item 155) so no brief reads disk. A bad source refuses startup naming the
+    STORE, never its path; the error is not chained, so its text is not shown."""
+    try:
+        app.state.judgement_store = load_configured_store()
+    except JudgementStoreError:
+        clear_templates()
+        clear_tenant_configs()
+        raise ConfigError("judgement_store_invalid") from None
+    try:
+        app.state.user_directory = load_configured_directory()
+    except UserDirectoryError:
+        clear_templates()
+        clear_tenant_configs()
+        raise ConfigError("user_directory_invalid") from None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Fail closed: if required config (signing key) is absent, refuse to start.
@@ -90,6 +116,7 @@ async def lifespan(app: FastAPI):
         except BaseException:
             clear_templates()
             raise
+    _load_brief_sources(app)
     if not settings.dd_api_keys:
         # Not fail-closed: the gate chain and /ready must work before a key is
         # provisioned (Step 0). Loud so a deployment with no backend keys at
@@ -180,6 +207,8 @@ async def lifespan(app: FastAPI):
             await app.state.crm_http.aclose()
             raise
     yield
+    app.state.judgement_store = None
+    app.state.user_directory = None
     # Before the pools, because clearing a dict cannot fail: a cache that
     # outlived its app would serve this deployment's templates to the next one.
     clear_templates()

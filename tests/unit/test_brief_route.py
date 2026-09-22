@@ -211,15 +211,12 @@ def test_a_subject_the_directory_does_not_list_is_404(client) -> None:
 def test_an_unwired_store_is_503_and_never_an_empty_brief(client, monkeypatch) -> None:
     """503 rather than 204: an empty brief would tell a manager they had a
     quiet month when in fact nobody had wired the store up."""
-    monkeypatch.delenv("DODEAL_JUDGEMENT_ROWS_PATH", raising=False)
+    # Register item 155: nothing loaded at startup is what "unwired" means.
+    monkeypatch.setattr(app.state, "judgement_store", None, raising=False)
     del app.dependency_overrides[get_judgement_store]
-    get_judgement_store.cache_clear()
-    try:
-        r = client.get(f"{BRIEFS}/rep/501", headers=_headers())
-        assert r.status_code == 503
-        assert r.json()["reason"] == "brief_store_unavailable"
-    finally:
-        get_judgement_store.cache_clear()
+    r = client.get(f"{BRIEFS}/rep/501", headers=_headers())
+    assert r.status_code == 503
+    assert r.json()["reason"] == "brief_store_unavailable"
 
 
 # --- what the route refuses -------------------------------------------------

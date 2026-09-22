@@ -23,6 +23,7 @@ import json
 import shutil
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -37,6 +38,7 @@ from dodeal_ai.units.structured_intelligence.judgement_rows import (
     JudgementStoreError,
     configured_path,
     get_judgement_store,
+    load_configured_store,
 )
 from dodeal_ai.units.structured_intelligence.schemas import (
     Band,
@@ -324,8 +326,10 @@ def test_a_document_that_is_not_an_object_is_refused(tmp_path: Path) -> None:
 
 
 def test_a_tenant_whose_value_is_not_a_list_is_refused(tmp_path: Path) -> None:
-    with pytest.raises(JudgementStoreError, match="tenant-a is not a list"):
+    # Register item 155: the refusal names no tenant key and no file.
+    with pytest.raises(JudgementStoreError, match="a tenant is not a list") as caught:
         FileJudgementStore.from_path(_outside(tmp_path, {"tenant-a": _scored()}))
+    assert "tenant-a" not in str(caught.value)
 
 
 def test_a_bad_row_names_its_position_and_never_its_contents(
@@ -339,7 +343,8 @@ def test_a_bad_row_names_its_position_and_never_its_contents(
     with pytest.raises(JudgementStoreError) as caught:
         FileJudgementStore.from_path(path)
     message = str(caught.value)
-    assert "tenant-a row 2" in message
+    # Register item 155: its position and the exception type, not its tenant.
+    assert message == "judgement rows: row 2: ValidationError"
     assert "4242" not in message
 
 
@@ -347,7 +352,7 @@ def test_a_row_with_a_note_body_is_refused_by_the_loader(tmp_path: Path) -> None
     """The contract's first rule, enforced where a file reaches it and not only
     where a caller does."""
     path = _outside(tmp_path, {"tenant-a": [_scored(note_text="Called them.")]})
-    with pytest.raises(JudgementStoreError, match="tenant-a row 1"):
+    with pytest.raises(JudgementStoreError, match="row 1"):
         FileJudgementStore.from_path(path)
 
 
@@ -383,30 +388,31 @@ def test_it_is_not_a_settings_field() -> None:
     assert "judgement_rows_path" not in Settings.model_fields
 
 
-def test_no_store_configured_is_a_503_and_never_an_empty_answer(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_no_store_loaded_is_a_503_and_never_an_empty_answer() -> None:
     """Register item 145. A brief computed over no rows would tell a manager
     they had a quiet month when nobody had wired the store up."""
-    monkeypatch.delenv(JUDGEMENT_ROWS_PATH_ENV, raising=False)
-    get_judgement_store.cache_clear()
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
     with pytest.raises(BriefStoreUnavailable) as caught:
-        get_judgement_store()
+        get_judgement_store(request)  # type: ignore[arg-type]
     assert caught.value.http_status == 503
-    get_judgement_store.cache_clear()
 
 
-def test_the_provider_reads_the_file_once(
+def test_the_provider_hands_out_what_the_lifespan_loaded() -> None:
+    """Register item 155: the dependency reads app.state and nothing else."""
+    store = FileJudgementStore({})
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(judgement_store=store))
+    )
+    assert get_judgement_store(request) is store  # type: ignore[arg-type]
+
+
+def test_the_loader_is_none_when_unset_and_a_store_when_set(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Cached, so no request reads disk -- the rule core/tenant_config.py holds
-    for tenant files. The file is deleted between the two calls."""
-    path = _outside(tmp_path, {"tenant-a": [_scored()]})
-    monkeypatch.setenv(JUDGEMENT_ROWS_PATH_ENV, str(path))
-    get_judgement_store.cache_clear()
-    try:
-        first = get_judgement_store()
-        path.unlink()
-        assert get_judgement_store() is first
-    finally:
-        get_judgement_store.cache_clear()
+    """The lifespan's one read: nothing when the variable is unset."""
+    monkeypatch.delenv(JUDGEMENT_ROWS_PATH_ENV, raising=False)
+    assert load_configured_store() is None
+    monkeypatch.setenv(
+        JUDGEMENT_ROWS_PATH_ENV, str(_outside(tmp_path, {"tenant-a": [_scored()]}))
+    )
+    assert isinstance(load_configured_store(), FileJudgementStore)

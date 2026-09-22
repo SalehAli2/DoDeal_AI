@@ -27,9 +27,13 @@ THE FAKE IS A FAKE, and is named one. `FileJudgementStore` reads INVENTED rows
 from a JSON file whose path comes from an environment variable, exactly as the
 scored set does (eval_set.py) and for the same two reasons: the variable is not
 a `Settings` field, so it can never be deployed with the service, and a path
-inside this repository is refused before the file is opened. The real
-implementation is a session of its own, when the backend answers. It is NOT
-written here and its endpoint is NOT invented.
+inside this repository is refused before the file is opened.
+
+LOADED AT STARTUP (register item 155): the lifespan reads the file once, when
+the variable is set, and a malformed or in-repo file refuses startup naming the
+store and never the path. `get_judgement_store` hands out what was loaded, so
+no request reads disk. A refusal here carries fixed text, a row's position and
+an exception type: never a path, a file name, a tenant key or a value.
 """
 
 from __future__ import annotations
@@ -38,10 +42,10 @@ import json
 import os
 from collections.abc import Sequence
 from datetime import UTC, datetime
-from functools import cache
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
+from fastapi import Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from dodeal_ai.core.errors import BriefStoreUnavailable
@@ -249,7 +253,7 @@ class FileJudgementStore:
         resolved = path.expanduser().resolve()
         if resolved.is_relative_to(REPO_ROOT):
             raise JudgementStoreError(
-                f"refusing judgement rows inside the repository: {resolved}. "
+                "refusing judgement rows inside the repository. "
                 "A real export names real leads and real people -- keep it out."
             )
         try:
@@ -258,36 +262,38 @@ class FileJudgementStore:
             # The exception TYPE, never its message: an OSError's message is the
             # operating system's, and what it decides to include is not ours.
             raise JudgementStoreError(
-                f"cannot read {resolved}: {type(exc).__name__}"
+                f"cannot read the judgement rows: {type(exc).__name__}"
             ) from None
         try:
             document = json.loads(raw)
         except ValueError:
             # from None and no decoder message: a JSONDecodeError carries the
             # offending document on `.doc`.
-            raise JudgementStoreError(f"{resolved.name}: not one JSON object") from None
+            raise JudgementStoreError("judgement rows: not one JSON object") from None
         if not isinstance(document, dict):
-            raise JudgementStoreError(f"{resolved.name}: not one JSON object")
+            raise JudgementStoreError("judgement rows: not one JSON object")
 
         rows_by_tenant: dict[str, list[JudgementRow]] = {}
+        position = 0
         for tenant, entries in document.items():
             if not isinstance(entries, list):
-                raise JudgementStoreError(f"{resolved.name}: {tenant} is not a list")
-            rows_by_tenant[tenant] = [
-                cls._row(resolved.name, tenant, position, entry)
-                for position, entry in enumerate(entries, start=1)
-            ]
+                raise JudgementStoreError("judgement rows: a tenant is not a list")
+            rows: list[JudgementRow] = []
+            for entry in entries:
+                position += 1
+                rows.append(cls._row(position, entry))
+            rows_by_tenant[tenant] = rows
         return cls(rows_by_tenant)
 
     @staticmethod
-    def _row(name: str, tenant: str, position: int, entry: object) -> JudgementRow:
-        """One entry as a row, or a refusal naming where it is and what kind of
-        thing went wrong -- never what the entry said."""
+    def _row(position: int, entry: object) -> JudgementRow:
+        """One entry as a row, or a refusal naming its position in the file
+        and the exception type -- never what the entry said, nor whose it is."""
         try:
             return JudgementRow.model_validate(entry)
         except ValueError as exc:
             raise JudgementStoreError(
-                f"{name}: {tenant} row {position}: {type(exc).__name__}"
+                f"judgement rows: row {position}: {type(exc).__name__}"
             ) from None
 
     async def rows_between(
@@ -318,19 +324,22 @@ class FileJudgementStore:
         ]
 
 
-@cache
-def get_judgement_store() -> JudgementStore:
-    """The store this deployment has, for the routes that read one.
-
-    CACHED, so the file is read once per process and no request reads disk --
-    the same rule core/tenant_config.py holds. Tests override the FastAPI
-    dependency rather than clearing this, as they do for every other seam.
-
-    Unset is the ordinary state today and is a 503, never an empty answer: the
-    real store is a backend ask, and a brief computed over no rows would tell a
-    manager they had a quiet month when nobody had wired the store up.
-    """
+def load_configured_store() -> FileJudgementStore | None:
+    """The invented rows, read now, when their variable is set; else None.
+    Called once, by the lifespan (register item 155)."""
     path = configured_path()
-    if path is None:
+    return None if path is None else FileJudgementStore.from_path(path)
+
+
+def get_judgement_store(request: Request) -> JudgementStore:
+    """The store the lifespan loaded, for the routes that read one.
+
+    Nothing is read here, so no request reads disk. None loaded is a 503,
+    never an empty answer: a brief computed over no rows would tell a manager
+    they had a quiet month when nobody had wired the store up. Tests override
+    this FastAPI dependency, as they do every other seam.
+    """
+    store = getattr(request.app.state, "judgement_store", None)
+    if store is None:
         raise BriefStoreUnavailable()
-    return FileJudgementStore.from_path(path)
+    return store

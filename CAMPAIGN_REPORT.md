@@ -6817,3 +6817,16 @@ flushed and every tenant silently drops back to its file with no alert beyond
 the missing version.
 Stress test: with a tenant file loaded, a PUT's version must win over the file's
 on the next resolve, and a refused PUT must leave that version in force.
+
+## Piece: register item 155, the brief's sources load at startup
+
+Item 155 -- the judgement rows and the user directory load once in the
+lifespan when their variables are set; a malformed or in-repo file refuses
+startup as `judgement_store_invalid` / `user_directory_invalid`, unchained, with
+no path. The dependencies read `app.state` only, and every refusal carries
+fixed text, a position and an exception type -- no path, file or tenant key.
+Production failure modes: (1) a file edited after startup is never seen until
+a restart, so a corrected fake keeps serving the old rows; (2) a large file is
+held whole in every worker's memory.
+Stress test: start the app, delete both files and refuse every `read_text`; a
+head-of-sales brief still answers 200 or 204.
