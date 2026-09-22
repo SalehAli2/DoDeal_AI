@@ -26,15 +26,25 @@ Settings over the SAME stack, in the same order (--env-file, default
 .env.demo). A missing file in the stack is skipped, so a clean checkout with no
 `.env` works.
 
+TWO KINDS OF TOKEN (register item D1). The fetch route and the versions probe
+take a USER token (sub, subdomain, database, iat, exp) signed with
+DODEAL_JWT_SIGNING_KEY. The direct, history, brief, measures and config routes
+take the CRM's SERVICE token (iss, aud, subdomain, iat, exp, five minutes at
+most) signed with DODEAL_SERVICE_JWT_SIGNING_KEY -- HS256 only here, because
+an RS256 or ES256 deployment holds the CRM's PUBLIC key and cannot mint.
+
 Usage:
     uv run python scripts/mint_demo_token.py
     uv run python scripts/mint_demo_token.py --route direct
+    uv run python scripts/mint_demo_token.py --route history
     uv run python scripts/mint_demo_token.py --route probe --ttl-seconds 60
     uv run python scripts/mint_demo_token.py --env-file .env   # non-demo
 
 Requires:
     - DODEAL_JWT_SIGNING_KEY, from that stack or from the real environment
       (which outranks both files, exactly as it does for the service).
+    - DODEAL_SERVICE_JWT_SIGNING_KEY and DODEAL_SERVICE_JWT_ALGORITHM=HS256 for
+      the service routes; .env.demo carries invented ones.
 """
 
 from __future__ import annotations
@@ -47,6 +57,7 @@ import time
 import jwt
 
 from dodeal_ai.core.auth.claims import normalise_tenant_label
+from dodeal_ai.core.auth.service import service_key_text
 from dodeal_ai.core.config import ConfigError, Settings, _build_settings
 
 # THE env-file stack, in precedence order (later wins), and the ONE definition
@@ -83,7 +94,24 @@ _DEMO_LEAD_CONTEXT = {
     "status": "On Hold",
 }
 
-_ROUTES = ("fetch", "direct", "probe")
+# Invented, like the note: the day the history body says the note was written.
+_DEMO_NOTE_CREATED_AT = "2026-03-04T09:15:00+04:00"
+
+# An invented rep in tests/fixtures/user_directory/invented_users.json, for the
+# brief and measures routes.
+_DEMO_REP_ID = 501
+
+# How long a minted service token lives: the five minutes the CRM is agreed to
+# mint (register item D1), or the deployment's own maximum if that is shorter.
+SERVICE_TTL_SECONDS = 300
+
+_ROUTES = ("fetch", "direct", "history", "brief", "measures", "config", "probe")
+
+# The routes behind the service chain; every other route takes a user token.
+SERVICE_ROUTES = frozenset({"direct", "history", "brief", "measures", "config"})
+
+# The routes that take a JSON body, and so a POST.
+_POST_ROUTES = frozenset({"fetch", "direct", "history"})
 
 
 def _parse_args() -> argparse.Namespace:
@@ -121,8 +149,10 @@ def _parse_args() -> argparse.Namespace:
         choices=_ROUTES,
         default="fetch",
         help="Which curl line to print: 'fetch' the primary route (needs the "
-        "fake CRM), 'direct' the note-in-body route (needs no CRM), 'probe' "
-        "the gate-chain probe (needs nothing) (default: fetch).",
+        "fake CRM), 'direct' and 'history' the note-in-body routes, 'brief' "
+        "and 'measures' a rep's figures, 'config' the tenant's rules, 'probe' "
+        "the versions read. Service token for direct, history, brief, "
+        "measures and config (default: fetch).",
     )
     parser.add_argument("--lead-id", type=int, default=_DEMO_LEAD_ID)
     parser.add_argument("--note-id", type=int, default=_DEMO_NOTE_ID)
@@ -166,6 +196,33 @@ def _payload(args: argparse.Namespace, settings: Settings, tenant: str) -> dict:
     }
 
 
+def service_payload(settings: Settings, tenant: str) -> dict:
+    """The service token's claims: exactly the five the service requires."""
+    now = int(time.time())
+    lifetime = min(SERVICE_TTL_SECONDS, settings.service_jwt_max_lifetime_seconds)
+    return {
+        "iss": settings.service_jwt_issuer,
+        "aud": settings.service_jwt_audience,
+        settings.claim_subdomain: tenant,
+        "iat": now,
+        "exp": now + lifetime,
+    }
+
+
+def mint_service_token(settings: Settings, tenant: str) -> str:
+    """A service token signed with the configured shared secret.
+
+    Refuses anything but HS256 with a key: under RS256 or ES256 the settings
+    hold the CRM's public key, which verifies and cannot sign.
+    """
+    key = settings.service_jwt_signing_key
+    if key is None or settings.service_jwt_algorithm != "HS256":
+        raise ConfigError("service_token_not_mintable")
+    return jwt.encode(
+        service_payload(settings, tenant), service_key_text(key), algorithm="HS256"
+    )
+
+
 def _shell_quote(value: str) -> str:
     """POSIX single-quoting, so a body containing an apostrophe cannot end the
     quoted argument early and turn the rest of the note into shell words."""
@@ -173,24 +230,29 @@ def _shell_quote(value: str) -> str:
 
 
 def _body(args: argparse.Namespace) -> str | None:
-    if args.route == "probe":
+    if args.route not in _POST_ROUTES:
         return None
     if args.route == "fetch":
         return json.dumps({"lead_id": args.lead_id, "note_id": args.note_id})
-    return json.dumps(
-        {
-            "lead_id": args.lead_id,
-            "note_id": args.note_id,
-            "author_id": 7,
-            "note_text": _DEMO_NOTE_TEXT,
-            "lead": _DEMO_LEAD_CONTEXT,
-        }
-    )
+    body: dict[str, object] = {
+        "lead_id": args.lead_id,
+        "note_id": args.note_id,
+        "author_id": 7,
+        "note_text": _DEMO_NOTE_TEXT,
+        "lead": _DEMO_LEAD_CONTEXT,
+    }
+    if args.route == "history":
+        body["note_created_at"] = _DEMO_NOTE_CREATED_AT
+    return json.dumps(body)
 
 
 _PATHS = {
     "fetch": "/api/v1/notes/judgements",
     "direct": "/api/v1/notes/judgements/direct",
+    "history": "/api/v1/notes/judgements/history",
+    "brief": f"/api/v1/briefs/rep/{_DEMO_REP_ID}",
+    "measures": f"/api/v1/measures/reps/{_DEMO_REP_ID}",
+    "config": "/api/v1/admin/tenant-config",
     # The versions read runs the whole gate chain and needs nothing else; the
     # old /_probe route is no longer served (register item 93).
     "probe": "/api/v1/meta/versions",
@@ -202,7 +264,7 @@ def _curl(args: argparse.Namespace, token: str, host: str) -> str:
     connection goes to --base-url, but Gate 2 only ever reads this."""
     url = f"{args.base_url.rstrip('/')}{_PATHS[args.route]}"
     parts = ["curl -sS"]
-    if args.route != "probe":
+    if args.route in _POST_ROUTES:
         parts.append("-X POST")
     parts.append(_shell_quote(url))
     parts.append(f"-H {_shell_quote(f'Host: {host}')}")
@@ -248,18 +310,38 @@ def main() -> int:
         return 2
 
     host = f"{tenant}.{settings.inbound_base_domain}"
-    token = jwt.encode(
-        _payload(args, settings, tenant),
-        settings.jwt_signing_key.get_secret_value(),
-        algorithm=settings.jwt_algorithm,
-    )
-
-    print(f"Algorithm:  {settings.jwt_algorithm}")
-    print(f"Claims:     {settings.claim_subject}, ", end="")
-    print(f"{settings.claim_subdomain}, {settings.claim_database}, iat, exp")
-    print(f"Tenant:     {tenant}")
-    print(f"Subject:    {args.subject}")
-    print(f"Valid for:  {args.ttl_seconds}s")
+    if args.route in SERVICE_ROUTES:
+        try:
+            token = mint_service_token(settings, tenant)
+        except ConfigError:
+            print(
+                "The service routes need DODEAL_SERVICE_JWT_ALGORITHM=HS256 and "
+                "DODEAL_SERVICE_JWT_SIGNING_KEY; under RS256 or ES256 only the "
+                "CRM can mint.",
+                file=sys.stderr,
+            )
+            return 2
+        claims = service_payload(settings, tenant)
+        print("Token:      service (the CRM's)")
+        print("Algorithm:  HS256")
+        print(f"Claims:     iss, aud, {settings.claim_subdomain}, iat, exp")
+        print(f"Issuer:     {claims['iss']}")
+        print(f"Audience:   {claims['aud']}")
+        print(f"Tenant:     {tenant}")
+        print(f"Valid for:  {claims['exp'] - claims['iat']}s")
+    else:
+        token = jwt.encode(
+            _payload(args, settings, tenant),
+            settings.jwt_signing_key.get_secret_value(),
+            algorithm=settings.jwt_algorithm,
+        )
+        print("Token:      user")
+        print(f"Algorithm:  {settings.jwt_algorithm}")
+        print(f"Claims:     {settings.claim_subject}, ", end="")
+        print(f"{settings.claim_subdomain}, {settings.claim_database}, iat, exp")
+        print(f"Tenant:     {tenant}")
+        print(f"Subject:    {args.subject}")
+        print(f"Valid for:  {args.ttl_seconds}s")
     print(f"Host (G2):  {host}")
     print(f"Route:      {args.route}  {_PATHS[args.route]}")
     print()

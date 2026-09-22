@@ -6787,3 +6787,17 @@ The load lane is outside the default run, so A3 missed one asked change there:
 `test_one_prompt_per_note.py` asserted the direct route's rate slot under the
 user `sub`; it now asserts `ratelimit:{t}:author:{id}`. Lanes after A5:
 redis_real 31 passed; load 11 passed three times.
+
+## Piece: register item D1, the demo minter's service tokens
+
+Item D1 -- `scripts/mint_demo_token.py` mints the CRM's service token (iss, aud,
+subdomain, iat, exp at now+300 or the deployment's shorter maximum; HS256 from
+the same env stack) for --route direct, history, brief, measures and config,
+and a user token for fetch and the versions probe; the history body carries
+`note_created_at`. `.env.demo` gains an invented HS256 service key.
+Production failure modes: (1) an operator copies .env.demo's shared secret into
+a real deployment and anyone holding the file can mint service tokens; (2) the
+compose stack and the minter drift apart again and every service call 401s as
+invalid_signature.
+Stress test: a token the minter prints for each service route verifies with
+`ServiceTokenVerifier` built from the same settings.
