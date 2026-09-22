@@ -6657,3 +6657,56 @@ Six commits: `548add4` (parseable examples), `1ed5852` (no_contact off `what_hap
 - **Failure mode 1:** an empty daily email trains people to ignore the channel within a fortnight, and then the one that matters is ignored with the rest. `build_brief` returns None and the route answers 204 when no line carries a single FIGURE -- not when there are no rows. A brief that looked at eight notes and can say nothing about any of them is still an empty email. A 204 is reserved for that: an unknown subject is 404 and an unwired store is 503, because both would otherwise read as a quiet day for ever.
 - **Failure mode 2:** a model asked to narrate figures will eventually produce one that is not in them, and a brief is read as fact. Every number here is `measures.py` arithmetic and every sentence is a template in `brief.py`; a suppressed measure renders as "not enough yet (4 of 10)" and never as a band or a 0%. The team roll-up is computed over the team's rows POOLED, not averaged from per-person averages, so a rep with three notes cannot weigh the same as one with nine.
 - **Stress test:** every role against a subject with two notes under a floor of three returns None; raising it to three returns text containing "nothing was asked about" and no band anywhere in the improvement line. A team of nine notes at 30 and three at 75 renders "fair over 12 notes" (pooled mean 41), where averaging the averages would have said "good".
+
+## Piece: register item 141b, the prompt-set stamp
+
+Item 141b -- `PROMPT_SET_VERSION` moves to `unit_a_prompts_v3`. `d1b4146` edited
+`score_v2.txt` in place and left the stamp at v2, so two prompt texts shared one
+stamp and a judgement stamped v2 was no longer reproducible from the v2 files.
+Production failure modes: (1) two stamps, one text -- an eval run compares
+judgements from before and after a prompt edit as if the prompt had not moved;
+(2) the stamp is a string in one module, so a future edit can miss it again.
+Stress test: the meta/versions route and a judgement both assert the literal
+v3 string, so the stamp cannot move in one place and not the other.
+
+## Piece: register item 146, the prompt set digest
+
+Item 146 -- a test hashes the ten templates `UNIT_A_TEMPLATES` names and pins
+the digest beside `PROMPT_SET_VERSION`, so a prompt edit without a bump is a red
+build. The name is hashed with the text, so a template joining or leaving the
+tuple moves the digest too.
+Production failure modes: (1) the digest is over the SHIPPED files, so a
+deployment running a DODEAL_PROMPTS_DIR override is unguarded and can send text
+no stamp describes; (2) the pair is updated by hand, so a bump with a stale
+digest passes review and leaves the guard asserting the wrong claim.
+Stress test: append one byte to a template, watch the digest assertion fail
+naming both constants to move, restore.
+
+## Piece: register item 140, the eval runner and the model-failure event
+
+Item 140 -- `_expected_band` compares the marked check set with
+`applicable_checks` before calling `compute_score`, and excludes on a mismatch.
+It used to catch `OutputValidationError`, by which point `output_rejected` had
+already written `output_validation_failed` -- a MODEL failure event -- for a
+human marking error.
+Production failure modes: (1) an alert on that event spikes whenever somebody
+runs the eval over a half-marked set, and the alert is trained to be ignored;
+(2) the set test and `validate_checks` are two statements of one rule, so a
+third fault added to `validate_checks` would pass the pre-check and raise here.
+Stress test: a no_contact row marked with all five of its checks plus
+`wh_outcome` asserts no `output_validation_failed` record on `dodeal_ai.unit_a`.
+
+## Piece: register item 132, recognised_short on the outcome lines
+
+Item 132 -- `recognised_short` is a bool on `judgement_completed` and
+`judgement_suppressed`, true only where the note was below the floor and the
+tenant table let it through. `_below_floor` is now one statement of the floor
+that both the gate and `_recognised_short` ask, and `diagnose_notes.run_passes`
+calls the shared helper instead of testing the phrase table on every note.
+Production failure modes: (1) the flag is computed before the gate and carried
+to whichever line is reached, so a new early return between them would log a
+judgement with no flag at all; (2) it is a per-judgement bool with no counter
+behind it -- a floor decision needs the lines aggregated, and nobody is doing
+that yet.
+Stress test: a full note opening with a tenant phrase ("not interested tmrw
+again") clears both floors and must read false, which the old column did not.

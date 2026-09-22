@@ -93,8 +93,8 @@ from dodeal_ai.units.structured_intelligence.eval_set import (
     load_eval_set,
 )
 from dodeal_ai.units.structured_intelligence.pipeline import (
-    _is_recognised_short_note,
     _length_gate,
+    _recognised_short,
 )
 from dodeal_ai.units.structured_intelligence.schemas import (
     CheckName,
@@ -261,8 +261,12 @@ async def run_passes(
     """
     run = PassRun(row_id=row.id)
     lead, note = as_inputs(row, ordinal)
-    text = note.note.strip()
-    run.recognised_short = _is_recognised_short_note(text, config)
+    # Register item 132: the recognition test runs only for a note BELOW the
+    # floor, which is what `_recognised_short` is -- pipeline.py's own answer,
+    # imported rather than rebuilt here. Asked of every note, as it was, a full
+    # note opening with a tenant phrase read back as a recognised short one and
+    # the column said the table was carrying notes it had never seen.
+    run.recognised_short = _recognised_short(note, config)
 
     gated = _length_gate(note, config)
     if gated is not None:

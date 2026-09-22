@@ -19,6 +19,7 @@ THE THREE THINGS THAT MUST HOLD, and the reason each is here:
 
 from __future__ import annotations
 
+import logging
 import shutil
 from pathlib import Path
 
@@ -308,6 +309,38 @@ async def test_a_scored_row_whose_marks_do_not_fit_its_type_is_reported(tmp_path
     assert summary.overall["band"].counted == 0
     assert summary.overall["band"].share is None
     assert summary.band_not_computable == 1
+
+
+async def test_a_marking_error_logs_no_model_failure(tmp_path, caplog):
+    """Register item 140: a human's bad mark never writes output_validation_failed.
+
+    The row answers all five checks no_contact asks AND `wh_outcome`, whose
+    component the type suppresses -- the exact shape `validate_checks` refuses.
+    Routed through `compute_score` that refusal logs the event that means a
+    MODEL answered badly, and an alert built on it would spike every time
+    somebody ran the eval over a half-marked set.
+    """
+    bad = tmp_path / "suppressed_check.jsonl"
+    bad.write_text(
+        '{"id": "nc-1", "text": "An invented note that is long enough to pass.", '
+        '"lead": {}, "note_type": "no_contact", '
+        '"checks": {"ns_action": true, "ns_date": true, "ns_closure": false, '
+        '"cl_readable": true, "cl_substance": true, "wh_outcome": true}}\n',
+        encoding="utf-8",
+    )
+    loaded = load_eval_set(bad)
+
+    llm = FakeLLM()
+    _script(llm, loaded, types={"nc-1": NoteType.NO_CONTACT})
+    with caplog.at_level(logging.WARNING, logger="dodeal_ai.unit_a"):
+        summary = await _run(loaded, llm)
+
+    # Excluded and counted, exactly as any other marking error.
+    assert summary.overall["band"].counted == 0
+    assert summary.band_not_computable == 1
+    assert [
+        r for r in caplog.records if "output_validation_failed" in r.getMessage()
+    ] == []
 
 
 @pytest.mark.parametrize(

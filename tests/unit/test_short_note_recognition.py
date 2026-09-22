@@ -17,6 +17,7 @@ from dodeal_ai.units.structured_intelligence.config import get_tenant_config
 from dodeal_ai.units.structured_intelligence.pipeline import (
     _is_recognised_short_note,
     _length_gate,
+    _recognised_short,
 )
 
 CONFIG = get_tenant_config("tenant-a")
@@ -141,3 +142,25 @@ def test_a_phrase_may_open_the_note_and_be_followed_by_fillers(text: str) -> Non
 def test_a_phrase_followed_by_ordinary_words_is_a_real_note(text: str) -> None:
     """Only fillers may follow the phrase; anything else is content to judge."""
     assert not _is_recognised_short_note(text, CONFIG)
+
+
+# --- what the outcome line and the diagnostic column report -----------------
+
+
+def test_a_note_above_the_floor_is_never_a_recognised_short_note() -> None:
+    """`_recognised_short` is about the too-short BRANCH, not the phrase table.
+
+    "not interested tmrw again" clears both floors, so the branch never ran --
+    but the phrase table recognises it, and the flag read off the table alone
+    counted a full note as one the floor would have refused.
+    """
+    full = _note("not interested tmrw again")
+    assert _is_recognised_short_note(full.note, CONFIG)
+    assert _length_gate(full, CONFIG) is None
+    assert not _recognised_short(full, CONFIG)
+
+
+def test_the_flag_is_true_only_where_the_branch_let_a_note_through() -> None:
+    """Below the floor and recognised: true. Below it and not: false."""
+    assert _recognised_short(_note("na1"), CONFIG)
+    assert not _recognised_short(_note("too thin"), CONFIG)
