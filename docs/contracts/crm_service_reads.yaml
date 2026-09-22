@@ -1,0 +1,149 @@
+openapi: 3.1.0
+info:
+  title: CRM service reads for the AI service's briefs and measures
+  version: 0.1.0-proposed
+  description: |
+    PROPOSED, NOT CONFIRMED (ASSUMPTION[Q23], register item 143). Two keyset-paged
+    reads the AI service asks the CRM to add to its service surface, beside the
+    three that exist (GET /leads, GET /leads/{id}, GET /leads/{id}/notes). The
+    client is src/dodeal_ai/tools/crm_reads.py; it is off unless
+    DODEAL_BRIEF_SOURCE=crm.
+
+    Paging is keyset: the first request sends no after_id; each next request sends
+    the largest row `id` seen so far; a page with fewer rows than `limit` is the
+    last. The AI service refuses to answer (503) rather than use a partial set, so a
+    failed page means no brief, never half of one. It reads at most 10000 rows per
+    call.
+
+    No row carries note text, and none may: the AI service holds no copy of a note.
+servers:
+  - url: https://{tenant}.dodealcrm.com/api/service
+    variables:
+      tenant:
+        default: tenant-a
+        description: The tenant's subdomain; each key is valid only against its own host.
+security:
+  - ddApiKey: []
+paths:
+  /judgements:
+    get:
+      summary: Stored judgements for one tenant, by the note's own time.
+      description: |
+        Rows with since <= note_created_at < until (half-open), optionally for one
+        author, in any order within a page; the AI service sorts by `id`, so `id`
+        must grow in the order rows were recorded.
+      parameters:
+        - {name: since, in: query, required: true, schema: {type: string, format: date-time},
+           description: "Inclusive. Always sent with an explicit offset, never Z."}
+        - {name: until, in: query, required: true, schema: {type: string, format: date-time},
+           description: "Exclusive. Always sent with an explicit offset, never Z."}
+        - {name: author_id, in: query, required: false, schema: {type: integer, minimum: 1},
+           description: "Narrows to one salesperson, in the same id space as a note's author_id."}
+        - $ref: '#/components/parameters/AfterId'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: One page.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, data]
+                properties:
+                  status: {type: boolean}
+                  data:
+                    type: array
+                    items: {$ref: '#/components/schemas/JudgementRow'}
+        '401': {$ref: '#/components/responses/Refused'}
+        '403': {$ref: '#/components/responses/Refused'}
+        '422': {$ref: '#/components/responses/Refused'}
+        '429': {$ref: '#/components/responses/Busy'}
+  /users:
+    get:
+      summary: Everyone in the tenant who writes or reads notes.
+      parameters:
+        - $ref: '#/components/parameters/AfterId'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: One page.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, data]
+                properties:
+                  status: {type: boolean}
+                  data:
+                    type: array
+                    items: {$ref: '#/components/schemas/User'}
+        '401': {$ref: '#/components/responses/Refused'}
+        '403': {$ref: '#/components/responses/Refused'}
+        '429': {$ref: '#/components/responses/Busy'}
+components:
+  securitySchemes:
+    ddApiKey:
+      type: apiKey
+      in: header
+      name: DD-API-KEY
+  parameters:
+    AfterId:
+      name: after_id
+      in: query
+      required: false
+      schema: {type: integer, minimum: 1}
+      description: Return rows with id greater than this. Absent on the first page.
+    Limit:
+      name: limit
+      in: query
+      required: true
+      schema: {type: integer, minimum: 1, maximum: 500}
+      description: The page size the AI service asks for (500 today).
+  responses:
+    Refused:
+      description: Refused. The AI service answers its caller 503 and reads no further.
+    Busy:
+      description: Rate limited. One retry after Retry-After when it is at most 2 s.
+  schemas:
+    JudgementRow:
+      type: object
+      additionalProperties: false
+      description: |
+        Exactly one half is filled: scored (band, total, denominator) with
+        suppressed_reason null, or suppressed_reason with the three null.
+      required: [id, note_id, lead_id, author_id, note_created_at, prompt_sent,
+                 enforcement_verdict, rubric_version, prompt_version, model_version,
+                 config_version]
+      properties:
+        id: {type: integer, minimum: 1, description: "The CRM's row id; the keyset."}
+        note_id: {type: integer, minimum: 1}
+        lead_id: {type: integer, minimum: 1}
+        author_id: {type: integer, minimum: 1}
+        note_created_at: {type: string, format: date-time}
+        note_type:
+          type: [string, 'null']
+          enum: [no_contact, callback, discovery, viewing, negotiation, won_lost,
+                 system_event, unclassifiable, null]
+        band: {type: [string, 'null'], enum: [poor, fair, good, excellent, null]}
+        total: {type: [integer, 'null'], minimum: 0, maximum: 100}
+        denominator: {type: [integer, 'null'], minimum: 1, maximum: 100}
+        suppressed_reason:
+          type: [string, 'null']
+          enum: [insufficient_evidence, not_scorable, null]
+        prompt_sent: {type: boolean}
+        enforcement_verdict: {type: string, enum: [allow, flag, block]}
+        rubric_version: {type: string, minLength: 1}
+        prompt_version: {type: string, minLength: 1}
+        model_version: {type: string, description: '"" when no model ran.'}
+        config_version: {type: string, minLength: 1}
+    User:
+      type: object
+      additionalProperties: false
+      description: A rep and a team leader have a team; a head of sales has none.
+      required: [id, user_id, name, role]
+      properties:
+        id: {type: integer, minimum: 1, description: "The CRM's row id; the keyset."}
+        user_id: {type: integer, minimum: 1, description: "The id space of a note's author_id."}
+        name: {type: string, minLength: 1}
+        role: {type: string, enum: [rep, team_leader, head_of_sales]}
+        team: {type: [string, 'null']}

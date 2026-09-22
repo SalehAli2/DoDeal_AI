@@ -32,6 +32,9 @@ from dodeal_ai.core.tenant_config import (
 from dodeal_ai.middleware.body_limit import BodyLimitMiddleware
 from dodeal_ai.middleware.inflight import InflightMiddleware
 from dodeal_ai.middleware.request_id import RequestIDMiddleware
+from dodeal_ai.tools.crm_reads import CrmJudgementStore, CrmUserDirectory
+from dodeal_ai.tools.httpx_transport import HttpxTransport
+from dodeal_ai.tools.keys import get_key_resolver
 from dodeal_ai.units.structured_intelligence.config import (
     UNIT_A_SECTION,
     parse_unit_a_section,
@@ -96,6 +99,23 @@ def _load_brief_sources(app: FastAPI) -> None:
         clear_templates()
         clear_tenant_configs()
         raise ConfigError("user_directory_invalid") from None
+
+
+def _crm_brief_sources(app: FastAPI, settings: Settings) -> None:
+    """Register item 143: with DODEAL_BRIEF_SOURCE=crm, each source the files
+    did not provide reads the CRM over the one pooled client. A file set by
+    its variable still wins."""
+    if settings.brief_source != "crm":
+        return
+    transport = HttpxTransport(app.state.crm_http)
+    if app.state.judgement_store is None:
+        app.state.judgement_store = CrmJudgementStore(
+            transport, get_key_resolver(), settings
+        )
+    if app.state.user_directory is None:
+        app.state.user_directory = CrmUserDirectory(
+            transport, get_key_resolver(), settings
+        )
 
 
 @asynccontextmanager
@@ -180,6 +200,7 @@ async def lifespan(app: FastAPI):
     app.state.http = httpx.AsyncClient(limits=_llm_limits(settings))
     # The CRM's pool, beside the model's and closed on the same two paths.
     app.state.crm_http = _crm_client(settings)
+    _crm_brief_sources(app, settings)
     if settings.llm_provider is None:
         # PERMISSIVE, for the same reason as backend_keys_missing above and in
         # the same shape: no provider is provisioned yet (Step 0), and a service

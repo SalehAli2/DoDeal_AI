@@ -51,6 +51,8 @@ ASSUMPTION_MARKERS = [
     "ASSUMPTION[Q7]",
     "ASSUMPTION[Q8]",
     "ASSUMPTION[Q13]",
+    # Register item 143: the two CRM reads the brief and the measures use.
+    "ASSUMPTION[Q23]",
 ]
 # RETIRED. The stub it named is gone (Piece N.2): `token_preflight` is a real
 # fail-open read and the pre-flight is enforced. Assembled rather than spelled,

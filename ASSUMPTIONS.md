@@ -651,6 +651,22 @@ Ordered by what they release. Items 4.1–4.3 are the critical path.
   `_attempt_fingerprint_key`), `units/structured_intelligence/config.py`
   (`attempt_ttl_seconds`).
 
+### 4.9 Two keyset reads for the briefs and the measures (Q23)
+- **Assumed, and built but off (register item 143):** the CRM will serve
+  `GET /api/service/judgements?since&until&author_id&after_id&limit` and
+  `GET /api/service/users?after_id&limit`, keyset-paged, each row carrying
+  the CRM's row `id`, as written in `docs/contracts/crm_service_reads.yaml`.
+  Neither exists. `DODEAL_BRIEF_SOURCE=crm` turns the clients on; the default
+  `none` leaves the brief and measures 503 unless the file fakes are set.
+- **Marker: `ASSUMPTION[Q23]`** (`src/dodeal_ai/tools/crm_reads.py`), `README.md`'s
+  provisional-answers table, and here.
+- **If wrong:** the shape is the backend's to confirm. A different envelope,
+  paging or field name changes `tools/crm_reads.py` and nothing above it:
+  the brief and measures read `JudgementStore` and `UserDirectory` only.
+- **Never partial:** a failed page, or more than 10000 rows, is 503
+  `brief_store_unavailable`, so a wrong answer here is a missing brief and
+  never a wrong figure.
+
 ---
 
 # 5. PENDING — awaiting a business or product answer

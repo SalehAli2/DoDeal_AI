@@ -6844,3 +6844,18 @@ change mid-month shifts every past window's bounds, and last week's figures
 change when re-read.
 Stress test: a London week across the spring change starts and ends at local
 00:00 and is 7 days minus one hour in UTC.
+
+## Piece: register item 143, the CRM read clients for the brief
+
+Item 143 -- `tools/crm_reads.py`: `CrmJudgementStore` and `CrmUserDirectory`
+behind the existing protocols, keyset-paged over the proposed
+`GET /api/service/judgements` and `/users` (ASSUMPTION[Q23],
+`docs/contracts/crm_service_reads.yaml`), built like `tools/leads.py`. Rows are
+sorted by the CRM row id before a JudgementRow is built; more than 10000 rows or
+any failed page is 503 `brief_store_unavailable`. `DODEAL_BRIEF_SOURCE=crm`
+turns them on in the lifespan; a file path set by its variable still wins.
+Production failure modes: (1) the CRM's ids are not monotonic with recording
+order, and improved share silently compares the wrong "later" row; (2) a
+tenant with more than 10000 rows in a window never gets a brief at all.
+Stress test: a backend that ignores `after_id` and returns the same full page
+must be refused as paging_stalled, not looped on.

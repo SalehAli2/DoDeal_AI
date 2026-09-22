@@ -594,7 +594,7 @@ The repo-wide guards are not separate jobs — they are ordinary pytest tests an
 
 ### Provisional answers
 
-Six questions were answered provisionally so the unit could be built. Each is marked in the code with a greppable token, so the blast radius of a wrong answer is `grep -r "ASSUMPTION\[Qn\]" src/`.
+Seven questions were answered provisionally so the unit could be built. Each is marked in the code with a greppable token, so the blast radius of a wrong answer is `grep -r "ASSUMPTION\[Qn\]" src/`.
 
 | # | Assumed | If wrong | Grep marker |
 | --- | --- | --- | --- |
@@ -603,6 +603,7 @@ Six questions were answered provisionally so the unit could be built. Each is ma
 | **Q6** | `/leads/{id}/notes` **may** return timeline events as well as notes, so `system_event` is a real note type: decided first, suppressed `not_scorable`, never vague-checked, never scored. | Nothing to undo — the type costs one enum member and a branch that never fires. We do not need the answer to be correct, only to know how often it happens. | `ASSUMPTION[Q6]` |
 | **Q7** | The JWT `sub` and a note's `author_id` are **different id spaces**, and nothing joins them. The rate limit keys on the verified `sub`; the judgement reports `author_id` as the backend gave it. | If they match, nothing breaks — the join simply becomes possible, which is what per-rep coaching over time would need. If they differ, the correction is a mapping table and it is the backend's to provide. | `ASSUMPTION[Q7]` |
 | **Q8** | The note being judged is on **page one** of the lead's notes (newest first, 25 per page), so one un-paged fetch finds it. | The note is matched **by id**, never by position, so a miss is a clean `404 note_not_found` — never the wrong note. The fix is query parameters in `tools/leads.py` at **step 4**, not a pipeline change. Watch for a rise in `note_not_found`. | `ASSUMPTION[Q8]` |
+| **Q23** | The CRM will serve **two keyset-paged reads** for the briefs and measures, `GET /api/service/judgements` and `GET /api/service/users` (`docs/contracts/crm_service_reads.yaml`). Off by default (`DODEAL_BRIEF_SOURCE=none`). | Only `tools/crm_reads.py` changes; the brief reads the `JudgementStore` and `UserDirectory` protocols. A failed page or over 10000 rows is 503, never a partial figure. | `ASSUMPTION[Q23]` |
 | **Q13** | **No lead field is confirmed to carry the business line**, so `deal_specifics` is suppressed for every note type and the denominator is 80, not 100. Suppressed is a *state*, not a zero — the weight leaves the denominator. | Set `business_line_field` and `deal_specifics_applicable` in `units/structured_intelligence/config.py`; nothing else moves. Past judgements are **not** recomputed — they carry `config_version` so a reader can see which rubric produced them. | `ASSUMPTION[Q13]` |
 
 `tests/test_assumption_markers.py` fails if any of these markers stops appearing in `src/`, this README, and `ASSUMPTIONS.md` together — so a marker cannot be deleted from the code while the documentation still claims it is there.

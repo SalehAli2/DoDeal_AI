@@ -168,6 +168,10 @@ class Settings(BaseSettings):
     # before reading it again (register item 97). 30 s is how late a changed rule
     # reaches the other pods; too high and an administrator's change looks lost.
     tenant_config_cache_seconds: float = Field(default=30.0, gt=0)
+    # Where the brief and the measures read judgements and people (register
+    # item 143): "crm" is the two CRM reads in tools/crm_reads.py, "none" is no
+    # source (503). Off by default: the endpoints are unconfirmed (Q23).
+    brief_source: Literal["none", "crm"] = "none"
     # --- Watchdog: timeout + retry policy for external calls (§6) -----------
     # Placeholder values; tune per real LLM/tool latency later.
     external_call_timeout_seconds: float = 10.0

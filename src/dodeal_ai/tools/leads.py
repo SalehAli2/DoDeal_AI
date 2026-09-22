@@ -141,8 +141,8 @@ class LeadsClient:
         return f"{s.backend_scheme}://{subdomain}.{s.backend_base_domain}/api/service"
 
     def _headers(self, tenant: str) -> dict[str, str]:
-        # The ONLY .get_secret_value() call on a DD-API-KEY in src/ -- the key
-        # exists as plaintext only for the instant it takes to build this header.
+        # One of the two .get_secret_value() calls on a DD-API-KEY in src/ (the
+        # other is tools/crm_reads.py's): plaintext only while the header is built.
         return {"DD-API-KEY": self._key_resolver.resolve(tenant).get_secret_value()}
 
     async def _get(
