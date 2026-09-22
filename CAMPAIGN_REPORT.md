@@ -6958,3 +6958,16 @@ english, so per-language figures overstate English; (2) a single Arabic word in
 an English note makes it mixed, so the mixed bucket fills with English notes.
 Stress test: "لا" is arabic and draws the Arabic fixed question; "ok" is english
 and draws the English one.
+
+## Piece: register item 107, the copied-previous flag
+
+Item 107 -- `NoteAnalysis.copied_previous` on every judgement: on the fetch
+route, the next-older note on page one equals this one after strip; on the
+direct route, the optional `previous_note_fingerprint` (64 hex, either case)
+equals this note's fingerprint. A flag only; no mark moves.
+Production failure modes: (1) the fetch route sees only page one, so a copy of a
+note that has fallen off it goes unflagged; (2) the direct route compares exact
+fingerprints while the fetch route strips, so a copy that differs only in
+trailing whitespace is flagged on one route and not the other.
+Stress test: the same answers scored for a copied and an original note give
+identical scores and actions, with only the flag different.

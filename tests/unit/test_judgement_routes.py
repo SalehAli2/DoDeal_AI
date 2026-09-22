@@ -566,6 +566,8 @@ def test_the_analysis_carries_all_three_passes(client):
         "checks": FAIR_CHECKS,
         # Register item 34: the note's script, on every judgement.
         "language": "english",
+        # Register item 107: not a copy of the note before it on the lead.
+        "copied_previous": False,
     }
 
 
@@ -580,6 +582,7 @@ def test_a_thin_note_has_no_note_type_at_all(client, leads):
         "reasoning": None,
         "checks": None,
         "language": "english",
+        "copied_previous": False,
     }
 
 

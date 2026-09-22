@@ -371,6 +371,13 @@ class DirectJudgementRequest(_SentNote):
 
     stage_change_to: str | None = Field(default=None, max_length=100)
 
+    # Register item 107: the hex SHA-256 of the author's previous note on this
+    # lead, as the CRM stored it. Equal to this note's fingerprint means the
+    # note was copied forward; a flag only, never a mark.
+    previous_note_fingerprint: str | None = Field(
+        default=None, pattern=r"^[0-9a-fA-F]{64}$"
+    )
+
 
 class HistoryJudgementRequest(_SentNote):
     """The history route's body (register item 127): an OLD saved note, scored
@@ -482,6 +489,10 @@ class NoteAnalysis(BaseModel):
     validated -- the facts the marks were computed from, so a salesperson can
     be shown which check failed. Null when suppressed, and on a judgement
     stored before the field existed, which still replays. Never on a log line.
+
+    `copied_previous` (register item 107) says the note repeats the one before
+    it on the lead, word for word: a flag the CRM may show, which changes no
+    mark. Null only on a judgement stored before the field existed.
     """
 
     note_type: ClassifierOutput | None = None
@@ -491,6 +502,7 @@ class NoteAnalysis(BaseModel):
     reasoning: str | None = None
     checks: dict[CheckName, bool] | None = None
     language: Language | None = None
+    copied_previous: bool | None = None
 
 
 class ScoreComponent(BaseModel):

@@ -602,8 +602,9 @@ async def _fetch_note(
     deps: JudgementDeps,
     *,
     deadline: float,
-) -> tuple[Lead, LeadNote]:
-    """Fetch the lead and page one of its notes together, then find the note.
+) -> tuple[Lead, LeadNote, bool]:
+    """Fetch the lead and page one of its notes together, then find the note,
+    and whether it repeats the next-older note on that page (register item 107).
 
     Both come back. The lead is not fetched only to prove it exists: four of its
     fields are the classifier's context section, and the alternative -- fetching
@@ -659,7 +660,17 @@ async def _fetch_note(
             note = _matching(notes, request.note_id)
     if note is None:
         raise NoteNotFoundError()
-    return lead, note
+    return lead, note, _copies_the_one_before(notes, note)
+
+
+def _copies_the_one_before(notes: list[LeadNote], note: LeadNote) -> bool:
+    """Register item 107: is the next-older note on page one (newest first,
+    so the next in the list) the same text once both are stripped? False when
+    the note is the oldest on the page -- there is nothing before it to read."""
+    position = notes.index(note)
+    if position + 1 >= len(notes):
+        return False
+    return notes[position + 1].note.strip() == note.note.strip()
 
 
 def _matching(notes: list[LeadNote], note_id: int) -> LeadNote | None:
@@ -776,7 +787,9 @@ async def _judge_fetched(
         async with asyncio.timeout(deps.settings.judgement_deadline_seconds) as budget:
             deadline = budget.when()
             assert deadline is not None  # set: the timeout was given a delay
-            lead, note = await _fetch_note(scope, request, deps, deadline=deadline)
+            lead, note, copied = await _fetch_note(
+                scope, request, deps, deadline=deadline
+            )
             return await _judge(
                 scope,
                 request,
@@ -786,6 +799,7 @@ async def _judge_fetched(
                 resubmission=resubmission,
                 deps=deps,
                 started=started,
+                copied_previous=copied,
             )
     except TimeoutError:
         raise _deadline_exceeded(scope, started) from None
@@ -870,6 +884,16 @@ async def judge_note_history(
     )
 
 
+def _copied_by_fingerprint(request: _JudgementInput) -> bool:
+    """Register item 107, on the note-in-the-body routes: the CRM's fingerprint
+    of the author's previous note equals this note's own fingerprint."""
+    previous = getattr(request, "previous_note_fingerprint", None)
+    note_text = getattr(request, "note_text", "")
+    return previous is not None and previous.lower() == state.note_fingerprint(
+        note_text
+    )
+
+
 def _stage_change(request: _JudgementInput, config: TenantConfig) -> bool:
     """Register item 142: is the CRM moving the lead to one of the tenant's
     blocking stages with this note? The ONE boolean the stage becomes; the
@@ -920,6 +944,7 @@ async def _judge_sent(
                 started=started,
                 history=history,
                 stage_change=_stage_change(request, deps.config),
+                copied_previous=_copied_by_fingerprint(request),
             )
     except TimeoutError:
         raise _deadline_exceeded(scope, started) from None
@@ -986,6 +1011,7 @@ async def _judge(
     started: float,
     history: bool = False,
     stage_change: bool = False,
+    copied_previous: bool = False,
 ) -> Judgement:
     """Every step from the length gate down, for every entry point.
 
@@ -1039,7 +1065,7 @@ async def _judge(
             reason=gate_reason,
             detail=gate_detail,
             config=config,
-            analysis=NoteAnalysis(language=language),
+            analysis=NoteAnalysis(language=language, copied_previous=copied_previous),
             clarification_prompt=clarification_prompt,
             prompt_withheld=prompt_withheld,
             stage_change=stage_change,
@@ -1151,7 +1177,9 @@ async def _judge(
                 detail=detail,
                 config=config,
                 analysis=NoteAnalysis(
-                    note_type=classification.note_type, language=language
+                    note_type=classification.note_type,
+                    language=language,
+                    copied_previous=copied_previous,
                 ),
                 model_version=classify_response.model,
                 stage_change=stage_change,
@@ -1212,6 +1240,7 @@ async def _judge(
                 reasoning=vague_output.reasoning,
                 checks=dict(score_output.checks),
                 language=language,
+                copied_previous=copied_previous,
             )
             score = compute_score(score_output.checks, note_type, config)
             # decide() is PURE, so it is asked twice: once with the window
