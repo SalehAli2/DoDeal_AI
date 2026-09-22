@@ -37,8 +37,9 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
+from zoneinfo import ZoneInfo
 
 from dodeal_ai.units.structured_intelligence.config import TenantConfig
 from dodeal_ai.units.structured_intelligence.judgement_rows import JudgementRow
@@ -127,14 +128,43 @@ class RepMeasures:
     improved_share: ShareMeasure
 
 
+def local_midnight(day: date, config: TenantConfig) -> datetime:
+    """The instant `day` begins in the tenant's zone, in UTC (register item
+    156). Built from the local date, so a daylight-saving change moves the
+    UTC instant and never the local midnight."""
+    zone = ZoneInfo(config.timezone)
+    return datetime.combine(day, time.min, tzinfo=zone).astimezone(UTC)
+
+
+def local_today(now: datetime, config: TenantConfig) -> date:
+    """Today's date in the tenant's zone."""
+    return now.astimezone(ZoneInfo(config.timezone)).date()
+
+
 def rolling_window(now: datetime, config: TenantConfig) -> tuple[datetime, datetime]:
-    """The half-open window `[now - rolling_window_days, now)` the store read takes.
+    """The half-open window the store read takes: WHOLE LOCAL DAYS (register
+    item 156), `[local midnight today - rolling_window_days, local midnight
+    today)`, as UTC instants. Today is never in it, so a brief at 07:30 and one
+    at 11:00 describe the same period.
 
     Here rather than at each call site so the 30 lives in exactly one place --
     the tenant's config -- and two callers cannot measure different periods and
     describe them with the same sentence.
     """
-    return now - timedelta(days=config.rolling_window_days), now
+    today = local_today(now, config)
+    start = today - timedelta(days=config.rolling_window_days)
+    return local_midnight(start, config), local_midnight(today, config)
+
+
+def local_dates(
+    since: datetime, until: datetime, config: TenantConfig
+) -> tuple[date, date]:
+    """The first and last LOCAL dates inside `[since, until)`: what a printed
+    period names. `until` is exclusive, so the last date is the one just before
+    it."""
+    zone = ZoneInfo(config.timezone)
+    last = until - timedelta(microseconds=1)
+    return since.astimezone(zone).date(), last.astimezone(zone).date()
 
 
 def _rep_notes(rows: Iterable[JudgementRow]) -> list[JudgementRow]:

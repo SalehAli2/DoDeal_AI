@@ -6830,3 +6830,17 @@ a restart, so a corrected fake keeps serving the old rows; (2) a large file is
 held whole in every worker's memory.
 Stress test: start the app, delete both files and refuse every `read_text`; a
 head-of-sales brief still answers 200 or 204.
+
+## Piece: register item 156, whole local days in the tenant's zone
+
+Item 156 -- `TenantConfig.timezone` (IANA, default "Asia/Dubai", validated by
+the section parser, no version bump). `rolling_window` is `[local midnight
+today - N days, local midnight today)` as UTC instants, built from local dates
+so daylight saving moves the UTC instant and never the local midnight; printed
+periods are local first-to-last dates. `tzdata` is now a dependency.
+Production failure modes: (1) a tenant spanning two zones is counted in one,
+so an evening shift's notes land on the next day for half the team; (2) a zone
+change mid-month shifts every past window's bounds, and last week's figures
+change when re-read.
+Stress test: a London week across the spring change starts and ends at local
+00:00 and is 7 days minus one hour in UTC.

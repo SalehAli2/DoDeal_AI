@@ -39,8 +39,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from dodeal_ai.core.tenant_config import (
     ResolvedSection,
@@ -296,6 +297,13 @@ class TenantConfig:
     # does not like. Read once per judgement and stamped on the block; a
     # tenant that moves to strict never changes an old judgement's meaning.
     enforcement_mode: EnforcementMode
+
+    # Register item 156: the IANA zone the tenant's days are counted in. Every
+    # window is whole local days and every printed period is local dates, so a
+    # rep's "yesterday" ends at their midnight, not at UTC's. A wrong zone moves
+    # a whole evening's notes into the next day. Not part of what a mark means,
+    # so changing it bumps no version.
+    timezone: str
     config_version: str
 
     def __post_init__(self) -> None:
@@ -365,6 +373,7 @@ _DEFAULT_CONFIG = TenantConfig(
     # calibration target is met, which nothing in this service can check. So
     # advisory is the default and only a tenant file may say otherwise.
     enforcement_mode=EnforcementMode.ADVISORY,
+    timezone="Asia/Dubai",
     # -4: register item 142 changed the enforcement_mode vocabulary, so a file
     # saying "blocking" no longer parses. The rubric did not move and
     # RUBRIC_VERSION did not either -- this stamp is what makes an old
@@ -410,6 +419,20 @@ class TenantConfigFile(BaseModel):
     measure_evidence_floor: int | None = Field(default=None, ge=1)
     rolling_window_days: int | None = Field(default=None, gt=0)
     enforcement_mode: EnforcementMode | None = None
+    timezone: str | None = None
+
+    @field_validator("timezone")
+    @classmethod
+    def _known_zone(cls, value: str | None) -> str | None:
+        """An IANA name the zone database knows; anything else is refused
+        rather than read as UTC. Fixed message: never the value."""
+        if value is None:
+            return None
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError):
+            raise ValueError("timezone") from None
+        return value
 
     def build(self) -> TenantConfig:
         """This file over the default, checked as a whole."""

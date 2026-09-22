@@ -56,13 +56,14 @@ PEOPLE = [HEAD, LEADER, IDRIS, NOOR]
 
 def _row(author_id: int, note_id: int, *, flagged: bool = False) -> JudgementRow:
     """One invented row, dated inside any rolling window the route can build:
-    the route's `until` is the clock, so `now` minus an hour is always in."""
+    the window is whole local days ending at local midnight today (register item
+    156), so `now` minus one day is always in."""
     return JudgementRow.model_validate(
         {
             "note_id": note_id,
             "lead_id": 9000 + note_id,
             "author_id": author_id,
-            "note_created_at": (datetime.now(UTC) - timedelta(hours=1)).isoformat(),
+            "note_created_at": (datetime.now(UTC) - timedelta(days=1)).isoformat(),
             "note_type": "discovery",
             "band": "good",
             "total": 72,

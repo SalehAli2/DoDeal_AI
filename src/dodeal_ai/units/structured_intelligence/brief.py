@@ -45,6 +45,7 @@ from dodeal_ai.units.structured_intelligence.measures import (
     average_band,
     flagged_share,
     improved_share,
+    local_dates,
 )
 from dodeal_ai.units.structured_intelligence.user_directory import Role, User
 
@@ -142,13 +143,12 @@ def _row_line(line: BriefLine, config: TenantConfig) -> str:
 
 
 def _period(since: datetime, until: datetime, config: TenantConfig) -> str:
-    """The window, in dates.
-
-    `until` is exclusive, and in normal use it is "now" -- so nothing after it
-    exists yet and naming its date is true. Stated rather than assumed, because
-    a correct figure described with the wrong period is a wrong statement.
+    """The window, in the tenant's LOCAL dates (register item 156), first day
+    to last day inclusive. Stated rather than assumed, because a correct figure
+    described with the wrong period is a wrong statement.
     """
-    return f"{since:%Y-%m-%d} to {until:%Y-%m-%d} ({config.rolling_window_days} days)"
+    first, last = local_dates(since, until, config)
+    return f"{first:%Y-%m-%d} to {last:%Y-%m-%d} ({config.rolling_window_days} days)"
 
 
 def _by_author(rows: Sequence[JudgementRow], author_id: int) -> list[JudgementRow]:

@@ -22,7 +22,8 @@ text -- there is no field for one.
 from __future__ import annotations
 
 import dataclasses
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -38,6 +39,7 @@ from dodeal_ai.units.structured_intelligence.measures import (
     average_band,
     flagged_share,
     improved_share,
+    local_dates,
     measure_rep,
     rolling_window,
 )
@@ -100,17 +102,19 @@ def _rows(count: int, **kwargs: object) -> list[JudgementRow]:
 
 def test_the_window_is_the_tenants_rolling_days() -> None:
     """The 30 lives in the config and nowhere else, so two callers cannot
-    measure different periods and describe them the same way."""
+    measure different periods and describe them the same way. Register item
+    156: whole local days, ending at local midnight today (Asia/Dubai, +04)."""
     now = datetime(2026, 9, 30, 7, 30, tzinfo=UTC)
     since, until = rolling_window(now, CONFIG)
-    assert until == now
-    assert since == now - timedelta(days=30)
+    assert until == datetime(2026, 9, 29, 20, 0, tzinfo=UTC)
+    assert since == until - timedelta(days=30)
 
 
 def test_a_tenant_may_shorten_the_window() -> None:
     config = dataclasses.replace(CONFIG, rolling_window_days=7)
     now = datetime(2026, 9, 30, tzinfo=UTC)
-    assert rolling_window(now, config)[0] == now - timedelta(days=7)
+    since, until = rolling_window(now, config)
+    assert until - since == timedelta(days=7)
 
 
 # --- the evidence floor -----------------------------------------------------
@@ -464,3 +468,47 @@ def test_a_tenant_may_raise_its_own_floor() -> None:
         MeasureSuppressed.BELOW_EVIDENCE_FLOOR
     )
     assert average_band(_rows(20), strict).suppressed is None
+
+
+# --- whole local days (register item 156) ----------------------------------
+
+
+def test_a_brief_at_0730_and_one_at_1100_local_share_a_window() -> None:
+    """Today is never in the window, so the hour of the call cannot move it."""
+    early = datetime(2026, 9, 30, 3, 30, tzinfo=UTC)  # 07:30 in Dubai
+    late = datetime(2026, 9, 30, 7, 0, tzinfo=UTC)  # 11:00 in Dubai
+    assert rolling_window(early, CONFIG) == rolling_window(late, CONFIG)
+
+
+def test_a_daylight_saving_zone_keeps_local_midnight_bounds() -> None:
+    """Across London's spring change the bounds are still local midnights, so
+    the week is an hour short in UTC and whole in local days."""
+    london = dataclasses.replace(
+        CONFIG, timezone="Europe/London", rolling_window_days=7
+    )
+    since, until = rolling_window(datetime(2026, 3, 30, 12, tzinfo=UTC), london)
+    zone = ZoneInfo("Europe/London")
+    assert since == datetime(2026, 3, 23, tzinfo=zone)
+    assert until == datetime(2026, 3, 30, tzinfo=zone)
+    assert (since.astimezone(zone).hour, until.astimezone(zone).hour) == (0, 0)
+    assert until - since == timedelta(days=7) - timedelta(hours=1)
+
+
+def test_the_printed_period_is_local_dates_first_to_last() -> None:
+    """A Dubai window named by its local first and last days."""
+    since, until = rolling_window(datetime(2026, 9, 21, 6, tzinfo=UTC), CONFIG)
+    assert local_dates(since, until, CONFIG) == (date(2026, 8, 22), date(2026, 9, 20))
+
+
+def test_the_zone_is_parsed_and_an_unknown_one_refused() -> None:
+    """An IANA name is accepted; anything else fails with no value quoted."""
+    assert CONFIG.timezone == "Asia/Dubai"
+    assert CONFIG.config_version == "tenant-cfg-default-4"
+    london = parse_unit_a_section({"config_version": "v", "timezone": "Europe/London"})
+    assert london.timezone == "Europe/London"
+    unset = parse_unit_a_section({"config_version": "v", "timezone": None})
+    assert unset.timezone == "Asia/Dubai"
+    for bad in ("Mars/Olympus", "../../etc/passwd", ""):
+        with pytest.raises(ValueError) as caught:
+            parse_unit_a_section({"config_version": "v", "timezone": bad})
+        assert "Olympus" not in str(caught.value.errors(include_input=False))  # type: ignore[attr-defined]
