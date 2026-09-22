@@ -6933,3 +6933,15 @@ flaky model marks good notes poor, blocking stage changes until the rep
 resubmits.
 Stress test: the table test turns each of the five conditions off in turn and
 gets a flag, never a block.
+
+## Piece: register item 148, the check answers on the judgement
+
+Item 148 -- `NoteAnalysis.checks` carries the scoring pass's validated yes/no
+answers on a scored judgement, null when suppressed and on judgements stored
+before the field (which still replay); it reaches no log line.
+Production failure modes: (1) the CRM shows a rep "which check failed" and the
+check names are the rubric's internal vocabulary, so a renamed check breaks the
+screen; (2) a replayed pre-field judgement shows no checks and reads as a
+different kind of answer.
+Stress test: a stored judgement with `checks` stripped out replays 200 with
+`checks: null` and no model call.

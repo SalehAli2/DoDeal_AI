@@ -54,7 +54,7 @@ from tests.helpers.fake_llm import (
     truncated,
 )
 from tests.helpers.fake_operational_redis import FakeOperationalRedis
-from tests.helpers.score_answers import score_payload
+from tests.helpers.score_answers import FAIR_CHECKS, score_payload
 
 JUDGE = "/api/v1/notes/judgements"
 RESUBMIT = "/api/v1/notes/judgements/resubmission"
@@ -562,6 +562,8 @@ def test_the_analysis_carries_all_three_passes(client):
         "missing_components": ["next_step_with_date"],
         "clarification_prompt": "Which Tuesday are you calling, and what will you cover?",
         "reasoning": "The follow-up has no date.",
+        # Register item 148: the validated check answers the marks came from.
+        "checks": FAIR_CHECKS,
     }
 
 
@@ -574,6 +576,7 @@ def test_a_thin_note_has_no_note_type_at_all(client, leads):
         "missing_components": [],
         "clarification_prompt": None,
         "reasoning": None,
+        "checks": None,
     }
 
 

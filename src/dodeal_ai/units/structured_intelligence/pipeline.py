@@ -1204,6 +1204,7 @@ async def _judge(
                 missing_components=vague_output.missing_components,
                 clarification_prompt=vague_output.clarification_prompt,
                 reasoning=vague_output.reasoning,
+                checks=dict(score_output.checks),
             )
             score = compute_score(score_output.checks, note_type, config)
             # decide() is PURE, so it is asked twice: once with the window

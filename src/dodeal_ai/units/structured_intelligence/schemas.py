@@ -472,13 +472,20 @@ class NoteAnalysis(BaseModel):
     """The analysis half of a judgement. On a suppressed judgement every field
     is null/empty except note_type, which carries the classifier's answer when
     there was one (including "unclassifiable") and null when we stopped before
-    classifying."""
+    classifying.
+
+    `checks` (register item 148) is the scoring pass's yes/no answers, as
+    validated -- the facts the marks were computed from, so a salesperson can
+    be shown which check failed. Null when suppressed, and on a judgement
+    stored before the field existed, which still replays. Never on a log line.
+    """
 
     note_type: ClassifierOutput | None = None
     is_vague: bool | None = None
     missing_components: list[MissingComponent] = Field(default_factory=list)
     clarification_prompt: str | None = None
     reasoning: str | None = None
+    checks: dict[CheckName, bool] | None = None
 
 
 class ScoreComponent(BaseModel):
