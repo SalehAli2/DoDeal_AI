@@ -7007,3 +7007,15 @@ does not count, so the rate is of judgements made, not of requests; (2) with no
 tenant label a floor change for one tenant cannot be read off the counter.
 Stress test: "na" below the floor counts once; a full note on the same lead
 leaves the counter where it was.
+
+## Piece: register item 116, the ceilings assume a non-reasoning model
+
+Item 116 -- one comment beside each of the three output ceilings and in
+core/llm/profiles.py: they are sized for a non-reasoning model. No behaviour
+changes.
+Production failure modes: (1) a profile moves a task to a reasoning model and
+every answer truncates, spending the reprompt and then 503 malformed_output;
+(2) a provider silently enables reasoning on an existing model id with the
+same effect.
+Stress test: a scripted MAX_TOKENS finish on the score pass is rejected as
+output_truncated and reprompted once (tests/unit/test_reprompt.py covers it).

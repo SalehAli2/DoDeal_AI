@@ -61,6 +61,8 @@ CLASSIFY_LABEL = "llm.unit_a.classify"
 # answer. The headroom is for a model that prefaces or fences its reply: that
 # still fits, and is then rejected as MALFORMED, which is a diagnosis. A ceiling
 # tight enough to truncate it would report the same fault as truncation.
+# Register item 116: sized for a NON-REASONING model. A reasoning model spends
+# hidden tokens from this same budget before it answers, and would truncate.
 CLASSIFY_MAX_OUTPUT_TOKENS = 64
 
 # What the classifier is allowed to see of the lead, and nothing else. Four

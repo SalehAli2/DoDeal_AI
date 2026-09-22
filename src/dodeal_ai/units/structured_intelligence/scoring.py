@@ -73,6 +73,8 @@ SCORE_LABEL = "llm.unit_a.score"
 # ceiling does not move with Arabic; the headroom is for formatting and for a
 # fenced reply, which fits and is then rejected as malformed rather than
 # truncated.
+# Register item 116: sized for a NON-REASONING model. A reasoning model spends
+# hidden tokens from this same budget before it answers, and would truncate.
 SCORE_MAX_OUTPUT_TOKENS = 384
 
 

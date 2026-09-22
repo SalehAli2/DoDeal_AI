@@ -19,6 +19,10 @@ from dataclasses import dataclass
 from dodeal_ai.core.config import LLMProvider, ModelProfile, Settings
 from dodeal_ai.core.llm.client import LLMConfigurationError
 
+# Register item 116: every Unit A ceiling (classify.py, vague.py, scoring.py)
+# assumes a NON-REASONING model; a profile pointing a task at a reasoning model
+# needs its ceiling re-sized first, or the hidden reasoning truncates the answer.
+#
 # The only names Unit A may pass. A fourth task means a fourth constant here
 # first, which is the point: KNOWN_PROFILES is grepped against the unit.
 PROFILE_UNIT_A_CLASSIFY = "unit_a.classify"

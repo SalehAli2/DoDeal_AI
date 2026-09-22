@@ -65,6 +65,8 @@ VAGUE_LABEL = "llm.unit_a.vague"
 # sentences of reasoning, and the remainder is slack for a model that formats
 # the object across lines. Settings.llm_max_output_tokens carries the same
 # headroom for the same reason; this task is why.
+# Register item 116: sized for a NON-REASONING model. A reasoning model spends
+# hidden tokens from this same budget before it answers, and would truncate.
 VAGUE_MAX_OUTPUT_TOKENS = 1024
 
 # Six types, six templates. system_event is DELIBERATELY ABSENT: a machine
