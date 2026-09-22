@@ -153,6 +153,26 @@ class SubjectNotFoundError(DodealError):
         super().__init__("subject_not_found", 404)
 
 
+class RepNumbersNotEnabled(DodealError):
+    """The tenant has not switched on per-person figures (register item 154).
+
+    403: the request was understood and the answer exists, but this tenant has
+    chosen not to publish numbers about individual people. The default is off,
+    so a tenant is never shown figures about its staff by accident.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("rep_numbers_not_enabled", 403)
+
+
+class BriefDeadlineExceeded(DodealError):
+    """A brief or a measure did not finish inside `judgement_deadline_seconds`
+    (register item 154). 503, the family of every "not now, try again"."""
+
+    def __init__(self) -> None:
+        super().__init__("brief_deadline_exceeded", 503)
+
+
 class BriefStoreUnavailable(DodealError):
     """No judgement store or no user directory is configured (item 145).
 

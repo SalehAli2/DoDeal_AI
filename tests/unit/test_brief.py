@@ -84,7 +84,9 @@ def _rows(author_id: int, count: int, *, first_note: int = 1, **kwargs: object):
 
 
 def _brief(role: Role, subject: User, rows, users=EVERYONE) -> str | None:
-    return build_brief(
+    """The brief's text, the part these tests read (register item 154 made
+    the brief a Brief; its JSON has tests of its own)."""
+    brief = build_brief(
         role,
         subject,
         users=users,
@@ -93,6 +95,7 @@ def _brief(role: Role, subject: User, rows, users=EVERYONE) -> str | None:
         until=UNTIL,
         config=CONFIG,
     )
+    return None if brief is None else brief.text
 
 
 # --- not sent ---------------------------------------------------------------
@@ -289,3 +292,29 @@ def test_no_brief_ever_prints_an_id(role: Role) -> None:
     assert text is not None
     for user in EVERYONE:
         assert str(user.user_id) not in text
+
+
+# --- the flagged note ids (register item 154) --------------------------------
+
+
+def test_flagged_ids_are_newest_first_distinct_and_at_most_fifty() -> None:
+    """Newest note first, a later-recorded row first on a tie, each id once."""
+    from dodeal_ai.units.structured_intelligence.brief import (
+        MAX_NOTE_IDS,
+        newest_note_ids,
+    )
+
+    rows = [
+        _row(author_id=501, note_id=n, flagged=True).model_copy(
+            update={
+                "note_created_at": datetime(2026, 9, 1, tzinfo=UTC).replace(
+                    minute=n % 60
+                )
+            }
+        )
+        for n in range(1, 60)
+    ]
+    ids = newest_note_ids([*rows, rows[0]])
+    assert len(ids) == MAX_NOTE_IDS
+    assert ids[0] == 59
+    assert len(set(ids)) == len(ids)

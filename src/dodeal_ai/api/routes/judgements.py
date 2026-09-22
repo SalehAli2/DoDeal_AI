@@ -40,13 +40,14 @@ fakes over invented files until the backend answers, and both of which are a
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Path, Request, Response
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse
 
 from dodeal_ai.core.auth.dependencies import (
     gate4_cost,
@@ -55,11 +56,16 @@ from dodeal_ai.core.auth.dependencies import (
 )
 from dodeal_ai.core.config import Settings, get_settings
 from dodeal_ai.core.context import RequestContext
-from dodeal_ai.core.errors import HistoryLoadShed, SubjectNotFoundError
+from dodeal_ai.core.errors import (
+    BriefDeadlineExceeded,
+    HistoryLoadShed,
+    RepNumbersNotEnabled,
+    SubjectNotFoundError,
+)
 from dodeal_ai.core.inflight import history_counter
 from dodeal_ai.core.llm import LLMClient, get_llm_client
 from dodeal_ai.tools.leads import LeadsClient, get_leads_client
-from dodeal_ai.units.structured_intelligence.brief import build_brief
+from dodeal_ai.units.structured_intelligence.brief import Brief, build_brief
 from dodeal_ai.units.structured_intelligence.config import (
     TenantConfig,
     resolve_tenant_config,
@@ -314,16 +320,42 @@ def _subject(users: list[User], subject_id: int) -> User:
     raise SubjectNotFoundError()
 
 
+async def rep_numbers_config(
+    context: Annotated[RequestContext, Depends(service_gate4_cost)],
+) -> TenantConfig:
+    """The tenant's rules for a route that shows a person's figures, or 403
+    rep_numbers_not_enabled (register item 154). Declared before the store in
+    each route, so a tenant that has not opted in is told so first."""
+    config = await resolve_tenant_config(context.tenant)
+    if not config.rep_numbers_enabled:
+        raise RepNumbersNotEnabled()
+    return config
+
+
+def deadline_exceeded(context: RequestContext) -> BriefDeadlineExceeded:
+    """Log the brief or measure that ran out of time; hand back the error."""
+    _logger.warning(
+        "brief_deadline_exceeded",
+        extra={
+            "reason_code": "brief_deadline_exceeded",
+            "tenant": context.tenant,
+            "request_id": context.request_id,
+        },
+    )
+    return BriefDeadlineExceeded()
+
+
 @router.get(
     "/briefs/{role}/{subject_id}",
-    response_class=PlainTextResponse,
     responses={204: {"description": "Nothing to report; no brief is sent."}},
 )
 async def read_brief(
     role: Role,
     context: Annotated[RequestContext, Depends(service_gate4_cost)],
+    config: Annotated[TenantConfig, Depends(rep_numbers_config)],
     store: Annotated[JudgementStore, Depends(get_judgement_store)],
     directory: Annotated[UserDirectory, Depends(get_user_directory)],
+    settings: Annotated[Settings, Depends(get_settings)],
     subject_id: Annotated[int, Path(ge=1)],
 ) -> Response:
     """One role brief, on demand. Register item 145.
@@ -340,12 +372,34 @@ async def read_brief(
     `role` is what the CALLER asked for, not what the subject's title entitles
     them to: a head of sales may want the rep view of one of their people.
 
+    JSON (register item 154): {text, period, lines, flagged_note_ids}, under
+    the judgement deadline with its own 503 brief_deadline_exceeded, and 403
+    rep_numbers_not_enabled for a tenant that has not opted in.
+
     THE SERVICE CHAIN ONLY (register item 153). A person's token is 401 here:
     the CRM asks for a brief with its own token and decides, on its side, who
     may read whose. The chain still holds the tenant -- Host match, tenant cost
     counter -- so a brief never crosses one.
     """
-    config = await resolve_tenant_config(context.tenant)
+    try:
+        async with asyncio.timeout(settings.judgement_deadline_seconds):
+            brief = await _brief(role, subject_id, context, store, directory, config)
+    except TimeoutError:
+        raise deadline_exceeded(context) from None
+    if brief is None:
+        return Response(status_code=204)
+    return JSONResponse(brief.body())
+
+
+async def _brief(
+    role: Role,
+    subject_id: int,
+    context: RequestContext,
+    store: JudgementStore,
+    directory: UserDirectory,
+    config: TenantConfig,
+) -> Brief | None:
+    """The brief's reads and its arithmetic, under the route's deadline."""
     since, until = rolling_window(datetime.now(UTC), config)
 
     users = list(await directory.users(context.tenant))
@@ -360,7 +414,7 @@ async def read_brief(
         author_id=subject.user_id if role is Role.REP else None,
     )
 
-    text = build_brief(
+    return build_brief(
         role,
         subject,
         users=users,
@@ -369,6 +423,3 @@ async def read_brief(
         until=until,
         config=config,
     )
-    if text is None:
-        return Response(status_code=204)
-    return PlainTextResponse(text)

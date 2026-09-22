@@ -18,6 +18,7 @@ memory from invented rows and invented people and injected through
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 from datetime import UTC, datetime, timedelta
 
@@ -116,11 +117,21 @@ def client(monkeypatch, store, directory):
     app.dependency_overrides[get_verifier] = lambda: JwtVerifier(test_settings)
     app.dependency_overrides[get_judgement_store] = lambda: store
     app.dependency_overrides[get_user_directory] = lambda: directory
+    # Register item 154: a tenant opts in to per-person figures; these tests
+    # are about the brief, so their tenant has.
+    monkeypatch.setattr(judgement_routes, "resolve_tenant_config", _opted_in)
 
     yield TestClient(app)
 
     app.dependency_overrides.clear()
     get_settings.cache_clear()
+
+
+OPTED_IN = dataclasses.replace(get_tenant_config("tenant-a"), rep_numbers_enabled=True)
+
+
+async def _opted_in(_tenant: str):
+    return OPTED_IN
 
 
 def _headers(subdomain: str = "tenant-a") -> dict:
@@ -170,27 +181,29 @@ def test_a_tenant_with_no_rows_of_its_own_gets_nothing(client) -> None:
 # --- the four answers -------------------------------------------------------
 
 
-def test_a_rep_brief_is_text(client) -> None:
+def test_a_rep_brief_is_json_carrying_its_text(client) -> None:
+    """Register item 154: JSON, with the text a person reads inside it."""
     r = client.get(f"{BRIEFS}/rep/501", headers=_headers())
     assert r.status_code == 200
-    assert r.headers["content-type"].startswith("text/plain")
-    assert r.text.startswith("Note quality for Idris Vale.\n")
-    assert "over 12 notes" in r.text
+    assert r.headers["content-type"].startswith("application/json")
+    assert r.json()["text"].startswith("Note quality for Idris Vale.\n")
+    assert "over 12 notes" in r.json()["text"]
 
 
 def test_a_team_brief_names_the_team_and_its_people(client) -> None:
     r = client.get(f"{BRIEFS}/team_leader/402", headers=_headers())
     assert r.status_code == 200
-    assert "Hana Reyes's team (north)" in r.text
-    assert "Idris Vale" in r.text and "Noor Adeyemi" in r.text
-    assert "over 24 notes" in r.text
+    text = r.json()["text"]
+    assert "Hana Reyes's team (north)" in text
+    assert "Idris Vale" in text and "Noor Adeyemi" in text
+    assert "over 24 notes" in text
 
 
 def test_an_org_brief_covers_every_team(client) -> None:
     r = client.get(f"{BRIEFS}/head_of_sales/401", headers=_headers())
     assert r.status_code == 200
-    assert "across all teams, for Ayla Brook" in r.text
-    assert "north" in r.text
+    assert "across all teams, for Ayla Brook" in r.json()["text"]
+    assert "north" in r.json()["text"]
 
 
 def test_nothing_to_report_is_204_and_no_body(client, store) -> None:
@@ -242,15 +255,15 @@ def test_the_rep_brief_reads_only_that_reps_rows(client) -> None:
     into a colleague's work by forgetting a filter downstream."""
     r = client.get(f"{BRIEFS}/rep/502", headers=_headers())
     assert r.status_code == 200
-    assert "over 12 notes" in r.text
-    assert "Idris Vale" not in r.text
+    assert "over 12 notes" in r.json()["text"]
+    assert "Idris Vale" not in r.json()["text"]
 
 
 def test_a_brief_carries_no_ids_at_all(client) -> None:
     """The reason the directory is a backend ask."""
     r = client.get(f"{BRIEFS}/head_of_sales/401", headers=_headers())
     for user in PEOPLE:
-        assert str(user.user_id) not in r.text
+        assert str(user.user_id) not in r.json()["text"]
 
 
 def test_the_window_is_the_tenants_rolling_days(client, monkeypatch, store) -> None:
@@ -259,7 +272,7 @@ def test_the_window_is_the_tenants_rolling_days(client, monkeypatch, store) -> N
     # Patched on the ROUTE module: it imported the name, so patching the
     # config module would leave the route holding the original reference. The
     # route resolves its rules with resolve_tenant_config since register item 97.
-    short = dataclasses.replace(get_tenant_config("tenant-a"), rolling_window_days=1)
+    short = dataclasses.replace(OPTED_IN, rolling_window_days=1)
 
     async def _short(_tenant: str):
         return short
@@ -272,3 +285,55 @@ def test_the_window_is_the_tenants_rolling_days(client, monkeypatch, store) -> N
     store._rows["tenant-a"] = [stale] * 12
     r = client.get(f"{BRIEFS}/rep/501", headers=_headers())
     assert r.status_code == 204
+
+
+# --- the JSON, the switch and the deadline (register item 154) --------------
+
+
+def test_the_brief_is_text_period_lines_and_flagged_ids(client, store) -> None:
+    """Four keys; the period in local dates; each line its three measures."""
+    store._rows["tenant-a"][0] = _row(501, 100, flagged=True)
+    body = client.get(f"{BRIEFS}/rep/501", headers=_headers()).json()
+    assert set(body) == {"text", "period", "lines", "flagged_note_ids"}
+    assert set(body["period"]) == {"first_day", "last_day", "days"}
+    assert body["period"]["days"] == 30
+    (line,) = body["lines"]
+    assert line["name"] == "Idris Vale"
+    assert line["average_band"]["band"] == "good"
+    assert line["flagged_share"]["counted"] == 1
+    assert body["flagged_note_ids"] == [100]
+
+
+def test_a_tenant_that_has_not_opted_in_is_403(client, monkeypatch) -> None:
+    """The default is off: no person's figures until the tenant says so."""
+
+    async def _default(tenant: str):
+        return get_tenant_config(tenant)
+
+    monkeypatch.setattr(judgement_routes, "resolve_tenant_config", _default)
+    r = client.get(f"{BRIEFS}/rep/501", headers=_headers())
+    assert r.status_code == 403
+    assert r.json()["reason"] == "rep_numbers_not_enabled"
+
+
+def test_a_slow_store_is_503_at_the_deadline(client, monkeypatch, store) -> None:
+    """The brief runs under the judgement deadline with its own code."""
+    monkeypatch.setenv("DODEAL_JUDGEMENT_DEADLINE_SECONDS", "0.05")
+    get_settings.cache_clear()
+
+    async def _slow(*_args, **_kwargs):
+        await asyncio.sleep(1)
+
+    monkeypatch.setattr(store, "rows_between", _slow)
+    r = client.get(f"{BRIEFS}/rep/501", headers=_headers())
+    assert r.status_code == 503
+    assert r.json()["reason"] == "brief_deadline_exceeded"
+
+
+def test_the_switch_is_settable_through_the_section_parser() -> None:
+    """One parser for the file and the admin route: the switch is in it."""
+    from dodeal_ai.units.structured_intelligence.config import parse_unit_a_section
+
+    config = parse_unit_a_section({"config_version": "v", "rep_numbers_enabled": True})
+    assert config.rep_numbers_enabled is True
+    assert get_tenant_config("tenant-a").rep_numbers_enabled is False

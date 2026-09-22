@@ -13,6 +13,10 @@ narrate figures will eventually produce one that is not in them. There is
 nothing to gain here that is worth that: the sentences are short and there are
 six of them.
 
+A BRIEF IS DATA AS WELL AS TEXT (register item 154): `build_brief` returns a
+`Brief` -- the text, the period in local dates, every line's measures and the
+flagged note ids -- and the route answers it as JSON.
+
 A BRIEF WITH NOTHING TO REPORT IS NOT SENT. `build_brief` returns None, and the
 route answers 204. An empty daily email trains people to ignore the channel
 within a fortnight, and once they do, the one that matters is ignored with the
@@ -33,8 +37,8 @@ as a low band and never as 0%.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import asdict, dataclass
+from datetime import date, datetime
 
 from dodeal_ai.units.structured_intelligence.config import TenantConfig
 from dodeal_ai.units.structured_intelligence.judgement_rows import JudgementRow
@@ -47,7 +51,12 @@ from dodeal_ai.units.structured_intelligence.measures import (
     improved_share,
     local_dates,
 )
+from dodeal_ai.units.structured_intelligence.schemas import EnforcementVerdict
 from dodeal_ai.units.structured_intelligence.user_directory import Role, User
+
+# The most note ids any one list in a brief carries, newest first. A list
+# longer than this is not read; the CRM links to the rest.
+MAX_NOTE_IDS = 50
 
 # How wide a name column is before the figures start. Fixed rather than
 # computed from the longest name, so two briefs a week apart line up in a
@@ -78,6 +87,55 @@ class BriefLine:
             or self.flagged_share.suppressed is None
             or self.improved_share.suppressed is None
         )
+
+
+@dataclass(frozen=True, slots=True)
+class Brief:
+    """One brief as the route answers it: the text a person reads, and the
+    same content as data the CRM can render or link from."""
+
+    text: str
+    first_day: date
+    last_day: date
+    days: int
+    lines: list[BriefLine]
+    flagged_note_ids: list[int]
+
+    def body(self) -> dict[str, object]:
+        """The JSON body. Ids and figures only: no row carries note text."""
+        return {
+            "text": self.text,
+            "period": {
+                "first_day": self.first_day.isoformat(),
+                "last_day": self.last_day.isoformat(),
+                "days": self.days,
+            },
+            "lines": [asdict(line) for line in self.lines],
+            "flagged_note_ids": self.flagged_note_ids,
+        }
+
+
+def newest_note_ids(rows: Sequence[JudgementRow]) -> list[int]:
+    """Distinct note ids, newest note first (a later-recorded row first on a
+    tie), at most MAX_NOTE_IDS."""
+    ordered = sorted(
+        enumerate(rows),
+        key=lambda pair: (pair[1].note_created_at, pair[0]),
+        reverse=True,
+    )
+    ids: list[int] = []
+    for _, row in ordered:
+        if row.note_id not in ids:
+            ids.append(row.note_id)
+        if len(ids) == MAX_NOTE_IDS:
+            break
+    return ids
+
+
+def _flagged(rows: Sequence[JudgementRow]) -> list[int]:
+    return newest_note_ids(
+        [row for row in rows if row.enforcement_verdict is EnforcementVerdict.FLAG]
+    )
 
 
 def _line(name: str, rows: Sequence[JudgementRow], config: TenantConfig) -> BriefLine:
@@ -161,7 +219,7 @@ def _rep_brief(
     since: datetime,
     until: datetime,
     config: TenantConfig,
-) -> tuple[list[str], list[BriefLine]]:
+) -> tuple[list[str], list[BriefLine], list[JudgementRow]]:
     """The rep's own day. `rows` are already theirs -- the route narrows the
     store read by author, so nothing is filtered twice."""
     line = _line(subject.name, rows, config)
@@ -171,7 +229,7 @@ def _rep_brief(
         "",
         *_block(line, config),
     ]
-    return text, [line]
+    return text, [line], list(rows)
 
 
 def _team_brief(
@@ -181,7 +239,7 @@ def _team_brief(
     since: datetime,
     until: datetime,
     config: TenantConfig,
-) -> tuple[list[str], list[BriefLine]]:
+) -> tuple[list[str], list[BriefLine], list[JudgementRow]]:
     """The team leader's team: the team as a whole, then each person in it.
 
     The team's roll-up is computed over the team's rows POOLED, not averaged
@@ -193,7 +251,7 @@ def _team_brief(
         # A team brief for somebody who is in no team. There is no team to
         # report on, and inventing one would be worse than saying nothing: no
         # lines means no figures, which build_brief turns into a 204.
-        return [], []
+        return [], [], []
 
     # The leader is in their own team and appears in the list. They write notes
     # too, and a team figure their own work is inside should say so.
@@ -216,7 +274,7 @@ def _team_brief(
     ]
     if people:
         text += ["", "Each person", *(_row_line(line, config) for line in people)]
-    return text, [team, *people]
+    return text, [team, *people], team_rows
 
 
 def _org_brief(
@@ -226,7 +284,7 @@ def _org_brief(
     since: datetime,
     until: datetime,
     config: TenantConfig,
-) -> tuple[list[str], list[BriefLine]]:
+) -> tuple[list[str], list[BriefLine], list[JudgementRow]]:
     """The head of sales, across teams. Teams, not people: naming every rep in
     the company is a list nobody reads, and the team leader's brief already
     does it for the people it is about."""
@@ -263,7 +321,7 @@ def _org_brief(
             "",
             f"{unattributed} notes are by people the directory does not list.",
         ]
-    return text, [total, *by_team]
+    return text, [total, *by_team], everything
 
 
 def build_brief(
@@ -275,8 +333,8 @@ def build_brief(
     since: datetime,
     until: datetime,
     config: TenantConfig,
-) -> str | None:
-    """The brief as text, or None when there is nothing to report.
+) -> Brief | None:
+    """The brief, or None when there is nothing to report.
 
     Pure: no I/O, no clock, no model. The route reads the store and the
     directory, chooses the window, and hands everything in -- so a brief can be
@@ -288,14 +346,22 @@ def build_brief(
     wants rather than being told what the subject's title entitles them to.
     """
     if role is Role.REP:
-        text, lines = _rep_brief(subject, rows, since, until, config)
+        text, lines, covered = _rep_brief(subject, rows, since, until, config)
     elif role is Role.TEAM_LEADER:
-        text, lines = _team_brief(subject, users, rows, since, until, config)
+        text, lines, covered = _team_brief(subject, users, rows, since, until, config)
     else:
-        text, lines = _org_brief(subject, users, rows, since, until, config)
+        text, lines, covered = _org_brief(subject, users, rows, since, until, config)
 
     # THE RULE THAT MATTERS. Not "no rows" -- no FIGURE: a brief whose every
     # measure is suppressed says nothing, however many rows it looked at.
     if not any(line.has_a_figure for line in lines):
         return None
-    return "\n".join(text) + "\n"
+    first_day, last_day = local_dates(since, until, config)
+    return Brief(
+        text="\n".join(text) + "\n",
+        first_day=first_day,
+        last_day=last_day,
+        days=config.rolling_window_days,
+        lines=lines,
+        flagged_note_ids=_flagged(covered),
+    )

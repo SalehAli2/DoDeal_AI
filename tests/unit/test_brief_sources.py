@@ -4,14 +4,17 @@ after startup reads no file."""
 
 from __future__ import annotations
 
+import dataclasses
 import shutil
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
+from dodeal_ai.api.routes import judgements as judgement_routes
 from dodeal_ai.core.config import ConfigError, get_settings
 from dodeal_ai.main import app
+from dodeal_ai.units.structured_intelligence.config import get_tenant_config
 from dodeal_ai.units.structured_intelligence.judgement_rows import (
     JUDGEMENT_ROWS_PATH_ENV,
 )
@@ -77,8 +80,13 @@ def test_a_file_inside_the_repository_refuses_startup(
     assert _refusal(monkeypatch) == code
 
 
+async def _opted_in(tenant: str):
+    return dataclasses.replace(get_tenant_config(tenant), rep_numbers_enabled=True)
+
+
 def test_a_brief_after_startup_reads_no_file(env, monkeypatch) -> None:
     """Both files deleted and every read refused: the brief still answers."""
+    monkeypatch.setattr(judgement_routes, "resolve_tenant_config", _opted_in)
     with TestClient(app) as client:
         env["rows"].unlink()
         env["users"].unlink()
@@ -101,6 +109,7 @@ def test_with_no_paths_set_nothing_is_loaded(monkeypatch) -> None:
     tokens.service_settings_env(monkeypatch)
     monkeypatch.delenv(JUDGEMENT_ROWS_PATH_ENV, raising=False)
     monkeypatch.delenv(USER_DIRECTORY_PATH_ENV, raising=False)
+    monkeypatch.setattr(judgement_routes, "resolve_tenant_config", _opted_in)
     get_settings.cache_clear()
     with TestClient(app) as client:
         headers = {

@@ -6872,3 +6872,18 @@ resubmission, so the figure flatters teams that write fair notes already;
 original reads as no improvement.
 Stress test: a note asked about at 10 that comes back at 35 stays poor and is
 not improved; one asked at fair that comes back fair is.
+
+## Piece: register item 154, the brief as JSON behind a switch and a deadline
+
+Item 154 -- the brief answers JSON `{text, period, lines, flagged_note_ids}`
+(lines are the BriefLine data; the period is local first and last day; flagged
+ids newest first, at most 50); 204 is unchanged. It runs under
+`judgement_deadline_seconds` with its own 503 `brief_deadline_exceeded`, and
+`TenantConfig.rep_numbers_enabled` (default False, settable by the section
+parser) off is 403 `rep_numbers_not_enabled`, checked before the store is read.
+Production failure modes: (1) a tenant opts in through the admin route and
+every manager's brief appears at once, with no staged rollout; (2) the deadline
+is shared with judgements, so a 25 s brief holds an in-flight slot as long as a
+judgement does.
+Stress test: a store that sleeps past a 0.05 s deadline answers 503
+brief_deadline_exceeded, not a hung request.

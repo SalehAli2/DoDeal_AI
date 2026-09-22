@@ -304,6 +304,11 @@ class TenantConfig:
     # a whole evening's notes into the next day. Not part of what a mark means,
     # so changing it bumps no version.
     timezone: str
+
+    # Register item 154: whether the brief and the measures may show figures
+    # about individual people at all. Off by default -- a tenant opts in -- so a
+    # deployment never publishes a person's numbers by accident. Off is 403.
+    rep_numbers_enabled: bool
     config_version: str
 
     def __post_init__(self) -> None:
@@ -374,6 +379,7 @@ _DEFAULT_CONFIG = TenantConfig(
     # advisory is the default and only a tenant file may say otherwise.
     enforcement_mode=EnforcementMode.ADVISORY,
     timezone="Asia/Dubai",
+    rep_numbers_enabled=False,
     # -4: register item 142 changed the enforcement_mode vocabulary, so a file
     # saying "blocking" no longer parses. The rubric did not move and
     # RUBRIC_VERSION did not either -- this stamp is what makes an old
@@ -420,6 +426,7 @@ class TenantConfigFile(BaseModel):
     rolling_window_days: int | None = Field(default=None, gt=0)
     enforcement_mode: EnforcementMode | None = None
     timezone: str | None = None
+    rep_numbers_enabled: bool | None = None
 
     @field_validator("timezone")
     @classmethod
