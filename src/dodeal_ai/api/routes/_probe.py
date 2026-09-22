@@ -14,10 +14,23 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends
 
-from dodeal_ai.core.auth.dependencies import gate4_cost
+from dodeal_ai.core.auth.dependencies import gate4_cost, service_gate4_cost
 from dodeal_ai.core.context import RequestContext
 
 router = APIRouter(prefix="/_probe", tags=["scaffolding"])
+
+
+@router.get("/service")
+async def service(
+    context: Annotated[RequestContext, Depends(service_gate4_cost)],
+) -> dict:
+    """The service chain (register item D1), for the tests that assert it."""
+    return {
+        "tenant": context.tenant,
+        "subject": context.subject,
+        "principal": context.principal,
+        "request_id": context.request_id,
+    }
 
 
 @router.get("/protected")

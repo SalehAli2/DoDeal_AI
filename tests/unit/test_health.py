@@ -15,14 +15,16 @@ client = TestClient(app)
 
 
 @pytest.fixture
-def llm_built():
-    """A client on app.state, the way lifespan leaves one.
+def llm_built(monkeypatch):
+    """A client on app.state, the way lifespan leaves one, and a service key.
 
     TestClient(app) at module scope does NOT run the lifespan, so app.state has
     no `llm` at all by default -- which is the unconfigured state, and /ready is
     strict about it. Every test below that is about REDIS reporting has to say
-    the model half is fine first, or it is only ever re-testing the 503.
+    the model half is fine first, or it is only ever re-testing the 503. The
+    service key is the same kind of precondition since register item D1.
     """
+    monkeypatch.setenv("DODEAL_SERVICE_JWT_SIGNING_KEY", "a-service-key")
     app.state.llm = FakeLLM()
     yield
     app.state.llm = None
@@ -201,6 +203,20 @@ def test_ready_reports_llm_ok_once_a_client_is_built(llm_built, monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["llm"] == "ok"
+    get_settings.cache_clear()
+
+
+def test_ready_is_503_when_no_service_key_is_set(llm_built, monkeypatch):
+    """Register item D1: no service key means every service route 401s, so the
+    pod stays out of rotation, and the body names the missing half."""
+    monkeypatch.setenv("DODEAL_JWT_SIGNING_KEY", "test-key")
+    monkeypatch.delenv("DODEAL_SERVICE_JWT_SIGNING_KEY")
+    get_settings.cache_clear()
+
+    response = client.get("/ready")
+
+    assert response.status_code == 503
+    assert response.json() == {"status": "not ready", "service_token": "not configured"}
     get_settings.cache_clear()
 
 

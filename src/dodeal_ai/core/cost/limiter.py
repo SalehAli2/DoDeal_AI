@@ -170,6 +170,50 @@ async def enforce_cost(tenant: str, subject: str, amount: int = 1) -> None:
         raise CostLimitError("user_quota_exceeded")
 
 
+# Gate 4 on the SERVICE chain (register item D1): the tenant counter alone. The
+# service token names no person, so there is no user counter to move; the user
+# path above and its script are untouched. Same TTL rule as _INCR_BOTH_SCRIPT.
+_INCR_TENANT_SCRIPT = """
+local existed = redis.call('EXISTS', KEYS[1])
+local count = redis.call('INCRBY', KEYS[1], ARGV[1])
+if existed == 0 or redis.call('TTL', KEYS[1]) == -1 then
+  redis.call('EXPIRE', KEYS[1], ARGV[2])
+end
+return {count}
+"""
+
+
+async def enforce_tenant_cost(tenant: str, amount: int = 1) -> None:
+    """The service chain's Gate 4: move `cost:tenant:{t}` by `amount` and deny
+    over the tenant cap. Fails OPEN on a Redis error, exactly as enforce_cost."""
+    settings = get_settings()
+    client = get_cost_client()
+    tenant_key = f"cost:tenant:{tenant}"
+
+    async def _incr() -> int:
+        (count,) = await client.eval(
+            _INCR_TENANT_SCRIPT, 1, tenant_key, amount, settings.cost_window_seconds
+        )
+        return int(count)
+
+    try:
+        tenant_count = await cost_breaker().call(_incr)
+    except redis.RedisError as exc:
+        metrics.BYPASSES.labels(event="cost_cap_bypassed").inc()
+        _logger.warning(
+            "cost_cap_bypassed",
+            extra={
+                "reason_code": "cost_store_unavailable",
+                "tenant": tenant,
+                **breaker_field(exc),
+            },
+        )
+        return
+
+    if tenant_count > settings.cost_per_tenant_limit:
+        raise CostLimitError("tenant_quota_exceeded")
+
+
 # --- the token counters ----------------------------------------------------
 #
 # A SECOND script, deliberately a separate constant with the same shape rather

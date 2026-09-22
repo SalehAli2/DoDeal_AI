@@ -6728,3 +6728,16 @@ every service call 401s as token_not_yet_valid; (2) a rotation leaves the
 previous key set forever, so a retired key keeps verifying.
 Stress test: a token with iat ten seconds old and exp 295 s ahead must refuse
 as lifetime_exceeded although exp is still in the future.
+
+## Piece: register item D1, the service gate chain
+
+Item D1 -- a second chain in `core/auth/dependencies.py`: service verify, the
+same Host match, a `principal="service"` context, and a Gate 4 that moves only
+`cost:tenant:{t}` (`limiter.enforce_tenant_cost`). `RequestContext.scope_for_author`
+names the author as an asserted subject; no service key is one startup ERROR
+and `/ready` 503 `{"service_token": "not configured"}`.
+Production failure modes: (1) every CRM call shares one tenant counter, so one
+busy integration exhausts the tenant's request cap for all routes; (2) a key
+missing on one pod only takes that pod out of rotation, which reads as flapping.
+Stress test: two service calls leave the cost store holding exactly
+`{"cost:tenant:tenant-a": 2}` and no `cost:user:*` key.

@@ -622,3 +622,20 @@ async def test_text_a_then_text_b_on_one_note_withholds_the_second_at_the_cap(
     assert decisions[1].attempt == 1
     assert await real_redis.mget(attempt_key, rate_key) == ["1", "1"]
     _assert_window(await real_redis.ttl(attempt_key), _CONFIG.attempt_ttl_seconds)
+
+
+# --- the service chain's tenant-only request script (register item D1) -------
+
+
+async def test_the_tenant_only_script_moves_one_counter_with_a_window(
+    real_redis: redis_async.Redis, cost_keys: tuple[str, str]
+) -> None:
+    """Counterpart: test_the_tenant_script_runs_on_real_lua_and_sets_a_window."""
+    from dodeal_ai.core.cost.limiter import _INCR_TENANT_SCRIPT
+
+    tenant_key, user_key = cost_keys
+    assert await real_redis.eval(_INCR_TENANT_SCRIPT, 1, tenant_key, 3, _WINDOW) == [3]
+    _assert_window(await real_redis.ttl(tenant_key))
+    await real_redis.eval(_INCR_TENANT_SCRIPT, 1, tenant_key, 1, _WINDOW * 100)
+    assert await real_redis.ttl(tenant_key) <= _WINDOW
+    assert await real_redis.ttl(user_key) == _TTL_KEY_ABSENT

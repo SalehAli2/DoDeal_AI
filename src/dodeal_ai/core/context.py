@@ -13,8 +13,25 @@ a convenience — a request's tenant must not be reassignable mid-flight.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 from dodeal_ai.core.auth.claims import Identity
+
+# Who presented the token: a person (the user JWT) or the CRM itself (the
+# service token, core/auth/service.py, register item D1).
+type Principal = Literal["user", "service"]
+
+# Which token budget a judgement is charged to (core/cost/limiter.py): the live
+# one every judgement shares, or the tenant's separate history budget (item 127).
+type TokenBudget = Literal["live", "history"]
+
+
+class PrincipalMismatchError(Exception):
+    """A scope was asked for that this principal may not produce. A bug, never
+    a caller's fault, so it is a 500 and not a refusal. Fixed text only."""
+
+    def __init__(self) -> None:
+        super().__init__("principal_mismatch")
 
 
 @dataclass(frozen=True)
@@ -33,15 +50,24 @@ class TenantScope:
     So this is the seam D1 named. When a second principal source appears, it
     produces a TenantScope and every tool call site keeps working unchanged.
 
-    Constructed in ONE place -- RequestContext.scope() below. A test greps src/
+    Constructed in ONE place -- RequestContext._scope() below. A test greps src/
     for other construction sites, because a scope built from anything other
     than a verified context is a scope whose tenant nobody checked.
+
+    The last three fields default, so a script that builds a scope directly
+    keeps working: `principal` says which token the gates verified,
+    `subject_asserted` is True when the subject is the CRM's word about an
+    author rather than a verified token's `sub`, and `token_budget` picks the
+    budget the model calls are charged to.
     """
 
     tenant: str
     subject: str
     database: str
     request_id: str
+    principal: Principal = "user"
+    subject_asserted: bool = False
+    token_budget: TokenBudget = "live"
 
 
 @dataclass(frozen=True)
@@ -52,6 +78,7 @@ class RequestContext:
     roles: tuple[str, ...]
     permissions: frozenset[str]
     request_id: str
+    principal: Principal = "user"
 
     @classmethod
     def from_identity(
@@ -60,6 +87,7 @@ class RequestContext:
         *,
         permissions: frozenset[str],
         request_id: str,
+        principal: Principal = "user",
     ) -> RequestContext:
         """Assemble the context from a mapped Identity (Gate 1 output) plus the
         permissions resolved by Gate 3 and the middleware-issued request_id.
@@ -75,6 +103,7 @@ class RequestContext:
             roles=identity.roles,
             permissions=permissions,
             request_id=request_id,
+            principal=principal,
         )
 
     def has_permission(self, permission: str) -> bool:
@@ -89,9 +118,32 @@ class RequestContext:
         `context.scope()`) is the point. Nothing is re-derived here -- the
         tenant is the one the gates already verified.
         """
+        return self._scope(self.subject, subject_asserted=False, budget="live")
+
+    def scope_for_author(
+        self, author_id: int, *, budget: TokenBudget = "live"
+    ) -> TenantScope:
+        """The scope for a judgement the CRM makes ON BEHALF OF an author.
+
+        Service principal only: the subject is `author:<id>`, the CRM's word
+        and not a verified token's, so it is marked asserted. Per-user limits
+        (question caps, the user token budget) then key on the author. A user
+        principal is refused -- a person's token must never name somebody else.
+        """
+        if self.principal != "service":
+            raise PrincipalMismatchError()
+        return self._scope(f"author:{author_id}", subject_asserted=True, budget=budget)
+
+    def _scope(
+        self, subject: str, *, subject_asserted: bool, budget: TokenBudget
+    ) -> TenantScope:
+        """THE construction site: every scope carries the verified tenant."""
         return TenantScope(
             tenant=self.tenant,
-            subject=self.subject,
+            subject=subject,
             database=self.database,
             request_id=self.request_id,
+            principal=self.principal,
+            subject_asserted=subject_asserted,
+            token_budget=budget,
         )

@@ -101,6 +101,15 @@ async def lifespan(app: FastAPI):
             "backend_keys_missing count=0", extra={"event": "backend_keys_missing"}
         )
 
+    if settings.service_jwt_signing_key is None:
+        # Not a refusal, for the reason backend_keys_missing is not: /health
+        # and /ready must answer before the CRM's key is provisioned. /ready
+        # 503s while this holds, so the pod stays out of rotation (item D1).
+        logging.getLogger("dodeal_ai.startup").error(
+            "service_token_not_configured",
+            extra={"event": "service_token_not_configured"},
+        )
+
     if settings.backend_scheme == "http":
         # NOT a refusal, and never one: the demo needs http, so this is the
         # loudest thing short of not serving. ERROR rather than WARNING because
@@ -192,7 +201,7 @@ async def health() -> dict[str, str]:
 
 async def ready(request: Request):
     try:
-        get_settings()
+        settings = get_settings()
     except ConfigError:
         return JSONResponse(status_code=503, content={"status": "not ready"})
     # STRICT, unlike the Redis fields below, and deliberately unlike them. There
@@ -203,6 +212,14 @@ async def ready(request: Request):
     if getattr(request.app.state, "llm", None) is None:
         return JSONResponse(
             status_code=503, content={"status": "not ready", "llm": "not configured"}
+        )
+    # STRICT for the same reason (register item D1): with no service key every
+    # direct, history, brief, measures and admin call is 401, which is most of
+    # what this service is for.
+    if settings.service_jwt_signing_key is None:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "not ready", "service_token": "not configured"},
         )
     # Redis down does NOT take the pod out of rotation: the cost gate fails
     # OPEN on a Redis outage (core/cost/limiter.py), so the service still

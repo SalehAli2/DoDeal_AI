@@ -18,6 +18,13 @@ Gate 3 (permissions) is currently parked: the token carries no roles and the
 permission model is undecided, so the live chain ends at build_context (auth +
 tenancy). require_context / require_permission remain here, tested in isolation,
 ready to wire when the permission model is confirmed.
+
+THE SERVICE CHAIN (register item D1) is a second, parallel chain for the CRM's
+own server-to-server token: service_gate1_identity (ServiceTokenVerifier, audit
+gate "service_auth") -> service_gate2_tenant (the same Host match, audit gate
+"service_tenancy") -> build_service_context (principal "service") ->
+service_gate4_cost (the TENANT request counter only). A user token is 401 on it,
+and a service token is 401 on the user chain: the verifiers share no key.
 """
 
 from __future__ import annotations
@@ -28,6 +35,7 @@ from fastapi import Depends, Header, HTTPException, Request
 
 from dodeal_ai.core.audit.logger import audit
 from dodeal_ai.core.auth.claims import Identity
+from dodeal_ai.core.auth.service import ServiceTokenVerifier
 from dodeal_ai.core.auth.verify import (
     AuthError,
     JwtVerifier,
@@ -44,6 +52,7 @@ from dodeal_ai.core.context import RequestContext
 from dodeal_ai.core.cost.limiter import (
     CostLimitError,
     enforce_cost,
+    enforce_tenant_cost,
 )
 from dodeal_ai.core.tenancy import TenantMismatchError, check_tenant
 
@@ -183,6 +192,121 @@ async def gate4_cost(
     request_id = getattr(request.state, "request_id", "unknown")
     try:
         await enforce_cost(context.tenant, context.subject)
+    except CostLimitError as exc:
+        audit(
+            decision="deny",
+            gate="cost",
+            request_id=request_id,
+            reason_code=exc.reason_code,
+            tenant=context.tenant,
+        )
+        raise HTTPException(status_code=429, detail="Too Many Requests")
+    audit(
+        decision="allow",
+        gate="cost",
+        request_id=request_id,
+        reason_code="ok",
+        tenant=context.tenant,
+    )
+    return context
+
+
+# --- the service chain (register item D1) ----------------------------------
+
+# The service verifier and the Settings it was built from, as for the user one.
+_service_verifier_cache: tuple[Settings, ServiceTokenVerifier] | None = None
+
+
+def get_service_verifier() -> ServiceTokenVerifier:
+    """The service chain's swap point, built once per Settings object and
+    overridable through app.dependency_overrides like get_verifier."""
+    global _service_verifier_cache
+    settings = get_settings()
+    cached = _service_verifier_cache
+    if cached is None or cached[0] is not settings:
+        cached = (settings, ServiceTokenVerifier(settings))
+        _service_verifier_cache = cached
+    return cached[1]
+
+
+async def service_gate1_identity(
+    request: Request,
+    token: Annotated[str, Depends(_bearer_token)],
+    verifier: Annotated[ServiceTokenVerifier, Depends(get_service_verifier)],
+) -> Identity:
+    request_id = getattr(request.state, "request_id", "unknown")
+    try:
+        identity = verifier.verify(token)
+    except AuthError as exc:
+        audit(
+            decision="deny",
+            gate="service_auth",
+            request_id=request_id,
+            reason_code=exc.reason_code,
+            tenant=None,
+        )
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    audit(
+        decision="allow",
+        gate="service_auth",
+        request_id=request_id,
+        reason_code="ok",
+        tenant=identity.tenant,
+    )
+    return identity
+
+
+async def service_gate2_tenant(
+    request: Request,
+    identity: Annotated[Identity, Depends(service_gate1_identity)],
+    host: Annotated[str | None, Header()] = None,
+) -> Identity:
+    request_id = getattr(request.state, "request_id", "unknown")
+    try:
+        check_tenant(identity, host, get_settings().inbound_base_domain)
+    except TenantMismatchError as exc:
+        audit(
+            decision="deny",
+            gate="service_tenancy",
+            request_id=request_id,
+            reason_code=exc.reason_code,
+            tenant=identity.tenant,
+        )
+        raise HTTPException(status_code=403, detail="Forbidden")
+    audit(
+        decision="allow",
+        gate="service_tenancy",
+        request_id=request_id,
+        reason_code="ok",
+        tenant=identity.tenant,
+    )
+    return identity
+
+
+async def build_service_context(
+    request: Request,
+    identity: Annotated[Identity, Depends(service_gate2_tenant)],
+) -> RequestContext:
+    """A context whose principal is the CRM. No permissions: Gate 3 is parked
+    on this chain exactly as on the user one."""
+    request_id = getattr(request.state, "request_id", "unknown")
+    return RequestContext.from_identity(
+        identity,
+        permissions=frozenset(),
+        request_id=request_id,
+        principal="service",
+    )
+
+
+async def service_gate4_cost(
+    request: Request,
+    context: Annotated[RequestContext, Depends(build_service_context)],
+) -> RequestContext:
+    """Gate 4 for the service chain: the TENANT counter only. The token names no
+    person, so a per-user request cap here would be one bucket for everyone."""
+    request_id = getattr(request.state, "request_id", "unknown")
+    try:
+        await enforce_tenant_cost(context.tenant)
     except CostLimitError as exc:
         audit(
             decision="deny",

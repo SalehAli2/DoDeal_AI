@@ -72,7 +72,16 @@ def test_scope_drops_roles_and_permissions() -> None:
     fields = {f.name for f in dataclasses.fields(TenantScope)}
     assert "roles" not in fields
     assert "permissions" not in fields
-    assert fields == {"tenant", "subject", "database", "request_id"}
+    # Register item D1 added the three defaulted principal fields.
+    assert fields == {
+        "tenant",
+        "subject",
+        "database",
+        "request_id",
+        "principal",
+        "subject_asserted",
+        "token_budget",
+    }
 
 
 def test_scope_is_frozen() -> None:

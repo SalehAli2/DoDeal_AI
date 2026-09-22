@@ -496,3 +496,38 @@ def test_a_pool_at_or_above_the_cap_or_unset_logs_nothing(
     assert _events(lines, "startup_probe_line")
     assert _events(lines, POOL_EVENT) == []
     get_settings.cache_clear()
+
+
+# --- the service token (register item D1) -----------------------------------
+
+SERVICE_EVENT = "service_token_not_configured"
+
+
+def test_an_unset_service_key_starts_the_app_and_says_so_once(monkeypatch, json_lines):
+    """Permissive like the other two: one ERROR line with its event field."""
+    monkeypatch.setenv("DODEAL_JWT_SIGNING_KEY", "test-key")
+    monkeypatch.delenv("DODEAL_SERVICE_JWT_SIGNING_KEY", raising=False)
+    get_settings.cache_clear()
+
+    with TestClient(app):
+        pass
+
+    found = _events(json_lines(), SERVICE_EVENT)
+    assert len(found) == 1
+    assert found[0]["level"] == "ERROR"
+    assert found[0]["logger"] == STARTUP_LOGGER
+    assert found[0]["event"] == SERVICE_EVENT
+    get_settings.cache_clear()
+
+
+def test_a_set_service_key_logs_no_such_line(monkeypatch, json_lines):
+    """Configured means quiet."""
+    monkeypatch.setenv("DODEAL_JWT_SIGNING_KEY", "test-key")
+    monkeypatch.setenv("DODEAL_SERVICE_JWT_SIGNING_KEY", "a-service-key")
+    get_settings.cache_clear()
+
+    with TestClient(app):
+        pass
+
+    assert _events(json_lines(), SERVICE_EVENT) == []
+    get_settings.cache_clear()
