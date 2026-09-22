@@ -508,3 +508,16 @@ async def test_take_prompt_slots_end_to_end_on_real_lua(client, monkeypatch):
         (0, True, 2),
         (0, False, _RATE_LIMIT),
     ]
+
+
+async def test_the_history_token_script_moves_one_counter_with_a_window(client):
+    """Register item 127: one key, its total returned, a window on create only."""
+    from dodeal_ai.core.cost.limiter import _add_history_tokens_with_window
+
+    key = "tokens:history:tenant:tenant-a"
+    assert await _add_history_tokens_with_window(client, key, 5, _WINDOW) == (5,)
+    assert await _add_history_tokens_with_window(client, key, 7, _WINDOW * 100) == (12,)
+    assert 0 < await client.ttl(key) <= _WINDOW
+    await client.persist(key)
+    await _add_history_tokens_with_window(client, key, 1, _WINDOW)
+    assert await client.ttl(key) > 0

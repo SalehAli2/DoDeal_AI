@@ -50,6 +50,11 @@ class InflightCounter:
 # a TenantScope and no Request, so it cannot reach app.state.
 _counter = InflightCounter()
 
+# The history bulkhead (register item 127): a SECOND counter of the same kind,
+# for history judgements only. A history request holds a slot in both, so this
+# one bounds how much of the process a backfill may occupy.
+history_counter = InflightCounter()
+
 
 def current_inflight() -> int:
     """The count as of right now, for anything that wants to record it.

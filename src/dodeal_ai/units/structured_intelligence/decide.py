@@ -15,10 +15,12 @@ is the whole design:
      had nothing to ask" from "this person has been asked enough today"
      without inferring it from an absent field.
 
-WHY THE ORDER OF THE FOUR IS FIXED (resubmission, attempt_cap, rate_limited,
+WHY THE ORDER IS FIXED (history, resubmission, attempt_cap, rate_limited,
 nothing_to_ask). More than one can be true at once, and the reported reason
 must be stable, so it is the most SPECIFIC-to-least fact about why we are
-quiet. A resubmission is a policy about this request; the attempt cap is about
+quiet. A history judgement (register item 127) is an old note nobody is waiting
+on, so it never asks and says so first; a resubmission is a policy about this
+request; the attempt cap is about
 this note; the rate limit is about this person; "nothing to ask" is about the
 answer we got. Reporting the rate limit to someone whose note was a
 resubmission would send them to the wrong explanation.
@@ -31,7 +33,7 @@ Nothing here blocks a save today; `strict` is built and recorded, never
 enabled, and the mode comes from the tenant's config and nowhere else.
 
 NO MODEL OUTPUT REACHES A DECISION. The inputs are a computed NoteScore, one
-integer and one flag from db2, the tenant's config, and one boolean from the
+integer and one flag from db2, the tenant's config, and two booleans from the
 route.
 `analysis.clarification_prompt` is consulted for PRESENCE only -- whether there
 is a question to ask -- never for its content.
@@ -137,10 +139,11 @@ def withheld_reason(
     rate_count: int,
     config: TenantConfig,
     resubmission: bool,
+    history: bool = False,
 ) -> PromptWithheld | None:
-    """The first failing condition, or None when all four hold and we ask.
+    """The first failing condition, or None when all five hold and we ask.
 
-    Written as four separate `if`s rather than an `all()` because the ORDER is
+    Written as separate `if`s rather than an `all()` because the ORDER is
     the contract: a chained boolean would give the same answer to "may we ask?"
     and no answer at all to "why not?".
 
@@ -149,6 +152,8 @@ def withheld_reason(
     other -- it has no NoteScore to build a Decision from, only the four
     conditions this function alone decides.
     """
+    if history:
+        return PromptWithheld.HISTORY
     if resubmission:
         return PromptWithheld.RESUBMISSION
     if attempts >= config.clarification_cap:
@@ -172,6 +177,7 @@ def decide(
     rate_count: int,
     config: TenantConfig,
     resubmission: bool,
+    history: bool = False,
 ) -> Decision:
     """The judgement's decision half. Pure: no I/O, no clock, no model.
 
@@ -184,6 +190,10 @@ def decide(
 
     `rate_allowed` is db2's answer from the round trip that claimed the slot:
     this function is told what the store said and decides nothing about it.
+
+    `history` (register item 127) withholds every prompt as `history`; the
+    action, and so the enforcement verdict, is computed exactly as for a live
+    note.
 
     A store outage reads 0 through the fail-open policy in state.py, so an
     unreachable db2 makes us MORE willing to ask, never less. That is the
@@ -209,6 +219,7 @@ def decide(
             rate_count=rate_count,
             config=config,
             resubmission=resubmission,
+            history=history,
         )
         prompt_sent = withheld is None
 

@@ -6765,3 +6765,18 @@ and nothing here can tell; (2) a burst of 07:30 brief calls shares the tenant
 request counter with judgements and can cap them for the window.
 Stress test: a valid user token for the same tenant and Host is 401 on the
 brief route.
+
+## Piece: register item 127, the history route
+
+Item 127 -- `POST /api/v1/notes/judgements/history` (service chain; the direct
+body plus an aware `note_created_at`) judges an old note with every prompt
+withheld `history` (first in decide()'s order), no db2 counter read or written,
+its own idempotency namespace, the note's date as createdAt, tokens charged to
+`tokens:history:tenant:{t}` alone, and a per-process bulkhead of
+`history_max_inflight` (8) that answers 503 `history_load_shed`, Retry-After: 1.
+Production failure modes: (1) a backfill fans out across pods, and eight per
+pod is still a tenant-wide flood on the model provider's rate limit; (2) the
+history budget runs out mid-backfill and the rest is 429 until the window
+resets, with no queue to resume from.
+Stress test: with eight history slots held, a ninth history request is 503
+with Retry-After: 1 while a live direct note on the same token is 200.

@@ -40,10 +40,12 @@ fakes over invented files until the backend answers, and both of which are a
 
 from __future__ import annotations
 
+import logging
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Path, Response
+from fastapi import APIRouter, Depends, Path, Request, Response
 from fastapi.responses import PlainTextResponse
 
 from dodeal_ai.core.auth.dependencies import (
@@ -53,7 +55,8 @@ from dodeal_ai.core.auth.dependencies import (
 )
 from dodeal_ai.core.config import Settings, get_settings
 from dodeal_ai.core.context import RequestContext
-from dodeal_ai.core.errors import SubjectNotFoundError
+from dodeal_ai.core.errors import HistoryLoadShed, SubjectNotFoundError
+from dodeal_ai.core.inflight import history_counter
 from dodeal_ai.core.llm import LLMClient, get_llm_client
 from dodeal_ai.tools.leads import LeadsClient, get_leads_client
 from dodeal_ai.units.structured_intelligence.brief import build_brief
@@ -70,9 +73,11 @@ from dodeal_ai.units.structured_intelligence.pipeline import (
     ReplayedJudgement,
     judge_note,
     judge_note_direct,
+    judge_note_history,
 )
 from dodeal_ai.units.structured_intelligence.schemas import (
     DirectJudgementRequest,
+    HistoryJudgementRequest,
     Judgement,
     JudgementRequest,
     Versions,
@@ -85,6 +90,8 @@ from dodeal_ai.units.structured_intelligence.user_directory import (
 )
 
 router = APIRouter(prefix="/api/v1", tags=["unit-a"])
+
+_logger = logging.getLogger("dodeal_ai.unit_a")
 
 # Sent, with "true", only on a judgement answered from the idempotency store.
 REPLAY_HEADER = "Idempotent-Replay"
@@ -213,6 +220,55 @@ async def create_direct_resubmission_judgement(
         context.scope_for_author(request.author_id),
         request,
         resubmission=True,
+        deps=_deps(context, None, llm, settings),
+    )
+    return _answer(judgement, response)
+
+
+async def _history_slot(request: Request) -> AsyncIterator[None]:
+    """The history bulkhead (register item 127): at most `history_max_inflight`
+    history judgements at once in this process, INSIDE the global cap.
+
+    Over it, 503 history_load_shed with Retry-After: 1, before anything is
+    reserved or spent. The slot is given back in a `finally`, so a history
+    judgement that fails cannot leak one.
+    """
+    if not history_counter.acquire(get_settings().history_max_inflight):
+        _logger.warning(
+            "history_load_shed",
+            extra={
+                "reason_code": "history_load_shed",
+                "request_id": getattr(request.state, "request_id", "unknown"),
+                "inflight": history_counter.count,
+            },
+        )
+        raise HistoryLoadShed()
+    try:
+        yield
+    finally:
+        history_counter.release()
+
+
+@router.post("/notes/judgements/history")
+async def create_history_judgement(
+    request: HistoryJudgementRequest,
+    response: Response,
+    context: Annotated[RequestContext, Depends(service_gate4_cost)],
+    _slot: Annotated[None, Depends(_history_slot)],
+    llm: Annotated[LLMClient, Depends(get_llm_client)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> Judgement:
+    """Judge an OLD saved note so the measures have a past (register item 127).
+
+    The service chain, the direct body plus `note_created_at` (an aware time;
+    naive is 422), and the direct route's pipeline with no question ever sent,
+    no db2 counter touched and the tokens charged to the tenant's HISTORY
+    budget alone -- so a backfill can neither pester anyone nor spend the live
+    budget. The history bulkhead bounds how many run at once.
+    """
+    judgement = await judge_note_history(
+        context.scope_for_author(request.author_id, budget="history"),
+        request,
         deps=_deps(context, None, llm, settings),
     )
     return _answer(judgement, response)

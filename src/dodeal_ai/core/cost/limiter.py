@@ -51,6 +51,11 @@ the design --
 
 Both fail OPEN on a Redis error, for the same reason enforce_cost does.
 
+WHICH TOKEN KEYS is the scope's choice (register item 127): `token_budget`
+"live" is the tenant and user pair above; "history" is the one counter
+`tokens:history:tenant:{t}`, with its own limit, in both the pre-flight and the
+charge. A history judgement never reads or moves the live pair.
+
 EVERY call here runs inside `cost_breaker` (core/breaker.py), so a store that is
 down stops being asked once. Nothing above changes: BreakerOpen IS a
 redis.RedisError, so a refusal takes the same fail-open branch a timeout does.
@@ -242,6 +247,52 @@ def _token_keys(tenant: str, subject: str) -> tuple[str, str]:
     return f"tokens:tenant:{tenant}", f"tokens:user:{tenant}:{subject}"
 
 
+# The history budget's one counter (register item 127): the tenant's alone, on a
+# script of its own so an edit to the live pair cannot move it.
+_ADD_HISTORY_TOKENS_SCRIPT = """
+local existed = redis.call('EXISTS', KEYS[1])
+local total = redis.call('INCRBY', KEYS[1], ARGV[1])
+if existed == 0 or redis.call('TTL', KEYS[1]) == -1 then
+  redis.call('EXPIRE', KEYS[1], ARGV[2])
+end
+return {total}
+"""
+
+
+def _history_token_key(tenant: str) -> str:
+    return f"tokens:history:tenant:{tenant}"
+
+
+def _budgets(scope: TenantScope) -> tuple[tuple[str, str, int], ...]:
+    """(name, key, limit) for every token budget this scope is charged to,
+    chosen by `scope.token_budget`. A history judgement is charged to the
+    tenant's history counter ONLY -- never the live tenant or user pair."""
+    settings = get_settings()
+    if scope.token_budget == "history":
+        return (
+            (
+                "history",
+                _history_token_key(scope.tenant),
+                settings.cost_tokens_history_per_tenant_limit,
+            ),
+        )
+    tenant_key, user_key = _token_keys(scope.tenant, scope.subject)
+    return (
+        ("tenant", tenant_key, settings.cost_tokens_per_tenant_limit),
+        ("user", user_key, settings.cost_tokens_per_user_limit),
+    )
+
+
+async def _add_history_tokens_with_window(
+    client: redis_async.Redis, key: str, total: int, window: int
+) -> tuple[int]:
+    """Add `total` to the history counter in one script execution."""
+    (history_total,) = await client.eval(
+        _ADD_HISTORY_TOKENS_SCRIPT, 1, key, total, window
+    )
+    return (int(history_total),)
+
+
 async def _add_tokens_with_window(
     client: redis_async.Redis,
     tenant_key: str,
@@ -309,19 +360,23 @@ async def enforce_token_cost(
     enforce_cost's is, because a money guard is not a security guard.
 
     Both counters move together in one atomic script execution, so a failure
-    leaves NEITHER moved rather than a tenant charged and a user not.
+    leaves NEITHER moved rather than a tenant charged and a user not. A history
+    scope (register item 127) moves its one history counter instead.
     """
     settings = get_settings()
     client = get_cost_client()
     total = input_tokens + output_tokens
-    tenant_key, user_key = _token_keys(scope.tenant, scope.subject)
+    budgets = _budgets(scope)
+    keys = [key for _, key, _ in budgets]
+    window = settings.cost_window_seconds
+
+    async def _charge() -> tuple[int, ...]:
+        if scope.token_budget == "history":
+            return await _add_history_tokens_with_window(client, keys[0], total, window)
+        return await _add_tokens_with_window(client, keys[0], keys[1], total, window)
 
     try:
-        tenant_total, user_total = await cost_breaker().call(
-            lambda: _add_tokens_with_window(
-                client, tenant_key, user_key, total, settings.cost_window_seconds
-            )
-        )
+        totals = await cost_breaker().call(_charge)
     except redis.RedisError as exc:
         # Fail open and say so. The tokens were spent whether or not we counted
         # them, so an uncounted charge is a hole in the meter, not in the bill.
@@ -338,6 +393,7 @@ async def enforce_token_cost(
         return
 
     # Numbers, ids and a profile NAME -- never a prompt, never a completion.
+    # One `<budget>_total` per counter moved: tenant and user, or history.
     _logger.info(
         "tokens_charged",
         extra={
@@ -347,28 +403,23 @@ async def enforce_token_cost(
             "profile": profile,
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
-            "tenant_total": tenant_total,
-            "user_total": user_total,
+            **{
+                f"{name}_total": after
+                for (name, _, _), after in zip(budgets, totals, strict=True)
+            },
         },
     )
 
     ratio = settings.cost_token_warning_ratio
-    _warn_on_crossing(
-        tenant_key,
-        before=tenant_total - total,
-        after=tenant_total,
-        limit=settings.cost_tokens_per_tenant_limit,
-        ratio=ratio,
-        scope=scope,
-    )
-    _warn_on_crossing(
-        user_key,
-        before=user_total - total,
-        after=user_total,
-        limit=settings.cost_tokens_per_user_limit,
-        ratio=ratio,
-        scope=scope,
-    )
+    for (_, key, limit), after in zip(budgets, totals, strict=True):
+        _warn_on_crossing(
+            key,
+            before=after - total,
+            after=after,
+            limit=limit,
+            ratio=ratio,
+            scope=scope,
+        )
 
 
 async def token_preflight(scope: TenantScope) -> bool:
@@ -394,11 +445,11 @@ async def token_preflight(scope: TenantScope) -> bool:
     """
     settings = get_settings()
     client = get_cost_client()
-    tenant_key, user_key = _token_keys(scope.tenant, scope.subject)
+    budgets = _budgets(scope)
 
     try:
-        tenant_raw, user_raw = await cost_breaker().call(
-            lambda: client.mget(tenant_key, user_key)
+        raws = await cost_breaker().call(
+            lambda: client.mget(*(key for _, key, _ in budgets))
         )
     except redis.RedisError as exc:
         metrics.BYPASSES.labels(event="token_preflight_bypassed").inc()
@@ -414,19 +465,15 @@ async def token_preflight(scope: TenantScope) -> bool:
         return False
 
     # A key that has never been charged, or whose window expired, reads None.
-    tenant_total, user_total = int(tenant_raw or 0), int(user_raw or 0)
-    if tenant_total >= settings.cost_tokens_per_tenant_limit:
-        raise TokenBudgetExceeded()
-    if user_total >= settings.cost_tokens_per_user_limit:
-        raise TokenBudgetExceeded()
+    totals = [int(raw or 0) for raw in raws]
+    for (_, _, limit), total in zip(budgets, totals, strict=True):
+        if total >= limit:
+            raise TokenBudgetExceeded()
 
     ratio = settings.cost_token_warning_ratio
     near = [
         name
-        for name, total, limit in (
-            ("tenant", tenant_total, settings.cost_tokens_per_tenant_limit),
-            ("user", user_total, settings.cost_tokens_per_user_limit),
-        )
+        for (name, _, limit), total in zip(budgets, totals, strict=True)
         if total >= limit * ratio
     ]
     if not near:

@@ -34,3 +34,16 @@ def test_scope(
 
 
 TEST_SCOPE = test_scope()
+
+
+def history_scope(tenant: str = "tenant-a", author_id: int = 7) -> TenantScope:
+    """A service-principal scope charged to the HISTORY budget (item 127)."""
+    return RequestContext(
+        tenant=tenant,
+        subject="service",
+        database="",
+        roles=(),
+        permissions=frozenset(),
+        request_id="req-history",
+        principal="service",
+    ).scope_for_author(author_id, budget="history")

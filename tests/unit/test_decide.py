@@ -272,3 +272,42 @@ def test_no_decision_field_is_populated_from_model_output() -> None:
     assert decision.action is DecisionAction.ACCEPT_FLAG_PROMPT
     assert decision.prompt_sent is True
     assert "ignore" not in decision.model_dump_json()
+
+
+# --- history (register item 127) --------------------------------------------
+
+
+def test_history_is_reported_first_whatever_else_is_true() -> None:
+    """History wins over a resubmission, the attempt cap and the rate limit."""
+    decision = decide(
+        _score(10),
+        _analysis(),
+        attempts=CONFIG.clarification_cap,
+        rate_allowed=False,
+        rate_count=99,
+        config=CONFIG,
+        resubmission=True,
+        history=True,
+    )
+    assert decision.action is DecisionAction.PROMPT_CLARIFICATION
+    assert (decision.prompt_sent, decision.prompt_withheld) == (
+        False,
+        PromptWithheld.HISTORY,
+    )
+    assert decision.attempt == CONFIG.clarification_cap
+
+
+def test_history_changes_no_advice_and_an_accepted_note_withholds_nothing() -> None:
+    """The action comes from the total alone; accept_silent carries no reason."""
+    decision = decide(
+        _score(100),
+        _analysis(),
+        attempts=0,
+        rate_allowed=True,
+        rate_count=0,
+        config=CONFIG,
+        resubmission=False,
+        history=True,
+    )
+    assert decision.action is DecisionAction.ACCEPT_SILENT
+    assert decision.prompt_withheld is None

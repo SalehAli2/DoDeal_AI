@@ -639,3 +639,16 @@ async def test_the_tenant_only_script_moves_one_counter_with_a_window(
     await real_redis.eval(_INCR_TENANT_SCRIPT, 1, tenant_key, 1, _WINDOW * 100)
     assert await real_redis.ttl(tenant_key) <= _WINDOW
     assert await real_redis.ttl(user_key) == _TTL_KEY_ABSENT
+
+
+async def test_the_history_token_script_moves_one_counter_with_a_window(
+    real_redis: redis_async.Redis, key_prefix: str
+) -> None:
+    """Counterpart: test_the_history_token_script_moves_one_counter_with_a_window."""
+    from dodeal_ai.core.cost.limiter import _add_history_tokens_with_window
+
+    key = f"{key_prefix}tokens:history:tenant:{_TENANT}"
+    assert await _add_history_tokens_with_window(real_redis, key, 5, _WINDOW) == (5,)
+    _assert_window(await real_redis.ttl(key))
+    await _add_history_tokens_with_window(real_redis, key, 1, _WINDOW * 100)
+    assert await real_redis.ttl(key) <= _WINDOW

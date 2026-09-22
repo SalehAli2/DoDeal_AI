@@ -37,6 +37,7 @@ from enum import StrEnum
 from typing import Annotated, Literal
 
 from pydantic import (
+    AwareDatetime,
     BaseModel,
     ConfigDict,
     Field,
@@ -222,6 +223,9 @@ class PromptWithheld(StrEnum):
     is rate limited" without inferring it.
     """
 
+    # A history judgement (register item 127) never asks: the note is old and
+    # its author is not waiting on it. First in decide()'s order.
+    HISTORY = "history"
     RESUBMISSION = "resubmission"
     ATTEMPT_CAP = "attempt_cap"
     RATE_LIMITED = "rate_limited"
@@ -325,7 +329,21 @@ class LeadContext(BaseModel):
     status: str | None = None
 
 
-class DirectJudgementRequest(BaseModel):
+class _SentNote(BaseModel):
+    """The fields every body that carries a saved note shares: the direct
+    route's and the history route's. Not a route body itself."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # ge=1 on every id, as on JudgementRequest (register item 10).
+    lead_id: int = Field(ge=1)
+    note_id: int = Field(ge=1)
+    author_id: int = Field(ge=1)
+    note_text: str = Field(max_length=MAX_NOTE_TEXT_CHARS)
+    lead: LeadContext
+
+
+class DirectJudgementRequest(_SentNote):
     """The direct route's body: the saved note, sent by the CRM after the save.
 
     DECISION[DIRECT_ROUTE] -- the ONE exception to "note text is never accepted
@@ -344,14 +362,17 @@ class DirectJudgementRequest(BaseModel):
     test.
     """
 
-    model_config = ConfigDict(extra="forbid")
 
-    # ge=1 on every id, as on JudgementRequest (register item 10).
-    lead_id: int = Field(ge=1)
-    note_id: int = Field(ge=1)
-    author_id: int = Field(ge=1)
-    note_text: str = Field(max_length=MAX_NOTE_TEXT_CHARS)
-    lead: LeadContext
+class HistoryJudgementRequest(_SentNote):
+    """The history route's body (register item 127): an OLD saved note, scored
+    so the measures have a past. The direct body plus when the note was
+    written; nothing a live judgement's prompt or enforcement reads.
+
+    `note_created_at` must carry an offset -- a naive time is a 422, because a
+    guess about which zone it was written in moves the note to another day.
+    """
+
+    note_created_at: AwareDatetime
 
 
 # ---------------------------------------------------------------------------

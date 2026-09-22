@@ -159,6 +159,7 @@ from dodeal_ai.units.structured_intelligence.decide import (
 from dodeal_ai.units.structured_intelligence.schemas import (
     Decision,
     DirectJudgementRequest,
+    HistoryJudgementRequest,
     Judgement,
     JudgementRequest,
     NoteAnalysis,
@@ -269,11 +270,11 @@ class JudgementDeps:
     settings: Settings
 
 
-# Either request shape. Both carry lead_id and note_id, which is all the shared
+# Any request shape. All carry lead_id and note_id, which is all the shared
 # pipeline reads off a request -- the direct body's three extra fields are
 # unpacked into a Lead and a LeadNote by judge_note_direct before the shared
 # function is entered, so nothing below this line knows which route it is on.
-_JudgementInput = JudgementRequest | DirectJudgementRequest
+_JudgementInput = JudgementRequest | DirectJudgementRequest | HistoryJudgementRequest
 
 
 class ReplayedJudgement(Judgement):
@@ -540,6 +541,7 @@ async def _fixed_question(
     *,
     config: TenantConfig,
     resubmission: bool,
+    history: bool,
 ) -> tuple[str | None, PromptWithheld | None]:
     """Register item 64: the length gate's fixed question, for a too-short note
     only -- a too-long note (NOTE_TOO_LONG) gets neither field.
@@ -549,11 +551,14 @@ async def _fixed_question(
     in the SAME trip a model question takes (state.take_prompt_slots), so a
     salesperson cannot be asked more often for writing a thin note than for
     writing a vague one. A resubmission withholds outright, the same reason a
-    scored judgement's resubmission does, and touches no counter.
+    scored judgement's resubmission does, and touches no counter. So does a
+    history judgement (register item 127), with its own reason.
     """
     if detail is not SuppressedDetail.NOTE_TOO_SHORT:
         return None, None
     prompt = _fixed_clarification_prompt(note.note)
+    if history:
+        return prompt, PromptWithheld.HISTORY
     if resubmission:
         return prompt, PromptWithheld.RESUBMISSION
     attempts = await state.read_attempts(
@@ -814,20 +819,61 @@ async def judge_note_direct(
     return await _metered(
         started,
         _judge_sent(
-            scope, request, resubmission=resubmission, deps=deps, started=started
+            scope,
+            request,
+            resubmission=resubmission,
+            deps=deps,
+            started=started,
+            # The CRM sends this right after the save, so arrival time stands
+            # in for createdAt (item 32). Nothing reads it today.
+            created_at=datetime.now(UTC),
+            history=False,
+        ),
+    )
+
+
+async def judge_note_history(
+    scope: TenantScope,
+    request: HistoryJudgementRequest,
+    *,
+    deps: JudgementDeps,
+) -> Judgement:
+    """Judge an OLD note the CRM sent us, for the measures' past (item 127).
+
+    The direct route's pipeline, with four differences and no more: no
+    question is ever sent (every prompt is withheld `history`), no db2 counter
+    is read or written and no prompt slot is taken, no resubmission reference
+    is written, and the note's own `note_created_at` is its createdAt. The
+    route charges the tenant's history token budget through `scope`. The score,
+    the action and the enforcement verdict are computed as for a live note.
+    """
+    started = time.monotonic()
+    return await _metered(
+        started,
+        _judge_sent(
+            scope,
+            request,
+            resubmission=False,
+            deps=deps,
+            started=started,
+            created_at=request.note_created_at,
+            history=True,
         ),
     )
 
 
 async def _judge_sent(
     scope: TenantScope,
-    request: DirectJudgementRequest,
+    request: DirectJudgementRequest | HistoryJudgementRequest,
     *,
     resubmission: bool,
     deps: JudgementDeps,
     started: float,
+    created_at: datetime,
+    history: bool,
 ) -> Judgement:
-    """judge_note_direct's body: the deadline, the note as sent, the shared steps."""
+    """The body of both note-in-the-body entry points: the deadline, the note
+    as sent, the shared steps."""
     # The same deadline as the fetch route, from the same point, so the two
     # routes' 503s mean the same thing.
     try:
@@ -844,9 +890,7 @@ async def _judge_sent(
                 note=request.note_text,
                 author=None,
                 author_id=request.author_id,
-                # The CRM sends this right after the save, so arrival time
-                # stands in for createdAt (item 32). Nothing reads it today.
-                createdAt=datetime.now(UTC),
+                createdAt=created_at,
             )
             return await _judge(
                 scope,
@@ -857,6 +901,7 @@ async def _judge_sent(
                 resubmission=resubmission,
                 deps=deps,
                 started=started,
+                history=history,
             )
     except TimeoutError:
         raise _deadline_exceeded(scope, started) from None
@@ -921,13 +966,17 @@ async def _judge(
     resubmission: bool,
     deps: JudgementDeps,
     started: float,
+    history: bool = False,
 ) -> Judgement:
-    """Every step from the length gate down, for both entry points.
+    """Every step from the length gate down, for every entry point.
 
     ONE body, not two. The two routes differ only in how the Lead and the
     LeadNote were obtained; everything that costs money, everything that
     reserves, everything that decides and everything that is logged is here, so
     the two routes cannot drift into judging the same text differently.
+
+    `history` (register item 127) withholds every prompt, reads and writes no
+    db2 counter, and reserves under its own idempotency namespace.
 
     `started` is the entry point's `time.monotonic()` reading, taken there and
     not here so that the fetch route's two backend calls are inside its
@@ -935,6 +984,7 @@ async def _judge(
     compares it to a clock, and it is not on any line.
     """
     config = deps.config
+    operation = state.JUDGE_HISTORY if history else state.JUDGE_NOTE
     # Register item 59: the key is the ORIGINAL text's fingerprint; only the
     # three prompts read the redacted copy. Counts reach the outcome line.
     fingerprint = state.note_fingerprint(note.note)
@@ -957,6 +1007,7 @@ async def _judge(
             gate_detail,
             config=config,
             resubmission=resubmission,
+            history=history,
         )
         judgement = _suppressed(
             scope,
@@ -997,10 +1048,11 @@ async def _judge(
             fingerprint,
             ttl=inflight_ttl,
             request_id=scope.request_id,
+            operation=operation,
         )
         if not claimed:
             claimed, replay = await _existing_judgement(
-                scope, request, fingerprint, ttl=inflight_ttl
+                scope, request, fingerprint, ttl=inflight_ttl, operation=operation
             )
     except state.IdempotencyUnavailableError:
         raise IdempotencyUnavailableResponse() from None
@@ -1029,11 +1081,16 @@ async def _judge(
     try:
         # Read HERE, before anything is spent: it picks step 8's trip, and that
         # trip's script re-checks the cap as it takes, so a concurrent request
-        # for this note cannot also send. Fails OPEN (0).
-        attempts = await state.read_attempts(
-            scope.tenant,
-            request.note_id,
-            request_id=scope.request_id,
+        # for this note cannot also send. Fails OPEN (0). A history judgement
+        # reads no counter at all (register item 127).
+        attempts = (
+            0
+            if history
+            else await state.read_attempts(
+                scope.tenant,
+                request.note_id,
+                request_id=scope.request_id,
+            )
         )
 
         # The token budget, read before the first thing that costs money. Over
@@ -1137,6 +1194,7 @@ async def _judge(
                     rate_count=0,
                     config=config,
                     resubmission=resubmission,
+                    history=history,
                 ),
                 scope,
                 request,
@@ -1151,6 +1209,7 @@ async def _judge(
                 rate_count=rate_count,
                 config=config,
                 resubmission=resubmission,
+                history=history,
             )
             if resubmission:
                 # Read only here: the reference belongs to a Decision, and a
@@ -1212,6 +1271,7 @@ async def _judge(
             judgement_json=judgement.model_dump_json(),
             ttl=config.idempotency_ttl_seconds,
             request_id=scope.request_id,
+            operation=operation,
         )
     except BaseException:
         # Reserved, then did not finish: release so the caller can retry
@@ -1223,7 +1283,11 @@ async def _judge(
         # cancel scope delivers, would otherwise kill it on the wire.
         await asyncio.shield(
             state.release_idempotency(
-                scope.tenant, request.note_id, fingerprint, request_id=scope.request_id
+                scope.tenant,
+                request.note_id,
+                fingerprint,
+                request_id=scope.request_id,
+                operation=operation,
             )
         )
         raise
@@ -1286,6 +1350,7 @@ async def _existing_judgement(
     fingerprint: str,
     *,
     ttl: int,
+    operation: str,
 ) -> tuple[bool, ReplayedJudgement | None]:
     """What a request that lost the reservation gets: (claimed, replay).
 
@@ -1294,7 +1359,11 @@ async def _existing_judgement(
     value that no longer validates is logged, taken over and judged again.
     """
     stored = await state.read_confirmed_judgement(
-        scope.tenant, request.note_id, fingerprint, request_id=scope.request_id
+        scope.tenant,
+        request.note_id,
+        fingerprint,
+        request_id=scope.request_id,
+        operation=operation,
     )
     if stored is None:
         return False, None
@@ -1317,6 +1386,7 @@ async def _existing_judgement(
             expected=stored,
             ttl=ttl,
             request_id=scope.request_id,
+            operation=operation,
         )
         return claimed, None
     if (replay.note_id, replay.lead_id) != (request.note_id, request.lead_id):

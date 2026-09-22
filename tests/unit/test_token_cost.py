@@ -58,7 +58,7 @@ from tests.helpers.fake_cost_redis import FakeCostRedis
 from tests.helpers.fake_leads import FakeLeadsClient, lead, note
 from tests.helpers.fake_llm import FakeLLM, json_response, response
 from tests.helpers.fake_operational_redis import FakeOperationalRedis
-from tests.helpers.scopes import TEST_SCOPE, test_scope
+from tests.helpers.scopes import TEST_SCOPE, history_scope, test_scope
 from tests.helpers.score_answers import score_payload
 
 JUDGE = "/api/v1/notes/judgements"
@@ -579,3 +579,56 @@ def test_a_degraded_judgement_logs_the_line_once_for_three_passes(
     assert llm.call_count == 3
     degraded = [x for x in _lines(json_log) if x["message"] == "token_budget_degraded"]
     assert len(degraded) == 1
+
+
+# --- the history budget (register item 127) ---------------------------------
+
+HISTORY_KEY = "tokens:history:tenant:tenant-a"
+
+
+async def test_a_history_charge_moves_only_the_history_counter(
+    monkeypatch, cost, json_log
+):
+    """One key, its own total on the line, and the warning names that key."""
+    monkeypatch.setenv("DODEAL_COST_TOKENS_HISTORY_PER_TENANT_LIMIT", "100")
+    get_settings.cache_clear()
+    monkeypatch.setattr(limiter, "get_cost_client", lambda: cost)
+
+    await enforce_token_cost(
+        history_scope(), input_tokens=90, output_tokens=5, profile="unit_a.score"
+    )
+
+    assert cost.store == {HISTORY_KEY: 95}
+    charged = next(x for x in _lines(json_log) if x["message"] == "tokens_charged")
+    assert charged["history_total"] == 95
+    assert "tenant_total" not in charged and "user_total" not in charged
+    warned = next(x for x in _lines(json_log) if x["message"] == "token_budget_warning")
+    assert warned["key"] == HISTORY_KEY
+
+
+async def test_the_history_preflight_reads_one_key_and_degrades_near_it(
+    monkeypatch, cost, json_log
+):
+    """Near the history limit the judgement runs degraded, named `history`."""
+    monkeypatch.setenv("DODEAL_COST_TOKENS_HISTORY_PER_TENANT_LIMIT", "1000")
+    get_settings.cache_clear()
+    monkeypatch.setattr(limiter, "get_cost_client", lambda: cost)
+    cost.store[HISTORY_KEY] = 950
+    cost.store[TENANT_KEY] = 10**9
+
+    assert await token_preflight(history_scope()) is True
+
+    assert cost.mgets == [(HISTORY_KEY,)]
+    line = next(x for x in _lines(json_log) if x["message"] == "token_budget_degraded")
+    assert line["budgets"] == "history"
+
+
+async def test_the_history_preflight_denies_at_its_own_limit(monkeypatch, cost):
+    """At the history limit the pre-flight refuses, whatever the live pair says."""
+    monkeypatch.setenv("DODEAL_COST_TOKENS_HISTORY_PER_TENANT_LIMIT", "1000")
+    get_settings.cache_clear()
+    monkeypatch.setattr(limiter, "get_cost_client", lambda: cost)
+    cost.store[HISTORY_KEY] = 1000
+
+    with pytest.raises(TokenBudgetExceeded):
+        await token_preflight(history_scope())

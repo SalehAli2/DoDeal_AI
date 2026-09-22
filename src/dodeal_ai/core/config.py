@@ -276,6 +276,10 @@ class Settings(BaseSettings):
     # PROVISIONAL -- no real provider has run, so these are placeholders.
     cost_tokens_per_tenant_limit: int = Field(default=5_000_000, gt=0)
     cost_tokens_per_user_limit: int = Field(default=500_000, gt=0)
+    # The tenant's separate token budget for HISTORY judgements (register item
+    # 127): old notes scored in bulk, charged here and never to the live pair,
+    # so a backfill cannot starve today's judgements. Too low stalls a backfill.
+    cost_tokens_history_per_tenant_limit: int = Field(default=20_000_000, gt=0)
     # The fraction of a limit at which a running total earns one WARNING.
     # STRICTLY between 0 and 1: 0 warns on the first token, 1 warns only once
     # the budget is already spent, and neither is a warning.
@@ -297,6 +301,10 @@ class Settings(BaseSettings):
     # config typo that looks exactly like an outage. It fails closed at startup
     # (ConfigError) instead.
     max_inflight: int = Field(default=32, gt=0)
+    # History judgements allowed in flight at once, per process, INSIDE
+    # max_inflight (register item 127). 8 leaves live notes three quarters of the
+    # slots; above max_inflight it bounds nothing and a backfill starves them.
+    history_max_inflight: int = Field(default=8, gt=0)
 
     # --- Judgement deadline (units/structured_intelligence/pipeline.py) -----
     # One end-to-end budget per judgement, fetch included; past it, 503.

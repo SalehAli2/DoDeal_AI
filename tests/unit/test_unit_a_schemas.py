@@ -20,6 +20,7 @@ from dodeal_ai.units.structured_intelligence.schemas import (
     Decision,
     DecisionAction,
     DirectJudgementRequest,
+    HistoryJudgementRequest,
     JudgementRequest,
     LeadContext,
     MissingComponent,
@@ -41,7 +42,12 @@ _OUTPUT_SCHEMAS = (ClassificationOutput, VagueOutput, ScoreOutput)
 # reason the model's answers are: it is written by something outside this
 # service, so it may not carry the answer either. LeadContext is included
 # because it is the half of that body the classifier's prompt reads.
-_REQUEST_SCHEMAS = (JudgementRequest, DirectJudgementRequest, LeadContext)
+_REQUEST_SCHEMAS = (
+    JudgementRequest,
+    DirectJudgementRequest,
+    HistoryJudgementRequest,
+    LeadContext,
+)
 
 _SRC = Path(__file__).resolve().parents[2] / "src" / "dodeal_ai"
 
@@ -97,7 +103,9 @@ def test_remaining_vocabularies_are_closed_sets() -> None:
         "accept_flag_prompt",
         "prompt_clarification",
     ]
+    # "history" first: register item 127 puts it first in decide()'s order.
     assert [p.value for p in PromptWithheld] == [
+        "history",
         "resubmission",
         "attempt_cap",
         "rate_limited",

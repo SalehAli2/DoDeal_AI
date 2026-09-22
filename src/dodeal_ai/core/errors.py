@@ -47,6 +47,10 @@ class DodealError(Exception):
     (core/log_safety.py keeps the message of our own exceptions).
     """
 
+    # Response headers this refusal carries, when it carries any. Fixed values
+    # set by the subclass, never caller content.
+    headers: dict[str, str] | None = None
+
     def __init__(self, reason_code: str, http_status: int) -> None:
         self.reason_code = reason_code
         self.http_status = http_status
@@ -179,6 +183,19 @@ class LoadShed(DodealError):
         super().__init__("load_shed", 503)
 
 
+class HistoryLoadShed(DodealError):
+    """The history bulkhead is full (register item 127): `history_max_inflight`
+    history judgements are already running in this process.
+
+    503 with Retry-After: 1, so a backfill backs off and retries on its own
+    while live notes keep their slots. Like LoadShed, nothing was spent.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("history_load_shed", 503)
+        self.headers = {"Retry-After": "1"}
+
+
 class PayloadTooLarge(DodealError):
     """Refused at the door: the body is larger than `max_request_body_bytes`.
 
@@ -257,6 +274,7 @@ def dodeal_error_response(exc: DodealError, request_id: str) -> JSONResponse:
     return JSONResponse(
         status_code=exc.http_status,
         content=_unit_error_body(exc.reason_code, exc.http_status, request_id),
+        headers=exc.headers,
     )
 
 

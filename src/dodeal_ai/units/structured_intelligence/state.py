@@ -119,8 +119,17 @@ def note_fingerprint(note_text: str) -> str:
     return hashlib.sha256(note_text.encode("utf-8")).hexdigest()
 
 
-def _idempotency_key(tenant: str, note_id: int, fingerprint: str) -> str:
-    return f"idem:{tenant}:judge_note:{note_id}:{fingerprint}"
+# The operation segment of an idempotency key. A history judgement (register
+# item 127) has its own, so a live replay can never answer a backfill request and
+# a backfill's withheld prompt can never be replayed to a live one.
+JUDGE_NOTE = "judge_note"
+JUDGE_HISTORY = "judge_history"
+
+
+def _idempotency_key(
+    tenant: str, note_id: int, fingerprint: str, operation: str = JUDGE_NOTE
+) -> str:
+    return f"idem:{tenant}:{operation}:{note_id}:{fingerprint}"
 
 
 def _rate_limit_key(tenant: str, subject: str) -> str:
@@ -177,6 +186,7 @@ async def reserve_idempotency(
     *,
     ttl: int,
     request_id: str,
+    operation: str = JUDGE_NOTE,
 ) -> bool:
     """Claim this (tenant, note, fingerprint). True if WE claimed it; False if
     someone already had it -> the route answers 409 duplicate_request.
@@ -192,7 +202,7 @@ async def reserve_idempotency(
     Raises IdempotencyUnavailableError on any RedisError -- see the module
     docstring for why this one does not fail open.
     """
-    key = _idempotency_key(tenant, note_id, fingerprint)
+    key = _idempotency_key(tenant, note_id, fingerprint, operation)
     try:
         claimed = await operational_breaker().call(
             lambda: get_operational_client().set(key, _RESERVED, nx=True, ex=ttl)
@@ -212,6 +222,7 @@ async def release_idempotency(
     fingerprint: str,
     *,
     request_id: str,
+    operation: str = JUDGE_NOTE,
 ) -> None:
     """Drop the reservation. BEST EFFORT: swallows every RedisError.
 
@@ -223,7 +234,7 @@ async def release_idempotency(
     its short TTL -- annoying, never wrong -- and raising here would replace the
     real error with a less useful one.
     """
-    key = _idempotency_key(tenant, note_id, fingerprint)
+    key = _idempotency_key(tenant, note_id, fingerprint, operation)
     try:
         await operational_breaker().call(lambda: get_operational_client().delete(key))
     except redis.RedisError as exc:
@@ -238,6 +249,7 @@ async def confirm_idempotency(
     judgement_json: str,
     ttl: int,
     request_id: str,
+    operation: str = JUDGE_NOTE,
 ) -> None:
     """The judgement exists: store it under the key for the long TTL.
 
@@ -251,7 +263,7 @@ async def confirm_idempotency(
     again: money, never correctness. Failing closed here would throw away a
     judgement that is already built and paid for.
     """
-    key = _idempotency_key(tenant, note_id, fingerprint)
+    key = _idempotency_key(tenant, note_id, fingerprint, operation)
     try:
         await operational_breaker().call(
             lambda: get_operational_client().set(key, judgement_json, xx=True, ex=ttl)
@@ -267,6 +279,7 @@ async def read_confirmed_judgement(
     fingerprint: str,
     *,
     request_id: str,
+    operation: str = JUDGE_NOTE,
 ) -> str | None:
     """The stored judgement JSON a duplicate replays, or None while the key is
     only reserved (or has gone). Untrusted until the caller validates it.
@@ -274,7 +287,7 @@ async def read_confirmed_judgement(
     Fails CLOSED like the reservation: an unanswered read raises
     IdempotencyUnavailableError rather than guess whether to judge.
     """
-    key = _idempotency_key(tenant, note_id, fingerprint)
+    key = _idempotency_key(tenant, note_id, fingerprint, operation)
     try:
         raw = await operational_breaker().call(
             lambda: get_operational_client().get(key)
@@ -308,6 +321,7 @@ async def take_over_idempotency(
     expected: str,
     ttl: int,
     request_id: str,
+    operation: str = JUDGE_NOTE,
 ) -> bool:
     """Turn a stored value that no longer validates back into a reservation.
 
@@ -315,7 +329,7 @@ async def take_over_idempotency(
     since it was read: someone else has it, and the caller answers 409.
     Fails CLOSED, as the reservation does.
     """
-    key = _idempotency_key(tenant, note_id, fingerprint)
+    key = _idempotency_key(tenant, note_id, fingerprint, operation)
     try:
         taken = await operational_breaker().call(
             lambda: get_operational_client().eval(
