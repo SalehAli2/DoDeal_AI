@@ -6996,3 +6996,14 @@ the suppression table as code today, so a future per-tenant table would need it
 re-proved.
 Stress test: weights 50/50 on what_happened and client_said sum to 100 and are
 refused, because no_contact scores neither.
+
+## Piece: register item 157, the recognised-short counter
+
+Item 157 -- `recognised_short_total` in core/metrics.py, with no label at all,
+incremented in `_log_outcome` exactly when the outcome line says
+`recognised_short: true`, so the counter and the lines cannot disagree.
+Production failure modes: (1) a replayed judgement writes no outcome line and
+does not count, so the rate is of judgements made, not of requests; (2) with no
+tenant label a floor change for one tenant cannot be read off the counter.
+Stress test: "na" below the floor counts once; a full note on the same lead
+leaves the counter where it was.

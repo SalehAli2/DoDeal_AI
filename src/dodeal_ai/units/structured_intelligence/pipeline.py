@@ -1597,8 +1597,12 @@ def _log_outcome(
     note the floor would have refused -- and nothing in the response says it: a
     recognised note comes back looking like any other. False, never null, on
     every note the floor never touched, because "was not recognised" and "was
-    never short" are the same answer to "did the table do anything here".
+    never short" are the same answer to "did the table do anything here". The
+    same fact counts `recognised_short_total` (register item 157), here, where
+    the line is written, so the counter and the lines cannot disagree.
     """
+    if recognised_short:
+        metrics.RECOGNISED_SHORT.inc()
     if judgement.suppressed is not None:
         _logger.info(
             "judgement_suppressed",

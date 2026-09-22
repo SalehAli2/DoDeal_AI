@@ -269,3 +269,23 @@ async def test_no_label_names_a_tenant_subject_note_or_lead(redis_fakes):
         assert not any(word in name.lower() for word in FORBIDDEN), name
     assert set(declared) == {"outcome", "pass", "event", "kind"}
     assert "tenant-a" not in metrics.render().decode()
+
+
+# --- recognised short notes (register item 157) -------------------------------
+
+
+async def test_a_recognised_short_note_counts_once_and_a_full_note_does_not():
+    """The counter moves with the outcome line's flag, and carries no label."""
+    before = _value("recognised_short_total")
+    leads = FakeLeadsClient(
+        leads={LEAD_ID: lead(LEAD_ID)},
+        notes={LEAD_ID: [note(NOTE_ID, "na"), note(NOTE_ID + 1, TEXT)]},
+    )
+    await _judge(_deps(FakeLLM(*_happy(), *_happy()), leads))
+    assert _value("recognised_short_total") == before + 1
+
+    await _judge(_deps(FakeLLM(*_happy()), leads), note_id=NOTE_ID + 1)
+    assert _value("recognised_short_total") == before + 1
+
+    (family,) = [m for m in metrics.REGISTRY.collect() if m.name == "recognised_short"]
+    assert all(sample.labels == {} for sample in family.samples)

@@ -51,6 +51,14 @@ LOAD_SHED = Counter(
     "Requests refused at the in-flight cap.",
     registry=REGISTRY,
 )
+# Register item 157: judgements the short-note tables let past the length
+# floor. No label at all -- the question a floor change is decided on is "how
+# often", and a tenant label would be a cardinality and a disclosure problem.
+RECOGNISED_SHORT = Counter(
+    "recognised_short",
+    "Judgements of a note below the length floor that a tenant table recognised.",
+    registry=REGISTRY,
+)
 BACKEND_ERRORS = Counter(
     "backend_errors",
     "CRM read failures that stopped a judgement, by kind.",
