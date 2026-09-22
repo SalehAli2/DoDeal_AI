@@ -311,25 +311,37 @@ def _asked(note_id: int, total: int, minutes: int = 0) -> JudgementRow:
     )
 
 
-def test_a_resubmission_is_a_later_row_for_the_same_note_with_a_better_band() -> None:
+def test_a_resubmission_is_a_later_row_for_the_same_note_at_fair_or_better() -> None:
     """The link the row does not carry, reconstructed from what it does: the
-    note id plus recorded order."""
+    note id plus recorded order. Register item 144: the bar is fair or better,
+    so a note asked about at fair that comes back fair has met it."""
     rows = [
         _asked(1, 50),
         _row(note_id=1, total=90),  # the resubmission: fair -> excellent
         _asked(2, 50),
-        _row(note_id=2, total=55),  # still fair: not an improvement
+        _row(note_id=2, total=55),  # still fair: at the bar, so improved
         _asked(3, 50),  # never came back
     ]
     measure = improved_share(rows, SMALL_FLOOR)
     assert measure.name is MeasureName.IMPROVED_SHARE
-    assert (measure.counted, measure.of, measure.percent) == (1, 3, 33)
+    assert (measure.counted, measure.of, measure.percent) == (2, 3, 67)
 
 
-def test_a_better_total_inside_the_same_band_is_not_an_improvement() -> None:
-    """The measure is in bands, as everything else this unit reports is: a
-    five-point rise that does not cross a boundary is not a result."""
-    rows = [_asked(1, 41), _row(note_id=1, total=60), _asked(2, 41), _asked(3, 41)]
+def test_a_better_total_that_stays_poor_is_not_an_improvement() -> None:
+    """The measure is in bands, and the bar is fair: a rise from 10 to 35 is
+    still a poor note (register item 144)."""
+    rows = [_asked(1, 10), _row(note_id=1, total=35), _asked(2, 41), _asked(3, 41)]
+    assert improved_share(rows, SMALL_FLOOR).counted == 0
+
+
+def test_a_suppressed_note_that_came_back_poor_is_not_improved() -> None:
+    """Scored at last is not enough: the note must reach fair."""
+    rows = [
+        _row(note_id=1, total=None, flagged=True, prompt_sent=True, note_type=None),
+        _row(note_id=1, total=20),
+        _asked(2, 50),
+        _asked(3, 50),
+    ]
     assert improved_share(rows, SMALL_FLOOR).counted == 0
 
 
@@ -341,8 +353,8 @@ def test_an_earlier_better_row_is_not_a_resubmission() -> None:
 
 
 def test_a_suppressed_note_that_came_back_scored_counts_as_improved() -> None:
-    """It went from unscorable to scored, which is exactly what being asked was
-    for. There is no band to beat, so any later band is the improvement."""
+    """It went from unscorable to fair, which is what being asked was for:
+    the bar is where the note ended up (register item 144)."""
     rows = [
         _row(note_id=1, total=None, flagged=True, prompt_sent=True, note_type=None),
         _row(note_id=1, total=45),

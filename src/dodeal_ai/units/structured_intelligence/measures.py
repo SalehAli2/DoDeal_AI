@@ -9,7 +9,7 @@ WHAT THEY ARE (register item 144), over a rolling window of a tenant's rows:
   flagged share     what proportion of their notes we had something to say
                     about.
   improved share    of the notes we actually ASKED about, what proportion came
-                    back better.
+                    back at fair or better (register item 144).
 
 NO MODEL TOUCHES ANY OF IT. Every figure here is arithmetic over rows, in
 integers, exactly as compute_score is -- the same reason: a measure a manager
@@ -282,14 +282,13 @@ def flagged_share(rows: Sequence[JudgementRow], config: TenantConfig) -> ShareMe
 def improved_share(rows: Sequence[JudgementRow], config: TenantConfig) -> ShareMeasure:
     """Of the notes we actually ASKED about, what proportion came back better.
 
-    WHAT THE DATA SUPPORTS, NOT WHAT THE BUSINESS ASKED FOR. The business asked
-    for "did the rep act on the prompt". No row links a resubmission to the
-    judgement it followed, and no row records an edit, so that question cannot
-    be answered from this store. What the rows DO support is: a later row for
-    the same note id carrying a better band. That is the measure computed here,
-    and it is narrower than the question -- a rep who rewrote a note without
-    being asked also counts, and one who improved it below a band boundary does
-    not.
+    THE BUSINESS CRITERION (register item 144): a note we asked about counts
+    as improved when a LATER row for the same note id is band fair or better.
+    No row links a resubmission to the judgement it followed, and no row
+    records an edit, so "a later row for the same note" is the link, and the
+    bar is the business's own -- fair or better -- rather than "better than
+    before". A note asked about at fair that comes back fair has met the bar;
+    one that rises from poor and stays poor has not.
 
     The denominator is notes where a prompt was actually SENT, not every
     flagged note. A prompt that was withheld -- capped, rate limited, or a
@@ -310,7 +309,6 @@ def improved_share(rows: Sequence[JudgementRow], config: TenantConfig) -> ShareM
         for position, row in enumerate(notes)
         if row.prompt_sent
         and _improved(
-            row,
             [
                 later.band
                 for later in notes[position + 1 :]
@@ -328,19 +326,20 @@ def improved_share(rows: Sequence[JudgementRow], config: TenantConfig) -> ShareM
     )
 
 
-def _improved(asked: JudgementRow, later: list[Band] | None) -> bool:
-    """Did any band after the asked-about row beat the band it had?
+# The business's bar for "improved" (register item 144): a later band at this
+# or above. Named once, so the criterion is read from here and not re-derived.
+_IMPROVED_AT = Band.FAIR
 
-    A row that was suppressed when we asked has no band to beat, so ANY later
-    band counts as an improvement: the note went from unscorable to scored,
-    which is exactly what being asked was for.
+
+def _improved(later: list[Band]) -> bool:
+    """Did any row after the asked-about one reach fair or better?
+
+    The asked row's own band does not enter into it: the criterion is where
+    the note ended up, so a suppressed note that came back fair counts and one
+    that came back poor does not.
     """
-    if not later:
-        return False
     order = list(Band)
-    if asked.band is None:
-        return True
-    return any(order.index(band) > order.index(asked.band) for band in later)
+    return any(order.index(band) >= order.index(_IMPROVED_AT) for band in later)
 
 
 def measure_rep(

@@ -6859,3 +6859,16 @@ order, and improved share silently compares the wrong "later" row; (2) a
 tenant with more than 10000 rows in a window never gets a brief at all.
 Stress test: a backend that ignores `after_id` and returns the same full page
 must be refused as paging_stalled, not looped on.
+
+## Piece: register item 144, improved means fair or better
+
+Item 144 -- `improved_share` counts a prompted note as improved only when a
+later row for the same note is band fair or better, the business criterion,
+instead of "any band better than before". The asked row's own band no longer
+enters into it.
+Production failure modes: (1) a rep whose notes start fair is credited for any
+resubmission, so the figure flatters teams that write fair notes already;
+(2) the CRM's row order is the only link, so a resubmission stored before its
+original reads as no improvement.
+Stress test: a note asked about at 10 that comes back at 35 stays poor and is
+not improved; one asked at fair that comes back fair is.
