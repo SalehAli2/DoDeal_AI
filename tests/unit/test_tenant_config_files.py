@@ -135,7 +135,6 @@ def test_the_weights_stay_immutable(tmp_path):
         {"accept_threshold": 75},
         {"config_version": ""},
         {"config_version": "v", "unknown_field": 1},
-        {"config_version": "v", "deal_specifics_applicable": True},
         {"config_version": "v", "accept_threshold": 101},
         {"config_version": "v", "max_note_chars": 4001},
         {"config_version": "v", "idempotency_ttl_seconds": 0},
@@ -200,7 +199,6 @@ def test_the_weights_stay_immutable(tmp_path):
         "no-version",
         "empty-version",
         "extra-field",
-        "q13-switch",
         "threshold-range",
         "note-cap",
         "zero-ttl",
@@ -455,3 +453,44 @@ def test_a_file_that_changes_a_weight_is_accepted_and_marks_follow_it(tmp_path):
     score = compute_score(all_true, NoteType.DISCOVERY, config)
     assert score.total == 100
     assert [c.mark for c in score.components if not c.suppressed] == [30, 20, 20, 10]
+
+
+# --- the Q13 switch through the parser (register item 97) --------------------
+
+
+def test_the_parser_accepts_deal_specifics_applicable(tmp_path):
+    """The switch is a tenant setting now; the component then counts."""
+    from dodeal_ai.units.structured_intelligence.config import parse_unit_a_section
+    from dodeal_ai.units.structured_intelligence.scoring import applicable_components
+
+    config = parse_unit_a_section(
+        {"config_version": "v", "deal_specifics_applicable": True}
+    )
+    assert config.deal_specifics_applicable is True
+    assert ComponentName.DEAL_SPECIFICS in applicable_components(
+        NoteType.DISCOVERY, config
+    )
+
+
+def test_the_switch_off_with_every_weight_on_deal_specifics_is_still_refused(
+    tmp_path,
+):
+    """Zero applicable weight is refused whichever way the switch arrived."""
+    from dodeal_ai.units.structured_intelligence.config import parse_unit_a_section
+
+    weights = {
+        c.value: (100 if c is ComponentName.DEAL_SPECIFICS else 0)
+        for c in ComponentName
+    }
+    with pytest.raises(ValueError):
+        parse_unit_a_section(
+            {
+                "config_version": "v",
+                "weights": weights,
+                "deal_specifics_applicable": False,
+            }
+        )
+    accepted = parse_unit_a_section(
+        {"config_version": "v", "weights": weights, "deal_specifics_applicable": True}
+    )
+    assert accepted.weights[ComponentName.DEAL_SPECIFICS] == 100

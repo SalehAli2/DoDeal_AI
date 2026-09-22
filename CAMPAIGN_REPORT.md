@@ -6971,3 +6971,15 @@ fingerprints while the fetch route strips, so a copy that differs only in
 trailing whitespace is flagged on one route and not the other.
 Stress test: the same answers scored for a copied and an original note give
 identical scores and actions, with only the flag different.
+
+## Piece: register item 97, the Q13 switch through the section parser
+
+Item 97 -- the `unit_a` section parser accepts `deal_specifics_applicable`, so a
+tenant file or the admin route can turn the Q13 component on; `_check` still
+refuses a rubric the switch leaves with zero applicable weight.
+Production failure modes: (1) a tenant flips the switch with no business-line
+checklist behind it, and deal_specifics is marked on checks the prompt never
+defined for its line; (2) flipping it moves the denominator from 80 to 100 and
+old and new totals are compared across a version the reader ignores.
+Stress test: every weight on deal_specifics is refused with the switch off and
+accepted with it on.

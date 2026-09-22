@@ -408,8 +408,11 @@ UNIT_A_SECTION = "unit_a"
 class TenantConfigFile(BaseModel):
     """A tenant's `unit_a` section: the numbers it may set, over the default.
 
-    The per-type rubric maps and the Q13 business-line switch are not here: they
+    The per-type rubric maps and `business_line_field` are not here: they
     change what a component MEANS, not how it is weighted, and stay code.
+    `deal_specifics_applicable` IS here (register item 97): the Q13 switch a
+    tenant flips when its business line is known. `_check` still refuses a
+    rubric the switch leaves with no applicable weight.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -438,6 +441,7 @@ class TenantConfigFile(BaseModel):
     measure_evidence_floor: int | None = Field(default=None, ge=1)
     rolling_window_days: int | None = Field(default=None, gt=0)
     enforcement_mode: EnforcementMode | None = None
+    deal_specifics_applicable: bool | None = None
     blocking_enabled: bool | None = None
     blocking_stages: frozenset[str] | None = None
     timezone: str | None = None
