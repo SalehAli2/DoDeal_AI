@@ -15,7 +15,7 @@ from dodeal_ai.units.structured_intelligence.state import (
     _attempt_key,
     _rate_limit_key,
 )
-from tests.load.conftest import SUBJECT, TENANT
+from tests.load.conftest import TENANT
 
 # How long both requests may take to reach classify, and how often to look.
 PARK_SECONDS = 5.0
@@ -50,4 +50,6 @@ async def test_one_note_id_with_two_vague_texts_at_once_sends_one_prompt(lane):
     assert withheld["prompt_withheld"] == "attempt_cap"
     operational = lane.stores.operational
     assert await operational.get(_attempt_key(TENANT, note.id)) == "1"
-    assert await operational.get(_rate_limit_key(TENANT, str(SUBJECT))) == "1"
+    # Register item 92: the direct route keys the rate slot on the author.
+    author = f"author:{note.author_id}"
+    assert await operational.get(_rate_limit_key(TENANT, author)) == "1"

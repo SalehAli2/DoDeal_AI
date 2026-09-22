@@ -6780,3 +6780,10 @@ history budget runs out mid-backfill and the rest is 429 until the window
 resets, with no queue to resume from.
 Stress test: with eight history slots held, a ninth history request is 503
 with Retry-After: 1 while a live direct note on the same token is 200.
+
+## Test: register item 92, the load lane's direct-route rate key
+
+The load lane is outside the default run, so A3 missed one asked change there:
+`test_one_prompt_per_note.py` asserted the direct route's rate slot under the
+user `sub`; it now asserts `ratelimit:{t}:author:{id}`. Lanes after A5:
+redis_real 31 passed; load 11 passed three times.
