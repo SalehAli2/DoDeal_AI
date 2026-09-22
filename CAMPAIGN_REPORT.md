@@ -6917,3 +6917,19 @@ and filters in code, so a large tenant pays a full read per team asked for;
 (2) a person moved between teams is counted in their current team only.
 Stress test: a rep with four notes under a floor of ten reads null values and
 state below_evidence_floor on every measure, and a null average total.
+
+## Piece: register item 142, strict blocking at a stage change
+
+Item 142 -- the direct body takes an optional `stage_change_to` (at most 100
+chars; the history body refuses it); the pipeline turns it into ONE boolean
+(casefolded, in the tenant's `blocking_stages`), and `decide.enforcement` blocks
+with `applies_to: stage_change` only when the mode is strict, `blocking_enabled`,
+that boolean, not a resubmission, and a prompt_clarification or an unrecognised
+thin note all hold. The resubmission route flags instead. Defaults: blocking off,
+stages qualified, won, lost. The stage is never logged or prompted.
+Production failure modes: (1) the CRM's stage names differ in spelling from the
+tenant's list and nothing blocks, silently; (2) a tenant turns blocking on and a
+flaky model marks good notes poor, blocking stage changes until the rep
+resubmits.
+Stress test: the table test turns each of the five conditions off in turn and
+gets a flag, never a block.

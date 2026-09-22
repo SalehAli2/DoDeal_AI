@@ -298,6 +298,12 @@ class TenantConfig:
     # tenant that moves to strict never changes an old judgement's meaning.
     enforcement_mode: EnforcementMode
 
+    # Register item 142: whether a strict tenant blocks at all, and at which
+    # stages. Off by default, so strict alone never locks a rep out; the stages
+    # are stored casefolded. A wrong stage name blocks nothing, silently.
+    blocking_enabled: bool
+    blocking_stages: frozenset[str]
+
     # Register item 156: the IANA zone the tenant's days are counted in. Every
     # window is whole local days and every printed period is local dates, so a
     # rep's "yesterday" ends at their midnight, not at UTC's. A wrong zone moves
@@ -319,7 +325,12 @@ class TenantConfig:
         )
         # The three short-note tables are folded here, the one place every
         # TenantConfig passes through, so a hand-built config matches too.
-        for name in ("short_note_codes", "short_note_phrases", "short_note_fillers"):
+        for name in (
+            "short_note_codes",
+            "short_note_phrases",
+            "short_note_fillers",
+            "blocking_stages",
+        ):
             table = getattr(self, name)
             object.__setattr__(self, name, frozenset(w.casefold() for w in table))
 
@@ -378,6 +389,8 @@ _DEFAULT_CONFIG = TenantConfig(
     # calibration target is met, which nothing in this service can check. So
     # advisory is the default and only a tenant file may say otherwise.
     enforcement_mode=EnforcementMode.ADVISORY,
+    blocking_enabled=False,
+    blocking_stages=frozenset({"qualified", "won", "lost"}),
     timezone="Asia/Dubai",
     rep_numbers_enabled=False,
     # -4: register item 142 changed the enforcement_mode vocabulary, so a file
@@ -425,6 +438,8 @@ class TenantConfigFile(BaseModel):
     measure_evidence_floor: int | None = Field(default=None, ge=1)
     rolling_window_days: int | None = Field(default=None, gt=0)
     enforcement_mode: EnforcementMode | None = None
+    blocking_enabled: bool | None = None
+    blocking_stages: frozenset[str] | None = None
     timezone: str | None = None
     rep_numbers_enabled: bool | None = None
 

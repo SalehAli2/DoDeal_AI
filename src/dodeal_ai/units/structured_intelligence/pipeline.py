@@ -374,6 +374,8 @@ def _suppressed(
     model_version: str = NO_MODEL,
     clarification_prompt: str | None = None,
     prompt_withheld: PromptWithheld | None = None,
+    stage_change: bool = False,
+    resubmission: bool = False,
 ) -> Judgement:
     """Build a suppressed judgement: score and decision are null, never zero.
 
@@ -409,7 +411,12 @@ def _suppressed(
             clarification_prompt=clarification_prompt,
             prompt_withheld=prompt_withheld,
         ),
-        enforcement=enforcement(config, detail=detail),
+        enforcement=enforcement(
+            config,
+            detail=detail,
+            stage_change=stage_change,
+            resubmission=resubmission,
+        ),
         versions=_versions(config, model_version),
         request_id=scope.request_id,
     )
@@ -862,6 +869,15 @@ async def judge_note_history(
     )
 
 
+def _stage_change(request: _JudgementInput, config: TenantConfig) -> bool:
+    """Register item 142: is the CRM moving the lead to one of the tenant's
+    blocking stages with this note? The ONE boolean the stage becomes; the
+    stage itself goes no further than this function -- not to a log line, not
+    to a prompt and not to decide.py."""
+    stage = getattr(request, "stage_change_to", None)
+    return stage is not None and stage.casefold() in config.blocking_stages
+
+
 async def _judge_sent(
     scope: TenantScope,
     request: DirectJudgementRequest | HistoryJudgementRequest,
@@ -902,6 +918,7 @@ async def _judge_sent(
                 deps=deps,
                 started=started,
                 history=history,
+                stage_change=_stage_change(request, deps.config),
             )
     except TimeoutError:
         raise _deadline_exceeded(scope, started) from None
@@ -967,6 +984,7 @@ async def _judge(
     deps: JudgementDeps,
     started: float,
     history: bool = False,
+    stage_change: bool = False,
 ) -> Judgement:
     """Every step from the length gate down, for every entry point.
 
@@ -977,6 +995,8 @@ async def _judge(
 
     `history` (register item 127) withholds every prompt, reads and writes no
     db2 counter, and reserves under its own idempotency namespace.
+    `stage_change` (register item 142) is the one boolean a CRM stage becomes;
+    it reaches the enforcement block and nothing else.
 
     `started` is the entry point's `time.monotonic()` reading, taken there and
     not here so that the fetch route's two backend calls are inside its
@@ -1018,6 +1038,8 @@ async def _judge(
             config=config,
             clarification_prompt=clarification_prompt,
             prompt_withheld=prompt_withheld,
+            stage_change=stage_change,
+            resubmission=resubmission,
         )
         _log_outcome(
             scope,
@@ -1126,6 +1148,8 @@ async def _judge(
                 config=config,
                 analysis=NoteAnalysis(note_type=classification.note_type),
                 model_version=classify_response.model,
+                stage_change=stage_change,
+                resubmission=resubmission,
             )
         else:
             # suppression_for returned None, so this is one of the six scored
@@ -1250,7 +1274,12 @@ async def _judge(
                 # is what the two thresholds already decided, and deriving the
                 # verdict from the total again would be a second place for the
                 # thresholds to be read (register item 142).
-                enforcement=enforcement(config, action=decision.action),
+                enforcement=enforcement(
+                    config,
+                    action=decision.action,
+                    stage_change=stage_change,
+                    resubmission=resubmission,
+                ),
                 # The SCORING pass's model, not the classifier's: the marks are
                 # what the judgement is, and on a reprompted pass it is the
                 # second response -- the call the marks actually came from.

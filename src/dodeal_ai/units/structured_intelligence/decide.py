@@ -29,8 +29,9 @@ THE ENFORCEMENT BLOCK IS THE THIRD QUESTION, and `enforcement()` below answers
 it for EVERY judgement -- scored or suppressed. It is separate from decide()
 because a suppressed note has no Decision to hang a verdict on and still needs
 one: the CRM must never infer what to do from an action that is not there.
-Nothing here blocks a save today; `strict` is built and recorded, never
-enabled, and the mode comes from the tenant's config and nowhere else.
+A block refuses a STAGE CHANGE and never a save (register item 142), and
+only when every one of five conditions holds -- see `enforcement`. The mode
+and the blocking switch come from the tenant's config and nowhere else.
 
 NO MODEL OUTPUT REACHES A DECISION. The inputs are a computed NoteScore, one
 integer and one flag from db2, the tenant's config, and two booleans from the
@@ -89,6 +90,8 @@ def enforcement(
     *,
     action: DecisionAction | None = None,
     detail: SuppressedDetail | None = None,
+    stage_change: bool = False,
+    resubmission: bool = False,
 ) -> Enforcement:
     """The enforcement block, for every judgement this service returns.
 
@@ -108,6 +111,13 @@ def enforcement(
     turned enforcement off gets `allow` whatever the action was. The judgement
     is still made and still reported in full -- off is about what the CRM does
     with it, not about whether we do the work.
+
+    BLOCK (register item 142) only when ALL of these hold: the mode is strict,
+    the tenant has blocking enabled, `stage_change` is true (the pipeline's one
+    boolean: the CRM's stage is in the tenant's blocking stages), this is not
+    a resubmission, and the note is one we would ask about -- the action is
+    prompt_clarification, or it is a thin note no table recognised. A
+    resubmission is flagged instead, so a rep is never locked out.
     """
     if config.enforcement_mode is EnforcementMode.OFF:
         return Enforcement(
@@ -116,12 +126,21 @@ def enforcement(
             applies_to=None,
         )
 
-    # STRICT DOES NOT BLOCK, and must not until the blocking work lands.
-    # Blocking is scoped to a STAGE CHANGE, and the request carries no field
-    # saying the lead is moving stage -- that field is an ask to the backend
-    # and a register item of its own. Until it exists there is no moment to
-    # block at, so strict is advisory plus a recorded intent: a tenant may set
-    # it, and the mode on the judgement says so, but the verdict is the same.
+    would_ask = (
+        action is DecisionAction.PROMPT_CLARIFICATION or detail is _FLAGGED_SUPPRESSION
+    )
+    if (
+        config.enforcement_mode is EnforcementMode.STRICT
+        and config.blocking_enabled
+        and stage_change
+        and not resubmission
+        and would_ask
+    ):
+        return Enforcement(
+            mode=EnforcementMode.STRICT,
+            verdict=EnforcementVerdict.BLOCK,
+            applies_to=EnforcementTarget.STAGE_CHANGE,
+        )
     flagged = action in _FLAGGED_ACTIONS or detail is _FLAGGED_SUPPRESSION
     return Enforcement(
         mode=config.enforcement_mode,

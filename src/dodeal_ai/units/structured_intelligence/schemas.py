@@ -177,10 +177,12 @@ class EnforcementMode(StrEnum):
     off       we judge and report, and nothing is ever flagged.
     advisory  a note we would ask about is flagged. EVERY TENANT LAUNCHES
               HERE, and it is config.py's default.
-    strict    advisory plus blocking at a stage change, which is not built.
-              A team moves here only once the calibration target is met, and
-              nothing in this service can check that, so this service never
-              enables it -- a tenant file does.
+    strict    advisory plus blocking at a stage change (register item 142),
+              and only where the tenant has also set blocking_enabled and
+              the stage is in its blocking_stages. A team moves here only
+              once the calibration target is met, and nothing in this
+              service can check that, so this service never enables it --
+              a tenant's rules do.
     """
 
     OFF = "off"
@@ -204,14 +206,12 @@ class EnforcementVerdict(StrEnum):
 
 
 class EnforcementTarget(StrEnum):
-    """What a verdict is about. One member today: the note itself.
-
-    A separate vocabulary rather than a bare string because the blocking work
-    (a stage change) will add a second member, and a caller matching on
-    `applies_to` must keep working when it does.
-    """
+    """What a verdict is about: the note itself, or the stage change the CRM
+    said the note came with (register item 142), which is what a block
+    refuses -- never the note, which is saved either way."""
 
     NOTE = "note"
+    STAGE_CHANGE = "stage_change"
 
 
 class PromptWithheld(StrEnum):
@@ -346,6 +346,11 @@ class _SentNote(BaseModel):
 class DirectJudgementRequest(_SentNote):
     """The direct route's body: the saved note, sent by the CRM after the save.
 
+    `stage_change_to` (register item 142) is the stage the lead is moving to
+    with this note, when it is. It is compared, casefolded, with the tenant's
+    blocking stages and becomes one boolean; it is never logged and never
+    reaches a prompt. The history body has no such field.
+
     DECISION[DIRECT_ROUTE] -- the ONE exception to "note text is never accepted
     in a request body", admitted for this route only because the CRM's read
     surface has been unavailable for six weeks. The fetch route is still the
@@ -361,6 +366,8 @@ class DirectJudgementRequest(_SentNote):
     are held to, for the same reason, and asserted by the same introspection
     test.
     """
+
+    stage_change_to: str | None = Field(default=None, max_length=100)
 
 
 class HistoryJudgementRequest(_SentNote):
@@ -566,8 +573,8 @@ class Enforcement(BaseModel):
 
     `applies_to` is what the verdict is about, and it is null exactly when the
     verdict is `allow`: nothing is flagged, so there is nothing for the flag to
-    be about. It is NOT the note id -- it says which THING is being judged, and
-    the blocking work adds the second member.
+    be about. It is NOT the note id -- it says which THING is being judged:
+    the note for a flag, the stage change for a block (register item 142).
 
     Derived in decide.py::enforcement from the mode and the action alone. No
     model output reaches it and no request field does.
