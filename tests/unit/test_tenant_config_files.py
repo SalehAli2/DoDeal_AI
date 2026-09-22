@@ -490,7 +490,14 @@ def test_the_switch_off_with_every_weight_on_deal_specifics_is_still_refused(
                 "deal_specifics_applicable": False,
             }
         )
+    # With the switch on, the weight must still leave every type something:
+    # no_contact never scores deal_specifics (register item 150).
+    mostly = {
+        **{c.value: 0 for c in ComponentName},
+        "deal_specifics": 80,
+        "clarity": 20,
+    }
     accepted = parse_unit_a_section(
-        {"config_version": "v", "weights": weights, "deal_specifics_applicable": True}
+        {"config_version": "v", "weights": mostly, "deal_specifics_applicable": True}
     )
-    assert accepted.weights[ComponentName.DEAL_SPECIFICS] == 100
+    assert accepted.weights[ComponentName.DEAL_SPECIFICS] == 80

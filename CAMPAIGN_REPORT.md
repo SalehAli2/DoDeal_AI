@@ -6983,3 +6983,16 @@ defined for its line; (2) flipping it moves the denominator from 80 to 100 and
 old and new totals are compared across a version the reader ignores.
 Stress test: every weight on deal_specifics is refused with the switch off and
 accepted with it on.
+
+## Piece: register item 150, zero weight through a type's suppression
+
+Item 150 -- `_check` refuses a rubric that any scored note type's suppression
+leaves with zero applicable weight (`weights_type_applicable`), so a no_contact
+note can never meet a denominator of 0 at run time; the refusal reaches the
+tenant file and the admin route through the one parser.
+Production failure modes: (1) a new type suppression added in code refuses
+tenant rubrics that loaded yesterday, at the next restart; (2) the check reads
+the suppression table as code today, so a future per-tenant table would need it
+re-proved.
+Stress test: weights 50/50 on what_happened and client_said sum to 100 and are
+refused, because no_contact scores neither.

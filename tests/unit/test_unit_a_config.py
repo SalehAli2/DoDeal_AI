@@ -300,22 +300,24 @@ def test_check_refuses_a_rubric_with_no_applicable_weight(
         _check(_broken(config, weights=_ALL_ON_DEAL_SPECIFICS))
 
 
-def test_the_same_rubric_is_accepted_once_q13_is_resolved(
+def test_the_same_rubric_passes_the_switch_and_fails_on_no_contact(
     config: TenantConfig,
 ) -> None:
-    """It is deal_specifics being OFF that empties the denominator, not the map.
+    """It is deal_specifics being OFF that empties the general denominator.
 
-    Flipping the Q13 switch makes the component applicable again, so the same
-    weights are a rubric this service can actually score against.
+    Flipping the Q13 switch makes the component applicable again -- but
+    no_contact suppresses deal_specifics whatever the switch says, so since
+    register item 150 this rubric is refused for the type it leaves empty.
     """
-    _check(
-        _broken(
-            config,
-            weights=_ALL_ON_DEAL_SPECIFICS,
-            business_line_field="leadFor",
-            deal_specifics_applicable=True,
+    with pytest.raises(ValueError, match="^weights_type_applicable$"):
+        _check(
+            _broken(
+                config,
+                weights=_ALL_ON_DEAL_SPECIFICS,
+                business_line_field="leadFor",
+                deal_specifics_applicable=True,
+            )
         )
-    )
 
 
 def test_the_default_marks_derive_to_the_documented_tables(
@@ -355,3 +357,35 @@ def test_every_derived_table_runs_from_zero_to_its_weight(
         assert marks[-1] == built.weights[component], component
         assert list(marks) == sorted(marks), component
         assert len(marks) == len(built.checks_by_component[component]) + 1, component
+
+
+# --- register item 150: zero weight through a type's suppression ------------
+
+# Everything on the three components no_contact suppresses: it sums to 100 and
+# leaves discovery a denominator, but a no-contact note none at all.
+_NOTHING_FOR_NO_CONTACT = MappingProxyType(
+    {
+        ComponentName.WHAT_HAPPENED: 50,
+        ComponentName.CLIENT_SAID: 50,
+        ComponentName.NEXT_STEP_DATE: 0,
+        ComponentName.DEAL_SPECIFICS: 0,
+        ComponentName.CLARITY: 0,
+    }
+)
+
+
+def test_check_refuses_a_rubric_a_type_suppression_leaves_empty(
+    config: TenantConfig,
+) -> None:
+    """no_contact would score over a denominator of 0: refused at load."""
+    with pytest.raises(ValueError, match="^weights_type_applicable$"):
+        _check(_broken(config, weights=_NOTHING_FOR_NO_CONTACT))
+
+
+def test_the_same_refusal_reaches_the_section_parser() -> None:
+    """A tenant file or an admin PUT with such weights is refused whole."""
+    from dodeal_ai.units.structured_intelligence.config import parse_unit_a_section
+
+    weights = {c.value: w for c, w in _NOTHING_FOR_NO_CONTACT.items()}
+    with pytest.raises(ValueError):
+        parse_unit_a_section({"config_version": "v", "weights": weights})

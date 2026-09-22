@@ -496,6 +496,23 @@ def _check(config: TenantConfig) -> None:
         or config.deal_specifics_applicable
     ):
         raise ValueError("weights_applicable")
+    # Register item 150: the same zero, reached through a type's suppression.
+    # no_contact scores only next_step_date and clarity, so a rubric weighting
+    # those two at 0 leaves every no-contact note a denominator of 0.
+    for note_type in NoteType:
+        if note_type is NoteType.SYSTEM_EVENT:
+            continue
+        suppressed = config.suppressed_components_by_type.get(note_type, frozenset())
+        if not any(
+            weight
+            for component, weight in config.weights.items()
+            if component not in suppressed
+            and (
+                component is not ComponentName.DEAL_SPECIFICS
+                or config.deal_specifics_applicable
+            )
+        ):
+            raise ValueError("weights_type_applicable")
     bands = [band for band, _ in config.band_boundaries]
     uppers = [upper for _, upper in config.band_boundaries]
     ascending = uppers == sorted(set(uppers)) and uppers[0] >= 0
