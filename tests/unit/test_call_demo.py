@@ -202,3 +202,102 @@ def test_the_minters_calls_body_is_a_valid_push(monkeypatch) -> None:
     body = minter.calls_body(args)
     assert CallJobRequest.model_validate(body).call_id == 9001
     assert "calls" in minter.SERVICE_ROUTES
+
+
+# --- a hand-written transcript (--transcript) ----------------------------------------
+
+TYPED = {
+    "segments": [
+        {
+            "start_s": 0.0,
+            "end_s": 4.5,
+            "speaker": "agent",
+            "text": "Good morning, calling about the villa.",
+            "language": "en",
+        },
+        {
+            "start_s": 4.8,
+            "end_s": 9.0,
+            "speaker": "client",
+            "text": "Yes, my budget is a million.",
+            "language": "en",
+            "confidence": 0.7,
+        },
+    ]
+}
+
+
+def _written(path, payload: object) -> object:
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def test_a_transcript_inside_the_repository_is_refused(tmp_path) -> None:
+    """Refused before it is read: nothing under the repo root is opened."""
+    inside = call_demo.REPO_ROOT / "tests" / "no-such-call.json"
+    with pytest.raises(call_demo.TranscriptRefused, match="outside the repository"):
+        call_demo.load_transcript(inside)
+    nested = _written(tmp_path / "call.json", TYPED)
+    with pytest.raises(call_demo.TranscriptRefused):
+        call_demo.load_transcript(nested, repo_root=tmp_path)
+
+
+def test_the_command_line_refuses_a_repo_transcript_and_serves_nothing(
+    monkeypatch, capsys
+) -> None:
+    served: list[object] = []
+
+    async def serve(*args: object) -> None:
+        served.append(args)
+
+    monkeypatch.setattr(call_demo, "_serve", serve)
+    inside = str(call_demo.REPO_ROOT / "call.json")
+    assert call_demo.main(["--worker", "--transcript", inside]) == 2
+    assert served == []
+    assert "outside the repository" in capsys.readouterr().out
+
+
+def test_a_typed_transcript_outside_the_repo_feeds_the_worker(
+    tmp_path, monkeypatch
+) -> None:
+    path = _written(tmp_path / "call.json", TYPED)
+    segments = call_demo.load_transcript(path, repo_root=tmp_path / "repo")
+    assert [(s.speaker, s.confidence) for s in segments] == [
+        ("agent", 1.0),
+        ("client", 0.7),
+    ]
+
+    served: list[tuple] = []
+
+    async def serve(*args: object) -> None:
+        served.append(args)
+
+    monkeypatch.setattr(call_demo, "REPO_ROOT", tmp_path / "repo")
+    monkeypatch.setattr(call_demo, "_serve", serve)
+    assert call_demo.main(["--worker", "--transcript", str(path)]) == 0
+    assert served[0][3] == segments
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "not json at all",
+        {"segments": [{"start_s": 0, "end_s": 1, "speaker": "agent"}]},
+        {"turns": []},
+        {"segments": [{**TYPED["segments"][0], "end_s": 9.5}, TYPED["segments"][1]]},
+        {"segments": [{**TYPED["segments"][0], "note": "extra"}]},
+    ],
+    ids=["not-json", "missing-field", "no-segments", "overlapping", "extra-field"],
+)
+def test_a_malformed_transcript_is_refused(tmp_path, payload: object) -> None:
+    path = tmp_path / "call.json"
+    path.write_text(
+        payload if isinstance(payload, str) else json.dumps(payload), encoding="utf-8"
+    )
+    with pytest.raises(call_demo.TranscriptRefused, match="list of segments"):
+        call_demo.load_transcript(path, repo_root=tmp_path / "repo")
+
+
+def test_a_transcript_needs_the_worker() -> None:
+    with pytest.raises(SystemExit):
+        call_demo._parse_args(["--transcript", "call.json"])

@@ -11,7 +11,27 @@ WHAT IT RUNS, on http://127.0.0.1:<port>:
                         -- NEVER the body, which carries the transcript
 
 and, with --worker, a call worker on the normal queue whose transcriber is the
-FakeTranscriber (no speech-to-text adapter exists yet).
+FakeTranscriber (no speech-to-text adapter exists yet). The worker builds the
+real model client from DODEAL_LLM_* like any call worker, and runs wave 1.
+
+--transcript <path> (with --worker) hands the FakeTranscriber a hand-written
+transcript, so the real model runs wave 1 on words you wrote. A path inside
+this repository is refused: a transcript of a real call must never land where
+it could be committed. The file is JSON, one object with a list of segments,
+in order and never overlapping:
+
+    {"segments": [
+      {"start_s": 0.0, "end_s": 4.5, "speaker": "agent",
+       "text": "Good morning, calling about the villa.", "language": "en"},
+      {"start_s": 4.8, "end_s": 9.0, "speaker": "client",
+       "text": "نعم، ميزانيتي مليون درهم.", "language": "ar"}
+    ]}
+
+  start_s, end_s  seconds from the start of the call, end_s >= start_s
+  speaker         "agent" is the agent; any other label is the client
+  text            what was said
+  language        an ISO 639 code, lower case: en, ar, ...
+  confidence      optional, 0 to 1; 1.0 when left out (it was typed, not heard)
 
 WHAT IT PRINTS: the environment the service needs (the demo flag and the
 callback secret), the curl that switches calls on for the tenant, and the curl
@@ -25,6 +45,7 @@ call_demo_audio_insecure. Demo only.
 Usage:
     uv run python scripts/call_demo.py
     uv run python scripts/call_demo.py --port 8765 --secret <s> --worker
+    uv run python scripts/call_demo.py --worker --transcript ~/calls/demo.json
 """
 
 from __future__ import annotations
@@ -41,11 +62,15 @@ import wave
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import Response
 from starlette.routing import Route
+
+if TYPE_CHECKING:
+    from dodeal_ai.units.call_intelligence.transcriber import Segment
 
 AUDIO_PATH = "/demo-call.wav"
 CALLBACK_PATH = "/callback"
@@ -58,6 +83,43 @@ _HEADERS = (
 )
 # A callback older than this is refused as a replay.
 MAX_AGE_SECONDS = 300
+
+# The repository root: no --transcript may be read from under it.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+# A typed transcript's confidence when the file gives none.
+TYPED_CONFIDENCE = 1.0
+
+
+class TranscriptRefused(ValueError):
+    """A --transcript that cannot be used; str() says why, never its words."""
+
+
+def load_transcript(path: Path, *, repo_root: Path = REPO_ROOT) -> tuple[Segment, ...]:
+    """The segments of a hand-written transcript, checked as a transcriber's
+    would be. Refused when the file sits inside the repository."""
+    from pydantic import ValidationError
+
+    from dodeal_ai.units.call_intelligence.transcriber import Segment, Transcript
+
+    resolved = path.expanduser().resolve()
+    if resolved.is_relative_to(repo_root.resolve()):
+        raise TranscriptRefused(
+            "--transcript must be outside the repository: a real call's words "
+            "must never be where they could be committed"
+        )
+    try:
+        raw = json.loads(resolved.read_text(encoding="utf-8"))
+        segments = tuple(
+            Segment.model_validate({"confidence": TYPED_CONFIDENCE, **segment})
+            for segment in raw["segments"]
+        )
+        Transcript.of(segments, provider="demo", model="typed")
+    except (OSError, ValueError, KeyError, TypeError, ValidationError):
+        raise TranscriptRefused(
+            "--transcript must be JSON with a list of segments as the docstring shows"
+        ) from None
+    return segments
 
 
 def silent_wav(seconds: float = 1.0, rate: int = 8000) -> bytes:
@@ -147,6 +209,7 @@ def instructions(
     return [
         "1. Start the service (and a worker, or --worker here) with:",
         "   DODEAL_CALL_DEMO_ALLOW_LOCAL_AUDIO=true",
+        "   DODEAL_LLM_PROVIDER, DODEAL_LLM_MODEL and DODEAL_LLM_API_KEY for wave 1",
         f"   DODEAL_CALL_CALLBACK_SECRETS={json.dumps({tenant: secret})}",
         "",
         "2. A service token, into $SERVICE_TOKEN:",
@@ -182,10 +245,24 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Also run a call worker on the normal queue with the FakeTranscriber.",
     )
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--transcript",
+        type=Path,
+        default=None,
+        help="With --worker: a hand-written transcript, JSON, outside the repo.",
+    )
+    args = parser.parse_args(argv)
+    if args.transcript is not None and not args.worker:
+        parser.error("--transcript needs --worker: the worker is what reads it")
+    return args
 
 
-async def _serve(args: argparse.Namespace, secret: str, audio: bytes) -> None:
+async def _serve(
+    args: argparse.Namespace,
+    secret: str,
+    audio: bytes,
+    segments: tuple[Segment, ...] | None,
+) -> None:
     import uvicorn
 
     server = uvicorn.Server(
@@ -204,13 +281,19 @@ async def _serve(args: argparse.Namespace, secret: str, audio: bytes) -> None:
         from dodeal_ai.units.call_intelligence.queues import NORMAL_QUEUE
         from dodeal_ai.workers.calls import worker_settings
 
-        worker = Worker(**worker_settings(NORMAL_QUEUE, transcriber=FakeTranscriber()))
+        fake = FakeTranscriber() if segments is None else FakeTranscriber(segments)
+        worker = Worker(**worker_settings(NORMAL_QUEUE, transcriber=fake))
         tasks.append(worker.main())
     await asyncio.gather(*tasks)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
+    try:
+        segments = None if args.transcript is None else load_transcript(args.transcript)
+    except TranscriptRefused as refused:
+        print(refused)
+        return 2
     secret = args.secret or secrets.token_hex(16)
     audio = args.audio.read_bytes() if args.audio else silent_wav()
     for line in instructions(
@@ -223,7 +306,7 @@ def main(argv: list[str] | None = None) -> int:
         print(line)
     print()
     print(f"Serving {AUDIO_PATH} and {CALLBACK_PATH} on 127.0.0.1:{args.port}")
-    asyncio.run(_serve(args, secret, audio))
+    asyncio.run(_serve(args, secret, audio, segments))
     return 0
 
 
