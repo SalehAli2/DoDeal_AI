@@ -35,6 +35,7 @@ from dodeal_ai.core.jobs import (
     settle_stage2,
     stale_jobs,
     start_pass,
+    start_stage2_pass,
     start_transcription,
     store_result,
     store_work,
@@ -397,6 +398,7 @@ async def test_every_operation_fails_closed_on_a_dead_store(dead_store) -> None:
         unmark_swept("tenant-a", "job-1"),
         note_wake(job, wake_at=NOW),
         settle_stage2(job, Stage2State.DONE, now=NOW),
+        start_stage2_pass(job, "objections", now=NOW),
     ]
     for operation in operations:
         with pytest.raises(JobStoreUnavailable) as caught:
@@ -529,6 +531,26 @@ async def test_stage2_is_set_with_done_and_settles_once_out_of_pending() -> None
     assert not await settle_stage2(job, Stage2State.DONE, now=LATER)
     await jobs.get_jobs_client().delete(job_key("tenant-a", "job-1"))
     assert not await settle_stage2(job, Stage2State.DONE, now=LATER)
+
+
+async def test_a_stage2_pass_is_counted_on_a_done_job_only_while_pending(
+    redis_fakes: RedisFakes,
+) -> None:
+    await _create()
+    job = await _job()
+    assert await start_stage2_pass(job, "objections", now=NOW) is None
+    await transition(
+        job, JobStatus.DONE, now=NOW, ttl_seconds=TTL, stage2=Stage2State.PENDING
+    )
+    assert await start_stage2_pass(job, "objections", now=NOW) == 1
+    assert await start_stage2_pass(job, "objections", now=NOW) == 2
+    assert (await _job()).passes == {"objections": 2}
+    assert await _score(redis_fakes) is None
+
+    await settle_stage2(job, Stage2State.DONE, now=NOW)
+    assert await start_stage2_pass(job, "objections", now=NOW) is None
+    await jobs.get_jobs_client().delete(job_key("tenant-a", "job-1"))
+    assert await start_stage2_pass(job, "objections", now=NOW) is None
 
 
 async def test_a_move_without_a_stage2_state_leaves_it_alone() -> None:

@@ -35,12 +35,16 @@ PROFILE_UNIT_A_SCORE = "unit_a.score"
 PROFILE_UNIT_B_EXTRACT = "unit_b.extract"
 PROFILE_UNIT_B_PROSE = "unit_b.prose"
 
+# Unit B's wave 2 passes, one profile each (units/call_intelligence/wave2.py).
+PROFILE_UNIT_B_OBJECTIONS = "unit_b.objections"
+
 KNOWN_PROFILES: tuple[str, ...] = (
     PROFILE_UNIT_A_CLASSIFY,
     PROFILE_UNIT_A_VAGUE,
     PROFILE_UNIT_A_SCORE,
     PROFILE_UNIT_B_EXTRACT,
     PROFILE_UNIT_B_PROSE,
+    PROFILE_UNIT_B_OBJECTIONS,
 )
 
 

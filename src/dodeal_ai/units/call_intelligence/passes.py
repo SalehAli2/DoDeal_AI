@@ -32,7 +32,7 @@ import json
 from collections.abc import Callable
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import Field
 
 from dodeal_ai.core.config import Settings
 from dodeal_ai.core.context import TenantScope
@@ -40,7 +40,12 @@ from dodeal_ai.core.llm import LLMClient, LLMResponse
 from dodeal_ai.core.llm.profiles import PROFILE_UNIT_B_EXTRACT, PROFILE_UNIT_B_PROSE
 from dodeal_ai.units.call_intelligence.evidence import (
     CallText,
+    Cited,
     Errors,
+    Quote,
+    Said,
+    SegmentId,
+    Strict,
     evidence_errors,
     in_language,
     quote_errors,
@@ -87,28 +92,19 @@ _ITEM_CHARS = 200
 _ITEMS = 6
 _SUMMARY_CHARS = 2000
 _NOTE_CHARS = 1000
-_SEGMENT = r"^s[1-9][0-9]{0,4}$"
 
 type _Item = Annotated[str, Field(min_length=1, max_length=_ITEM_CHARS)]
 type _Items = Annotated[list[_Item], Field(max_length=_ITEMS)]
-type _Quote = Annotated[str | None, Field(max_length=_SENTENCE_CHARS)]
-type _SegmentId = Annotated[str | None, Field(pattern=_SEGMENT)]
-type _Said = Annotated[str, Field(min_length=1, max_length=_SENTENCE_CHARS)]
-type _Cited = Annotated[str, Field(pattern=_SEGMENT)]
 
 
-class _Strict(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-
-class Detail(_Strict):
+class Detail(Strict):
     value: Annotated[str | None, Field(max_length=_ITEM_CHARS)]
     state: Literal["stated", "not_mentioned", "uncertain"]
-    quote: _Quote
-    segment: _SegmentId
+    quote: Quote
+    segment: SegmentId
 
 
-class Details(_Strict):
+class Details(Strict):
     budget: Detail
     area: Detail
     property_reference: Detail
@@ -117,39 +113,39 @@ class Details(_Strict):
     decision_maker: Detail
 
 
-class Item(_Strict):
+class Item(Strict):
     """A concern or an agreement, and the quote it rests on."""
 
     text: _Item
-    quote: _Said
-    segment: _Cited
+    quote: Said
+    segment: Cited
 
 
-class Wanted(_Strict):
+class Wanted(Strict):
     """What the client wants, in one sentence, and the quote it rests on."""
 
-    text: _Said
-    quote: _Said
-    segment: _Cited
+    text: Said
+    quote: Said
+    segment: Cited
 
 
-class NextStep(_Strict):
+class NextStep(Strict):
     """The next action, and the quote it rests on whenever there is one."""
 
     action: Annotated[str | None, Field(max_length=_SENTENCE_CHARS)]
     owner: Literal["agent", "client", "unknown"]
     due: Annotated[str | None, Field(max_length=_ITEM_CHARS)]
-    quote: _Quote
-    segment: _SegmentId
+    quote: Quote
+    segment: SegmentId
 
 
-class Mood(_Strict):
+class Mood(Strict):
     value: Literal["positive", "neutral", "negative"]
-    quote: _Quote
-    segment: _SegmentId
+    quote: Quote
+    segment: SegmentId
 
 
-class Extraction(_Strict):
+class Extraction(Strict):
     """unit_b.extract's answer, exactly (extract_v2)."""
 
     wanted: Wanted | None
@@ -162,7 +158,7 @@ class Extraction(_Strict):
     mood: Mood
 
 
-class Prose(_Strict):
+class Prose(Strict):
     """unit_b.prose's answer, exactly."""
 
     summary: Annotated[str, Field(min_length=1, max_length=_SUMMARY_CHARS)]

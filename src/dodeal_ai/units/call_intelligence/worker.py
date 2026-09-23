@@ -97,8 +97,9 @@ from dodeal_ai.core.jobs import (
     transition,
 )
 from dodeal_ai.core.logging_config import job_log_context
-from dodeal_ai.units.call_intelligence.analysis import JobGone, PassUsage, Wave1, wave1
+from dodeal_ai.units.call_intelligence.analysis import Wave1, wave1
 from dodeal_ai.units.call_intelligence.config import CallsConfig, resolve_calls_config
+from dodeal_ai.units.call_intelligence.paid import JobGone, PassUsage
 from dodeal_ai.units.call_intelligence.queues import enqueue_call, enqueue_stage2
 from dodeal_ai.units.call_intelligence.transcriber import (
     Transcriber,

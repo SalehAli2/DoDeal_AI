@@ -60,7 +60,7 @@ from dodeal_ai.units.call_intelligence.queues import (
     PRIORITY_QUEUE,
     STAGE2_QUEUE,
 )
-from dodeal_ai.units.call_intelligence.stage2 import analyse_stage2
+from dodeal_ai.units.call_intelligence.stage2 import STAGE2_TRIES, analyse_stage2
 from dodeal_ai.units.call_intelligence.sweep import (
     SWEEP_INTERVAL_SECONDS,
     sweep_stuck_jobs,
@@ -144,11 +144,6 @@ def worker_settings(
         "on_startup": startup,
         "on_shutdown": shutdown,
     }
-
-
-# arq's runs of one analyse_stage2: the first, and re-runs for a store outage
-# or a deadline; each resumes from the passes kept, never re-paying one.
-STAGE2_TRIES = 5
 
 
 def _every(seconds: int) -> set[int]:

@@ -2,7 +2,8 @@
 transcript is written into a prompt.
 
 THE TEMPLATES are files under prompts/call_intelligence/, like Unit A's: the
-extraction pass, the prose pass, and the reprompt tail every pass shares.
+extraction and prose passes (wave 1), each wave 2 pass, and the reprompt tail
+every pass shares.
 PROMPT_SET_VERSION names the texts; a test pins their digest beside it
 (tests/unit/test_unit_b_prompt_set_stamp.py), so an edit without a bump fails.
 A template is never edited once stamped: a change is a new file, and the one
@@ -34,6 +35,7 @@ from dodeal_ai.units.call_intelligence.transcriber import Segment
 
 EXTRACT_TEMPLATE = "call_intelligence/extract_v2.txt"
 PROSE_TEMPLATE = "call_intelligence/prose_v1.txt"
+OBJECTIONS_TEMPLATE = "call_intelligence/objections_v1.txt"
 REPROMPT_TAIL_TEMPLATE = "call_intelligence/reprompt_tail_v1.txt"
 
 # Replaced by extract_v2 (evidence for every element); never sent again.
@@ -48,6 +50,7 @@ PROMPT_SET_VERSION = "unit_b_prompts_v2"
 UNIT_B_TEMPLATES: tuple[str, ...] = (
     EXTRACT_TEMPLATE,
     PROSE_TEMPLATE,
+    OBJECTIONS_TEMPLATE,
     REPROMPT_TAIL_TEMPLATE,
     *RETIRED_TEMPLATES,
 )

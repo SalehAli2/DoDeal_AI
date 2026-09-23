@@ -39,6 +39,7 @@ from dodeal_ai.units.call_intelligence.transcriber import Segment
 from dodeal_ai.units.call_intelligence.worker import STAGE1, process_call
 from dodeal_ai.workers import calls as calls_worker
 from tests.conftest import RedisFakes
+from tests.helpers.fake_llm import FakeLLM, json_response
 
 HOST = "audio.tenant-a.example"
 JOB = "job-1"
@@ -229,14 +230,28 @@ async def test_a_deadline_with_stage2_still_owed_re_runs_the_job(ctx: dict) -> N
 
 # --- the task ------------------------------------------------------------------------
 
+NONE_RAISED = {"objections": []}
+
+
+def _stage2_ctx(*answers: object, job_try: int = 1) -> dict[str, Any]:
+    llm = FakeLLM(*(json_response(a) for a in answers or (NONE_RAISED,)))
+    return {"llm": llm, "job_try": job_try}
+
+
+async def _done_and_pending(ctx: dict) -> None:
+    await _push()
+    await process_call(ctx, "tenant-a", JOB)
+    assert (await _job()).stage2 is Stage2State.PENDING
+
 
 async def test_stage2_settles_done_on_the_stage1_transcript(
     ctx: dict, caplog: pytest.LogCaptureFixture
 ) -> None:
-    await _push()
-    await process_call(ctx, "tenant-a", JOB)
+    await _done_and_pending(ctx)
+    stage2_ctx = _stage2_ctx()
     with caplog.at_level(logging.INFO, logger="dodeal_ai.unit_b"):
-        await analyse_stage2({}, "tenant-a", JOB)
+        await analyse_stage2(stage2_ctx, "tenant-a", JOB)
+    assert stage2_ctx["llm"].call_count == 1
 
     job = await _job()
     assert (job.status, job.stage2, job.stage2_reason) == (
@@ -251,11 +266,10 @@ async def test_stage2_settles_done_on_the_stage1_transcript(
 async def test_stage2_whose_stage1_result_expired_fails_with_its_reason(
     ctx: dict, redis_fakes: RedisFakes, caplog: pytest.LogCaptureFixture
 ) -> None:
-    await _push()
-    await process_call(ctx, "tenant-a", JOB)
+    await _done_and_pending(ctx)
     await redis_fakes.jobs.delete(result_key("tenant-a", JOB))
     with caplog.at_level(logging.INFO, logger="dodeal_ai.unit_b"):
-        await analyse_stage2({}, "tenant-a", JOB)
+        await analyse_stage2(_stage2_ctx(), "tenant-a", JOB)
 
     job = await _job()
     assert (job.stage2, job.stage2_reason) == (Stage2State.FAILED, RESULT_GONE)
@@ -273,6 +287,121 @@ async def test_stage2_not_pending_or_gone_is_left_alone(
         await analyse_stage2({}, "tenant-a", "job-never")
     assert (await _job()).stage2 is Stage2State.NOT_ELIGIBLE
     assert not [r for r in caplog.records if r.getMessage() == "call_stage2_outcome"]
+
+
+async def test_a_worker_with_no_model_fails_stage2_and_pays_nothing(ctx: dict) -> None:
+    await _done_and_pending(ctx)
+    await analyse_stage2({"llm": None}, "tenant-a", JOB)
+    job = await _job()
+    assert (job.stage2, job.stage2_reason) == (Stage2State.FAILED, "llm_not_configured")
+
+
+async def test_a_failed_pass_still_settles_stage2_done(
+    ctx: dict, caplog: pytest.LogCaptureFixture
+) -> None:
+    await _done_and_pending(ctx)
+    with caplog.at_level(logging.INFO, logger="dodeal_ai.unit_b"):
+        await analyse_stage2(_stage2_ctx({}, {}), "tenant-a", JOB)
+    assert (await _job()).stage2 is Stage2State.DONE
+    (line,) = [r for r in caplog.records if r.getMessage() == "call_stage2_outcome"]
+    assert line.part_reasons == {"objections": "objections_malformed_output"}
+
+
+@pytest.mark.parametrize(
+    ("stored", "fail", "reason", "delay"),
+    [
+        (
+            {"tokens:calls:tenant:tenant-a": 20_000_000},
+            False,
+            "token_budget_exceeded",
+            None,
+        ),
+        ({}, True, "cost_store_unavailable", 300),
+    ],
+    ids=["over-budget", "store-down"],
+)
+async def test_over_budget_or_store_down_waits_then_fails_on_the_last_run(
+    ctx: dict,
+    redis_fakes: RedisFakes,
+    stored: dict,
+    fail: bool,
+    reason: str,
+    delay: int | None,
+) -> None:
+    """Nothing is paid for; arq runs it again, and the last run gives up."""
+    await _done_and_pending(ctx)
+    redis_fakes.cost.store.update(stored)
+    redis_fakes.cost.fail = fail
+    first = _stage2_ctx()
+    with pytest.raises(Retry) as again:
+        await analyse_stage2(first, "tenant-a", JOB)
+    expected = get_settings().cost_window_seconds if delay is None else delay
+    assert again.value.defer_score == expected * 1000
+    assert first["llm"].call_count == 0
+    assert (await _job()).stage2 is Stage2State.PENDING
+
+    last = _stage2_ctx(job_try=stage2.STAGE2_TRIES)
+    await analyse_stage2(last, "tenant-a", JOB)
+    job = await _job()
+    assert (job.stage2, job.stage2_reason) == (Stage2State.FAILED, reason)
+    assert last["llm"].call_count == 0
+
+
+async def test_a_run_cut_off_by_its_deadline_runs_again_and_resumes(
+    ctx: dict, monkeypatch
+) -> None:
+    await _done_and_pending(ctx)
+    monkeypatch.setattr(stage2, "deadline_seconds", lambda: 0.2)
+    held = {"llm": FakeLLM(hold_after=0), "job_try": 1}
+    with pytest.raises(Retry):
+        await analyse_stage2(held, "tenant-a", JOB)
+    assert (await _job()).passes == {"objections": 1}
+
+    monkeypatch.setattr(stage2, "deadline_seconds", lambda: 60)
+    resumed = _stage2_ctx(job_try=2)
+    await analyse_stage2(resumed, "tenant-a", JOB)
+    job = await _job()
+    assert (job.stage2, job.passes) == (Stage2State.DONE, {"objections": 2})
+
+
+async def test_a_deadline_on_the_last_run_fails_stage2(ctx: dict, monkeypatch) -> None:
+    await _done_and_pending(ctx)
+    monkeypatch.setattr(stage2, "deadline_seconds", lambda: 0.2)
+    held = {"llm": FakeLLM(hold_after=0), "job_try": stage2.STAGE2_TRIES}
+    await analyse_stage2(held, "tenant-a", JOB)
+    job = await _job()
+    assert (job.stage2, job.stage2_reason) == (
+        Stage2State.FAILED,
+        "job_deadline_exceeded",
+    )
+
+
+async def test_a_timeout_that_is_not_the_deadline_is_an_error(
+    ctx: dict, monkeypatch
+) -> None:
+    await _done_and_pending(ctx)
+
+    async def slow(*args: object, **kwargs: object) -> None:
+        raise TimeoutError
+
+    monkeypatch.setattr(stage2, "wave2", slow)
+    with pytest.raises(TimeoutError):
+        await analyse_stage2(_stage2_ctx(), "tenant-a", JOB)
+
+
+async def test_stage2_that_stops_under_its_passes_settles_nothing(
+    ctx: dict, monkeypatch
+) -> None:
+    from dodeal_ai.units.call_intelligence.paid import JobGone
+
+    await _done_and_pending(ctx)
+
+    async def gone(*args: object, **kwargs: object) -> None:
+        raise JobGone()
+
+    monkeypatch.setattr(stage2, "wave2", gone)
+    await analyse_stage2(_stage2_ctx(), "tenant-a", JOB)
+    assert (await _job()).stage2 is Stage2State.PENDING
 
 
 async def test_a_dead_job_store_is_retried_by_arq(monkeypatch) -> None:

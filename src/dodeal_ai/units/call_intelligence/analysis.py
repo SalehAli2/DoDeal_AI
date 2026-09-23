@@ -9,44 +9,32 @@ passes -- so a model outage still delivers an off_channel_contact escalation.
 EVERY TRANSCRIPT GETS IT: a call from min_transcribe_seconds up (BRD B8), and
 an uncertain one too, with every field marked uncertain (passes.settled).
 
-NOTHING RECEIVED IS PAID FOR TWICE. Each pass's outcome -- its validated
-answer, or why it failed -- is kept in the job's work (core/jobs.py) the
-moment it is known, and a later run reads it instead of calling. Each start of
-a pass is counted in db3 before the paid call:
-
-  - a response that never arrived (model_unavailable, or a run cut off
-    mid-call) may be started ONCE more, in this run or the next -- the lead's
-    override of the never-retry rule for this case (BRD B6); after two
-    starts the pass has failed;
-  - a malformed answer has already had its one reprompt (llm_call.py) and
-    fails the pass at once: a response we received is never paid for again.
+NOTHING RECEIVED IS PAID FOR TWICE: each pass is kept, counted and started at
+most twice (paid.py).
 
 A PASS THAT FAILS still lets stage 1 go: analysis is null and analysis_reason
 says which pass and why (`extract_model_unavailable`, `prose_malformed_output`,
 `extract_pass_interrupted`, or `llm_not_configured` for a run with no client).
 The prose pass is not started once the extraction has failed.
-
-The tokens each pass spent in this run are counted per pass for the outcome
-line, both answers of a reprompt included.
 """
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, field
-from datetime import UTC, datetime
-
-from pydantic import BaseModel
+from dataclasses import dataclass
 
 from dodeal_ai.core.config import Settings
 from dodeal_ai.core.context import TenantScope
-from dodeal_ai.core.errors import MalformedOutputError, ModelUnavailableError
-from dodeal_ai.core.jobs import Job, start_pass, store_work
-from dodeal_ai.core.llm import LLMClient, LLMResponse
-from dodeal_ai.core.prompting import AssembledPrompt
+from dodeal_ai.core.jobs import Job, start_pass
+from dodeal_ai.core.llm import LLMClient
 from dodeal_ai.units.call_intelligence.alarms import alarms_if_enabled
 from dodeal_ai.units.call_intelligence.config import CallsConfig
 from dodeal_ai.units.call_intelligence.numbers import numbers_if_enabled
+from dodeal_ai.units.call_intelligence.paid import (
+    PassFailed,
+    PassRun,
+    PassUsage,
+    run_pass,
+)
 from dodeal_ai.units.call_intelligence.passes import (
     DETAIL_NAMES,
     CallText,
@@ -63,65 +51,7 @@ from dodeal_ai.units.call_intelligence.transcriber import Transcript
 
 EXTRACT = "extract"
 PROSE = "prose"
-
-# Starts a pass may make, each paid: the first and ONE more when the first
-# response never arrived (BRD B6, the lead's override). Never a third.
-PASS_TRIES = 2
-PASS_INTERRUPTED = "pass_interrupted"
 NO_CLIENT = "llm_not_configured"
-
-
-class PassFailed(Exception):
-    """A pass that has failed for good; str() is the reason code."""
-
-
-class JobGone(Exception):
-    """The job went terminal or expired while wave 1 ran: nothing to finish."""
-
-
-@dataclass(slots=True)
-class PassUsage:
-    """Tokens per pass, as the provider reported them, in this run."""
-
-    tokens: dict[str, dict[str, int]] = field(default_factory=dict)
-
-    def add(self, name: str, response: LLMResponse) -> None:
-        spent = self.tokens.setdefault(name, {"input": 0, "output": 0, "calls": 0})
-        spent["input"] += response.input_tokens
-        spent["output"] += response.output_tokens
-        spent["calls"] += 1
-
-
-class _Metered:
-    """An LLMClient that counts every response of one pass into the usage, and
-    hands the adapter the pass's schema for a json_schema profile."""
-
-    def __init__(
-        self,
-        client: LLMClient,
-        usage: PassUsage,
-        name: str,
-        schema: Mapping[str, object],
-    ) -> None:
-        self._client, self._usage, self._name = client, usage, name
-        self._schema = schema
-
-    async def complete(
-        self,
-        prompt: AssembledPrompt,
-        *,
-        profile: str,
-        max_output_tokens: int | None = None,
-        response_schema: Mapping[str, object] | None = None,
-    ) -> LLMResponse:
-        response = await self._client.complete(
-            prompt,
-            profile=profile,
-            max_output_tokens=max_output_tokens,
-            response_schema=response_schema or self._schema,
-        )
-        self._usage.add(self._name, response)
-        return response
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,64 +63,6 @@ class Wave1:
     reason: str | None
     versions: dict[str, object]
     signals: dict[str, object]
-
-
-@dataclass(frozen=True, slots=True)
-class _Run:
-    """What one pass needs to be started, kept and counted."""
-
-    job: Job
-    work: dict[str, dict[str, object]]
-    ttl_seconds: int
-    client: LLMClient
-    usage: PassUsage
-
-
-async def _keep(run: _Run, name: str, outcome: dict[str, object]) -> None:
-    await store_work(
-        run.job.tenant, run.job.job_id, name, outcome, ttl_seconds=run.ttl_seconds
-    )
-
-
-async def _pass[M: BaseModel](
-    run: _Run,
-    name: str,
-    schema: type[M],
-    call: Callable[[LLMClient], Awaitable[tuple[M, LLMResponse]]],
-) -> tuple[M, str]:
-    """The pass's answer and the model it came from: kept from an earlier run,
-    or paid for now under the retry-once rule. PassFailed when it has failed."""
-    kept = run.work.get(name)
-    if kept is not None:
-        if "failed" in kept:
-            raise PassFailed(f"{name}_{kept['failed']}")
-        return schema.model_validate(kept["answer"]), str(kept["model"])
-    starts = run.job.passes.get(name, 0)
-    while True:
-        if starts >= PASS_TRIES:
-            raise await _failed(run, name, PASS_INTERRUPTED)
-        counted = await start_pass(run.job, name, now=datetime.now(UTC))
-        if counted is None:
-            raise JobGone()
-        starts = counted
-        try:
-            metered = _Metered(run.client, run.usage, name, schema.model_json_schema())
-            answer, response = await call(metered)
-        except ModelUnavailableError:
-            if starts >= PASS_TRIES:
-                raise await _failed(run, name, "model_unavailable")
-            continue
-        except MalformedOutputError:
-            raise await _failed(run, name, "malformed_output")
-        kept = {"answer": answer.model_dump(mode="json"), "model": response.model}
-        await _keep(run, name, kept)
-        return answer, response.model
-
-
-async def _failed(run: _Run, name: str, reason: str) -> PassFailed:
-    """Keep the pass's failure, so no later run pays for it; the error to raise."""
-    await _keep(run, name, {"failed": reason})
-    return PassFailed(f"{name}_{reason}")
 
 
 def _analysis(
@@ -283,9 +155,9 @@ async def wave1(
     }
     if client is None:
         return Wave1(None, NO_CLIENT, versions, code)
-    run = _Run(job, work, config.result_ttl_seconds, client, usage)
+    run = PassRun(job, work, config.result_ttl_seconds, client, usage, start_pass)
     try:
-        extraction, model = await _pass(
+        extraction, model = await run_pass(
             run,
             EXTRACT,
             Extraction,
@@ -293,7 +165,7 @@ async def wave1(
         )
         models.append(model)
         doubted = settled(extraction, call)
-        prose, model = await _pass(
+        prose, model = await run_pass(
             run,
             PROSE,
             Prose,

@@ -375,6 +375,19 @@ return redis.call('HINCRBY', KEYS[1], ARGV[2], 1)
 """
 )
 
+# KEYS: the job. ARGV: the pass's field. 0 missing, -1 stage 2 not pending,
+# else the pass's starts after this one: a stage-2 pass counted on a done job,
+# before its paid call, nothing else about the job touched.
+_STAGE2_PASS_SCRIPT = """
+if redis.call('EXISTS', KEYS[1]) == 0 then
+  return 0
+end
+if redis.call('HGET', KEYS[1], 'stage2') ~= 'pending' then
+  return -1
+end
+return redis.call('HINCRBY', KEYS[1], ARGV[1], 1)
+"""
+
 # KEYS: the work hash. ARGV: the field, its JSON, the TTL. One step, so the
 # hash never holds a field without its expiry.
 _WORK_SCRIPT = """
@@ -677,6 +690,22 @@ async def start_pass(job: Job, name: str, *, now: datetime) -> int | None:
             f"{_PASS_FIELD}{name}",
             *_touch_args(job.tenant, job.job_id, now),
             *_TERMINAL_ARGS,
+        )
+    )
+    return int(count) if int(count) > 0 else None
+
+
+async def start_stage2_pass(job: Job, name: str, *, now: datetime) -> int | None:
+    """Count one more start of stage-2 pass `name` on a done job, before its
+    paid call. The pass's starts after this one, or None when the job is gone
+    or its stage 2 is no longer pending. `now` is taken for the Starter shape."""
+    client = get_jobs_client()
+    count = await _call(
+        lambda: client.eval(
+            _STAGE2_PASS_SCRIPT,
+            1,
+            job_key(job.tenant, job.job_id),
+            f"{_PASS_FIELD}{name}",
         )
     )
     return int(count) if int(count) > 0 else None

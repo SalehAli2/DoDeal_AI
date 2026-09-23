@@ -1,5 +1,6 @@
 """What every Unit B pass is checked against (waves 1 and 2): the transcript as
-the model read it, the quote check, and the language share.
+the model read it, the quote check, the language share, and the strict schema
+types every pass's answer is built from.
 
 THE TRANSCRIPT AS A PASS SEES IT (CallText): each segment's prompt copy --
 numbers and emails masked under the tenant's country code (numbers.py) -- its
@@ -10,7 +11,8 @@ THE QUOTE CHECK, in code, on every quote a pass returns: at most 25 words; the
 segment it cites exists; and its words, normalised as the alarm matcher
 normalises (alarms.py), appear in that segment in order and unbroken. The
 segment is read as the model read it, so a quote can never carry a number back
-out. Any failure is a malformed answer: the pass is reprompted once, then fails.
+out. Where a pass names who must have said it, the segment is that speaker's.
+Any failure is a malformed answer: the pass is reprompted once, then fails.
 
 THE LANGUAGE SHARE: a text is in the language asked for when at least 60 % of
 its letters are in that language's script, counting none inside quotation
@@ -23,6 +25,9 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Annotated
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from dodeal_ai.units.call_intelligence.alarms import words
 from dodeal_ai.units.call_intelligence.language import (
@@ -30,7 +35,7 @@ from dodeal_ai.units.call_intelligence.language import (
     summary_language,
 )
 from dodeal_ai.units.call_intelligence.numbers import prompt_copy
-from dodeal_ai.units.call_intelligence.prompts import render_transcript
+from dodeal_ai.units.call_intelligence.prompts import render_transcript, role_of
 from dodeal_ai.units.call_intelligence.transcriber import (
     MIN_MEAN_CONFIDENCE,
     Segment,
@@ -53,6 +58,23 @@ _SCRIPTS: dict[SummaryLanguage, re.Pattern[str]] = {
 }
 
 type Errors = list[tuple[str, str]]
+
+# Lengths past any honest answer: a quote or a sentence the size of the
+# transcript is not one. A segment id is s1 to s99999.
+_SENTENCE_CHARS = 400
+_SEGMENT = r"^s[1-9][0-9]{0,4}$"
+
+# A quote and its segment where either may be absent, then where both must be.
+type Quote = Annotated[str | None, Field(max_length=_SENTENCE_CHARS)]
+type SegmentId = Annotated[str | None, Field(pattern=_SEGMENT)]
+type Said = Annotated[str, Field(min_length=1, max_length=_SENTENCE_CHARS)]
+type Cited = Annotated[str, Field(pattern=_SEGMENT)]
+
+
+class Strict(BaseModel):
+    """An answer's shape, exactly: no field it does not name, never changed."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,9 +127,11 @@ def quote_errors(
     where: str,
     quote: str | None,
     segment: str | None,
+    *,
+    speaker: str | None = None,
 ) -> Errors:
     """The quote check for one cited quote, which may be absent altogether;
-    [] when it passes."""
+    [] when it passes. `speaker`, when given, is who must have said it."""
     if quote is None and segment is None:
         return []
     if quote is None or segment is None:
@@ -120,6 +144,8 @@ def quote_errors(
         return [(where, "quote_length")]
     if not _contains(words(call.shown[index]), quoted):
         return [(where, "quote_not_in_segment")]
+    if speaker is not None and role_of(call.segments[index]) != speaker:
+        return [(where, "quote_wrong_speaker")]
     return []
 
 
@@ -128,11 +154,13 @@ def evidence_errors(
     where: str,
     quote: str | None,
     segment: str | None,
+    *,
+    speaker: str | None = None,
 ) -> Errors:
     """The quote check for a quote that must be there."""
     if quote is None and segment is None:
         return [(where, "quote_missing")]
-    return quote_errors(call, where, quote, segment)
+    return quote_errors(call, where, quote, segment, speaker=speaker)
 
 
 def in_language(text: str, language: SummaryLanguage) -> bool:
