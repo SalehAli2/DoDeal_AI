@@ -45,6 +45,11 @@ decides what a salesperson is told about their own work:
                        is shown. Wrong -> a figure nobody tested.
     units/structured_intelligence/language.py  the note's script. Wrong -> a
                        question asked in the wrong language.
+    core/audio_download.py  a call's recording fetched. Wrong -> SSRF.
+    core/callbacks.py  a signed callback. Wrong -> an unsigned transcript.
+    core/jobs.py      a call job's state. Wrong -> a job paid twice or lost.
+    units/call_intelligence/worker.py  process_call. Wrong -> a paid retry
+                       nobody asked for, or a job stranded.
 
 A file matched by both a `**` pattern and its own exact pattern is checked
 against both and printed twice; the stricter floor governs. That is deliberate
@@ -151,6 +156,17 @@ _FLOORS: dict[str, float] = {
     # The note's script (item 34): pure functions over a string; a gap is a
     # note answered in the wrong language.
     "src/dodeal_ai/units/structured_intelligence/language.py": 100,
+    # Register item 113, Unit B. The call budgets are core/cost/limiter.py, at
+    # 100 above. The recording's download: every refusal is an SSRF or a disk
+    # guard, reachable on a fake transport, so a gap is an untested refusal.
+    "src/dodeal_ai/core/audio_download.py": 100,
+    # Callback signing: a gap is a callback path sent without a test behind it.
+    "src/dodeal_ai/core/callbacks.py": 100,
+    # The job store's scripts run for real on fakeredis[lua]; a gap is a state
+    # move -- a claim, a pause, a delivery -- that no test has made.
+    "src/dodeal_ai/core/jobs.py": 100,
+    # process_call: 95, as item 113 sets it, for a defensive branch or two.
+    "src/dodeal_ai/units/call_intelligence/worker.py": 95,
 }
 
 
