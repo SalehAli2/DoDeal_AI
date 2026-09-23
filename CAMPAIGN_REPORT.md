@@ -7075,3 +7075,14 @@ generic HTTP error, not as the rate limit it is; (2) an operator pastes the
 terminal into a ticket and the tenant subdomain in the URL line travels with it.
 Stress test: seven leads named with a sentinel print "First lead ids: 1, 2, 3,
 4, 5" and no sentinel.
+
+## Piece: register item 149, the two sides of the vague figure
+
+Item 149 -- run_eval.py prints, under VAGUENESS, the share of human-vague
+notes the pipeline marked vague and the share of human-clear notes it marked
+vague, each as matched/counted; a pass that did not run counts as not marked.
+Production failure modes: (1) a small set gives a caught share over three
+notes that reads as a rate; (2) a prompt change that asks about everything
+raises the caught share and hides in it until the false-alarm line is read.
+Stress test: one vague note missed and one clear note wrongly marked print
+"n-1/n" and "1/m" on the two lines.

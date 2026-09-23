@@ -305,6 +305,10 @@ class Summary:
     failed: int
     tokens: int
     band_not_computable: int
+    # Register item 149: of the notes a human marked vague, how many the
+    # pipeline marked vague; of those marked clear, how many it marked vague.
+    vague_caught: Tally = field(default_factory=Tally)
+    clear_marked_vague: Tally = field(default_factory=Tally)
 
 
 def _empty_tallies() -> dict[str, Tally]:
@@ -342,6 +346,7 @@ def summarise(pairs: list[tuple[EvalRow, PassRun]], config: TenantConfig) -> Sum
             if latency is not None:
                 stats.latencies.append(latency)
 
+    vague_caught, clear_marked_vague = _vagueness(pairs)
     return Summary(
         overall=overall,
         by_type=by_type,
@@ -352,7 +357,21 @@ def summarise(pairs: list[tuple[EvalRow, PassRun]], config: TenantConfig) -> Sum
         failed=sum(1 for _, run in pairs if run.error),
         tokens=sum(run.total_tokens for _, run in pairs),
         band_not_computable=sum(1 for o in outcomes if o.band_not_computable),
+        vague_caught=vague_caught,
+        clear_marked_vague=clear_marked_vague,
     )
+
+
+def _vagueness(pairs: list[tuple[EvalRow, PassRun]]) -> tuple[Tally, Tally]:
+    """The two sides of the vague figure (register item 149). A note whose pass
+    did not run was not marked vague by the pipeline, and counts as such."""
+    caught, false_alarms = Tally(), Tally()
+    for row, run in pairs:
+        if row.is_vague is None:
+            continue
+        tally = caught if row.is_vague else false_alarms
+        tally.add(int(run.is_vague is True), 1)
+    return caught, false_alarms
 
 
 async def evaluate(
@@ -445,6 +464,9 @@ def _report(summary: Summary) -> None:
             f"p95 {_ms(_percentile(stats.latencies, 95))}"
         )
     print(f"  tokens {summary.tokens}   failed notes {summary.failed}")
+    print("\nVAGUENESS")
+    print(f"  human-vague marked vague  {_cell(summary.vague_caught).strip()}")
+    print(f"  human-clear marked vague  {_cell(summary.clear_marked_vague).strip()}")
     if summary.band_not_computable:
         print(
             f"  {summary.band_not_computable} scored row(s) excluded from the band "

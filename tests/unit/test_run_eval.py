@@ -382,3 +382,52 @@ def test_the_disagreement_csv_is_written_beside_the_input(tmp_path):
 
     write_csv(destination, [{"id": "inv-01", "figure": "classify"}])
     assert destination.read_text(encoding="utf-8").splitlines()[0] == "id,figure"
+
+
+# --- the two sides of the vague figure (register item 149) -------------------
+
+
+def test_the_vague_figure_is_split_into_caught_and_false_alarms(rows, capsys):
+    """Of the human-vague notes, how many were marked vague; of the human-clear
+    ones, how many were -- each printed with its count."""
+    from scripts.diagnose_notes import PassRun
+
+    marked = [row for row in rows if row.is_vague is not None]
+    vague = [row for row in marked if row.is_vague]
+    clear = [row for row in marked if not row.is_vague]
+    assert vague and clear
+    runs = {
+        # Every vague note caught but the first; every clear note left clear
+        # but the first, which the pipeline wrongly marks vague.
+        **{
+            row.id: PassRun(row_id=row.id, is_vague=row is not vague[0])
+            for row in vague
+        },
+        **{row.id: PassRun(row_id=row.id, is_vague=row is clear[0]) for row in clear},
+    }
+    pairs = [(row, runs.get(row.id, PassRun(row_id=row.id))) for row in rows]
+
+    summary = summarise(pairs, CONFIG)
+
+    assert (summary.vague_caught.matched, summary.vague_caught.counted) == (
+        len(vague) - 1,
+        len(vague),
+    )
+    assert (
+        summary.clear_marked_vague.matched,
+        summary.clear_marked_vague.counted,
+    ) == (1, len(clear))
+    _report(summary)
+    out = capsys.readouterr().out
+    assert f"human-vague marked vague  {len(vague) - 1}/{len(vague)}" in out
+    assert f"human-clear marked vague  1/{len(clear)}" in out
+
+
+def test_a_pass_that_did_not_run_is_not_marked_vague(rows):
+    """No answer is not a vague mark: it counts against the caught share."""
+    from scripts.diagnose_notes import PassRun
+
+    pairs = [(row, PassRun(row_id=row.id)) for row in rows]
+    summary = summarise(pairs, CONFIG)
+    assert summary.vague_caught.matched == 0
+    assert summary.clear_marked_vague.matched == 0
