@@ -1477,9 +1477,11 @@ async def _rate_limit_trip(
       a prompt would be sent   TAKE the note's attempt and the subject's slot
                                together -- this IS both increments, and a
                                request that lost the note's attempt gets the cap.
-      nothing to ask           READ the rate limit only, so an exhausted window
-                               still reports `rate_limited` ahead of
-                               `nothing_to_ask`.
+      nothing to ask           READ both rate limits, hourly and daily, at
+                               once (register item 66), so an exhausted window
+                               of either kind still reports `rate_limited`
+                               ahead of `nothing_to_ask`. The script is
+                               unchanged; nothing is taken.
       anything else            NO call (resubmission, attempt cap, accept_silent).
 
     Returns (attempts, rate_allowed, rate_count) for the second decide().
@@ -1502,13 +1504,16 @@ async def _rate_limit_trip(
             request_id=scope.request_id,
         )
     if provisional.prompt_withheld is PromptWithheld.NOTHING_TO_ASK:
-        return (
-            attempts,
-            True,
-            await state.read_rate_limit(
+        # Both fail open to 0 inside state.py, so neither can raise here.
+        hourly, daily = await asyncio.gather(
+            state.read_rate_limit(
+                scope.tenant, scope.subject, request_id=scope.request_id
+            ),
+            state.read_daily_rate_limit(
                 scope.tenant, scope.subject, request_id=scope.request_id
             ),
         )
+        return attempts, daily < config.rate_limit_per_day, hourly
     return attempts, True, 0
 
 

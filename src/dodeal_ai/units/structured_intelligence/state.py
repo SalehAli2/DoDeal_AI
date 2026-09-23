@@ -471,6 +471,20 @@ async def read_rate_limit(tenant: str, subject: str, *, request_id: str) -> int:
     return int(raw or 0)
 
 
+async def read_daily_rate_limit(tenant: str, subject: str, *, request_id: str) -> int:
+    """How many clarification prompts this subject has been sent today (register
+    item 66), read-only, for the nothing-to-ask path beside the hourly read.
+    0 when the store is unreachable (fail open) or the key has expired."""
+    try:
+        raw = await operational_breaker().call(
+            lambda: get_operational_client().get(_rate_limit_day_key(tenant, subject))
+        )
+    except redis.RedisError as exc:
+        _bypass("rate_limit_bypassed", tenant, request_id, exc)
+        return 0
+    return int(raw or 0)
+
+
 # --- attempts: fails OPEN --------------------------------------------------
 
 

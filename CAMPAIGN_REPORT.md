@@ -7039,3 +7039,16 @@ must stay so; (2) a proxy base URL for one vendor with the other vendor's
 provider setting passes the check and posts to the wrong API shape.
 Stress test: an openai profile on a groq client raises before the transport is
 entered, and the error names no model.
+
+## Piece: register item 66, the daily cap on the nothing-to-ask path
+
+Item 66 -- when there is nothing to ask, the pipeline reads the daily key
+beside the hourly one (`state.read_daily_rate_limit`, concurrently, both
+failing open), so a rep already past today's cap reports `rate_limited` rather
+than `nothing_to_ask`. The prompt-slots script is unchanged and nothing is
+taken.
+Production failure modes: (1) a db2 outage reads 0 for both and the report
+drifts to nothing_to_ask for a rep who is in fact capped; (2) the two GETs are
+not atomic, so a take landing between them can split the report by one.
+Stress test: with the daily key at the cap, a fair note with no question reads
+rate_limited and the key is not incremented.
