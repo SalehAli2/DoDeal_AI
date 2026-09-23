@@ -16,7 +16,9 @@ from __future__ import annotations
 from dodeal_ai.core.context import RequestContext, TenantScope
 
 
-def test_scope(
+# Not named test_*: a helper imported into a test module under that name is
+# collected there as a test (register item 152).
+def make_scope(
     tenant: str = "tenant-a",
     subject: str = "42",
     request_id: str = "req-1",
@@ -33,7 +35,7 @@ def test_scope(
     ).scope()
 
 
-TEST_SCOPE = test_scope()
+TEST_SCOPE = make_scope()
 
 
 def history_scope(tenant: str = "tenant-a", author_id: int = 7) -> TenantScope:

@@ -58,7 +58,7 @@ from tests.helpers.fake_cost_redis import FakeCostRedis
 from tests.helpers.fake_leads import FakeLeadsClient, lead, note
 from tests.helpers.fake_llm import FakeLLM, json_response, response
 from tests.helpers.fake_operational_redis import FakeOperationalRedis
-from tests.helpers.scopes import TEST_SCOPE, history_scope, test_scope
+from tests.helpers.scopes import TEST_SCOPE, history_scope, make_scope
 from tests.helpers.score_answers import score_payload
 
 JUDGE = "/api/v1/notes/judgements"
@@ -300,7 +300,7 @@ async def test_the_preflight_bypass_is_logged_every_time(monkeypatch, cost, json
     cost.fail = True
 
     for _ in range(3):
-        await token_preflight(test_scope())
+        await token_preflight(make_scope())
 
     bypasses = [
         x for x in _lines(json_log) if x["message"] == "token_preflight_bypassed"
@@ -323,7 +323,7 @@ async def test_an_open_breaker_bypasses_the_preflight_without_a_read(
     monkeypatch.setattr(limiter, "get_cost_client", lambda: cost)
     await breakers.trip(cost_breaker())
 
-    await token_preflight(test_scope())  # must not raise
+    await token_preflight(make_scope())  # must not raise
 
     assert cost.mgets == []
     line = next(

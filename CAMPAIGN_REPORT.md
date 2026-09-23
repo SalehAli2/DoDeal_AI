@@ -7205,3 +7205,15 @@ for no product reason; (2) three route tests still assert call order itself.
 Stress test: start the gathered tasks in reverse -- the HEAD versions fail 37,
 the converted ones 3, all three order assertions (sabotage: no queue clear in
 rescript fails 18).
+
+## Test: register item 152, test_token_cost.py::test_scope is no longer a test
+
+tests/helpers/scopes.test_scope was collected as a test wherever it was
+imported by name: it asserted nothing and returned a TenantScope, which was the
+suite's one PytestReturnNotNoneWarning. Renamed make_scope; a guard test parses
+tests/helpers for any top-level `test*` function.
+Production failure modes: (1) a phantom test inflates the count and hides a
+real warning behind a familiar one; (2) the guard reads only tests/helpers, so a
+helper elsewhere named test_* would still be collected.
+Stress test: the suite runs with no warning (sabotage: the old name fails the
+guard).
