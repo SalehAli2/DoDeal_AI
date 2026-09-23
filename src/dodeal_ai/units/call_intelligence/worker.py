@@ -29,12 +29,17 @@ THE ORDER, and what each step may cost:
      status. eligible_for_full_analysis is at least scoring_min_seconds long
      and not uncertain.
 
+THE DEADLINE: a run stops itself at CALL_JOB_TIMEOUT_SECONDS less 60, before
+arq's own cancel. The step it cut off is failed as retryable: a download or a
+transcription by the rules above, anything later by a re-run of the job.
+
 The arq job carries only (tenant, job_id); everything else is read from db3.
 Nothing here logs the link, a hash, a voiceprint or a word of the transcript.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
@@ -101,6 +106,11 @@ INTERRUPTED = "transcription_interrupted"
 OUTAGE_DELAY_SECONDS = 300
 OUTAGE_DELAY_CAP_SECONDS = 3600
 STORE_DOWN = "cost_store_unavailable"
+
+# process_call's own deadline is arq's job timeout less this: the time left to
+# record the interrupted path before arq cancels the run and records nothing.
+DEADLINE_MARGIN_SECONDS = 60
+DEADLINE = "job_deadline_exceeded"
 
 # The outcome labels a call can be done with before any paid call.
 _UNPAID_OUTCOMES = frozenset({"voicemail", "no_answer"})
@@ -200,7 +210,7 @@ async def process_call(ctx: dict[str, Any], tenant: str, job_id: str) -> None:
         spending("unit_b"),
     ):
         try:
-            await _process(ctx, tenant, job_id, run, fields)
+            await _within_deadline(ctx, tenant, job_id, run, fields)
         except JobStoreUnavailable:
             # Nothing can be recorded; arq runs the job again shortly.
             _logger.warning(
@@ -216,6 +226,51 @@ async def process_call(ctx: dict[str, Any], tenant: str, job_id: str) -> None:
         finally:
             if run.job is not None:
                 _log_outcome(run)
+
+
+def deadline_seconds() -> int:
+    """How long one run may take before it stops itself."""
+    return get_settings().call_job_timeout_seconds - DEADLINE_MARGIN_SECONDS
+
+
+async def _within_deadline(
+    ctx: dict[str, Any],
+    tenant: str,
+    job_id: str,
+    run: CallRun,
+    fields: dict[str, str],
+) -> None:
+    """_process under the run's deadline; past it, the interrupted path."""
+    deadline = asyncio.timeout(deadline_seconds())
+    try:
+        async with deadline:
+            await _process(ctx, tenant, job_id, run, fields)
+    except TimeoutError:
+        if not deadline.expired():
+            raise
+        await _expired(ctx, tenant, job_id, run)
+
+
+async def _expired(ctx: dict[str, Any], tenant: str, job_id: str, run: CallRun) -> None:
+    """The deadline cut a step off: a download or a transcription fails as
+    retryable under its own rules; any other running step, or a callback still
+    owed, is left to a re-run of the job."""
+    _logger.warning("call_job_deadline_exceeded", extra={"reason_code": DEADLINE})
+    job = await read_job(tenant, job_id)
+    if job is None or (job.terminal and job.delivery is not DeliveryState.PENDING):
+        return
+    config = await resolve_calls_config(tenant)
+    if job.status is JobStatus.DOWNLOADING:
+        cut = AudioDownloadError(DEADLINE, retryable=True)
+        await _download_failed(ctx, job, config, cut, job.attempts, run)
+        return
+    if job.status is JobStatus.TRANSCRIBING:
+        stalled = TranscriptionError(DEADLINE, retryable=True)
+        await _transcription_failed(
+            ctx, job, config, stalled, job.attempts, job.transcriptions, run
+        )
+        return
+    raise Retry(defer=RETRY_DELAY_SECONDS)
 
 
 async def _process(
@@ -369,7 +424,7 @@ async def _transcribe(
                 run.transcript = await transcriber.transcribe(
                     audio.path, language_hint=hint if isinstance(hint, str) else None
                 )
-            except TranscriptionError:
+            except (TranscriptionError, asyncio.CancelledError):
                 # Possibly billed, by a model it never named: unpriced, not free.
                 if spend is not None:
                     spend.record_audio(_UNKNOWN_MODEL, seconds)

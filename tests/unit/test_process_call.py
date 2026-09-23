@@ -4,6 +4,7 @@ after the transcript is stored retries delivery only."""
 
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
 import sys
@@ -540,6 +541,148 @@ async def test_a_dead_job_store_is_retried_by_arq(ctx: dict, monkeypatch) -> Non
     monkeypatch.setattr(worker, "read_job", down)
     with pytest.raises(Retry):
         await process_call(ctx, "tenant-a", JOB)
+
+
+# --- the run's own deadline (stuck jobs) --------------------------------------
+
+
+class _HungTranscriber(FakeTranscriber):
+    """Counts the call, then never answers."""
+
+    async def transcribe(self, audio_path: Path, *, language_hint: str | None):
+        await super().transcribe(audio_path, language_hint=language_hint)
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+
+@pytest.fixture
+def short_deadline(monkeypatch) -> None:
+    monkeypatch.setattr(worker, "deadline_seconds", lambda: 0.5)
+
+
+async def _bounded(ctx: dict) -> None:
+    """One run, failed rather than hung when no deadline fires."""
+    await asyncio.wait_for(process_call(ctx, "tenant-a", JOB), 5)
+
+
+async def test_a_hung_transcriber_ends_as_a_retry_then_dead_letter(
+    ctx: dict, short_deadline: None, redis_fakes: RedisFakes
+) -> None:
+    """Two paid starts, each cut off, then dead_letter and call.failed."""
+    await _calls_on()
+    await _push()
+    ctx["transcriber"] = _HungTranscriber()
+
+    with pytest.raises(Retry):
+        await _bounded(ctx)
+    job = await _job()
+    assert (job.status, job.reason, job.transcriptions) == (
+        JobStatus.QUEUED,
+        worker.DEADLINE,
+        1,
+    )
+
+    await _bounded(ctx)
+
+    job = await _job()
+    assert (job.status, job.reason, job.attempts, job.transcriptions) == (
+        JobStatus.DEAD_LETTER,
+        worker.DEADLINE,
+        2,
+        2,
+    )
+    assert len(ctx["transcriber"].calls) == 2
+    assert ctx["deliver"].events == [FAILED]
+
+
+async def test_a_hung_download_is_retried_as_an_attempt(
+    ctx: dict, short_deadline: None, source: _Source
+) -> None:
+    await _calls_on()
+    await _push()
+
+    async def hang(request: httpx.Request) -> httpx.Response:
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(hang)) as http:
+        ctx["http"] = http
+        with pytest.raises(Retry):
+            await _bounded(ctx)
+
+    job = await _job()
+    assert (job.status, job.reason, job.attempts) == (
+        JobStatus.QUEUED,
+        worker.DEADLINE,
+        1,
+    )
+    assert ctx["transcriber"].calls == []
+
+
+class _HungDeliveries(_Deliveries):
+    async def __call__(self, job, event: str, config) -> bool:
+        self.events.append(event)
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+
+@pytest.mark.parametrize(
+    ("callback", "retried"),
+    [("https://crm.tenant-a.example/hooks", True), (None, False)],
+    ids=["callback-owed", "no-callback"],
+)
+async def test_a_hung_delivery_is_re_run_only_while_a_callback_is_owed(
+    ctx: dict, short_deadline: None, callback: str | None, retried: bool
+) -> None:
+    await _calls_on(callback_url=callback)
+    await _push(call_outcome="voicemail")
+    ctx["deliver"] = _HungDeliveries()
+
+    if retried:
+        with pytest.raises(Retry):
+            await _bounded(ctx)
+    else:
+        await _bounded(ctx)
+
+    assert (await _job()).status is JobStatus.DONE
+
+
+async def test_a_job_gone_when_the_deadline_passes_is_left_alone(
+    ctx: dict, short_deadline: None, redis_fakes: RedisFakes
+) -> None:
+    await _calls_on()
+    await _push(call_outcome="voicemail")
+
+    class _Vanishing(_HungDeliveries):
+        async def __call__(self, job, event: str, config) -> bool:
+            await redis_fakes.jobs.delete(job_key("tenant-a", JOB))
+            return await super().__call__(job, event, config)
+
+    ctx["deliver"] = _Vanishing()
+    await _bounded(ctx)
+    assert await read_job("tenant-a", JOB) is None
+
+
+async def test_a_timeout_that_is_not_the_deadline_is_an_error(ctx: dict) -> None:
+    await _calls_on()
+    await _push()
+
+    class _TimesOut(FakeTranscriber):
+        async def transcribe(self, audio_path: Path, *, language_hint: str | None):
+            raise TimeoutError
+
+    ctx["transcriber"] = _TimesOut()
+    with pytest.raises(TimeoutError):
+        await process_call(ctx, "tenant-a", JOB)
+    assert (await _job()).status is JobStatus.TRANSCRIBING
+
+
+def test_the_deadline_is_the_job_timeout_less_its_margin(monkeypatch) -> None:
+    assert worker.deadline_seconds() == 1800 - worker.DEADLINE_MARGIN_SECONDS
+    monkeypatch.setenv("DODEAL_CALL_JOB_TIMEOUT_SECONDS", "60")
+    get_settings.cache_clear()
+    with pytest.raises(ConfigError):
+        get_settings()
 
 
 # --- budgets (core(105)) ----------------------------------------------------------
