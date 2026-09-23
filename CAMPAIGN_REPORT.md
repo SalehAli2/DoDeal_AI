@@ -7019,3 +7019,10 @@ every answer truncates, spending the reprompt and then 503 malformed_output;
 same effect.
 Stress test: a scripted MAX_TOKENS finish on the score pass is rejected as
 output_truncated and reprompted once (tests/unit/test_reprompt.py covers it).
+
+## Test: register item 97, a runtime-config test that depended on the date
+
+`test_a_new_day_starts_the_count_again` (B1) set its first version at the real
+now and hardcoded 2026-09-23 as "the next day"; it went red when the calendar
+reached that date. Both instants are now fixed. The code was right; the test
+was not.

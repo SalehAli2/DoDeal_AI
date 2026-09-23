@@ -302,8 +302,11 @@ def test_versions_count_up_within_a_day_and_history_is_newest_first(client) -> N
 
 
 def test_a_new_day_starts_the_count_again(redis_fakes: RedisFakes) -> None:
-    """The date in the version is the day it was set, in UTC."""
-    run(set_override("tenant-a", UNIT_A_SECTION, {}, now=NOW))
+    """The date in the version is the day it was set, in UTC. Both instants
+    are fixed: the test must not depend on the day it is run."""
+    first = datetime(2026, 9, 22, 23, 30, tzinfo=UTC)
+    earlier = run(set_override("tenant-a", UNIT_A_SECTION, {}, now=first))
+    assert earlier.version == "tenant-cfg-tenant-a-20260922-1"
     later = datetime(2026, 9, 23, 0, 30, tzinfo=UTC)
     record = run(set_override("tenant-a", UNIT_A_SECTION, {}, now=later))
     assert record.version == "tenant-cfg-tenant-a-20260923-1"
