@@ -15,6 +15,10 @@ arq's own try count is CALL_MAX_TRIES + 1, one more than the job's: the job's
 attempts in db3 decide, and the extra run is the one that dead-letters a job
 whose last attempt crashed. Each run is cut off at CALL_JOB_TIMEOUT_SECONDS.
 
+THE NORMAL QUEUE'S WORKER ALSO SWEEPS, every 300 s: a job stuck in a running
+status with no run is re-enqueued once (units/call_intelligence/sweep.py).
+arq runs a cron once per slot however many normal workers there are.
+
 THE TRANSCRIBER IS BUILT BY THE FACTORY, which refuses while no adapter exists,
 so a worker with nothing to transcribe with does not start. A test or the demo
 passes one in, and the worker starts with it only under the demo flag.
@@ -26,7 +30,7 @@ import sys
 from typing import Any
 
 import httpx
-from arq import func
+from arq import cron, func
 from arq.connections import RedisSettings
 from arq.worker import run_worker
 
@@ -40,6 +44,10 @@ from dodeal_ai.units.call_intelligence.queues import (
     NORMAL_QUEUE,
     OVERNIGHT_QUEUE,
     PRIORITY_QUEUE,
+)
+from dodeal_ai.units.call_intelligence.sweep import (
+    SWEEP_INTERVAL_SECONDS,
+    sweep_stuck_jobs,
 )
 from dodeal_ai.units.call_intelligence.transcriber import (
     Transcriber,
@@ -83,7 +91,13 @@ def worker_settings(
         if http is not None:
             await http.aclose()
 
+    sweeps = (
+        [cron(sweep_stuck_jobs, minute=_every(SWEEP_INTERVAL_SECONDS))]
+        if queue == NORMAL_QUEUE
+        else []
+    )
     return {
+        "cron_jobs": sweeps,
         "functions": [
             func(process_call, max_tries=settings.call_max_tries + 1),
             # One re-run for a worker that died mid-POST; the schedule is ours.
@@ -95,6 +109,11 @@ def worker_settings(
         "on_startup": startup,
         "on_shutdown": shutdown,
     }
+
+
+def _every(seconds: int) -> set[int]:
+    """The minutes of the hour a cron every `seconds` fires on."""
+    return set(range(0, 60, seconds // 60))
 
 
 def main(argv: list[str]) -> int:

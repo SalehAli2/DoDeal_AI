@@ -5,13 +5,15 @@ apart, and a store that cannot answer fails closed."""
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import fakeredis
 import pytest
 
 from dodeal_ai.core import jobs
+from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.jobs import (
+    ACTIVE_JOBS_KEY,
     DeliveryState,
     JobStatus,
     JobStoreUnavailable,
@@ -19,14 +21,17 @@ from dodeal_ai.core.jobs import (
     claim_attempt,
     create_job,
     job_key,
+    mark_swept,
     pause,
     read_job,
     read_result,
     result_key,
     settle_delivery,
+    stale_jobs,
     start_transcription,
     store_result,
     transition,
+    unmark_swept,
 )
 from tests.conftest import RedisFakes
 
@@ -101,13 +106,65 @@ async def test_the_same_call_id_in_two_tenants_is_two_jobs() -> None:
     assert await read_job("tenant-b", "job-1") is None
 
 
-async def test_a_running_transition_holds_no_ttl(redis_fakes: RedisFakes) -> None:
+RECORD_TTL = 604_800
+LATER = NOW + timedelta(minutes=5)
+
+
+async def _record_ttls(redis_fakes: RedisFakes) -> list[int]:
+    return [
+        await redis_fakes.jobs.ttl(key)
+        for key in (job_key("tenant-a", "job-1"), call_index_key("tenant-a", 7))
+    ]
+
+
+async def _score(redis_fakes: RedisFakes) -> float | None:
+    return await redis_fakes.jobs.zscore(ACTIVE_JOBS_KEY, "tenant-a:job-1")
+
+
+async def test_a_new_job_expires_a_record_ttl_after_its_push(
+    redis_fakes: RedisFakes,
+) -> None:
+    """Job and index both expire; the job is active from its push."""
     await _create()
-    assert await transition(
-        await _job(), JobStatus.DELIVERING, now=NOW, ttl_seconds=TTL
-    )
-    assert (await _job()).status is JobStatus.DELIVERING
-    assert await redis_fakes.jobs.ttl(job_key("tenant-a", "job-1")) == -1
+    assert all(0 < ttl <= RECORD_TTL for ttl in await _record_ttls(redis_fakes))
+    assert await _score(redis_fakes) == NOW.timestamp()
+
+
+@pytest.mark.parametrize(
+    "move",
+    ["transition", "claim", "pause", "transcription"],
+)
+async def test_every_running_move_renews_the_record_ttl_and_the_score(
+    redis_fakes: RedisFakes, move: str
+) -> None:
+    await _create()
+    for key in (job_key("tenant-a", "job-1"), call_index_key("tenant-a", 7)):
+        await redis_fakes.jobs.persist(key)
+    job = await _job()
+    moves = {
+        "transition": lambda: transition(
+            job, JobStatus.DELIVERING, now=LATER, ttl_seconds=TTL
+        ),
+        "claim": lambda: claim_attempt(
+            job, max_tries=2, now=LATER, status=JobStatus.DOWNLOADING
+        ),
+        "pause": lambda: pause(job, now=LATER, reason="token_budget_exceeded"),
+        "transcription": lambda: start_transcription(job, now=LATER),
+    }
+
+    assert await moves[move]()
+
+    assert all(0 < ttl <= RECORD_TTL for ttl in await _record_ttls(redis_fakes))
+    assert await _score(redis_fakes) == LATER.timestamp()
+
+
+async def test_a_record_ttl_is_the_configured_one(
+    redis_fakes: RedisFakes, monkeypatch
+) -> None:
+    monkeypatch.setenv("DODEAL_CALL_JOB_RECORD_TTL_SECONDS", "3600")
+    get_settings.cache_clear()
+    await _create()
+    assert all(3500 < ttl <= 3600 for ttl in await _record_ttls(redis_fakes))
 
 
 async def test_a_terminal_transition_is_final_and_expires_job_and_index(
@@ -128,6 +185,7 @@ async def test_a_terminal_transition_is_final_and_expires_job_and_index(
     assert failed.terminal
     for key in (job_key("tenant-a", "job-1"), call_index_key("tenant-a", 7)):
         assert 0 < await redis_fakes.jobs.ttl(key) <= TTL
+    assert await _score(redis_fakes) is None
     assert not await transition(job, JobStatus.DONE, now=NOW, ttl_seconds=TTL)
     assert (
         await claim_attempt(job, max_tries=2, now=NOW, status=JobStatus.DOWNLOADING)
@@ -318,6 +376,9 @@ async def test_every_operation_fails_closed_on_a_dead_store(dead_store) -> None:
         settle_delivery(job, DeliveryState.DELIVERED, now=NOW),
         store_result("tenant-a", "job-1", {}, ttl_seconds=TTL),
         read_result("tenant-a", "job-1"),
+        stale_jobs(NOW, limit=10),
+        mark_swept("tenant-a", "job-1", statuses=frozenset({JobStatus.QUEUED})),
+        unmark_swept("tenant-a", "job-1"),
     ]
     for operation in operations:
         with pytest.raises(JobStoreUnavailable) as caught:
@@ -328,3 +389,60 @@ async def test_every_operation_fails_closed_on_a_dead_store(dead_store) -> None:
 
 def test_a_hash_value_is_read_as_text_whichever_way_the_client_decodes() -> None:
     assert (jobs._text(b"queued"), jobs._text("queued")) == ("queued", "queued")
+
+
+# --- the active set and the sweep's mark ---------------------------------------
+
+STUCK = frozenset({JobStatus.TRANSCRIBING})
+
+
+async def test_stale_jobs_are_read_oldest_first_up_to_the_limit() -> None:
+    for n, minutes in ((1, 30), (2, 50), (3, 5)):
+        await create_job(
+            "tenant-a",
+            n,
+            job_id=f"job-{n}",
+            request_id="req-1",
+            queue="calls:normal",
+            metadata={},
+            now=NOW - timedelta(minutes=minutes),
+        )
+
+    stale = await stale_jobs(NOW - timedelta(minutes=10), limit=10)
+    assert stale == [("tenant-a", "job-2"), ("tenant-a", "job-1")]
+    assert await stale_jobs(NOW, limit=1) == [("tenant-a", "job-2")]
+
+
+async def test_a_stuck_job_is_marked_once_per_transition() -> None:
+    await _create()
+    assert await start_transcription(await _job(), now=NOW) == 1
+
+    assert await mark_swept("tenant-a", "job-1", statuses=STUCK) == (
+        1,
+        "calls:normal",
+    )
+    assert await mark_swept("tenant-a", "job-1", statuses=STUCK) is None
+
+    await unmark_swept("tenant-a", "job-1")
+    assert await mark_swept("tenant-a", "job-1", statuses=STUCK) == (
+        2,
+        "calls:normal",
+    )
+    await transition(await _job(), JobStatus.TRANSCRIBING, now=LATER, ttl_seconds=TTL)
+    assert await mark_swept("tenant-a", "job-1", statuses=STUCK) == (
+        3,
+        "calls:normal",
+    )
+
+
+async def test_a_job_in_another_status_is_not_marked() -> None:
+    await _create()
+    assert await mark_swept("tenant-a", "job-1", statuses=STUCK) is None
+
+
+async def test_a_job_gone_leaves_the_active_set(redis_fakes: RedisFakes) -> None:
+    await _create()
+    await redis_fakes.jobs.delete(job_key("tenant-a", "job-1"))
+
+    assert await mark_swept("tenant-a", "job-1", statuses=STUCK) is None
+    assert await _score(redis_fakes) is None

@@ -12,7 +12,8 @@ The arq job carries the tenant and the job_id ONLY. The link, the hashes and
 the voiceprint stay in db3 with the job, so nothing sensitive sits in db0.
 
 The arq job id is `<tenant>:<job_id>`, so pushing the same job twice puts it on
-its queue once. A pause (core(105)) re-queues under `...:resume:<n>`.
+its queue once. A pause (core(105)) re-queues under `...:resume:<n>`, and the
+stuck-job sweep (sweep.py) under `...:sweep:<n>`.
 """
 
 from __future__ import annotations
@@ -63,9 +64,12 @@ async def refresh_queue_depths() -> None:
         metrics.CALL_QUEUE_DEPTH.labels(queue=queue).set(depth)
 
 
-def arq_job_id(tenant: str, job_id: str, *, resume: int = 0) -> str:
-    """The arq id: one per job, and one per resume after a pause."""
+def arq_job_id(tenant: str, job_id: str, *, resume: int = 0, sweep: int = 0) -> str:
+    """The arq id: one per job, one per resume after a pause, and one per
+    sweep of a stuck job."""
     base = f"{tenant}:{job_id}"
+    if sweep:
+        return f"{base}:sweep:{sweep}"
     return base if resume == 0 else f"{base}:resume:{resume}"
 
 
@@ -103,6 +107,7 @@ async def enqueue_call(
     queue: str,
     *,
     resume: int = 0,
+    sweep: int = 0,
     defer: timedelta | None = None,
 ) -> None:
     """Put `process_call(tenant, job_id)` on `queue`, once per arq id. A queue
@@ -114,7 +119,7 @@ async def enqueue_call(
                 PROCESS_CALL,
                 tenant,
                 job_id,
-                _job_id=arq_job_id(tenant, job_id, resume=resume),
+                _job_id=arq_job_id(tenant, job_id, resume=resume, sweep=sweep),
                 _queue_name=queue,
                 _defer_by=defer,
             )

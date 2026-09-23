@@ -195,6 +195,10 @@ class Settings(BaseSettings):
     # sooner (worker.py). 1800 s holds a long call's transcription; too low kills
     # paid work mid-flight, too high lets a hung run hold a worker slot.
     call_job_timeout_seconds: int = Field(default=1800, gt=60)
+    # How long a call job's record lives after its last transition (core/jobs.py):
+    # a week outlives any retry and pause, so nothing is stranded forever. Too
+    # low loses a paused job's record; too high keeps a dead job's link longer.
+    call_job_record_ttl_seconds: int = Field(default=604_800, gt=0)
     # Each tenant's callback signing secret, JSON {"tenant": "secret"}; SecretStr
     # so a repr prints stars. Read once, in core/callbacks.py. A tenant missing
     # here gets NO callback -- never an unsigned one -- and polls GET instead.

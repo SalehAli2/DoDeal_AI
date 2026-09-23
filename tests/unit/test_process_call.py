@@ -27,7 +27,7 @@ from dodeal_ai.core.jobs import (
     read_result,
 )
 from dodeal_ai.core.tenant_config import set_override
-from dodeal_ai.units.call_intelligence import worker
+from dodeal_ai.units.call_intelligence import sweep, worker
 from dodeal_ai.units.call_intelligence.admission import job_metadata
 from dodeal_ai.units.call_intelligence.config import (
     UNIT_B_SECTION,
@@ -683,6 +683,103 @@ def test_the_deadline_is_the_job_timeout_less_its_margin(monkeypatch) -> None:
     get_settings.cache_clear()
     with pytest.raises(ConfigError):
         get_settings()
+
+
+# --- stuck jobs: the sweep ------------------------------------------------------
+
+
+def _stuck_later() -> datetime:
+    """A moment past the sweep's threshold for a job moved now."""
+    wait = get_settings().call_job_timeout_seconds + sweep.SWEEP_GRACE_SECONDS
+    return datetime.now(UTC) + timedelta(seconds=wait + 5)
+
+
+async def _swept_ids(redis_fakes: RedisFakes) -> list[str]:
+    keys = await redis_fakes.queue.keys("arq:job:*sweep*")
+    return sorted(key.decode() for key in keys)
+
+
+async def _left_transcribing(ctx: dict) -> None:
+    """A run that died mid-transcription and left the job with no worker."""
+    ctx["transcriber"] = _DyingTranscriber()
+    with pytest.raises(RuntimeError):
+        await process_call(ctx, "tenant-a", JOB)
+    assert (await _job()).status is JobStatus.TRANSCRIBING
+
+
+@pytest.mark.parametrize(
+    ("deaths", "status"),
+    [(1, JobStatus.DONE), (2, JobStatus.DEAD_LETTER)],
+    ids=["retried", "dead-lettered"],
+)
+async def test_a_job_left_transcribing_is_swept_once_and_never_stays_stuck(
+    ctx: dict, redis_fakes: RedisFakes, deaths: int, status: JobStatus
+) -> None:
+    await _calls_on()
+    await _push()
+    for _ in range(deaths):
+        await _left_transcribing(ctx)
+
+    assert await sweep.sweep(now=_stuck_later()) == 1
+    assert await sweep.sweep(now=_stuck_later()) == 0
+    assert await _swept_ids(redis_fakes) == [f"arq:job:tenant-a:{JOB}:sweep:1"]
+    (queued,) = await redis_fakes.queue.queued_jobs(queue_name=NORMAL_QUEUE)
+
+    ctx["transcriber"] = FakeTranscriber()
+    await process_call(ctx, *queued.args)
+
+    job = await _job()
+    assert job.status is status
+    assert ctx["deliver"].events == [STAGE1 if status is JobStatus.DONE else FAILED]
+    assert await sweep.sweep(now=_stuck_later()) == 0
+
+
+async def test_a_job_moved_recently_or_waiting_on_purpose_is_not_swept(
+    ctx: dict, redis_fakes: RedisFakes
+) -> None:
+    await _calls_on()
+    await _push()
+    assert await sweep.sweep(now=_stuck_later()) == 0
+    await _left_transcribing(ctx)
+    assert await sweep.sweep(now=datetime.now(UTC)) == 0
+    assert await _swept_ids(redis_fakes) == []
+
+
+async def test_a_sweep_with_the_queue_down_takes_its_mark_back(
+    ctx: dict, redis_fakes: RedisFakes, monkeypatch
+) -> None:
+    from dodeal_ai.core.errors import QueueUnavailable
+
+    await _calls_on()
+    await _push()
+    await _left_transcribing(ctx)
+
+    async def no_queue(*args: object, **kwargs: object) -> None:
+        raise QueueUnavailable()
+
+    with monkeypatch.context() as patched:
+        patched.setattr(sweep, "enqueue_call", no_queue)
+        assert await sweep.sweep(now=_stuck_later()) == 0
+
+    assert await sweep.sweep(now=_stuck_later()) == 1
+    assert await _swept_ids(redis_fakes) == [f"arq:job:tenant-a:{JOB}:sweep:2"]
+
+
+async def test_the_cron_task_sweeps_now() -> None:
+    assert await sweep.sweep_stuck_jobs({}) == 0
+
+
+def test_only_the_normal_queues_worker_sweeps_every_five_minutes() -> None:
+    crons = {
+        name: calls_worker.worker_settings(queue)["cron_jobs"]
+        for name, queue in calls_worker.QUEUES.items()
+    }
+    (job,) = crons["normal"]
+    assert (job.name, job.minute) == (
+        "cron:sweep_stuck_jobs",
+        {0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55},
+    )
+    assert crons["priority"] == crons["overnight"] == []
 
 
 # --- budgets (core(105)) ----------------------------------------------------------
