@@ -107,6 +107,22 @@ class RequestContext:
             principal=principal,
         )
 
+    @classmethod
+    def for_admitted_job(cls, tenant: str, *, request_id: str) -> RequestContext:
+        """The CRM's context for work its service chain already admitted: a
+        call job (register item 50). `tenant` is the one the push's gates
+        verified, read back from the job key it was stored under, never from
+        the job's content; the only way a worker reaches a scope."""
+        return cls(
+            tenant=tenant,
+            subject="service",
+            database="",
+            roles=(),
+            permissions=frozenset(),
+            request_id=request_id,
+            principal="service",
+        )
+
     def has_permission(self, permission: str) -> bool:
         """Single read-path Gate 3 uses to enforce default-deny."""
         return permission in self.permissions

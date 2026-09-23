@@ -177,6 +177,10 @@ class Settings(BaseSettings):
     # 200 MiB on a modest link; too low fails long calls as audio_download_timeout
     # (retried, and paid for again in time), too high holds a worker on a stall.
     call_download_timeout_seconds: float = Field(default=60.0, gt=0)
+    # Processing attempts a call job gets before it is dead-lettered (register
+    # item 35). 2 rides out one bad download; a transcription is never re-paid
+    # whatever this says. Higher re-fetches a dead link; 1 never retries at all.
+    call_max_tries: int = Field(default=2, ge=1)
 
     # --- Watchdog: timeout + retry policy for external calls (§6) -----------
     # Placeholder values; tune per real LLM/tool latency later.
