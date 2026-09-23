@@ -40,6 +40,11 @@ DELIVERY IS APART FROM STATUS (register item 50). A job whose result exists is
 the event is owed, then delivered or delivery_failed, and it moves only out of
 pending. No callback URL, no delivery: the field stays empty.
 
+STAGE 2 IS APART FROM STATUS TOO. A `done` job stays done while wave 2 runs;
+`stage2` says where that is: not_eligible, or pending until the stage-2 task
+settles it done or failed, with the reason in `stage2_reason`. It is set with
+the move to done, in the same script, and moves only out of pending.
+
 FAILS CLOSED. The job store is the job: a store that cannot be read or written
 raises JobStoreUnavailable (a 503 at the route, a retry in the worker), never a
 guess. Every call runs inside the jobs breaker and catches RedisError.
@@ -85,6 +90,15 @@ class DeliveryState(StrEnum):
     DELIVERY_FAILED = "delivery_failed"
 
 
+class Stage2State(StrEnum):
+    """Where a done job's wave 2 is; read on GET beside the status."""
+
+    NOT_ELIGIBLE = "not_eligible"
+    PENDING = "pending"
+    DONE = "done"
+    FAILED = "failed"
+
+
 # The statuses no transition, claim or pause may leave.
 TERMINAL: frozenset[JobStatus] = frozenset(
     {JobStatus.DONE, JobStatus.FAILED, JobStatus.DEAD_LETTER}
@@ -120,6 +134,9 @@ class Job:
     reason: str | None
     # The callback's state; None when the tenant has no callback to send to.
     delivery: DeliveryState | None
+    # Wave 2's state once the job is done, and why it failed; None before.
+    stage2: Stage2State | None
+    stage2_reason: str | None
     queue: str
     created_at: str
     updated_at: str
@@ -195,9 +212,10 @@ return {1, ARGV[1]}
 
 # KEYS: the job, the call index, the active set. ARGV: status, now, reason, the
 # result TTL, "1" when the status is terminal, the delivery state or "" to leave
-# it, the record TTL, now's score, the member, then every terminal status. 0
-# missing, -1 already terminal, 1 moved. A terminal move sets finished_at and
-# the result TTL on both keys and leaves the active set; any other is touched.
+# it, the stage-2 state or "" to leave it, the record TTL, now's score, the
+# member, then every terminal status. 0 missing, -1 already terminal, 1 moved.
+# A terminal move sets finished_at and the result TTL on both keys and leaves
+# the active set; any other is touched.
 _TRANSITION_SCRIPT = (
     _TOUCH
     + """
@@ -205,7 +223,7 @@ if redis.call('EXISTS', KEYS[1]) == 0 then
   return 0
 end
 local current = redis.call('HGET', KEYS[1], 'status')
-for i = 10, #ARGV do
+for i = 11, #ARGV do
   if current == ARGV[i] then
     return -1
   end
@@ -214,13 +232,16 @@ redis.call('HSET', KEYS[1], 'status', ARGV[1], 'updated_at', ARGV[2], 'reason', 
 if ARGV[6] ~= '' then
   redis.call('HSET', KEYS[1], 'delivery', ARGV[6])
 end
+if ARGV[7] ~= '' then
+  redis.call('HSET', KEYS[1], 'stage2', ARGV[7])
+end
 if ARGV[5] == '1' then
   redis.call('HSET', KEYS[1], 'finished_at', ARGV[2])
   redis.call('EXPIRE', KEYS[1], ARGV[4])
   redis.call('EXPIRE', KEYS[2], ARGV[4])
-  redis.call('ZREM', KEYS[3], ARGV[9])
+  redis.call('ZREM', KEYS[3], ARGV[10])
 else
-  touch(ARGV[7], ARGV[8], ARGV[9])
+  touch(ARGV[8], ARGV[9], ARGV[10])
 end
 return 1
 """
@@ -315,6 +336,20 @@ if redis.call('HGET', KEYS[1], 'delivery') ~= 'pending' then
   return -1
 end
 redis.call('HSET', KEYS[1], 'delivery', ARGV[1], 'updated_at', ARGV[2])
+return 1
+"""
+
+# KEYS: the job. ARGV: the settled stage-2 state, its reason or "", now. 0
+# missing, -1 not pending (settled already, or never owed), 1 settled. The
+# status is never touched.
+_STAGE2_SCRIPT = """
+if redis.call('EXISTS', KEYS[1]) == 0 then
+  return 0
+end
+if redis.call('HGET', KEYS[1], 'stage2') ~= 'pending' then
+  return -1
+end
+redis.call('HSET', KEYS[1], 'stage2', ARGV[1], 'stage2_reason', ARGV[2], 'updated_at', ARGV[3])
 return 1
 """
 
@@ -509,6 +544,8 @@ async def read_job(tenant: str, job_id: str) -> Job | None:
         request_id=raw["request_id"],
         reason=raw["reason"] or None,
         delivery=DeliveryState(raw["delivery"]) if raw.get("delivery") else None,
+        stage2=Stage2State(raw["stage2"]) if raw.get("stage2") else None,
+        stage2_reason=raw.get("stage2_reason") or None,
         queue=raw["queue"],
         created_at=raw["created_at"],
         updated_at=raw["updated_at"],
@@ -525,11 +562,12 @@ async def transition(
     reason: str | None = None,
     ttl_seconds: int,
     delivery: DeliveryState | None = None,
+    stage2: Stage2State | None = None,
 ) -> bool:
-    """Move a job that is not terminal to `status`, and its delivery with it
-    when given. A terminal status sets finished_at and `ttl_seconds` on the job
-    and its call index; any other gives both the record TTL. False when the
-    job is gone or already terminal."""
+    """Move a job that is not terminal to `status`, and its delivery and its
+    stage-2 state with it when given. A terminal status sets finished_at and
+    `ttl_seconds` on the job and its call index; any other gives both the
+    record TTL. False when the job is gone or already terminal."""
     client = get_jobs_client()
     moved = await _call(
         lambda: client.eval(
@@ -542,11 +580,31 @@ async def transition(
             ttl_seconds,
             "1" if status in TERMINAL else "0",
             "" if delivery is None else delivery.value,
+            "" if stage2 is None else stage2.value,
             *_touch_args(job.tenant, job.job_id, now),
             *_TERMINAL_ARGS,
         )
     )
     return int(moved) == 1
+
+
+async def settle_stage2(
+    job: Job, state: Stage2State, *, now: datetime, reason: str | None = None
+) -> bool:
+    """A pending stage 2 becomes `state`, with its reason, whatever the job's
+    status. False when it was not pending or the job is gone."""
+    client = get_jobs_client()
+    settled = await _call(
+        lambda: client.eval(
+            _STAGE2_SCRIPT,
+            1,
+            job_key(job.tenant, job.job_id),
+            state.value,
+            reason or "",
+            now.isoformat(),
+        )
+    )
+    return int(settled) == 1
 
 
 async def settle_delivery(job: Job, state: DeliveryState, *, now: datetime) -> bool:

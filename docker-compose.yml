@@ -37,6 +37,10 @@ services:
     <<: *call-worker
     command: ["python", "-m", "dodeal_ai.workers.calls", "overnight"]
 
+  worker-stage2:
+    <<: *call-worker
+    command: ["python", "-m", "dodeal_ai.workers.calls", "stage2"]
+
   redis:
     image: redis:7-alpine
     ports:

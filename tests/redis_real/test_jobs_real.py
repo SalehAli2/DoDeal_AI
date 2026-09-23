@@ -98,6 +98,7 @@ async def test_a_terminal_move_is_final_and_expires_both_keys(
             _TTL,
             "1",
             "",
+            "",
             *_touch("job-1"),
             *_TERMINAL_ARGS,
         )

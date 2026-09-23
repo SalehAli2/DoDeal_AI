@@ -17,6 +17,7 @@ from dodeal_ai.core.jobs import (
     DeliveryState,
     JobStatus,
     JobStoreUnavailable,
+    Stage2State,
     Swept,
     call_index_key,
     claim_attempt,
@@ -31,6 +32,7 @@ from dodeal_ai.core.jobs import (
     read_work,
     result_key,
     settle_delivery,
+    settle_stage2,
     stale_jobs,
     start_pass,
     start_transcription,
@@ -368,6 +370,8 @@ async def test_every_operation_fails_closed_on_a_dead_store(dead_store) -> None:
         request_id="req-1",
         reason=None,
         delivery=None,
+        stage2=None,
+        stage2_reason=None,
         queue="calls:normal",
         created_at="t",
         updated_at="t",
@@ -392,6 +396,7 @@ async def test_every_operation_fails_closed_on_a_dead_store(dead_store) -> None:
         mark_swept("tenant-a", "job-1", now=NOW, waits={JobStatus.QUEUED: 0}),
         unmark_swept("tenant-a", "job-1"),
         note_wake(job, wake_at=NOW),
+        settle_stage2(job, Stage2State.DONE, now=NOW),
     ]
     for operation in operations:
         with pytest.raises(JobStoreUnavailable) as caught:
@@ -501,6 +506,36 @@ async def test_a_job_gone_leaves_the_active_set(redis_fakes: RedisFakes) -> None
 
     assert await mark_swept("tenant-a", "job-1", now=NOW, waits=STUCK) is None
     assert await _score(redis_fakes) is None
+
+
+# --- stage 2's state ---------------------------------------------------------------
+
+
+async def test_stage2_is_set_with_done_and_settles_once_out_of_pending() -> None:
+    await _create()
+    job = await _job()
+    assert await transition(
+        job, JobStatus.DONE, now=NOW, ttl_seconds=TTL, stage2=Stage2State.PENDING
+    )
+    assert (await _job()).stage2 is Stage2State.PENDING
+
+    assert await settle_stage2(job, Stage2State.FAILED, now=LATER, reason="x")
+    settled = await _job()
+    assert (settled.status, settled.stage2, settled.stage2_reason) == (
+        JobStatus.DONE,
+        Stage2State.FAILED,
+        "x",
+    )
+    assert not await settle_stage2(job, Stage2State.DONE, now=LATER)
+    await jobs.get_jobs_client().delete(job_key("tenant-a", "job-1"))
+    assert not await settle_stage2(job, Stage2State.DONE, now=LATER)
+
+
+async def test_a_move_without_a_stage2_state_leaves_it_alone() -> None:
+    await _create()
+    job = await _job()
+    await transition(job, JobStatus.DOWNLOADING, now=NOW, ttl_seconds=TTL)
+    assert (await _job()).stage2 is None
 
 
 # --- stage 1's work and the pass counts ------------------------------------------

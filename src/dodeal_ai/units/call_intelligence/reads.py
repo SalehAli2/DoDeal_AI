@@ -1,5 +1,6 @@
 """Reading a call job back (register item 50): status, reason, the callback's
-delivery beside the status, and the result while it is held.
+delivery and wave 2's state beside the status, and the result while it is
+held.
 
 TENANT BY KEY. The job is looked up under the tenant the gates verified, so
 another tenant's job_id is simply not there: 404 call_job_not_found, the same
@@ -21,6 +22,7 @@ from dodeal_ai.core.jobs import (
     DeliveryState,
     JobStatus,
     JobStoreUnavailable,
+    Stage2State,
     read_job,
     read_result,
 )
@@ -30,12 +32,14 @@ _audit = logging.getLogger("dodeal_ai.audit")
 
 class CallJobView(BaseModel):
     """What the CRM reads: where the job is, why, whether its callback went
-    (None: no callback to send), and its result while held."""
+    (None: no callback to send), where wave 2 is (None: not done yet), and its
+    result while held."""
 
     job_id: str
     status: JobStatus
     reason: str | None
     delivery: DeliveryState | None
+    stage2: Stage2State | None
     result: dict[str, object] | None
 
 
@@ -65,5 +69,6 @@ async def read_call_job(context: RequestContext, job_id: str) -> CallJobView:
         status=job.status,
         reason=job.reason,
         delivery=job.delivery,
+        stage2=job.stage2,
         result=result,
     )

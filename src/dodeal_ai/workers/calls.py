@@ -1,9 +1,11 @@
 """The call workers (Unit B, register items 35 and 50): one arq worker per call
-queue, running process_call. THE worker entry point; there is no other.
+queue, running process_call, and one on the stage-2 queue, running
+analyse_stage2. THE worker entry point; there is no other.
 
     python -m dodeal_ai.workers.calls priority
     python -m dodeal_ai.workers.calls normal
     python -m dodeal_ai.workers.calls overnight
+    python -m dodeal_ai.workers.calls stage2
 
 BUILT BY A FUNCTION, NOT A CLASS BODY. arq reads a settings class through its
 `__dict__`, so a lazy descriptor reaches arq as the descriptor itself; and a
@@ -21,7 +23,8 @@ arq runs a cron once per slot however many normal workers there are.
 
 THE TRANSCRIBER IS BUILT BY THE FACTORY, which refuses while no adapter exists,
 so a worker with nothing to transcribe with does not start. A test or the demo
-passes one in, and the worker starts with it only under the demo flag.
+passes one in, and the worker starts with it only under the demo flag. The
+stage-2 worker transcribes nothing and builds none.
 
 THE MODEL CLIENT IS BUILT AS THE SERVICE BUILDS IT: core/llm's
 build_llm_client, from the same DODEAL_LLM_* settings, with the same startup
@@ -55,7 +58,9 @@ from dodeal_ai.units.call_intelligence.queues import (
     NORMAL_QUEUE,
     OVERNIGHT_QUEUE,
     PRIORITY_QUEUE,
+    STAGE2_QUEUE,
 )
+from dodeal_ai.units.call_intelligence.stage2 import analyse_stage2
 from dodeal_ai.units.call_intelligence.sweep import (
     SWEEP_INTERVAL_SECONDS,
     sweep_stuck_jobs,
@@ -70,6 +75,7 @@ QUEUES = {
     "priority": PRIORITY_QUEUE,
     "normal": NORMAL_QUEUE,
     "overnight": OVERNIGHT_QUEUE,
+    "stage2": STAGE2_QUEUE,
 }
 
 
@@ -88,7 +94,8 @@ def worker_settings(
     async def startup(ctx: dict[str, Any]) -> None:
         configure_logging()
         warn_if_demo_audio(settings)
-        ctx["transcriber"] = select_transcriber(settings, transcriber)
+        if queue != STAGE2_QUEUE:
+            ctx["transcriber"] = select_transcriber(settings, transcriber)
         preload_templates(UNIT_B_TEMPLATES)
         # The model's own pool, apart from the download's pinned client.
         llm_http = httpx.AsyncClient()
@@ -119,19 +126,29 @@ def worker_settings(
         if queue == NORMAL_QUEUE
         else []
     )
-    return {
-        "cron_jobs": sweeps,
-        "functions": [
+    functions = (
+        [func(analyse_stage2, max_tries=STAGE2_TRIES)]
+        if queue == STAGE2_QUEUE
+        else [
             func(process_call, max_tries=settings.call_max_tries + 1),
             # One re-run for a worker that died mid-POST; the schedule is ours.
             func(deliver_callback, max_tries=2),
-        ],
+        ]
+    )
+    return {
+        "cron_jobs": sweeps,
+        "functions": functions,
         "queue_name": queue,
         "job_timeout": settings.call_job_timeout_seconds,
         "redis_settings": redis_settings(),
         "on_startup": startup,
         "on_shutdown": shutdown,
     }
+
+
+# arq's runs of one analyse_stage2: the first, and re-runs for a store outage
+# or a deadline; each resumes from the passes kept, never re-paying one.
+STAGE2_TRIES = 5
 
 
 def _every(seconds: int) -> set[int]:

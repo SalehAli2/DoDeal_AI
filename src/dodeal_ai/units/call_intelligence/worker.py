@@ -36,6 +36,11 @@ THE ORDER, and what each step may cost:
      call.stage1 is then delivered, and what came of it is the delivery field,
      never the status. eligible_for_full_analysis is at least
      scoring_min_seconds long and not uncertain.
+  9. STAGE 2 WAITS FOR STAGE 1. Only once call.stage1 has gone is an eligible
+     job's analyse_stage2 put on its own queue (stage2.py); its stage2 field,
+     set with the move to done, is pending, and not_eligible otherwise. A
+     queue that cannot be reached re-runs this task, which finds the job done
+     and queues stage 2 then; nothing about stage 1 waits on it.
 
 THE DEADLINE: a run stops itself at CALL_JOB_TIMEOUT_SECONDS less 60, before
 arq's own cancel. The step it cut off is failed as retryable: a download or a
@@ -78,6 +83,7 @@ from dodeal_ai.core.jobs import (
     Job,
     JobStatus,
     JobStoreUnavailable,
+    Stage2State,
     claim_attempt,
     clear_work,
     note_wake,
@@ -93,7 +99,7 @@ from dodeal_ai.core.jobs import (
 from dodeal_ai.core.logging_config import job_log_context
 from dodeal_ai.units.call_intelligence.analysis import JobGone, PassUsage, Wave1, wave1
 from dodeal_ai.units.call_intelligence.config import CallsConfig, resolve_calls_config
-from dodeal_ai.units.call_intelligence.queues import enqueue_call
+from dodeal_ai.units.call_intelligence.queues import enqueue_call, enqueue_stage2
 from dodeal_ai.units.call_intelligence.transcriber import (
     Transcriber,
     Transcript,
@@ -167,6 +173,18 @@ def unpaid_outcome(job: Job, config: CallsConfig) -> str | None:
     return None
 
 
+def eligible_for_full_analysis(
+    job: Job, config: CallsConfig, transcript: Transcript | None
+) -> bool:
+    """A transcript, not uncertain, of a call at least scoring_min_seconds."""
+    duration = int(str(job.metadata["duration_seconds"]))
+    return (
+        transcript is not None
+        and not transcript.uncertain
+        and duration >= config.scoring_min_seconds
+    )
+
+
 def stage1_result(
     job: Job,
     config: CallsConfig,
@@ -179,17 +197,14 @@ def stage1_result(
     transcript, the signals block, wave 1's analysis (or null and why) and the
     versions. No transcript, no signals: both are null."""
     duration = int(str(job.metadata["duration_seconds"]))
-    eligible = (
-        transcript is not None
-        and not transcript.uncertain
-        and duration >= config.scoring_min_seconds
-    )
     return {
         "stage": 1,
         "call_id": job.call_id,
         "duration_seconds": duration,
         "outcome_label": outcome_label,
-        "eligible_for_full_analysis": eligible,
+        "eligible_for_full_analysis": eligible_for_full_analysis(
+            job, config, transcript
+        ),
         "transcript": None
         if transcript is None
         else transcript.model_dump(mode="json"),
@@ -284,7 +299,11 @@ async def _expired(ctx: dict[str, Any], tenant: str, job_id: str, run: CallRun) 
     owed, is left to a re-run of the job."""
     _logger.warning("call_job_deadline_exceeded", extra={"reason_code": DEADLINE})
     job = await read_job(tenant, job_id)
-    if job is None or (job.terminal and job.delivery is not DeliveryState.PENDING):
+    if job is None or (
+        job.terminal
+        and job.delivery is not DeliveryState.PENDING
+        and job.stage2 is not Stage2State.PENDING
+    ):
         return
     config = await resolve_calls_config(tenant)
     if job.status is JobStatus.DOWNLOADING:
@@ -323,6 +342,8 @@ async def _process(
             config = await resolve_calls_config(tenant)
             event = STAGE1 if job.status is JobStatus.DONE else FAILED
             await _deliver(ctx, job, event, config, run)
+        if job.stage2 is Stage2State.PENDING:
+            await _queue_stage2(job)
         return
     config = await resolve_calls_config(tenant)
     if not config.calls_enabled:
@@ -447,7 +468,10 @@ async def _done(
     label: str | None,
     run: CallRun,
 ) -> None:
-    """`done` with its delivery owed, then call.stage1 sent once."""
+    """`done` with its delivery owed and its stage-2 state, then call.stage1
+    sent once, and only then stage 2 queued for an eligible call."""
+    eligible = eligible_for_full_analysis(job, config, run.transcript)
+    stage2 = Stage2State.PENDING if eligible else Stage2State.NOT_ELIGIBLE
     await transition(
         job,
         JobStatus.DONE,
@@ -455,9 +479,22 @@ async def _done(
         reason=label,
         ttl_seconds=config.result_ttl_seconds,
         delivery=owed_delivery(config),
+        stage2=stage2,
     )
     run.moved(JobStatus.DONE, label)
     await _deliver(ctx, job, STAGE1, config, run)
+    if stage2 is Stage2State.PENDING:
+        await _queue_stage2(job)
+
+
+async def _queue_stage2(job: Job) -> None:
+    """analyse_stage2 on its own queue, once per job. A queue that cannot be
+    reached runs this task again soon, which finds the job done and tries
+    again: stage 1 has gone already, and is never held for stage 2."""
+    try:
+        await enqueue_stage2(job.tenant, job.job_id)
+    except QueueUnavailable:
+        raise Retry(defer=RETRY_DELAY_SECONDS) from None
 
 
 def owed_delivery(config: CallsConfig) -> DeliveryState | None:

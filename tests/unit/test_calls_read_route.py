@@ -96,6 +96,7 @@ async def test_a_queued_job_reads_back_with_no_result(client) -> None:
         "status": "queued",
         "reason": None,
         "delivery": None,
+        "stage2": None,
         "result": None,
     }
 
@@ -110,6 +111,7 @@ async def test_a_done_job_reads_back_its_result_while_held(
             "status": "done",
             "reason": "voicemail",
             "delivery": "delivery_failed",
+            "stage2": "not_eligible",
         },
     )
     await store_result("tenant-a", job_id, {"stage": 1}, ttl_seconds=60)
@@ -121,6 +123,7 @@ async def test_a_done_job_reads_back_its_result_while_held(
         "delivery_failed",
         {"stage": 1},
     )
+    assert body["stage2"] == "not_eligible"
 
 
 async def test_another_tenants_job_is_404(client, audit_log: io.StringIO) -> None:
