@@ -870,16 +870,15 @@ async def test_arq_is_asked_under_every_id_the_job_can_have_had(
 
 
 async def test_arq_unreachable_is_queue_unavailable(monkeypatch) -> None:
-    import redis as redis_lib
+    import fakeredis
 
     from dodeal_ai.core.errors import QueueUnavailable
     from dodeal_ai.units.call_intelligence import queues
 
-    class _Down:
-        async def exists(self, *keys: str) -> int:
-            raise redis_lib.ConnectionError("down")
-
-    monkeypatch.setattr(queues, "get_queue_client", lambda: _Down())
+    server = fakeredis.FakeServer()
+    server.connected = False
+    down = fakeredis.FakeAsyncRedis(server=server)
+    monkeypatch.setattr(queues, "get_queue_client", lambda: down)
     with pytest.raises(QueueUnavailable):
         await queues.on_the_queue("tenant-a", JOB, pauses=0, sweeps=0)
 
