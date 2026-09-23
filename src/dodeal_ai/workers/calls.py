@@ -13,7 +13,7 @@ worker is built and hands arq a plain dict.
 
 arq's own try count is CALL_MAX_TRIES + 1, one more than the job's: the job's
 attempts in db3 decide, and the extra run is the one that dead-letters a job
-whose last attempt crashed.
+whose last attempt crashed. Each run is cut off at CALL_JOB_TIMEOUT_SECONDS.
 
 THE TRANSCRIBER IS BUILT BY THE FACTORY, which refuses while no adapter exists,
 so a worker with nothing to transcribe with does not start. A test or the demo
@@ -85,6 +85,7 @@ def worker_settings(
             func(deliver_callback, max_tries=2),
         ],
         "queue_name": queue,
+        "job_timeout": settings.call_job_timeout_seconds,
         "redis_settings": redis_settings(),
         "on_startup": startup,
         "on_shutdown": shutdown,

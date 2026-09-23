@@ -708,6 +708,7 @@ async def test_the_worker_settings_carry_one_more_arq_try_than_the_job(
         ("deliver_callback", 2),
     ]
     assert built["queue_name"] == NORMAL_QUEUE
+    assert built["job_timeout"] == 1800
 
     ctx: dict[str, Any] = {}
     await built["on_startup"](ctx)
@@ -718,6 +719,14 @@ async def test_the_worker_settings_carry_one_more_arq_try_than_the_job(
     await built["on_shutdown"](ctx)
     assert ctx["http"].is_closed
     await built["on_shutdown"]({})
+
+
+def test_each_queue_carries_the_configured_job_timeout(monkeypatch) -> None:
+    """CALL_JOB_TIMEOUT_SECONDS is every call queue's arq job timeout."""
+    monkeypatch.setenv("DODEAL_CALL_JOB_TIMEOUT_SECONDS", "2400")
+    get_settings.cache_clear()
+    for queue in calls_worker.QUEUES.values():
+        assert calls_worker.worker_settings(queue)["job_timeout"] == 2400
 
 
 async def test_the_fake_with_the_demo_flag_off_refuses_to_start() -> None:

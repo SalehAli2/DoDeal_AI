@@ -191,6 +191,10 @@ class Settings(BaseSettings):
     # item 35). 2 rides out one bad download or one failed transcription, never
     # more than one re-paid. Higher re-fetches a dead link; 1 never retries.
     call_max_tries: int = Field(default=2, ge=1)
+    # arq's timeout for one run of a call-queue task: download, transcription
+    # and delivery together. 1800 s holds a long call's transcription; too low
+    # kills paid work mid-flight, too high lets a hung run hold a worker slot.
+    call_job_timeout_seconds: int = Field(default=1800, gt=0)
     # Each tenant's callback signing secret, JSON {"tenant": "secret"}; SecretStr
     # so a repr prints stars. Read once, in core/callbacks.py. A tenant missing
     # here gets NO callback -- never an unsigned one -- and polls GET instead.
