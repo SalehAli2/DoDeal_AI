@@ -7295,3 +7295,45 @@ in clear; (2) calls on with no audio host leaves the download with no list to
 hold a signed link to.
 Stress test: an http callback and calls on with no host are both refused, in
 the parser and as a 422 that stores nothing (sabotage: scheme check off fails 2).
+
+## Batch: Unit B foundation (branch call-intelligence), items 193 to 156 and docs
+
+One block for the batch, by the lead's instruction; 193 and the unit_b
+section also have their own blocks above. Per item: two production failure
+modes, then one stress test (sabotage in brackets).
+
+- 193 merge: a PUT drops another section; a lost race merges into the stale
+  record. Test: unit_b PUT keeps unit_a's stamps (start from {} fails 5).
+- 50 unit_b section: http callback leaks a transcript; calls on with no host.
+  Test: both refused in the parser and as a 422 (scheme check off fails 2).
+- 50 jobs store (db3): two pushes make two jobs and two bills; a finished job
+  lives forever. Test: 20 concurrent pushes on real Redis make one job, x3
+  (index check off fails 2).
+- 50 push route: a disabled tenant is admitted; a lost enqueue strands a
+  queued job. Test: calls off is 403 with nothing written (check off fails 1).
+- unit-b download: SSRF to metadata/loopback via a redirect or DNS rebind; a
+  huge file fills the disk. Test: redirect to 127.0.0.1 refused before a byte
+  (follow_redirects=True fails 1).
+- 101 transcriber: an adapter returns overlapping segments or a flag its own
+  segments contradict. Test: the conformance suite (overlap check off fails 1).
+- 105 calls budgets: a worker spends blind through a cost-store outage; calls
+  spend the live token budget. Test: calls charges touch only calls keys
+  ("calls" budget off fails 2).
+- 35/36 process_call: a crash after STT pays twice; a flaky link loops. Test:
+  crash after transcription retries delivery only (stored-result check off
+  fails 1).
+- unit-b callbacks: unsigned or misdirected transcripts; a CRM outage loses
+  stage 1. Test: signature verifies and retries run 60/300/1800/7200 (sign the
+  body alone fails 3).
+- 50 read route: a job_id read across tenants; reads unaudited. Test: other
+  tenant 404 with one audit line (audit at DEBUG fails 2).
+- 54 observability: a worker line with no job id; an outcome line missing a
+  field or carrying words. Test: complete outcome line, no content (bytes
+  dropped fails 2).
+- cost: a reprompt uncounted; an unpriced model read as free. Test: 3 passes,
+  4 model_calls, cost null + one warning unpriced (recording off fails 6).
+- demo: the flag left on in production; loopback admitted with it off. Test:
+  off refuses 127.0.0.1 and http (loopback always admitted fails 4).
+- 156 CODEOWNERS: Unit B owned by the wrong person; a rename re-owns it. Test:
+  rules pinned and the path exists (owner added fails 2).
+- docs(owasp): not code; every test it cites is checked to exist.
