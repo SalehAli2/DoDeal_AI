@@ -61,7 +61,15 @@ Both fail OPEN on a Redis error, for the same reason enforce_cost does.
 WHICH TOKEN KEYS is the scope's choice (register item 127): `token_budget`
 "live" is the tenant and user pair above; "history" is the one counter
 `tokens:history:tenant:{t}`, with its own limit, in both the pre-flight and the
-charge. A history judgement never reads or moves the live pair.
+charge. A history judgement never reads or moves the live pair. "calls" is the
+one counter `tokens:calls:tenant:{t}` (register item 105), the same way.
+
+THE CALL BUDGETS PAUSE, THEY DO NOT FAIL OPEN (register item 105). A worker
+draining a backlog must not spend blind: `calls_budget_preflight` reads the
+calls token counter and `audio_seconds:calls:tenant:{t}` and raises
+CallsBudgetPaused at or over either limit AND when the store cannot answer;
+`charge_audio_seconds` does the same when its charge cannot be written. The
+worker parks the job as paused_budget and retries it after the window.
 
 EVERY call here runs inside `cost_breaker` (core/breaker.py), so a store that is
 down stops being asked once. Nothing above changes: BreakerOpen IS a
@@ -322,6 +330,14 @@ def _history_token_key(tenant: str) -> str:
     return f"tokens:history:tenant:{tenant}"
 
 
+def _calls_token_key(tenant: str) -> str:
+    return f"tokens:calls:tenant:{tenant}"
+
+
+def _audio_seconds_key(tenant: str) -> str:
+    return f"audio_seconds:calls:tenant:{tenant}"
+
+
 def _budgets(scope: TenantScope) -> tuple[tuple[str, str, int], ...]:
     """(name, key, limit) for every token budget this scope is charged to,
     chosen by `scope.token_budget`. A history judgement is charged to the
@@ -333,6 +349,14 @@ def _budgets(scope: TenantScope) -> tuple[tuple[str, str, int], ...]:
                 "history",
                 _history_token_key(scope.tenant),
                 settings.cost_tokens_history_per_tenant_limit,
+            ),
+        )
+    if scope.token_budget == "calls":
+        return (
+            (
+                "calls",
+                _calls_token_key(scope.tenant),
+                settings.cost_tokens_calls_per_tenant_limit,
             ),
         )
     tenant_key, user_key = _token_keys(scope.tenant, scope.subject)
@@ -430,7 +454,8 @@ async def enforce_token_cost(
     window = settings.cost_window_seconds
 
     async def _charge() -> tuple[int, ...]:
-        if scope.token_budget == "history":
+        if len(keys) == 1:
+            # history or calls: one counter, on the one-counter script.
             return await _add_history_tokens_with_window(client, keys[0], total, window)
         return await _add_tokens_with_window(client, keys[0], keys[1], total, window)
 
@@ -547,6 +572,77 @@ async def token_preflight(scope: TenantScope) -> bool:
         },
     )
     return True
+
+
+class CallsBudgetPaused(Exception):
+    """A call job must wait for the next window (register item 105): a calls
+    budget is spent, or the store that counts it cannot answer. Fixed reason
+    code: token_budget_exceeded, audio_budget_exceeded or cost_store_unavailable."""
+
+    def __init__(self, reason_code: str) -> None:
+        self.reason_code = reason_code
+        super().__init__(reason_code)
+
+
+def _calls_unavailable(scope: TenantScope, exc: redis.RedisError) -> CallsBudgetPaused:
+    """Log the store refusing a calls budget, and hand back the pause to raise."""
+    _logger.warning(
+        "calls_budget_unavailable",
+        extra={
+            "reason_code": "cost_store_unavailable",
+            "tenant": scope.tenant,
+            "request_id": scope.request_id,
+            **breaker_field(exc),
+        },
+    )
+    return CallsBudgetPaused("cost_store_unavailable")
+
+
+async def calls_budget_preflight(scope: TenantScope) -> None:
+    """Before a call job spends anything: pause at or over the calls token
+    budget or the audio-seconds budget, and pause when the store cannot say.
+    READ-ONLY, one MGET of the two calls keys and nothing else."""
+    settings = get_settings()
+    client = get_cost_client()
+    keys = (_calls_token_key(scope.tenant), _audio_seconds_key(scope.tenant))
+    try:
+        raws = await cost_breaker().call(lambda: client.mget(*keys))
+    except redis.RedisError as exc:
+        raise _calls_unavailable(scope, exc) from None
+    tokens, seconds = (int(raw or 0) for raw in raws)
+    if tokens >= settings.cost_tokens_calls_per_tenant_limit:
+        raise CallsBudgetPaused("token_budget_exceeded")
+    if seconds >= settings.cost_audio_seconds_per_tenant_limit:
+        raise CallsBudgetPaused("audio_budget_exceeded")
+
+
+async def charge_audio_seconds(scope: TenantScope, seconds: int) -> int:
+    """Charge a downloaded recording's seconds to the tenant's audio budget,
+    on the one-counter script and the cost window. Returns the running total.
+    A store that cannot take the charge pauses the job before it is paid for."""
+    settings = get_settings()
+    client = get_cost_client()
+    key = _audio_seconds_key(scope.tenant)
+
+    async def _charge() -> tuple[int]:
+        return await _add_history_tokens_with_window(
+            client, key, seconds, settings.cost_window_seconds
+        )
+
+    try:
+        (total,) = await cost_breaker().call(_charge)
+    except redis.RedisError as exc:
+        raise _calls_unavailable(scope, exc) from None
+    _logger.info(
+        "audio_seconds_charged",
+        extra={
+            "tenant": scope.tenant,
+            "request_id": scope.request_id,
+            "audio_seconds": seconds,
+            "calls_total": total,
+        },
+    )
+    return total
 
 
 async def get_usage(tenant: str, subject: str) -> tuple[int, int]:

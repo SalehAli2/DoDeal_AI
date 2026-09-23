@@ -310,6 +310,14 @@ class Settings(BaseSettings):
     # 127): old notes scored in bulk, charged here and never to the live pair,
     # so a backfill cannot starve today's judgements. Too low stalls a backfill.
     cost_tokens_history_per_tenant_limit: int = Field(default=20_000_000, gt=0)
+    # The tenant's token budget for CALL analysis (register item 105), per
+    # window, charged to `tokens:calls:tenant` and never the live pair. A call
+    # transcript is long; too low pauses every call job for the rest of the day.
+    cost_tokens_calls_per_tenant_limit: int = Field(default=20_000_000, gt=0)
+    # Seconds of call audio a tenant may send to speech-to-text per window,
+    # charged on download to `audio_seconds:calls:tenant`. 360000 is 100 hours;
+    # too low pauses a busy floor's calls, too high bounds no bill.
+    cost_audio_seconds_per_tenant_limit: int = Field(default=360_000, gt=0)
     # The fraction of a limit at which a running total earns one WARNING.
     # STRICTLY between 0 and 1: 0 warns on the first token, 1 warns only once
     # the budget is already spent, and neither is a warning.

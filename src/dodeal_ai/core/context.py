@@ -22,8 +22,9 @@ from dodeal_ai.core.auth.claims import Identity
 type Principal = Literal["user", "service"]
 
 # Which token budget a judgement is charged to (core/cost/limiter.py): the live
-# one every judgement shares, or the tenant's separate history budget (item 127).
-type TokenBudget = Literal["live", "history"]
+# one every judgement shares, the tenant's separate history budget (item 127),
+# or its call budget (register item 105), which a worker pauses on.
+type TokenBudget = Literal["live", "history", "calls"]
 
 
 class PrincipalMismatchError(Exception):

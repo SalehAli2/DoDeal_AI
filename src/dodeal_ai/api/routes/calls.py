@@ -34,7 +34,7 @@ async def create_call_job(
     """Admit one recorded call. Work happens on a worker, never here: the
     answer is the job to poll and the callbacks to expect."""
     return await admit_call(
-        context.scope_for_author(body.author_id),
+        context.scope_for_author(body.author_id, budget="calls"),
         body,
         await resolve_calls_config(context.tenant),
         now=datetime.now(UTC),
