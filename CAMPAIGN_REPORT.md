@@ -7062,3 +7062,16 @@ Production failure modes: (1) the orchestrator's termination grace period is
 set separately and shorter, and the pod is killed before uvicorn's drain ends;
 (2) a brief under the same deadline plus its store read may still run past it.
 Stress test: a 12.3 s deadline gives uvicorn an 18 s drain.
+
+## Piece: register item 89, the fetch check prints statuses and ids only
+
+Item 89 -- scripts/real_fetch_check.py branches on the transport's
+`BackendStatusError` (it tested `httpx.HTTPStatusError`, which the transport
+never raises), prints the status and a fixed diagnosis and never a response
+body, the exception type and never a foreign message, and lead ids on success,
+never a name.
+Production failure modes: (1) a 429 with a long Retry-After is reported as a
+generic HTTP error, not as the rate limit it is; (2) an operator pastes the
+terminal into a ticket and the tenant subdomain in the URL line travels with it.
+Stress test: seven leads named with a sentinel print "First lead ids: 1, 2, 3,
+4, 5" and no sentinel.

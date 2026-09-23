@@ -30,6 +30,11 @@ Requires:
       closed, even though this script bypasses the gate chain entirely and
       never touches a JWT. Your local .env already has this if you can run
       the app at all.
+
+What it prints (register item 89): the status and a fixed diagnosis for a
+refused call -- never a response body, which is the CRM's and may quote the
+request -- the exception TYPE for a network failure, never its message, and
+lead ids on success, never a name.
 """
 
 from __future__ import annotations
@@ -45,7 +50,11 @@ from pydantic import SecretStr
 from dodeal_ai.core.config import Settings, get_settings
 from dodeal_ai.core.context import TenantScope
 from dodeal_ai.core.resilience import ExternalCallError
-from dodeal_ai.tools.errors import BackendEnvelopeInvalid, BackendError
+from dodeal_ai.tools.errors import (
+    BackendEnvelopeInvalid,
+    BackendError,
+    BackendStatusError,
+)
 from dodeal_ai.tools.httpx_transport import HttpxTransport
 from dodeal_ai.tools.keys import SettingsKeyResolver, TenantKeyResolver
 from dodeal_ai.tools.leads import LeadsClient
@@ -147,11 +156,15 @@ def _mask_key(key: str) -> str:
     return "*" * (len(key) - 4) + key[-4:]
 
 
+# How many lead ids the success line prints.
+_IDS_SHOWN = 5
+
+
 def _report_external_call_error(exc: ExternalCallError) -> None:
+    """The status and a fixed diagnosis; never the body, never a message."""
     cause = exc.cause
-    if isinstance(cause, httpx.HTTPStatusError):
-        status = cause.response.status_code
-        snippet = cause.response.text[:300]
+    if isinstance(cause, BackendStatusError):
+        status = cause.status
         if status in (401, 403):
             print(
                 f"AUTH PROBLEM: backend returned {status}. Check that "
@@ -166,15 +179,11 @@ def _report_external_call_error(exc: ExternalCallError) -> None:
                 file=sys.stderr,
             )
         else:
-            print(
-                f"BACKEND HTTP ERROR: {status} {cause.response.reason_phrase}",
-                file=sys.stderr,
-            )
-        print(f"Response body (truncated): {snippet}", file=sys.stderr)
+            print(f"BACKEND HTTP ERROR: {status}", file=sys.stderr)
     else:
         print(
             f"NETWORK PROBLEM: could not complete the request "
-            f"({type(cause).__name__}: {cause}). Check connectivity, DNS, "
+            f"({type(cause).__name__}). Check connectivity, DNS, "
             "and that the tenant subdomain is reachable.",
             file=sys.stderr,
         )
@@ -263,8 +272,9 @@ async def _run(tenant: str, live: bool) -> int:
 
     print(f"OK: parsed {len(leads)} lead(s) against the confirmed schema.")
     if leads:
-        first = leads[0]
-        print(f"First lead: id={first.id} name={first.name!r}")
+        # Ids only: a lead's name is a real client's, and this is a terminal.
+        shown = ", ".join(str(lead.id) for lead in leads[:_IDS_SHOWN])
+        print(f"First lead ids: {shown}")
     else:
         print("(This tenant currently has zero leads -- shape still parsed cleanly.)")
     return 0
