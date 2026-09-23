@@ -16,6 +16,9 @@ from __future__ import annotations
 import json
 import logging
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime
 
 from dodeal_ai.core.config import get_settings
@@ -34,6 +37,40 @@ _STANDARD_RECORD_ATTRS = frozenset(
 # three explicitly, so all three need handing back -- clearing only the parent
 # leaves uvicorn.error and uvicorn.access still holding their own handlers.
 _UVICORN_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access")
+
+
+# The job a worker line belongs to (register item 54): set around each call
+# task by `job_log_context`, read by JobContextFilter, None outside a task.
+_JOB_CONTEXT: ContextVar[dict[str, str] | None] = ContextVar(
+    "dodeal_job_context", default=None
+)
+
+
+@contextmanager
+def job_log_context(*, tenant: str, job_id: str) -> Iterator[dict[str, str]]:
+    """Every line logged inside carries this tenant, job_id and request_id.
+    The request_id is "unknown" until the task has read its job and set it on
+    the dict this yields."""
+    fields = {"tenant": tenant, "job_id": job_id, "request_id": "unknown"}
+    token = _JOB_CONTEXT.set(fields)
+    try:
+        yield fields
+    finally:
+        _JOB_CONTEXT.reset(token)
+
+
+class JobContextFilter(logging.Filter):
+    """Adds the current job's three ids to a record that does not already
+    carry them. A filter, not a record factory: a factory's attribute would
+    make every `extra=` naming the same field raise."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        fields = _JOB_CONTEXT.get()
+        if fields is not None:
+            for name, value in fields.items():
+                if not hasattr(record, name):
+                    setattr(record, name, value)
+        return True
 
 
 class JsonFormatter(logging.Formatter):
@@ -128,6 +165,8 @@ def configure_logging() -> None:
 
     handler = logging.StreamHandler(stream=sys.stdout)
     handler.setFormatter(JsonFormatter())
+    # Register item 54: a worker line names its job wherever it was logged.
+    handler.addFilter(JobContextFilter())
 
     root = logging.getLogger()
     root.setLevel(logging.WARNING)

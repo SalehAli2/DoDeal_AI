@@ -30,12 +30,15 @@ Nothing here logs the link, a hash, a voiceprint or a word of the transcript.
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from arq import Retry
 
+from dodeal_ai.core import metrics
 from dodeal_ai.core.audio_download import (
     AudioDownloadError,
     downloaded_audio,
@@ -61,6 +64,7 @@ from dodeal_ai.core.jobs import (
     store_result,
     transition,
 )
+from dodeal_ai.core.logging_config import job_log_context
 from dodeal_ai.units.call_intelligence.config import CallsConfig, resolve_calls_config
 from dodeal_ai.units.call_intelligence.queues import enqueue_call
 from dodeal_ai.units.call_intelligence.transcriber import (
@@ -141,37 +145,90 @@ def stage1_result(
     }
 
 
+@dataclass(slots=True)
+class CallRun:
+    """What one task run did, for its one outcome line (register item 54).
+    A stage that did not run stays None: it did not take zero milliseconds."""
+
+    started: float = field(default_factory=time.monotonic)
+    job: Job | None = None
+    status: str | None = None
+    reason: str | None = None
+    attempts: int | None = None
+    bytes: int | None = None
+    transcript: Transcript | None = None
+    download_ms: int | None = None
+    transcribe_ms: int | None = None
+    analyse_ms: int | None = None
+    deliver_ms: int | None = None
+
+    def moved(self, status: JobStatus, reason: str | None = None) -> None:
+        self.status, self.reason = status.value, reason
+
+
+def _ms_since(started: float) -> int:
+    return int((time.monotonic() - started) * 1000)
+
+
 async def process_call(ctx: dict[str, Any], tenant: str, job_id: str) -> None:
-    """The arq task. See the module docstring for the order."""
-    try:
-        await _process(ctx, tenant, job_id)
-    except JobStoreUnavailable:
-        # Nothing can be recorded; arq runs the job again shortly.
-        _logger.warning(
-            "call_job_store_unavailable",
-            extra={"reason_code": "job_store_unavailable", "tenant": tenant},
-        )
-        raise Retry(defer=RETRY_DELAY_SECONDS) from None
+    """The arq task. See the module docstring for the order. Every line it
+    logs names the job (core/logging_config.py), and it ends in one outcome
+    line whatever happened."""
+    run = CallRun()
+    with job_log_context(tenant=tenant, job_id=job_id) as fields:
+        try:
+            await _process(ctx, tenant, job_id, run, fields)
+        except JobStoreUnavailable:
+            # Nothing can be recorded; arq runs the job again shortly.
+            _logger.warning(
+                "call_job_store_unavailable",
+                extra={"reason_code": "job_store_unavailable"},
+            )
+            raise Retry(defer=RETRY_DELAY_SECONDS) from None
+        except Retry:
+            raise
+        except BaseException:
+            run.status = "error"
+            raise
+        finally:
+            if run.job is not None:
+                _log_outcome(run)
 
 
-async def _process(ctx: dict[str, Any], tenant: str, job_id: str) -> None:
+async def _process(
+    ctx: dict[str, Any],
+    tenant: str,
+    job_id: str,
+    run: CallRun,
+    fields: dict[str, str],
+) -> None:
     settings = get_settings()
     job = await read_job(tenant, job_id)
-    if job is None or job.terminal:
+    if job is None:
+        return
+    fields["request_id"] = job.request_id
+    run.job, run.status, run.reason, run.attempts = (
+        job,
+        job.status.value,
+        job.reason,
+        job.attempts,
+    )
+    if job.terminal:
         return
     config = await resolve_calls_config(tenant)
     if not config.calls_enabled:
-        await _fail(ctx, job, config, "calls_not_enabled", dead=False)
+        await _fail(ctx, job, config, "calls_not_enabled", dead=False, run=run)
         return
     if job.attempts >= settings.call_max_tries:
-        await _fail(ctx, job, config, job.reason or "max_tries_exceeded", dead=True)
+        reason = job.reason or "max_tries_exceeded"
+        await _fail(ctx, job, config, reason, dead=True, run=run)
         return
 
     label = unpaid_outcome(job, config)
     stored = None if label is not None else await read_result(tenant, job_id)
     paid = label is None and stored is None
     if paid and job.status is JobStatus.TRANSCRIBING:
-        await _fail(ctx, job, config, "transcription_interrupted", dead=True)
+        await _fail(ctx, job, config, "transcription_interrupted", dead=True, run=run)
         return
 
     scope = job_scope(job)
@@ -179,7 +236,7 @@ async def _process(ctx: dict[str, Any], tenant: str, job_id: str) -> None:
         try:
             await calls_budget_preflight(scope)
         except CallsBudgetPaused as paused:
-            await _pause(job, paused.reason_code)
+            await _pause(job, paused.reason_code, run=run)
             return
 
     attempt = await claim_attempt(
@@ -191,8 +248,10 @@ async def _process(ctx: dict[str, Any], tenant: str, job_id: str) -> None:
     if attempt is None:
         return
     if attempt == 0:
-        await _fail(ctx, job, config, job.reason or "max_tries_exceeded", dead=True)
+        reason = job.reason or "max_tries_exceeded"
+        await _fail(ctx, job, config, reason, dead=True, run=run)
         return
+    run.attempts = attempt
 
     if label is not None:
         result = stage1_result(job, config, transcript=None, outcome_label=label)
@@ -200,7 +259,7 @@ async def _process(ctx: dict[str, Any], tenant: str, job_id: str) -> None:
             tenant, job_id, result, ttl_seconds=config.result_ttl_seconds
         )
     elif paid:
-        transcript = await _transcribe(ctx, job, config, scope, attempt)
+        transcript = await _transcribe(ctx, job, config, scope, attempt, run)
         if transcript is None:
             return
         result = stage1_result(job, config, transcript=transcript, outcome_label=None)
@@ -211,8 +270,12 @@ async def _process(ctx: dict[str, Any], tenant: str, job_id: str) -> None:
     await transition(
         job, JobStatus.DELIVERING, now=_now(), ttl_seconds=config.result_ttl_seconds
     )
+    run.moved(JobStatus.DELIVERING)
     deliver: Deliver = ctx.get("deliver", deliver_nothing)
-    if await deliver(job, STAGE1, config):
+    started = time.monotonic()
+    delivered = await deliver(job, STAGE1, config)
+    run.deliver_ms = _ms_since(started)
+    if delivered:
         await transition(
             job,
             JobStatus.DONE,
@@ -220,10 +283,7 @@ async def _process(ctx: dict[str, Any], tenant: str, job_id: str) -> None:
             reason=label,
             ttl_seconds=config.result_ttl_seconds,
         )
-        _logger.info(
-            "call_job_done",
-            extra={"tenant": tenant, "job_id": job_id, "outcome_label": label},
-        )
+        run.moved(JobStatus.DONE, label)
 
 
 async def _transcribe(
@@ -232,12 +292,14 @@ async def _transcribe(
     config: CallsConfig,
     scope: TenantScope,
     attempt: int,
+    run: CallRun,
 ) -> Transcript | None:
     """Download, charge the seconds, transcribe once. None when the job was
     failed, paused or scheduled to retry instead."""
     settings = get_settings()
     transcriber: Transcriber = ctx["transcriber"]
     meta = job.metadata
+    started = time.monotonic()
     try:
         async with downloaded_audio(
             str(meta["audio_url"]),
@@ -249,10 +311,12 @@ async def _transcribe(
             http=ctx["http"],
             resolve=ctx.get("resolve", resolve_host),
         ) as audio:
+            run.download_ms, run.bytes = _ms_since(started), audio.size_bytes
+            seconds = int(str(meta["duration_seconds"]))
             try:
-                await charge_audio_seconds(scope, int(str(meta["duration_seconds"])))
+                await charge_audio_seconds(scope, seconds)
             except CallsBudgetPaused as paused:
-                await _pause(job, paused.reason_code)
+                await _pause(job, paused.reason_code, run=run)
                 return None
             await transition(
                 job,
@@ -260,16 +324,25 @@ async def _transcribe(
                 now=_now(),
                 ttl_seconds=config.result_ttl_seconds,
             )
+            run.moved(JobStatus.TRANSCRIBING)
+            metrics.AUDIO_SECONDS_PROCESSED.inc(seconds)
             hint = meta.get("language_hint")
-            return await transcriber.transcribe(
-                audio.path, language_hint=hint if isinstance(hint, str) else None
-            )
+            started = time.monotonic()
+            try:
+                run.transcript = await transcriber.transcribe(
+                    audio.path, language_hint=hint if isinstance(hint, str) else None
+                )
+            finally:
+                run.transcribe_ms = _ms_since(started)
+            return run.transcript
     except AudioDownloadError as refused:
-        await _download_failed(ctx, job, config, refused, attempt)
+        if run.download_ms is None:
+            run.download_ms = _ms_since(started)
+        await _download_failed(ctx, job, config, refused, attempt, run)
         return None
     except TranscriptionError as failed:
         # Never retried, retryable or not: the provider may have billed it.
-        await _fail(ctx, job, config, failed.reason, dead=False)
+        await _fail(ctx, job, config, failed.reason, dead=False, run=run)
         return None
 
 
@@ -279,14 +352,15 @@ async def _download_failed(
     config: CallsConfig,
     refused: AudioDownloadError,
     attempt: int,
+    run: CallRun,
 ) -> None:
     """A refused link fails the job; one that may work later is retried until
     the attempts run out, then dead-lettered with its reason."""
     if not refused.retryable:
-        await _fail(ctx, job, config, refused.reason, dead=False)
+        await _fail(ctx, job, config, refused.reason, dead=False, run=run)
         return
     if attempt >= get_settings().call_max_tries:
-        await _fail(ctx, job, config, refused.reason, dead=True)
+        await _fail(ctx, job, config, refused.reason, dead=True, run=run)
         return
     await transition(
         job,
@@ -295,6 +369,7 @@ async def _download_failed(
         reason=refused.reason,
         ttl_seconds=config.result_ttl_seconds,
     )
+    run.moved(JobStatus.QUEUED, refused.reason)
     raise Retry(defer=RETRY_DELAY_SECONDS * attempt)
 
 
@@ -305,6 +380,7 @@ async def _fail(
     reason: str,
     *,
     dead: bool,
+    run: CallRun | None = None,
 ) -> None:
     """failed or dead_letter with `reason`, then call.failed to the CRM."""
     status = JobStatus.DEAD_LETTER if dead else JobStatus.FAILED
@@ -313,29 +389,20 @@ async def _fail(
     )
     if not moved:
         return
-    _logger.warning(
-        "call_job_failed",
-        extra={
-            "reason_code": reason,
-            "tenant": job.tenant,
-            "job_id": job.job_id,
-            "status": status.value,
-        },
-    )
+    if run is not None:
+        run.moved(status, reason)
     deliver: Deliver = ctx.get("deliver", deliver_nothing)
     await deliver(job, FAILED, config)
 
 
-async def _pause(job: Job, reason: str) -> None:
+async def _pause(job: Job, reason: str, *, run: CallRun | None = None) -> None:
     """paused_budget, and back on the job's queue after the cost window."""
     settings = get_settings()
     count = await pause(job, now=_now(), reason=reason)
     if count is None:
         return
-    _logger.warning(
-        "call_job_paused",
-        extra={"reason_code": reason, "tenant": job.tenant, "job_id": job.job_id},
-    )
+    if run is not None:
+        run.moved(JobStatus.PAUSED_BUDGET, reason)
     try:
         await enqueue_call(
             job.tenant,
@@ -348,3 +415,47 @@ async def _pause(job: Job, reason: str) -> None:
         # Paused with nothing to wake it: run this again soon, which pauses
         # again and queues the resume then.
         raise Retry(defer=RETRY_DELAY_SECONDS) from None
+
+
+def _log_outcome(run: CallRun) -> None:
+    """ONE line per task run, and its metrics (register item 54). Numbers,
+    ids and fixed words only -- never the link, a hash or a word said.
+    `pass_tokens` is null until an analysis pass exists to spend any."""
+    assert run.job is not None
+    job, transcript = run.job, run.transcript
+    status = run.status or job.status.value
+    elapsed = time.monotonic() - run.started
+    fields: dict[str, object] = {
+        "status": status,
+        "reason": run.reason,
+        "attempts": run.attempts,
+        "queue": job.queue,
+        "duration_seconds": job.metadata.get("duration_seconds"),
+        "bytes": run.bytes,
+        "language_profile": None if transcript is None else transcript.language_profile,
+        "uncertain": None if transcript is None else transcript.uncertain,
+        "download_ms": run.download_ms,
+        "transcribe_ms": run.transcribe_ms,
+        "analyse_ms": run.analyse_ms,
+        "deliver_ms": run.deliver_ms,
+        "elapsed_ms": int(elapsed * 1000),
+        "provider": None if transcript is None else transcript.provider,
+        "model": None if transcript is None else transcript.model,
+        "pass_tokens": None,
+    }
+    level = logging.INFO if status not in _FAILURES else logging.WARNING
+    _logger.log(level, "call_job_outcome", extra=fields)
+    metrics.CALL_JOBS.labels(status=status).inc()
+    metrics.CALL_JOB_SECONDS.observe(elapsed)
+    for stage, ms in (
+        ("download", run.download_ms),
+        ("transcribe", run.transcribe_ms),
+        ("analyse", run.analyse_ms),
+        ("deliver", run.deliver_ms),
+    ):
+        if ms is not None:
+            metrics.CALL_STAGE_SECONDS.labels(stage=stage).observe(ms / 1000)
+
+
+# Statuses whose outcome line is a WARNING, not INFO.
+_FAILURES = frozenset({JobStatus.FAILED.value, JobStatus.DEAD_LETTER.value, "error"})

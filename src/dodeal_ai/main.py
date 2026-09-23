@@ -42,6 +42,7 @@ from dodeal_ai.units.call_intelligence.config import (
     UNIT_B_SECTION,
     parse_unit_b_section,
 )
+from dodeal_ai.units.call_intelligence.queues import refresh_queue_depths
 from dodeal_ai.units.structured_intelligence.config import (
     UNIT_A_SECTION,
     parse_unit_a_section,
@@ -327,6 +328,8 @@ async def metrics() -> Response:
     DODEAL_METRICS_ENABLED. No gate: it carries no tenant and no note."""
     if not get_settings().metrics_enabled:
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
+    # The call queues' depth is read now, not tracked (register item 54).
+    await refresh_queue_depths()
     return Response(service_metrics.render(), media_type=service_metrics.CONTENT_TYPE)
 
 

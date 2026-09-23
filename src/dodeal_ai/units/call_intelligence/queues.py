@@ -21,6 +21,7 @@ from datetime import timedelta
 
 import redis
 
+from dodeal_ai.core import metrics
 from dodeal_ai.core.breaker import queue_breaker
 from dodeal_ai.core.errors import QueueUnavailable
 from dodeal_ai.core.redis import get_queue_client
@@ -43,6 +44,23 @@ def queue_for(lead_status: str | None, config: CallsConfig) -> str:
     if lead_status is not None and lead_status.casefold() in config.priority_statuses:
         return PRIORITY_QUEUE
     return NORMAL_QUEUE
+
+
+async def refresh_queue_depths() -> None:
+    """call_queue_depth{queue} from each queue's length (register item 54),
+    read when /metrics is served. A queue that cannot be read keeps its last
+    value: the page must never fail over a gauge."""
+    client = get_queue_client()
+    for queue in CALL_QUEUES:
+
+        async def _depth(name: str = queue) -> int:
+            return int(await client.zcard(name))
+
+        try:
+            depth = await queue_breaker().call(_depth)
+        except redis.RedisError:
+            continue
+        metrics.CALL_QUEUE_DEPTH.labels(queue=queue).set(depth)
 
 
 def arq_job_id(tenant: str, job_id: str, *, resume: int = 0) -> str:

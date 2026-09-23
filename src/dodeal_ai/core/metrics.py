@@ -19,6 +19,7 @@ from prometheus_client import (
     CONTENT_TYPE_LATEST,
     CollectorRegistry,
     Counter,
+    Gauge,
     Histogram,
     generate_latest,
 )
@@ -74,6 +75,52 @@ JUDGEMENT_SECONDS = Histogram(
     "Wall time of one judgement, from the entry point to its answer, by route.",
     ["route"],
     buckets=(0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0),
+    registry=REGISTRY,
+)
+
+# --- Unit B's call jobs (register item 54) -------------------------------
+# No tenant label on any of them, as for every metric here.
+CALL_JOBS = Counter(
+    "call_jobs",
+    "Call-job task runs by the status each ended in, or error for a crash.",
+    ["status"],
+    registry=REGISTRY,
+)
+# From a free outcome in under a second to a long download and transcription.
+CALL_JOB_SECONDS = Histogram(
+    "call_job_seconds",
+    "Wall time of one call-job task run.",
+    buckets=(0.5, 1.0, 5.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0),
+    registry=REGISTRY,
+)
+CALL_STAGE_SECONDS = Histogram(
+    "call_stage_seconds",
+    "Wall time of one stage of a call job: download, transcribe, analyse, deliver.",
+    ["stage"],
+    buckets=(0.1, 0.5, 1.0, 5.0, 15.0, 30.0, 60.0, 120.0, 300.0),
+    registry=REGISTRY,
+)
+AUDIO_SECONDS_PROCESSED = Counter(
+    "audio_seconds_processed",
+    "Seconds of call audio sent to speech-to-text.",
+    registry=REGISTRY,
+)
+CALLBACK_DELIVERIES = Counter(
+    "callback_deliveries",
+    "Callback attempts by event and outcome (delivered, retry, refused, no_callback).",
+    ["event", "outcome"],
+    registry=REGISTRY,
+)
+CALL_QUEUE_DEPTH = Gauge(
+    "call_queue_depth",
+    "Call jobs waiting on each call queue, read when the page is served.",
+    ["queue"],
+    registry=REGISTRY,
+)
+CALL_TOKENS = Counter(
+    "call_tokens",
+    "Model tokens a call analysis pass spent, by pass and kind.",
+    ["pass", "kind"],
     registry=REGISTRY,
 )
 

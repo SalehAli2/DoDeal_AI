@@ -23,6 +23,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from dodeal_ai.core import metrics
 from dodeal_ai.core.audio_download import resolve_host
 from dodeal_ai.core.callbacks import (
     CALL_STAGE1,
@@ -32,6 +33,7 @@ from dodeal_ai.core.callbacks import (
     post_event,
 )
 from dodeal_ai.core.jobs import Job, JobStatus, read_job, read_result, transition
+from dodeal_ai.core.logging_config import job_log_context
 from dodeal_ai.units.call_intelligence.config import CallsConfig, resolve_calls_config
 from dodeal_ai.units.call_intelligence.queues import enqueue_delivery
 
@@ -94,10 +96,24 @@ async def deliver_event(
 async def deliver_callback(
     ctx: dict[str, Any], tenant: str, job_id: str, event: str, attempt: int
 ) -> None:
-    """The arq task for the `attempt`-th retry of one event."""
+    """The arq task for the `attempt`-th retry of one event. Every line it
+    logs names the job (register item 54)."""
+    with job_log_context(tenant=tenant, job_id=job_id) as fields:
+        await _retry(ctx, tenant, job_id, event, attempt, fields)
+
+
+async def _retry(
+    ctx: dict[str, Any],
+    tenant: str,
+    job_id: str,
+    event: str,
+    attempt: int,
+    fields: dict[str, str],
+) -> None:
     job = await read_job(tenant, job_id)
     if job is None:
         return
+    fields["request_id"] = job.request_id
     if event == CALL_STAGE1 and job.status is not JobStatus.DELIVERING:
         return
     config = await resolve_calls_config(tenant)
@@ -155,7 +171,10 @@ async def _delivery_failed(job: Job, event: str, config: CallsConfig) -> None:
 
 
 def _log(job: Job, event: str, outcome: Delivery | None, *, attempt: int) -> None:
-    """One line per attempt: which event, which attempt, what came of it."""
+    """One line and one count per attempt: which event, which attempt, what
+    came of it."""
+    word = "no_callback" if outcome is None else outcome.value
+    metrics.CALLBACK_DELIVERIES.labels(event=event, outcome=word).inc()
     _logger.info(
         "callback_attempt",
         extra={
@@ -163,6 +182,6 @@ def _log(job: Job, event: str, outcome: Delivery | None, *, attempt: int) -> Non
             "job_id": job.job_id,
             "event": event,
             "attempt": attempt,
-            "outcome": "no_callback" if outcome is None else outcome.value,
+            "outcome": word,
         },
     )
