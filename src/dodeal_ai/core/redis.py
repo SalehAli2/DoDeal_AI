@@ -7,6 +7,9 @@ talking to:
   - operational_client (db2): per-request operational state for the feature
                               units -- idempotency reservations, clarification
                               rate limits, per-note attempt counters.
+  - jobs_client (db3):        Unit B's call jobs and their results (core/jobs.py,
+                              register item 50). Fails CLOSED, like db2, but
+                              its keys live for days, not for one request.
 
 They are separate logical DBs, not namespaces in one, because their failure
 policies differ: losing the cost store fails OPEN (a money guard), losing the
@@ -135,6 +138,14 @@ def get_operational_client() -> redis_async.Redis:
     )
 
 
+@lru_cache
+def get_jobs_client() -> redis_async.Redis:
+    """The jobs connection (db3): call jobs, their index by call and their
+    results. Same shape and settings as the other two, on its own pool, so a
+    burst of job polling can never take db2's reservations' connections."""
+    return redis_async.Redis(connection_pool=_build_pool(get_settings().redis_jobs_url))
+
+
 async def _ping(client: redis_async.Redis) -> bool:
     """True if `client` answers PING within the configured socket timeout. A
     connection error is False, never an exception: readiness is the CALLER's
@@ -164,3 +175,10 @@ async def check_operational_redis_ready() -> bool:
     materially different state, and one flag would hide it. The queue connection
     is still not probed: it is arq's, and no worker exists to consume it."""
     return await _ping(get_operational_client())
+
+
+async def check_jobs_redis_ready() -> bool:
+    """Return True if the jobs connection (db3) responds to ping. Reported on
+    its own: a dead jobs store refuses every call push and poll (503) while
+    notes are judged normally, and one flag would hide which half is down."""
+    return await _ping(get_jobs_client())

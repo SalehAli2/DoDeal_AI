@@ -243,6 +243,10 @@ class Settings(BaseSettings):
     # counters (idempotency fails CLOSED, the cost cap fails open), and sharing
     # a DB would make a flush aimed at one of them hit the other.
     redis_operational_url: str = "redis://localhost:6379/2"
+    # Unit B's job state and results (core/jobs.py, register item 50): a FOURTH
+    # logical DB, because jobs fail CLOSED and outlive a request by days. A URL
+    # shared with db2 would let a flush of reservations erase every call job.
+    redis_jobs_url: str = "redis://localhost:6379/3"
     # --- Redis connection budget (core/redis.py; audit H3) ------------------
     # PROVISIONAL, all four; gt=0 on every one, so a non-positive value fails
     # closed at construction rather than at the first command.

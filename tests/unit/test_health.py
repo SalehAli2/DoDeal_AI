@@ -58,12 +58,13 @@ def test_ready_returns_503_when_config_missing(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("cost_pings", "operational_pings", "expected_redis", "expected_operational"),
+    ("cost_pings", "operational_pings", "jobs_pings", "expected"),
     [
-        (True, True, "ok", "ok"),
-        (False, True, "degraded", "ok"),
-        (True, False, "ok", "degraded"),
-        (False, False, "degraded", "degraded"),
+        (True, True, True, ("ok", "ok", "ok")),
+        (False, True, True, ("degraded", "ok", "ok")),
+        (True, False, True, ("ok", "degraded", "ok")),
+        (False, False, True, ("degraded", "degraded", "ok")),
+        (True, True, False, ("ok", "ok", "degraded")),
     ],
 )
 def test_ready_reports_each_connection_independently(
@@ -71,11 +72,12 @@ def test_ready_reports_each_connection_independently(
     monkeypatch,
     cost_pings,
     operational_pings,
-    expected_redis,
-    expected_operational,
+    jobs_pings,
+    expected,
 ):
-    """All four combinations, because the two fields are the whole point: a
-    healthy cost store and a dead idempotency store must not read as "Redis ok".
+    """Every combination of the first two, and the jobs store (register item 50)
+    down on its own: a healthy cost store and a dead idempotency store must not
+    read as "Redis ok", and neither may a dead jobs store.
 
     The real probes run -- only the CLIENTS are faked -- so this also proves a
     raising PING cannot escape past /ready and turn a report into a 500."""
@@ -93,6 +95,11 @@ def test_ready_reports_each_connection_independently(
             "get_operational_client",
             return_value=_probe_result(pings=operational_pings),
         ),
+        patch.object(
+            redis_module,
+            "get_jobs_client",
+            return_value=_probe_result(pings=jobs_pings),
+        ),
     ):
         response = client.get("/ready")
 
@@ -100,14 +107,15 @@ def test_ready_reports_each_connection_independently(
     assert response.json() == {
         "status": "ready",
         "llm": "ok",
-        "redis": expected_redis,
-        "operational": expected_operational,
+        "redis": expected[0],
+        "operational": expected[1],
+        "jobs": expected[2],
     }
     get_settings.cache_clear()
 
 
 def test_ready_probes_both_connections_concurrently(llm_built, monkeypatch):
-    """Two slow probes cost ONE probe's time, not two.
+    """Three slow probes cost ONE probe's time, not three.
 
     The number that matters operationally: an orchestrator's readiness
     `timeoutSeconds` is sized against a probe, and a sequential /ready would
@@ -134,6 +142,7 @@ def test_ready_probes_both_connections_concurrently(llm_built, monkeypatch):
     with (
         patch.object(redis_module, "get_cost_client", side_effect=_slow_client),
         patch.object(redis_module, "get_operational_client", side_effect=_slow_client),
+        patch.object(redis_module, "get_jobs_client", side_effect=_slow_client),
     ):
         started = time.monotonic()
         response = client.get("/ready")
@@ -142,6 +151,7 @@ def test_ready_probes_both_connections_concurrently(llm_built, monkeypatch):
     assert response.status_code == 200
     assert response.json()["redis"] == "ok"
     assert response.json()["operational"] == "ok"
+    assert response.json()["jobs"] == "ok"
     # Generously below the 0.4s a sequential pair would take, and generously
     # above the 0.2s a concurrent one does: this asserts the SHAPE, not a
     # latency budget, so a slow CI runner cannot make it flaky.
@@ -197,6 +207,9 @@ def test_ready_reports_llm_ok_once_a_client_is_built(llm_built, monkeypatch):
             redis_module,
             "get_operational_client",
             return_value=_probe_result(pings=True),
+        ),
+        patch.object(
+            redis_module, "get_jobs_client", return_value=_probe_result(pings=True)
         ),
     ):
         response = client.get("/ready")

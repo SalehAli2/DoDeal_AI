@@ -6,7 +6,7 @@ by PATH, so a module that forgets its own `pytestmark` still cannot run there.
 
 SKIPPED, NEVER FAILED, without a usable server. DODEAL_REDIS_REAL_URL unset, a
 server that does not answer PING, or a URL that selects one of the service's own
-databases (db0 to db2) skips every test with a reason naming the variable. The
+databases (db0 to db3) skips every test with a reason naming the variable. The
 reason carries an error TYPE and never the URL, which may hold a password.
 
 UNLESS DODEAL_REDIS_REAL_REQUIRED IS SET (register item 106): then each of those
@@ -47,9 +47,9 @@ REQUIRED_VAR = "DODEAL_REDIS_REAL_REQUIRED"
 
 _LANE_DIR = pathlib.Path(__file__).parent
 
-# The service's own logical databases: queue 0, cost 1, operational 2
+# The service's own logical databases: queue 0, cost 1, operational 2, jobs 3
 # (docker-compose.yml). The lane refuses them rather than trusting its prefixes.
-_SERVICE_DBS = frozenset({0, 1, 2})
+_SERVICE_DBS = frozenset({0, 1, 2, 3})
 
 # Settings' DEFAULTS, with no environment and no .env read: a local override
 # must not change what the lane measures against, and a session fixture runs
@@ -101,7 +101,7 @@ async def real_redis() -> AsyncIterator[redis_async.Redis]:
     if db in _SERVICE_DBS:
         await client.aclose()
         _unusable(
-            f"{URL_VAR} selects db{db}; the real-Redis lane refuses db0 to db2, "
+            f"{URL_VAR} selects db{db}; the real-Redis lane refuses db0 to db3, "
             "the service's own stores"
         )
     try:

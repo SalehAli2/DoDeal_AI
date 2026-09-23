@@ -5,7 +5,7 @@ the default run, and the hook below puts it on every test in this directory by
 PATH, the way tests/redis_real does.
 
 THE REAL-REDIS LANE'S USABILITY RULES, imported rather than restated.
-DODEAL_REDIS_REAL_URL unset, a URL that selects db0 to db2, or a server that does
+DODEAL_REDIS_REAL_URL unset, a URL that selects db0 to db3, or a server that does
 not answer PING skips every test, and fails it when DODEAL_REDIS_REAL_REQUIRED
 is set. The reason names an error TYPE and never the URL.
 
@@ -69,7 +69,7 @@ from tests.redis_real.conftest import (
 
 _LANE_DIR = pathlib.Path(__file__).parent
 
-# The lane's two databases. Outside db0 to db2 (the service's own) and apart
+# The lane's two databases. Outside db0 to db3 (the service's own) and apart
 # from db 9, which the real-Redis lane uses, so a flush here reaches neither.
 COST_DB = 10
 OPERATIONAL_DB = 11
@@ -147,7 +147,7 @@ async def stores() -> AsyncIterator[Stores]:
     db = int(parse_url(url).get("db", 0))
     if db in _SERVICE_DBS:
         _unusable(
-            f"{URL_VAR} selects db{db}; the load lane refuses db0 to db2, "
+            f"{URL_VAR} selects db{db}; the load lane refuses db0 to db3, "
             "the service's own stores"
         )
 

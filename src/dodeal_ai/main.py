@@ -20,8 +20,10 @@ from dodeal_ai.core.logging_config import configure_logging
 from dodeal_ai.core.prompting import clear_templates, preload_templates
 from dodeal_ai.core.redis import (
     check_cost_redis_ready,
+    check_jobs_redis_ready,
     check_operational_redis_ready,
     get_cost_client,
+    get_jobs_client,
     get_operational_client,
 )
 from dodeal_ai.core.tenant_config import (
@@ -256,6 +258,7 @@ async def lifespan(app: FastAPI):
     # checked-out connection and leak the other nineteen.
     await get_cost_client().aclose(close_connection_pool=True)
     await get_operational_client().aclose(close_connection_pool=True)
+    await get_jobs_client().aclose(close_connection_pool=True)
 
 
 async def health() -> dict[str, str]:
@@ -299,14 +302,21 @@ async def ready(request: Request):
     # two. Sequentially, the worst case is the sum of both probes, and a
     # readiness deadline sized against one of them kills a pod that is only
     # reporting on a dependency it already tolerates.
-    cost_ready, operational_ready = await asyncio.gather(
-        check_cost_redis_ready(), check_operational_redis_ready()
+    #
+    # `jobs` (db3, register item 50) is reported the same way: a dead jobs
+    # store 503s call pushes and polls, but notes are still judged, so the pod
+    # stays in rotation and says which half is degraded.
+    cost_ready, operational_ready, jobs_ready = await asyncio.gather(
+        check_cost_redis_ready(),
+        check_operational_redis_ready(),
+        check_jobs_redis_ready(),
     )
     return {
         "status": "ready",
         "llm": "ok",
         "redis": "ok" if cost_ready else "degraded",
         "operational": "ok" if operational_ready else "degraded",
+        "jobs": "ok" if jobs_ready else "degraded",
     }
 
 

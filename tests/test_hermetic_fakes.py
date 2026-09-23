@@ -28,9 +28,10 @@ _LANE = _TESTS / "redis_real"
 _KNOWN_HOLDERS = {
     "dodeal_ai.core.cost.limiter",
     "dodeal_ai.units.structured_intelligence.state",
+    "dodeal_ai.core.jobs",
     "dodeal_ai.main",
 }
-_PATCHED_NAMES = {"get_cost_client", "get_operational_client"}
+_PATCHED_NAMES = {"get_cost_client", "get_operational_client", "get_jobs_client"}
 # The module whose own tests legitimately hand these factories something else.
 _FACTORY_MODULE = "dodeal_ai.core.redis"
 _HELPER_PACKAGE = "tests.helpers"
@@ -172,6 +173,7 @@ def test_no_test_reaches_a_real_redis_client_factory(redis_fakes) -> None:
     fake_for = {
         "get_cost_client": redis_fakes.cost,
         "get_operational_client": redis_fakes.operational,
+        "get_jobs_client": redis_fakes.jobs,
     }
     unreplaced = []
     for module_name, factory, local in bindings:
@@ -181,12 +183,13 @@ def test_no_test_reaches_a_real_redis_client_factory(redis_fakes) -> None:
             unreplaced.append(f"{module_name}.{local}")
     assert not unreplaced, (
         "a src module imports a Redis factory by name and the root conftest does "
-        "not replace it; add the module to _COST_CLIENT_HOLDERS or "
+        "not replace it; add the module to _COST_CLIENT_HOLDERS, _JOBS_CLIENT_HOLDERS or "
         "_OPERATIONAL_CLIENT_HOLDERS in tests/conftest.py:\n" + "\n".join(unreplaced)
     )
 
     assert hasattr(redis_module.get_cost_client, "cache_clear")
     assert hasattr(redis_module.get_operational_client, "cache_clear")
+    assert hasattr(redis_module.get_jobs_client, "cache_clear")
     assert hasattr(redis_module._build_pool, "__wrapped__"), (
         "core/redis.py's _build_pool is not wrapped by the session's counter"
     )
@@ -204,6 +207,7 @@ def test_the_service_urls_point_at_a_closed_port_and_the_lane_keeps_its_own() ->
     for variable, url in (
         ("DODEAL_REDIS_COST_URL", settings.redis_cost_url),
         ("DODEAL_REDIS_OPERATIONAL_URL", settings.redis_operational_url),
+        ("DODEAL_REDIS_JOBS_URL", settings.redis_jobs_url),
     ):
         assert os.environ[variable] == url
         parts = urlsplit(url)
@@ -214,8 +218,10 @@ def test_the_service_urls_point_at_a_closed_port_and_the_lane_keeps_its_own() ->
     for service_name in (
         "DODEAL_REDIS_COST_URL",
         "DODEAL_REDIS_OPERATIONAL_URL",
+        "DODEAL_REDIS_JOBS_URL",
         "redis_cost_url",
         "redis_operational_url",
+        "redis_jobs_url",
     ):
         assert service_name not in lane, service_name
 

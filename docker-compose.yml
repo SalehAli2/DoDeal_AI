@@ -14,6 +14,7 @@ services:
       DODEAL_REDIS_QUEUE_URL: redis://redis:6379/0
       DODEAL_REDIS_COST_URL: redis://redis:6379/1
       DODEAL_REDIS_OPERATIONAL_URL: redis://redis:6379/2
+      DODEAL_REDIS_JOBS_URL: redis://redis:6379/3
     depends_on: [redis]
 
   redis:

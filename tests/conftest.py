@@ -27,11 +27,12 @@ import os
 from collections.abc import Iterator
 from dataclasses import dataclass
 
+import fakeredis
 import pytest
 
 from dodeal_ai import main
+from dodeal_ai.core import jobs, tenant_config
 from dodeal_ai.core import redis as redis_module
-from dodeal_ai.core import tenant_config
 from dodeal_ai.core.breaker import reset_breakers
 from dodeal_ai.core.config import Settings, get_settings
 from dodeal_ai.core.cost import limiter
@@ -45,6 +46,7 @@ from tests.helpers.fake_operational_redis import FakeOperationalRedis
 # fails if a src module imports a factory by name and is missing here.
 _COST_CLIENT_HOLDERS = (limiter, main)
 _OPERATIONAL_CLIENT_HOLDERS = (state, main, tenant_config)
+_JOBS_CLIENT_HOLDERS = (jobs, main)
 
 # A closed port on loopback. db 1 and db 2 are kept so each URL still names the
 # store it stands in for; tests/unit/test_redis.py asserts the two differ and
@@ -52,6 +54,7 @@ _OPERATIONAL_CLIENT_HOLDERS = (state, main, tenant_config)
 _CLOSED_PORT_REDIS_URLS = {
     "DODEAL_REDIS_COST_URL": "redis://127.0.0.1:1/1",
     "DODEAL_REDIS_OPERATIONAL_URL": "redis://127.0.0.1:1/2",
+    "DODEAL_REDIS_JOBS_URL": "redis://127.0.0.1:1/3",
 }
 
 _REAL_POOL_BUILDS = pytest.StashKey[list[str]]()
@@ -90,10 +93,12 @@ def _isolated_settings(monkeypatch):
 
 @dataclass(frozen=True)
 class RedisFakes:
-    """The two shared fakes one test's code reaches through every factory name."""
+    """The shared fakes one test's code reaches through every factory name. The
+    jobs store (db3) is fakeredis, so its Lua scripts run for real."""
 
     cost: FakeCostRedis
     operational: FakeOperationalRedis
+    jobs: fakeredis.FakeAsyncRedis
 
 
 @pytest.fixture(autouse=True)
@@ -131,9 +136,14 @@ def redis_fakes(
     """
     redis_module.get_cost_client.cache_clear()
     redis_module.get_operational_client.cache_clear()
+    redis_module.get_jobs_client.cache_clear()
     # One test's outage must not refuse the next test's calls.
     reset_breakers()
-    fakes = RedisFakes(cost=FakeCostRedis(), operational=FakeOperationalRedis())
+    fakes = RedisFakes(
+        cost=FakeCostRedis(),
+        operational=FakeOperationalRedis(),
+        jobs=fakeredis.FakeAsyncRedis(decode_responses=True),
+    )
     if not any(request.node.get_closest_marker(m) for m in _REAL_REDIS_MARKERS):
         for module in _COST_CLIENT_HOLDERS:
             monkeypatch.setattr(module, "get_cost_client", lambda: fakes.cost)
@@ -141,10 +151,13 @@ def redis_fakes(
             monkeypatch.setattr(
                 module, "get_operational_client", lambda: fakes.operational
             )
+        for module in _JOBS_CLIENT_HOLDERS:
+            monkeypatch.setattr(module, "get_jobs_client", lambda: fakes.jobs)
     yield fakes
     reset_breakers()
     redis_module.get_cost_client.cache_clear()
     redis_module.get_operational_client.cache_clear()
+    redis_module.get_jobs_client.cache_clear()
 
 
 @pytest.fixture(autouse=True)

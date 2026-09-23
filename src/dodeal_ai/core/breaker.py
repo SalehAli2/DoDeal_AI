@@ -1,4 +1,4 @@
-"""Circuit breaker for the two Redis connections, and for each model provider.
+"""Circuit breaker for the three Redis connections, and for each model provider.
 
 After `failure_threshold` consecutive failures a breaker OPENS and refuses calls
 for `open_seconds` without touching a socket; then ONE probe decides whether it
@@ -255,7 +255,15 @@ def operational_breaker() -> CircuitBreaker:
     return _from_settings("operational")
 
 
+@lru_cache
+def jobs_breaker() -> CircuitBreaker:
+    """The db3 breaker (register item 50), its own so a dead jobs store refuses
+    call jobs without ever refusing a judgement's reservation."""
+    return _from_settings("jobs")
+
+
 def reset_breakers() -> None:
-    """Drop both cached breakers; the next use builds fresh ones from settings."""
+    """Drop every cached breaker; the next use builds fresh ones from settings."""
     cost_breaker.cache_clear()
     operational_breaker.cache_clear()
+    jobs_breaker.cache_clear()
