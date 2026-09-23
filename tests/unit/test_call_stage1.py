@@ -201,17 +201,22 @@ async def test_a_call_is_analysed_and_delivered_with_its_stage1_payload(
         "details",
         "mood",
         "crm_note",
-        "signals",
-        "numbers",
-        "alarms",
-        "escalations",
     }
     assert (analysis_["language"], analysis_["summary"]) == ("en", PROSE["summary"])
     assert analysis_["elements"]["ending"] == "moved_forward"
     assert analysis_["details"]["budget"]["state"] == "stated"
     assert analysis_["details"]["area"] == _detail()
     assert analysis_["mood"]["uncertain"] is False
-    assert analysis_["numbers"] == [
+    signals = result["signals"]
+    assert set(signals) == {
+        "version",
+        "agent",
+        "client",
+        "numbers",
+        "alarms",
+        "escalations",
+    }
+    assert signals["numbers"] == [
         {
             "speaker": "agent",
             "start_s": 10.0,
@@ -220,7 +225,7 @@ async def test_a_call_is_analysed_and_delivered_with_its_stage1_payload(
             "match": "agent_personal",
         }
     ]
-    assert [(e["source"], e["segment"]) for e in analysis_["escalations"]] == [
+    assert [(e["source"], e["segment"]) for e in signals["escalations"]] == [
         ("number", "s3"),
         ("alarm_phrase", "s3"),
     ]
@@ -247,8 +252,8 @@ async def test_the_switches_off_find_no_numbers_or_phrases(ctx: dict) -> None:
     await process_call(ctx, "tenant-a", JOB)
 
     result = await _result()
-    analysis_ = result["analysis"]
-    assert (analysis_["numbers"], analysis_["alarms"], analysis_["escalations"]) == (
+    signals = result["signals"]
+    assert (signals["numbers"], signals["alarms"], signals["escalations"]) == (
         None,
         None,
         [],
@@ -328,6 +333,30 @@ async def test_a_model_outage_delivers_the_transcript_with_analysis_null(
     assert result["transcript"] is not None and result["versions"]["model"] is None
     assert ctx["llm"].call_count == 2
     assert await _status() is JobStatus.DONE
+    assert ctx["deliver"].events == [STAGE1]
+
+
+@pytest.mark.parametrize("llm", ["down", "none"])
+async def test_a_model_outage_still_delivers_the_off_channel_escalation(
+    ctx: dict, llm: str
+) -> None:
+    """The signals block goes out top-level whatever becomes of the passes."""
+    ctx["llm"] = (
+        FakeLLM(RuntimeError("provider down"), RuntimeError("still down"))
+        if llm == "down"
+        else None
+    )
+    await _push()
+
+    await process_call(ctx, "tenant-a", JOB)
+
+    result = await _result()
+    assert result["analysis"] is None
+    assert result["signals"]["client"]["interruptions"] == 0
+    assert [(e["type"], e["source"]) for e in result["signals"]["escalations"]] == [
+        ("off_channel_contact", "number"),
+        ("off_channel_contact", "alarm_phrase"),
+    ]
     assert ctx["deliver"].events == [STAGE1]
 
 

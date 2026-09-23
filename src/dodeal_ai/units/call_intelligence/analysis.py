@@ -1,6 +1,10 @@
 """Wave 1 (Unit B): what stage 1 says about a transcribed call, beside the
-transcript -- the language, the two model passes, the signals, the numbers,
-the alarm phrases and the escalations they raise.
+transcript -- the language and the two model passes (the analysis), and the
+signals, numbers, alarm phrases and escalations found in code (the signals).
+
+THE SIGNALS BLOCK IS ALWAYS THERE for a transcript: it is found in code before
+any pass starts and goes out top-level in stage 1, whatever becomes of the
+passes -- so a model outage still delivers an off_channel_contact escalation.
 
 EVERY TRANSCRIPT GETS IT: a call from min_transcribe_seconds up (BRD B8), and
 an uncertain one too, with every field marked uncertain (passes.settled).
@@ -110,11 +114,13 @@ class _Metered:
 
 @dataclass(frozen=True, slots=True)
 class Wave1:
-    """Stage 1's analysis, or null with the reason, and the versions it ran on."""
+    """Stage 1's analysis, or null with the reason; the signals block found in
+    code, never null; and the versions both ran on."""
 
     analysis: dict[str, object] | None
     reason: str | None
     versions: dict[str, object]
+    signals: dict[str, object]
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,10 +181,9 @@ async def _failed(run: _Run, name: str, reason: str) -> PassFailed:
 
 
 def _analysis(
-    call: CallText, extraction: Extraction, prose: Prose, code: dict[str, object]
+    call: CallText, extraction: Extraction, prose: Prose
 ) -> dict[str, object]:
-    """The analysis block: the passes' answers with code's word on certainty,
-    then what code found on its own."""
+    """The analysis block: the passes' answers with code's word on certainty."""
     kept = settled(extraction, call)
     return {
         "language": call.language,
@@ -204,15 +209,14 @@ def _analysis(
             "uncertain": mood_uncertain(extraction, call),
         },
         "crm_note": prose.crm_note,
-        **code,
     }
 
 
 def _found_in_code(
     transcript: Transcript, config: CallsConfig, job: Job
 ) -> tuple[dict[str, object], str | None]:
-    """Signals, numbers, alarm phrases and their escalations, with no model;
-    and the digest of the alarm list they were matched against."""
+    """The signals block -- talk signals, numbers, alarm phrases and their
+    escalations, with no model -- and the alarm list's digest."""
     segments = transcript.segments
     lead, agent = (
         job.metadata.get("lead_phone_hash"),
@@ -233,7 +237,7 @@ def _found_in_code(
     ]
     escalations.sort(key=lambda escalation: float(str(escalation["start_s"])))
     found: dict[str, object] = {
-        "signals": call_signals(segments),
+        **call_signals(segments),
         "numbers": None if numbers is None else numbers.finds,
         "alarms": None if alarms is None else alarms.finds,
         "escalations": escalations,
@@ -264,7 +268,7 @@ async def wave1(
         "alarm_list_digest": digest,
     }
     if client is None:
-        return Wave1(None, NO_CLIENT, versions)
+        return Wave1(None, NO_CLIENT, versions, code)
     run = _Run(job, work, config.result_ttl_seconds, client, usage)
     try:
         extraction, model = await _pass(
@@ -286,6 +290,6 @@ async def wave1(
         models.append(model)
     except PassFailed as failed:
         versions["model"] = ",".join(sorted(set(models))) or None
-        return Wave1(None, str(failed), versions)
+        return Wave1(None, str(failed), versions, code)
     versions["model"] = ",".join(sorted(set(models)))
-    return Wave1(_analysis(call, extraction, prose, code), None, versions)
+    return Wave1(_analysis(call, extraction, prose), None, versions, code)

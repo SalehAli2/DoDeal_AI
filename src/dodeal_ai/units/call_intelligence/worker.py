@@ -26,9 +26,10 @@ THE ORDER, and what each step may cost:
      may succeed later is retried until the attempts run out.
   7. The transcript is kept in the job's work (core/jobs.py) the moment it
      exists, and the job moves to `analysing` for wave 1 (analysis.py): the
-     language, the two passes, signals, numbers, alarm phrases and their
-     escalations. A pass that fails leaves analysis null with its reason; the
-     transcript still goes. A run that finds a kept transcript resumes wave 1
+     language and the two passes (analysis), and the signals block -- talk
+     signals, numbers, alarm phrases and their escalations -- found in code. A
+     pass that fails leaves analysis null with its reason; the transcript and
+     the signals block still go. A run that finds a kept transcript resumes wave 1
      there, with no attempt spent and nothing received paid for again.
   8. The stage-1 result is stored for result_ttl_seconds and the job is
      `done`, its delivery pending when the tenant has a callback (item 50);
@@ -174,7 +175,8 @@ def stage1_result(
     wave: Wave1 | None = None,
 ) -> dict[str, object]:
     """The stage-1 result, held in db3 and delivered as call.stage1: the
-    transcript, wave 1's analysis (or null and why) and the versions."""
+    transcript, the signals block, wave 1's analysis (or null and why) and the
+    versions. No transcript, no signals: both are null."""
     duration = int(str(job.metadata["duration_seconds"]))
     eligible = (
         transcript is not None
@@ -190,6 +192,7 @@ def stage1_result(
         "transcript": None
         if transcript is None
         else transcript.model_dump(mode="json"),
+        "signals": None if wave is None else wave.signals,
         "analysis": None if wave is None else wave.analysis,
         "analysis_reason": NO_TRANSCRIPT if wave is None else wave.reason,
         "versions": None if wave is None else wave.versions,
