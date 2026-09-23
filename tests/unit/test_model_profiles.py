@@ -245,7 +245,9 @@ _UNIT_MODULES = sorted(pathlib.Path("src/dodeal_ai/units").rglob("*.py"))
 # `profile=<name>` or `profile=<literal>`. The forwarding parameter in
 # llm_call.py spells it `profile=profile` and is the one allowed name that is
 # not a constant -- everything else must resolve to a KNOWN_PROFILES value.
-_PROFILE_ARG = re.compile(r"profile=(\"[^\"]*\"|'[^']*'|[A-Za-z_][A-Za-z0-9_]*)")
+_PROFILE_ARG = re.compile(
+    r"(?<![A-Za-z0-9_])profile=(\"[^\"]*\"|'[^']*'|[A-Za-z_][A-Za-z0-9_]*)"
+)
 _FORWARDING = "profile"
 
 
