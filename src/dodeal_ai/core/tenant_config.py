@@ -14,7 +14,9 @@ never reads as an unnamed crash.
 
 RUNTIME OVERRIDES (register item 97, second half) live below the file loader:
 a section set through the admin route, stored in db2, resolved before the file
-and cached per process. See `resolve_section`.
+and cached per process. See `resolve_section`. One record holds every section
+set at runtime, each with its own stamps: a PUT merges its section in (register
+item 193), so one unit's change never drops or re-stamps another's.
 """
 
 from __future__ import annotations
@@ -22,8 +24,8 @@ from __future__ import annotations
 import json
 import logging
 import time
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
@@ -174,15 +176,43 @@ class OverrideConflict(Exception):
 
 
 @dataclass(frozen=True, slots=True)
+class SectionStamp:
+    """One section's own stamps (register item 193): the config_version it is
+    judged under, when it was last PUT, and that PUT's policy_version."""
+
+    version: str
+    set_at: str
+    policy_version: str | None = None
+
+    def to_dict(self) -> dict[str, str | None]:
+        return {
+            "version": self.version,
+            "set_at": self.set_at,
+            "policy_version": self.policy_version,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class OverrideRecord:
-    """One stored override: the config_version its section is judged under,
-    when it was set, the raw sections, and the PUT's own dated policy_version
-    (None on a record stored before register item 97 gave it one)."""
+    """One stored override: the LAST PUT's config_version, set_at and dated
+    policy_version (None on a record stored before register item 97 gave it
+    one), every section in force, and each section's own stamps (item 193).
+
+    A record stored before item 193 has no `stamps`: it held one section, so
+    the top-level stamps are that section's."""
 
     version: str
     set_at: str
     sections: dict[str, object]
     policy_version: str | None = None
+    stamps: dict[str, SectionStamp] = field(default_factory=dict)
+
+    def stamp_for(self, section: str) -> SectionStamp:
+        """`section`'s own stamps, else the top-level ones (an older record)."""
+        stamp = self.stamps.get(section)
+        if stamp is not None:
+            return stamp
+        return SectionStamp(self.version, self.set_at, self.policy_version)
 
     def to_json(self) -> str:
         return json.dumps(
@@ -191,6 +221,9 @@ class OverrideRecord:
                 "policy_version": self.policy_version,
                 "set_at": self.set_at,
                 "sections": self.sections,
+                "stamps": {
+                    name: stamp.to_dict() for name, stamp in self.stamps.items()
+                },
             },
             sort_keys=True,
         )
@@ -246,11 +279,23 @@ def _record(tenant: str, raw: str | None) -> OverrideRecord | None:
             version=version,
             set_at=set_at,
             sections=sections,
-            policy_version=None if policy_version is None else str(policy_version),
+            policy_version=_optional(policy_version),
+            stamps={
+                str(name): SectionStamp(
+                    version=str(stamp["version"]),
+                    set_at=str(stamp["set_at"]),
+                    policy_version=_optional(stamp.get("policy_version")),
+                )
+                for name, stamp in dict(document.get("stamps") or {}).items()
+            },
         )
-    except (ValueError, KeyError, TypeError):
+    except (ValueError, KeyError, TypeError, AttributeError):
         _invalid(tenant)
         return None
+
+
+def _optional(value: object) -> str | None:
+    return None if value is None else str(value)
 
 
 def _invalid(tenant: str) -> None:
@@ -318,12 +363,15 @@ async def resolve_section(tenant: str, section: str) -> ResolvedSection:
     else the startup file, else the unit's default (value None)."""
     entry = await _entry(tenant)
     if entry is not None and entry.record is not None and section in entry.parsed:
+        # This section's own stamps (item 193): another section's PUT never
+        # moves them.
+        stamp = entry.record.stamp_for(section)
         return ResolvedSection(
             value=entry.parsed[section],
-            version=entry.record.version,
-            set_at=entry.record.set_at,
+            version=stamp.version,
+            set_at=stamp.set_at,
             source="override",
-            policy_version=entry.record.policy_version,
+            policy_version=stamp.policy_version,
         )
     from_file = tenant_section(tenant, section)
     if from_file is not None:
@@ -331,13 +379,38 @@ async def resolve_section(tenant: str, section: str) -> ResolvedSection:
     return ResolvedSection(None, None, None, "default")
 
 
-def _next_version(kind: str, tenant: str, current: str | None, today: str) -> str:
-    """tenant-<kind>-<tenant>-<YYYYMMDD>-<n>, n counting that day's versions of
-    this kind: `current` is the one in force, None when there is none."""
+def _next_version(
+    kind: str, tenant: str, current: Iterable[str | None], today: str
+) -> str:
+    """tenant-<kind>-<tenant>-<YYYYMMDD>-<n>, n one past the highest of that
+    day's versions of this kind among `current`, the stamps in force. Across
+    every section (item 193), so two sections never share one stamp."""
     prefix = f"tenant-{kind}-{tenant}-{today}-"
-    if current is not None and current.startswith(prefix):
-        return f"{prefix}{int(current.removeprefix(prefix)) + 1}"
-    return f"{prefix}1"
+    counts = [
+        int(version.removeprefix(prefix))
+        for version in current
+        if version is not None and version.startswith(prefix)
+    ]
+    return f"{prefix}{max(counts, default=0) + 1}"
+
+
+def _merged(
+    current: OverrideRecord | None, section: str, stamped: dict, stamp: SectionStamp
+) -> OverrideRecord:
+    """The stored record with `section` replaced and every other section, and
+    its stamps, carried over unchanged (register item 193). An older record's
+    one section gets its top-level stamps written down as its own first."""
+    sections = dict(current.sections) if current else {}
+    stamps = {name: current.stamp_for(name) for name in sections} if current else {}
+    sections[section] = stamped
+    stamps[section] = stamp
+    return OverrideRecord(
+        version=stamp.version,
+        set_at=stamp.set_at,
+        sections=sections,
+        policy_version=stamp.policy_version,
+        stamps=stamps,
+    )
 
 
 async def set_override(
@@ -352,6 +425,10 @@ async def set_override(
     force, with two stamps (register item 97): the next dated policy_version,
     always, and as its config_version the one in force when `keep_version` says
     the body marks alike, else the next dated one.
+
+    MERGED, never replaced (register item 193): the section goes into the
+    stored record beside every other section, under the same compare-and-set,
+    and the other sections keep their own stamps.
 
     InvalidOverride for a body its parser refuses (nothing is written);
     OverrideUnavailable when the store cannot be read or written;
@@ -369,25 +446,35 @@ async def set_override(
         current, current_parsed = _decode(tenant, raw)
         # The section a judgement made now would use: override, else file.
         in_force = current_parsed.get(section, tenant_section(tenant, section))
+        in_force_stamps = (
+            [current.version, *(current.stamp_for(n).version for n in current.sections)]
+            if current
+            else []
+        )
         try:
             kept = keep_version(body, in_force)
             version = (
                 kept
                 if kept is not None
-                else _next_version(
-                    "cfg", tenant, current.version if current else None, today
-                )
+                else _next_version("cfg", tenant, in_force_stamps, today)
             )
             stamped = {**body, "config_version": version}
             parsed = parser(stamped)
         except Exception:  # noqa: BLE001 - any parser failure is an invalid body
             raise InvalidOverride() from None
-        record = OverrideRecord(
-            version=version,
-            set_at=now.astimezone(UTC).isoformat(),
-            sections={section: stamped},
-            policy_version=_next_version(
-                "policy", tenant, current.policy_version if current else None, today
+        record = _merged(
+            current,
+            section,
+            stamped,
+            SectionStamp(
+                version=version,
+                set_at=now.astimezone(UTC).isoformat(),
+                policy_version=_next_version(
+                    "policy",
+                    tenant,
+                    [current.policy_version] if current else [],
+                    today,
+                ),
             ),
         )
         record_json = record.to_json()
@@ -400,12 +487,13 @@ async def set_override(
                 fetched_at=time.monotonic(),
                 raw=record_json,
                 record=record,
-                parsed={section: parsed},
+                parsed={**current_parsed, section: parsed},
             )
             _logger.info(
                 "tenant_config_changed",
                 extra={
                     "tenant": tenant,
+                    "section": section,
                     "version": version,
                     "policy_version": record.policy_version,
                 },

@@ -7272,3 +7272,14 @@ Production failure modes: (1) a new branch in the admin routes or the measures
 ships with no test and the repo-wide average hides it; (2) a renamed file drops
 its floor silently -- the script fails closed on a pattern that matches nothing.
 Stress test: the check passes all 28 floors (sabotage: language.py at 101 FAILs).
+
+## Piece: register item 193, an override PUT merges its section
+
+set_override merges the PUT's section into the stored record under the same
+compare-and-set, with per-section stamps; the dated cfg and policy counters run
+across the whole record, so no two sections share a stamp.
+Production failure modes: (1) a unit_b PUT replaces the record and silently
+drops unit_a's rules, so judgements fall back to the file or the default; (2) a
+PUT that loses the race merges into the stale record and erases the winner.
+Stress test: unit_a then unit_b PUT leaves unit_a's section, config_version,
+policy_version and set_at unchanged (sabotage: start from {} fails 5).
