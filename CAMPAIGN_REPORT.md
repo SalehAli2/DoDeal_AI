@@ -7239,3 +7239,14 @@ notes once it has spent the cap; (2) a Redis outage lets a backfill run uncapped
 (fail open, logged as cost_cap_bypassed).
 Stress test: ten history judgements leave `cost:tenant` absent and the history
 key at 10 (sabotage: history on `cost:tenant` fails 2).
+
+## Piece: register item 153, reads count on their own request key
+
+The brief, measures and admin routes (and rep_numbers_config, so a request
+counts once) end in service_gate4_reads_cost: `cost:reads:tenant:{t}` against
+cost_reads_per_tenant_limit (5000). Live direct judgements keep `cost:tenant`.
+Production failure modes: (1) a CRM dashboard polling the brief or measures
+spends the live cap and 429s the notes being written; (2) a dependency left on
+the old gate counts one request on both keys.
+Stress test: six reads across the three route families leave only the reads key,
+at 6 (sabotage: reads on `cost:tenant` fails 2).

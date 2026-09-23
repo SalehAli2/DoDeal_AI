@@ -3,8 +3,9 @@
   GET /api/v1/measures/reps/{author_id}   one person's three measures
   GET /api/v1/measures/teams/{team}       the team pooled, then each member
 
-Behind the service chain, the rep-numbers switch (403 when the tenant has not
-opted in) and the judgement deadline (503 brief_deadline_exceeded), over the
+Behind the service chain -- counted on the tenant's READS request counter, never
+the live one (register item 153) -- the rep-numbers switch (403 when the tenant
+has not opted in) and the judgement deadline (503 brief_deadline_exceeded), over the
 same store and directory as the brief. Each measure is value, state, n, floor
 and excluded: a measure under the evidence floor is a STATE with a null value,
 never a 0. No note text and no note id reaches either answer.
@@ -20,7 +21,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Path
 
 from dodeal_ai.api.routes.judgements import deadline_exceeded, rep_numbers_config
-from dodeal_ai.core.auth.dependencies import service_gate4_cost
+from dodeal_ai.core.auth.dependencies import service_gate4_reads_cost
 from dodeal_ai.core.config import Settings, get_settings
 from dodeal_ai.core.context import RequestContext
 from dodeal_ai.core.errors import SubjectNotFoundError
@@ -63,7 +64,7 @@ def _theirs(rows: Sequence[JudgementRow], author_id: int) -> list[JudgementRow]:
 
 @router.get("/reps/{author_id}")
 async def read_rep_measures(
-    context: Annotated[RequestContext, Depends(service_gate4_cost)],
+    context: Annotated[RequestContext, Depends(service_gate4_reads_cost)],
     config: Annotated[TenantConfig, Depends(rep_numbers_config)],
     store: Annotated[JudgementStore, Depends(get_judgement_store)],
     directory: Annotated[UserDirectory, Depends(get_user_directory)],
@@ -91,7 +92,7 @@ async def read_rep_measures(
 
 @router.get("/teams/{team}")
 async def read_team_measures(
-    context: Annotated[RequestContext, Depends(service_gate4_cost)],
+    context: Annotated[RequestContext, Depends(service_gate4_reads_cost)],
     config: Annotated[TenantConfig, Depends(rep_numbers_config)],
     store: Annotated[JudgementStore, Depends(get_judgement_store)],
     directory: Annotated[UserDirectory, Depends(get_user_directory)],

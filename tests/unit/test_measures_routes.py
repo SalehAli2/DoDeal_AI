@@ -26,6 +26,7 @@ from dodeal_ai.units.structured_intelligence.user_directory import (
     User,
     get_user_directory,
 )
+from tests.conftest import RedisFakes
 from tests.helpers import tokens
 
 REPS = "/api/v1/measures/reps"
@@ -90,6 +91,36 @@ def _headers() -> dict:
         "Authorization": f"Bearer {tokens.mint_service_token()}",
         "Host": "tenant-a.dodealcrm.com",
     }
+
+
+def test_reads_leave_the_live_request_counter_untouched(
+    client, redis_fakes: RedisFakes
+) -> None:
+    """The guard (register item 153): the brief, measures and admin routes
+    count on cost:reads:tenant, once each, and never on cost:tenant."""
+    admin = "/api/v1/admin/tenant-config"
+    calls = [
+        client.get(f"{REPS}/501", headers=_headers()),
+        client.get(f"{TEAMS}/north", headers=_headers()),
+        client.get("/api/v1/briefs/rep/501", headers=_headers()),
+        client.get(admin, headers=_headers()),
+        client.put(admin, content="{}", headers=_headers()),
+        client.get(f"{admin}/history", headers=_headers()),
+    ]
+    assert all(r.status_code in (200, 204) for r in calls)
+    assert redis_fakes.cost.store == {"cost:reads:tenant:tenant-a": len(calls)}
+
+
+def test_a_spent_reads_cap_is_429(client, monkeypatch) -> None:
+    """Over its own cap a read is refused at Gate 4, as the live cap refuses."""
+    monkeypatch.setenv("DODEAL_COST_READS_PER_TENANT_LIMIT", "1")
+    get_settings.cache_clear()
+    assert client.get(f"{REPS}/501", headers=_headers()).status_code == 200
+    refused = client.get(f"{REPS}/501", headers=_headers())
+    assert (refused.status_code, refused.json()) == (
+        429,
+        {"detail": "Too Many Requests"},
+    )
 
 
 def test_a_rep_gets_three_measures_the_average_total_and_the_window(client) -> None:

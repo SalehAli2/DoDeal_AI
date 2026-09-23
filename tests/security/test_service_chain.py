@@ -15,6 +15,7 @@ from dodeal_ai.core.cost.limiter import (
     _INCR_TENANT_SCRIPT,
     CostLimitError,
     enforce_history_cost,
+    enforce_reads_cost,
     enforce_tenant_cost,
 )
 from tests.conftest import RedisFakes
@@ -141,6 +142,19 @@ async def test_the_history_counter_fails_open(redis_fakes: RedisFakes, caplog) -
     redis_fakes.cost.fail = True
     await enforce_history_cost("tenant-a")
     assert "cost_cap_bypassed" in caplog.text
+
+
+async def test_the_reads_counter_is_its_own_key_and_cap(
+    monkeypatch: pytest.MonkeyPatch, redis_fakes: RedisFakes
+) -> None:
+    """Register item 153: its own key, its own cap, its own reason."""
+    monkeypatch.setenv("DODEAL_COST_READS_PER_TENANT_LIMIT", "2")
+    get_settings.cache_clear()
+    await enforce_reads_cost("tenant-a", amount=2)
+    with pytest.raises(CostLimitError) as raised:
+        await enforce_reads_cost("tenant-a")
+    assert raised.value.reason_code == "reads_quota_exceeded"
+    assert redis_fakes.cost.store == {"cost:reads:tenant:tenant-a": 3}
 
 
 async def test_the_tenant_script_runs_on_real_lua_and_sets_a_window() -> None:

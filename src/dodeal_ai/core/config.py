@@ -281,6 +281,10 @@ class Settings(BaseSettings):
     # counter (register item 127): a backfill of old notes never spends the live
     # cap. 50000 is a backfill's worth; too low stalls a backfill with 429s.
     cost_history_per_tenant_limit: int = Field(default=50_000, gt=0)
+    # The tenant's request cap for the brief, measures and admin routes, per
+    # window, on its own counter (register item 153): reads never spend the live
+    # cap. 5000 covers a CRM's dashboards; too low 429s them, too high bounds none.
+    cost_reads_per_tenant_limit: int = Field(default=5_000, gt=0)
 
     # Token budget (core/cost/limiter.py), on the SAME window as the request
     # caps above but on its own keys: "requests made" and "tokens spent" are

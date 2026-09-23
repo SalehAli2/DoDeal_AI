@@ -652,6 +652,19 @@ def test_both_direct_routes_are_gated(client):
     assert client.post(DIRECT_RESUBMIT, json=_direct_body()).status_code == 401
 
 
+def test_a_live_direct_judgement_counts_on_the_tenant_request_key_alone(
+    client, llm, cost
+):
+    """Register item 153: live judgements keep cost:tenant, and only it."""
+    _script(llm)
+    assert (
+        client.post(DIRECT, json=_direct_body(), headers=_headers()).status_code == 200
+    )
+    assert {key for key in cost.store if key.startswith("cost:")} == {
+        "cost:tenant:tenant-a"
+    }
+
+
 @pytest.mark.parametrize("path", [DIRECT, DIRECT_RESUBMIT])
 def test_a_user_token_is_401_on_both_direct_routes(client, llm, path):
     """Register item 92: a person's token may not post a note as anyone."""

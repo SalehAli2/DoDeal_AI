@@ -25,8 +25,9 @@ gate "service_auth") -> service_gate2_tenant (the same Host match, audit gate
 "service_tenancy") -> build_service_context (principal "service") ->
 service_gate4_cost (the TENANT request counter only). A user token is 401 on it,
 and a service token is 401 on the user chain: the verifiers share no key. The
-history route ends in service_gate4_history_cost instead (register item 127):
-the same chain, counted on the tenant's history counter.
+history route ends in service_gate4_history_cost instead (register item 127),
+and the brief, measures and admin routes in service_gate4_reads_cost (item
+153): the same chain, each counted on the tenant's own counter for that work.
 """
 
 from __future__ import annotations
@@ -57,6 +58,7 @@ from dodeal_ai.core.cost.limiter import (
     CostLimitError,
     enforce_cost,
     enforce_history_cost,
+    enforce_reads_cost,
     enforce_tenant_cost,
 )
 from dodeal_ai.core.tenancy import TenantMismatchError, check_tenant
@@ -355,6 +357,15 @@ async def service_gate4_history_cost(
     """Gate 4 for history judgements (register item 127): the tenant's HISTORY
     request counter alone, so a backfill never moves `cost:tenant`."""
     return await _service_gate4(request, context, enforce_history_cost)
+
+
+async def service_gate4_reads_cost(
+    request: Request,
+    context: Annotated[RequestContext, Depends(build_service_context)],
+) -> RequestContext:
+    """Gate 4 for the brief, measures and admin routes (register item 153): the
+    tenant's READS request counter alone, so reads never move `cost:tenant`."""
+    return await _service_gate4(request, context, enforce_reads_cost)
 
 
 async def _service_gate4(

@@ -39,7 +39,8 @@ current usage without affecting it.
 THE SERVICE CHAIN'S REQUEST COUNTERS are one per tenant and per kind of work,
 each its own key and cap on the one-key script: `cost:tenant:{t}` for live
 judgements, `cost:history:tenant:{t}` for history judgements (register item
-127), so a backfill counts apart from the notes being written today.
+127), so a backfill counts apart from the notes being written today, and
+`cost:reads:tenant:{t}` for the brief, measures and admin routes (item 153).
 
 THE TOKEN COUNTERS ARE A SECOND, DISJOINT PAIR. `tokens:tenant:{t}` and
 `tokens:user:{t}:{s}` are moved by their own Lua script, share no key with the
@@ -214,6 +215,19 @@ async def enforce_history_cost(tenant: str, amount: int = 1) -> None:
         f"cost:history:tenant:{tenant}",
         limit=get_settings().cost_history_per_tenant_limit,
         reason_code="history_quota_exceeded",
+        amount=amount,
+    )
+
+
+async def enforce_reads_cost(tenant: str, amount: int = 1) -> None:
+    """Gate 4 for the brief, measures and admin routes (register item 153):
+    `cost:reads:tenant:{t}` against its own cap and never `cost:tenant`, so
+    reads cannot starve live judgements. Fails OPEN, as every request counter."""
+    await _enforce_one_counter(
+        tenant,
+        f"cost:reads:tenant:{tenant}",
+        limit=get_settings().cost_reads_per_tenant_limit,
+        reason_code="reads_quota_exceeded",
         amount=amount,
     )
 

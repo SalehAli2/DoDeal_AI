@@ -54,6 +54,7 @@ from dodeal_ai.core.auth.dependencies import (
     gate4_either_principal,
     service_gate4_cost,
     service_gate4_history_cost,
+    service_gate4_reads_cost,
 )
 from dodeal_ai.core.config import Settings, get_settings
 from dodeal_ai.core.context import RequestContext
@@ -329,11 +330,12 @@ def _subject(users: list[User], subject_id: int) -> User:
 
 
 async def rep_numbers_config(
-    context: Annotated[RequestContext, Depends(service_gate4_cost)],
+    context: Annotated[RequestContext, Depends(service_gate4_reads_cost)],
 ) -> TenantConfig:
     """The tenant's rules for a route that shows a person's figures, or 403
     rep_numbers_not_enabled (register item 154). Declared before the store in
-    each route, so a tenant that has not opted in is told so first."""
+    each route, so a tenant that has not opted in is told so first. On the
+    reads gate, the same one as its routes, so a request counts once."""
     config = await resolve_tenant_config(context.tenant)
     if not config.rep_numbers_enabled:
         raise RepNumbersNotEnabled()
@@ -359,7 +361,7 @@ def deadline_exceeded(context: RequestContext) -> BriefDeadlineExceeded:
 )
 async def read_brief(
     role: Role,
-    context: Annotated[RequestContext, Depends(service_gate4_cost)],
+    context: Annotated[RequestContext, Depends(service_gate4_reads_cost)],
     config: Annotated[TenantConfig, Depends(rep_numbers_config)],
     store: Annotated[JudgementStore, Depends(get_judgement_store)],
     directory: Annotated[UserDirectory, Depends(get_user_directory)],
@@ -386,8 +388,9 @@ async def read_brief(
 
     THE SERVICE CHAIN ONLY (register item 153). A person's token is 401 here:
     the CRM asks for a brief with its own token and decides, on its side, who
-    may read whose. The chain still holds the tenant -- Host match, tenant cost
-    counter -- so a brief never crosses one.
+    may read whose. The chain still holds the tenant -- Host match, the
+    tenant's READS request counter, never the live one -- so a brief never
+    crosses one and never spends a judgement's cap.
     """
     try:
         async with asyncio.timeout(settings.judgement_deadline_seconds):

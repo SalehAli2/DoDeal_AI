@@ -1,7 +1,8 @@
 """The tenant administrator's rules, changed at runtime (register item 97).
 
 Three routes behind the SERVICE chain -- the CRM's admin screen calls them
-with its own token for the tenant the Host names:
+with its own token for the tenant the Host names -- counted on the tenant's
+READS request counter, never the live one (register item 153):
 
   PUT  /api/v1/admin/tenant-config          a WHOLE `unit_a` section, validated by
                                             the SAME parser as the tenant file,
@@ -34,7 +35,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request
 
-from dodeal_ai.core.auth.dependencies import service_gate4_cost
+from dodeal_ai.core.auth.dependencies import service_gate4_reads_cost
 from dodeal_ai.core.context import RequestContext
 from dodeal_ai.core.errors import (
     InvalidTenantConfig,
@@ -62,7 +63,7 @@ router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 @router.put("/tenant-config")
 async def put_tenant_config(
     request: Request,
-    context: Annotated[RequestContext, Depends(service_gate4_cost)],
+    context: Annotated[RequestContext, Depends(service_gate4_reads_cost)],
 ) -> dict[str, str | None]:
     """Store a new `unit_a` section as the rules in force for this tenant.
 
@@ -102,7 +103,7 @@ async def put_tenant_config(
 
 @router.get("/tenant-config")
 async def read_tenant_config(
-    context: Annotated[RequestContext, Depends(service_gate4_cost)],
+    context: Annotated[RequestContext, Depends(service_gate4_reads_cost)],
 ) -> dict[str, object]:
     """The rules a judgement made now would use, resolved exactly as a
     judgement resolves them, and where they came from."""
@@ -119,7 +120,7 @@ async def read_tenant_config(
 
 @router.get("/tenant-config/history")
 async def read_tenant_config_history(
-    context: Annotated[RequestContext, Depends(service_gate4_cost)],
+    context: Annotated[RequestContext, Depends(service_gate4_reads_cost)],
 ) -> dict[str, object]:
     """Past runtime versions, newest first, at most 50, each with its
     config_version (`version`) and its policy_version (null on a record stored
