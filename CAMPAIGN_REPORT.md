@@ -7110,3 +7110,17 @@ Production failure modes: (1) the fallback provider has its own rate limit and
 the burst moves to it whole; (2) the open breaker holds for 30 s after the
 primary recovers, paying the fallback's price for that window.
 Stress test: the scenario itself, run three times.
+
+## Test: register item 74, load scenario S8 -- CRM reads under concurrency
+
+S8 -- fifteen fetch-route judgements at once through the real LeadsClient over
+httpx.ASGITransport against the in-process fake backend (which gains injectable
+data, a request log and a hide-on-first-read set, defaults unchanged): every
+judgement reads the lead and its notes exactly once, the one note hidden on its
+first read costs one more notes read, and a note that never appears is read
+again once and then 404.
+Production failure modes: (1) a busy lead's notes page is fetched once per
+judgement with no shared cache, so a burst on one lead multiplies reads; (2)
+the re-read's 250 ms wait sits inside the deadline and in the slot count.
+Stress test: the scenario itself, run three times; the late note alone makes
+it 2N+1 reads.

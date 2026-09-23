@@ -90,11 +90,26 @@ class FakeBackend:
     URL it saw, so tests can assert what was actually sent rather than infer it
     from a 200. The URL is recorded as the ASGI scope reconstructs it, scheme
     included -- which is what makes DODEAL_BACKEND_SCHEME checkable through the
-    real httpx path rather than only at the string that builds it."""
+    real httpx path rather than only at the string that builds it.
 
-    def __init__(self) -> None:
+    For the load lane (register item 74, S8): `leads` and `notes` replace the
+    two built-in dicts, every request path is appended to `paths`, and a note
+    id in `hidden_once` is left out of its lead's FIRST notes read only -- a
+    save the CRM has not yet made visible to its reads."""
+
+    def __init__(
+        self,
+        leads: dict[int, dict] | None = None,
+        notes: dict[int, list[dict]] | None = None,
+        hidden_once: set[int] | None = None,
+    ) -> None:
         self.last_dd_api_key: str | None = None
         self.last_url: str | None = None
+        self.paths: list[str] = []
+        self._leads = _LEADS if leads is None else leads
+        self._notes = _NOTES if notes is None else notes
+        self._hidden_once = set(hidden_once or ())
+        self._notes_reads: dict[int, int] = {}
         self.app = self._build_app()
 
     def _require_api_key(
@@ -104,6 +119,7 @@ class FakeBackend:
     ) -> None:
         self.last_dd_api_key = dd_api_key
         self.last_url = str(request.url)
+        self.paths.append(request.url.path)
         if dd_api_key != EXPECTED_API_KEY:
             raise HTTPException(status_code=401, detail="Unauthorized")
 
@@ -113,7 +129,7 @@ class FakeBackend:
 
         @app.get("/api/service/leads")
         def list_leads(_: None = require_key) -> dict:
-            leads = list(_LEADS.values())
+            leads = list(self._leads.values())
             return {"status": True, "data": leads, "meta": _meta(len(leads))}
 
         @app.get("/api/service/leads/{lead_id}")
@@ -122,16 +138,22 @@ class FakeBackend:
                 # Deliberately malformed: proves schema validation fails
                 # closed end to end, through the real HTTP path.
                 return {"unexpected": "shape"}
-            lead = _LEADS.get(lead_id)
+            lead = self._leads.get(lead_id)
             if lead is None:
                 raise HTTPException(status_code=404, detail="Not found")
             return {"status": True, "data": lead}
 
         @app.get("/api/service/leads/{lead_id}/notes")
         def get_notes(lead_id: int, _: None = require_key) -> dict:
-            if lead_id not in _LEADS:
+            if lead_id not in self._leads:
                 raise HTTPException(status_code=404, detail="Not found")
-            notes = _NOTES.get(lead_id, [])
+            reads = self._notes_reads.get(lead_id, 0)
+            self._notes_reads[lead_id] = reads + 1
+            notes = [
+                note
+                for note in self._notes.get(lead_id, [])
+                if reads > 0 or note["id"] not in self._hidden_once
+            ]
             return {"status": True, "data": notes, "meta": _meta(len(notes))}
 
         return app
