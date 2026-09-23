@@ -64,7 +64,7 @@ _TOKEN = re.compile(r"[^\s,.\-،]+")
 # A written digit group, with a leading + or ( and a trailing ) allowed.
 _GROUP = re.compile(r"(?P<plus>\+)?\(?(?P<digits>[0-9٠-٩۰-۹]+)\)?")
 # Arabic diacritics and the tatweel, which a digit word may carry.
-_MARKS = re.compile(r"[ً-ٰٟـ]")
+_MARKS = re.compile(r"[\u064b-\u065f\u0670\u0640]")
 _ARABIC_INDIC = str.maketrans(
     "٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹",
     "01234567890123456789",
