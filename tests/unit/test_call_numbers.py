@@ -106,11 +106,26 @@ def test_a_client_giving_another_number_is_a_new_client_number() -> None:
     assert findings.escalations == []
 
 
-def test_with_no_hashes_an_agents_number_is_personal() -> None:
+@pytest.mark.parametrize("lead", [None, LEAD_HASH])
+def test_with_no_company_hash_an_agents_number_is_unverified_and_never_escalates(
+    lead: str | None,
+) -> None:
     findings = detect_numbers(
-        (_say("agent", "050 123 4567"),), lead_phone_hash=None, agent_phone_hash=None
+        (_say("agent", "text me on my own mobile, 055 765 4321"),),
+        lead_phone_hash=lead,
+        agent_phone_hash=None,
     )
-    assert [f["match"] for f in findings.finds] == ["agent_personal"]
+    assert [f["match"] for f in findings.finds] == ["agent_unverified"]
+    assert findings.escalations == []
+
+
+def test_with_no_company_hash_the_leads_number_still_matches() -> None:
+    findings = detect_numbers(
+        (_say("agent", "I have you on 050 123 4567"),),
+        lead_phone_hash=LEAD_HASH,
+        agent_phone_hash=None,
+    )
+    assert [f["match"] for f in findings.finds] == ["lead"]
 
 
 def test_a_hash_is_compared_whatever_its_case() -> None:

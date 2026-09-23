@@ -23,9 +23,10 @@ and is left alone: "1,200,000 AED" is not a phone number and is not masked.
 WHAT A FIND CARRIES: who said it (agent or client), when, which segment, the
 last four digits and what it matched -- never the number or its hash. The
 lead's hash is `lead`, the agent's is `agent_company`; any other number is
-`new_client_number` from the client and `agent_personal` from the agent, and
-an agent_personal number is an off_channel_contact escalation. With no hash
-on the push nothing can match it: an agent's every number is then personal.
+`new_client_number` from the client. From the agent it is `agent_personal`
+when the push named the company number -- a known, different number, and an
+off_channel_contact escalation -- and `agent_unverified` when it did not:
+with nothing to compare against, nothing escalates.
 
 THE PROMPT COPY masks every phone number as [PHONE] and every email address as
 [EMAIL]; the stored transcript keeps what was said.
@@ -50,6 +51,7 @@ MATCH_LEAD = "lead"
 MATCH_AGENT_COMPANY = "agent_company"
 MATCH_NEW_CLIENT = "new_client_number"
 MATCH_AGENT_PERSONAL = "agent_personal"
+MATCH_AGENT_UNVERIFIED = "agent_unverified"
 
 # The phone rule's lengths (module docstring, step 4). E.164 caps a number at
 # 15 digits; the shortest international number in use is 8.
@@ -250,9 +252,11 @@ class NumberFindings:
 def _match(digest: str, role: str, lead: str | None, agent: str | None) -> str:
     if lead is not None and digest == lead:
         return MATCH_LEAD
-    if agent is not None and digest == agent:
-        return MATCH_AGENT_COMPANY
-    return MATCH_AGENT_PERSONAL if role == AGENT else MATCH_NEW_CLIENT
+    if role != AGENT:
+        return MATCH_NEW_CLIENT
+    if agent is None:
+        return MATCH_AGENT_UNVERIFIED
+    return MATCH_AGENT_COMPANY if digest == agent else MATCH_AGENT_PERSONAL
 
 
 def detect_numbers(

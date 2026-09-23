@@ -5,6 +5,7 @@ is kept re-pays nothing, and a model outage still delivers the transcript."""
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -43,6 +44,8 @@ ON = {
     "alarm_phrases_enabled": True,
     "alarm_phrases": [ALARM],
 }
+# The company number the push names: not the one the agent gives on the call.
+COMPANY_HASH = hashlib.sha256(b"971561112222").hexdigest()
 
 
 def _say(start: float, speaker: str, text: str, confidence: float = 0.9) -> Segment:
@@ -153,6 +156,7 @@ async def _push(duration: int = 150, **config: object) -> None:
             "audio_url_expires_at": (
                 datetime.now(UTC) + timedelta(hours=2)
             ).isoformat(),
+            "agent_phone_hash": COMPANY_HASH,
         }
     )
     await create_job(
