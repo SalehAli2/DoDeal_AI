@@ -1,1 +1,8 @@
+# Code owners. The LAST matching pattern wins, so the order is the rule.
+#
+# Everything is @SalehAli2's (register item 156) except Unit B's unit package,
+# which a pattern with no owner leaves unowned: its reviewers are named by the
+# lead when Unit B's owner is. core/, api/ and workers/ stay owned, Unit B's
+# pieces there included -- the download, callbacks, jobs and budgets.
 * @SalehAli2
+/src/dodeal_ai/units/call_intelligence/
