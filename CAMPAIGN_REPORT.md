@@ -7169,3 +7169,15 @@ refusal surfaces as the pass's error path, so a caller that swallows PromptError
 turns it into a silent unscored note.
 Stress test: build_prompt(caller_data="data") raises PromptError (sabotage:
 skipping the check fails it).
+
+## Piece: register item 177, a string sub is 1-64 of [A-Za-z0-9_-]
+
+A user token's string `sub` must fullmatch SUBJECT_RE, or the request is 401
+`invalid_subject_claim` (fixed text, never the value). An integer sub is
+unchanged: normalised to its decimal string, not bounded by this item.
+Production failure modes: (1) a CRM that starts minting e-mail or dotted subs
+locks every user out at once, with one reason code as the only clue; (2) an
+integer sub of any length still reaches the cost key, which this item leaves.
+Stress test: six shapes (65 chars, a trailing newline, a colon, a space, a
+non-ASCII letter, a dot) each refused (sabotage: skipping the check fails all
+six; `match` for `fullmatch` fails five).

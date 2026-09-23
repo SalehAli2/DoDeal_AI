@@ -47,6 +47,21 @@ def test_string_sub_also_accepted():
     assert ident.subject == "42"
 
 
+@pytest.mark.parametrize("value", ["a" * 65, "42\n", "a:b", "user 42", "émile", "42.0"])
+def test_a_string_sub_outside_the_shape_is_refused(value):
+    """Register item 177: a string sub is 1-64 of [A-Za-z0-9_-]."""
+    with pytest.raises(ClaimMappingError) as exc:
+        extract_identity({"sub": value, "subdomain": "tenant-a"}, _settings())
+    assert exc.value.reason_code == "invalid_subject_claim"
+
+
+def test_a_64_character_string_sub_is_accepted():
+    """The bound is inclusive."""
+    value = "A-z_9" + "x" * 59
+    ident = extract_identity({"sub": value, "subdomain": "tenant-a"}, _settings())
+    assert ident.subject == value
+
+
 def test_bool_sub_rejected():
     # bool is an int subclass; must not slip through as "True".
     with pytest.raises(ClaimMappingError) as exc:

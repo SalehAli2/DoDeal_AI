@@ -28,6 +28,11 @@ from dodeal_ai.core.config import Settings, get_settings
 # rejected at the boundary so nothing downstream ever sees an unvalidated tenant.
 TENANT_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 
+# A string subject (register item 177): 1-64 of [A-Za-z0-9_-], whole string.
+# It becomes the per-user cost key and an audit field, so a newline, a colon or
+# a name in it would reach both. fullmatch, because `$` allows a final newline.
+SUBJECT_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
 
 def normalise_tenant_label(value: str) -> str | None:
     """Lowercase and validate. Returns the normalised label or None if invalid."""
@@ -84,13 +89,18 @@ def _require_tenant(payload: dict, key: str) -> str:
 def _require_subject(payload: dict, key: str, reason_code: str) -> str:
     """sub is an INTEGER in the Tymon token (e.g. 42). Accept int or str,
     normalise to str. Reject absent/empty. Guard against bool (bool is an int
-    subclass in Python, so True would otherwise slip through as 'True')."""
+    subclass in Python, so True would otherwise slip through as 'True').
+    A string outside SUBJECT_RE -> "invalid_subject_claim", as the tenant's."""
     value = payload.get(key)
     if value is None or value == "":
         raise ClaimMappingError(reason_code)
     if isinstance(value, bool):
         raise ClaimMappingError(reason_code)
-    if isinstance(value, (int, str)):
+    if isinstance(value, str):
+        if SUBJECT_RE.fullmatch(value) is None:
+            raise ClaimMappingError("invalid_subject_claim")
+        return value
+    if isinstance(value, int):
         return str(value)
     raise ClaimMappingError(reason_code)
 
