@@ -200,17 +200,45 @@ async def test_a_job_stored_before_the_count_reads_as_none_started(
 
 
 async def test_a_pause_counts_and_leaves_attempts_alone() -> None:
+    """Every pause counts; only an outage counts as an outage too."""
     await _create()
     job = await _job()
-    assert await pause(job, now=NOW, reason="token_budget_exceeded") == 1
-    assert await pause(job, now=NOW, reason="token_store_unavailable") == 2
-    paused = await _job()
-    assert (paused.status, paused.reason, paused.pauses, paused.attempts) == (
-        JobStatus.PAUSED_BUDGET,
-        "token_store_unavailable",
+    assert await pause(job, now=NOW, reason="token_budget_exceeded") == (1, 0)
+    assert await pause(job, now=NOW, reason="cost_store_unavailable", outage=True) == (
         2,
-        0,
+        1,
     )
+    paused = await _job()
+    assert (
+        paused.status,
+        paused.reason,
+        paused.pauses,
+        paused.outages,
+        paused.attempts,
+    ) == (JobStatus.PAUSED_BUDGET, "cost_store_unavailable", 2, 1, 0)
+
+
+async def test_a_pause_after_a_claim_gives_the_attempt_back() -> None:
+    """A claimed attempt is returned, and a count at zero never goes below."""
+    await _create()
+    job = await _job()
+    assert (
+        await claim_attempt(job, max_tries=2, now=NOW, status=JobStatus.DOWNLOADING)
+        == 1
+    )
+    await pause(job, now=NOW, reason="cost_store_unavailable", claimed=True)
+    assert (await _job()).attempts == 0
+    await pause(job, now=NOW, reason="cost_store_unavailable", claimed=True)
+    assert (await _job()).attempts == 0
+
+
+async def test_a_job_stored_before_the_outage_count_reads_as_none(
+    redis_fakes: RedisFakes,
+) -> None:
+    """A hash with no outages field reads as zero, never a KeyError."""
+    await _create()
+    await redis_fakes.jobs.hdel(job_key("tenant-a", "job-1"), "outages")
+    assert (await _job()).outages == 0
 
 
 async def test_the_result_is_held_apart_for_its_ttl(redis_fakes: RedisFakes) -> None:
@@ -240,6 +268,7 @@ async def test_every_operation_fails_closed_on_a_dead_store(dead_store) -> None:
         attempts=0,
         transcriptions=0,
         pauses=0,
+        outages=0,
         request_id="req-1",
         reason=None,
         queue="calls:normal",

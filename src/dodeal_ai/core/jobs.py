@@ -5,8 +5,8 @@ THREE KEYS, every one under the tenant, so a job id from one tenant can never
 address another tenant's job:
 
   call_job:{tenant}:{job_id}          a hash: status, attempts, transcriptions,
-                                      pauses, reason, request_id, queue,
-                                      timestamps, metadata
+                                      pauses, outages, reason, request_id,
+                                      queue, timestamps, metadata
   call_job_by_call:{tenant}:{call_id} the job_id this call was admitted as
   call_result:{tenant}:{job_id}       the stage result, EX result_ttl_seconds
 
@@ -80,6 +80,8 @@ class Job:
     # Transcriptions started, a paid call each; item 35 allows two.
     transcriptions: int
     pauses: int
+    # The pauses a cost-store outage caused: what the resume's backoff doubles on.
+    outages: int
     request_id: str
     reason: str | None
     queue: str
@@ -164,20 +166,29 @@ redis.call('HSET', KEYS[1], 'status', ARGV[3], 'updated_at', ARGV[2], 'reason', 
 return {1, attempts}
 """
 
-# KEYS: the job. ARGV: the paused status, now, reason, then every terminal
-# status. 0 missing, -1 terminal, else the job's pause count after this one.
+# KEYS: the job. ARGV: the paused status, now, reason, "1" to give back the
+# attempt this run claimed, "1" when the cost store was down, then every
+# terminal status. {0, 0} missing, {-1, 0} terminal, else the job's pause and
+# outage counts after this one. A pause never costs an attempt (core(105)).
 _PAUSE_SCRIPT = """
 if redis.call('EXISTS', KEYS[1]) == 0 then
-  return 0
+  return {0, 0}
 end
 local current = redis.call('HGET', KEYS[1], 'status')
-for i = 4, #ARGV do
+for i = 6, #ARGV do
   if current == ARGV[i] then
-    return -1
+    return {-1, 0}
   end
 end
 redis.call('HSET', KEYS[1], 'status', ARGV[1], 'updated_at', ARGV[2], 'reason', ARGV[3])
-return redis.call('HINCRBY', KEYS[1], 'pauses', 1)
+if ARGV[4] == '1' and tonumber(redis.call('HGET', KEYS[1], 'attempts') or '0') > 0 then
+  redis.call('HINCRBY', KEYS[1], 'attempts', -1)
+end
+local outages = tonumber(redis.call('HGET', KEYS[1], 'outages') or '0')
+if ARGV[5] == '1' then
+  outages = redis.call('HINCRBY', KEYS[1], 'outages', 1)
+end
+return {redis.call('HINCRBY', KEYS[1], 'pauses', 1), outages}
 """
 
 # KEYS: the job. ARGV: now, the transcribing status, then every terminal
@@ -234,6 +245,7 @@ async def create_job(
         "attempts": "0",
         "transcriptions": "0",
         "pauses": "0",
+        "outages": "0",
         "request_id": request_id,
         "reason": "",
         "queue": queue,
@@ -273,6 +285,8 @@ async def read_job(tenant: str, job_id: str) -> Job | None:
         # A job stored before the count existed has started none.
         transcriptions=int(raw.get("transcriptions", "0")),
         pauses=int(raw["pauses"]),
+        # A job stored before the outage count existed has had none.
+        outages=int(raw.get("outages", "0")),
         request_id=raw["request_id"],
         reason=raw["reason"] or None,
         queue=raw["queue"],
@@ -351,11 +365,19 @@ async def start_transcription(job: Job, *, now: datetime) -> int | None:
     return int(count) if int(count) > 0 else None
 
 
-async def pause(job: Job, *, now: datetime, reason: str) -> int | None:
-    """paused_budget with `reason`, counting the pause. The job's pause count
-    after this one, or None when it is terminal or gone."""
+async def pause(
+    job: Job,
+    *,
+    now: datetime,
+    reason: str,
+    claimed: bool = False,
+    outage: bool = False,
+) -> tuple[int, int] | None:
+    """paused_budget with `reason`, counting the pause, and an outage when the
+    cost store was down. `claimed` gives back the attempt this run took. The
+    job's (pauses, outages) after this one, or None when terminal or gone."""
     client = get_jobs_client()
-    count = await _call(
+    pauses, outages = await _call(
         lambda: client.eval(
             _PAUSE_SCRIPT,
             1,
@@ -363,10 +385,12 @@ async def pause(job: Job, *, now: datetime, reason: str) -> int | None:
             JobStatus.PAUSED_BUDGET.value,
             now.isoformat(),
             reason,
+            "1" if claimed else "0",
+            "1" if outage else "0",
             *_TERMINAL_ARGS,
         )
     )
-    return int(count) if int(count) > 0 else None
+    return (int(pauses), int(outages)) if int(pauses) > 0 else None
 
 
 async def store_result(

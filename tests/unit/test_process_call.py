@@ -527,16 +527,27 @@ async def test_a_dead_job_store_is_retried_by_arq(ctx: dict, monkeypatch) -> Non
 # --- budgets (core(105)) ----------------------------------------------------------
 
 
+def _resume_delays(queued: list) -> list[float]:
+    """Seconds each queued resume was deferred by, in queue order."""
+    return [(j.score - j.enqueue_time.timestamp() * 1000) / 1000 for j in queued]
+
+
 @pytest.mark.parametrize(
-    ("stored", "fail", "reason"),
+    ("stored", "fail", "reason", "delay"),
     [
-        ({"tokens:calls:tenant:tenant-a": 20_000_000}, False, "token_budget_exceeded"),
+        (
+            {"tokens:calls:tenant:tenant-a": 20_000_000},
+            False,
+            "token_budget_exceeded",
+            None,
+        ),
         (
             {"audio_seconds:calls:tenant:tenant-a": 360_000},
             False,
             "audio_budget_exceeded",
+            None,
         ),
-        ({}, True, "cost_store_unavailable"),
+        ({}, True, "cost_store_unavailable", worker.OUTAGE_DELAY_SECONDS),
     ],
 )
 async def test_over_budget_or_store_down_pauses_before_any_spend(
@@ -546,7 +557,9 @@ async def test_over_budget_or_store_down_pauses_before_any_spend(
     stored: dict,
     fail: bool,
     reason: str,
+    delay: int | None,
 ) -> None:
+    """Over budget waits for the window; a store outage waits 300 s."""
     await _calls_on()
     await _push()
     redis_fakes.cost.store.update(stored)
@@ -564,9 +577,57 @@ async def test_over_budget_or_store_down_pauses_before_any_spend(
     assert source.requests == 0 and ctx["transcriber"].calls == []
     (resumed,) = await redis_fakes.queue.queued_jobs(queue_name=NORMAL_QUEUE)
     assert resumed.args == ("tenant-a", JOB)
-    window = get_settings().cost_window_seconds
-    delay = (resumed.score - resumed.enqueue_time.timestamp() * 1000) / 1000
-    assert window - 5 <= delay <= window + 5
+    expected = get_settings().cost_window_seconds if delay is None else delay
+    (waited,) = _resume_delays([resumed])
+    assert expected - 5 <= waited <= expected + 5
+
+
+async def test_two_outage_pauses_then_success_cost_no_attempt(
+    ctx: dict, redis_fakes: RedisFakes, monkeypatch
+) -> None:
+    """Pauses at the charge give their attempt back and back off 300 s, 600 s."""
+    await _calls_on()
+    await _push()
+    from dodeal_ai.core.cost.limiter import CallsBudgetPaused
+
+    real_charge = worker.charge_audio_seconds
+    outages = [CallsBudgetPaused("cost_store_unavailable")] * 2
+
+    async def flaky(*args: Any, **kwargs: Any) -> int:
+        if outages:
+            raise outages.pop()
+        return await real_charge(*args, **kwargs)
+
+    monkeypatch.setattr(worker, "charge_audio_seconds", flaky)
+    for pauses in (1, 2):
+        await process_call(ctx, "tenant-a", JOB)
+        job = await _job()
+        assert (job.status, job.attempts, job.pauses, job.outages) == (
+            JobStatus.PAUSED_BUDGET,
+            0,
+            pauses,
+            pauses,
+        )
+    await process_call(ctx, "tenant-a", JOB)
+
+    job = await _job()
+    assert (job.status, job.attempts) == (JobStatus.DONE, 1)
+    queued = await redis_fakes.queue.queued_jobs(queue_name=NORMAL_QUEUE)
+    delays = sorted(_resume_delays(queued))
+    assert [round(d, -1) for d in delays] == [300, 600]
+    assert len(ctx["transcriber"].calls) == 1
+
+
+def test_an_outage_backs_off_doubling_to_the_cap_and_over_budget_waits_the_window():
+    """300, 600, 1200, 2400, then 3600 for good; over budget is the window."""
+    delays = [
+        worker.pause_delay("cost_store_unavailable", n, window_seconds=86_400)
+        for n in (1, 2, 3, 4, 5, 6, 1_000)
+    ]
+    assert delays == [300, 600, 1200, 2400, 3600, 3600, 3600]
+    assert (
+        worker.pause_delay("audio_budget_exceeded", 3, window_seconds=86_400) == 86_400
+    )
 
 
 async def test_a_store_down_at_the_audio_charge_pauses_before_transcribing(

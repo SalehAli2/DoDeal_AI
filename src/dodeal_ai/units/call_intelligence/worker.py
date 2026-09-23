@@ -14,7 +14,9 @@ THE ORDER, and what each step may cost:
      CLAUDE.md's never-retry rule for this case only), and the second
      interruption dead-letters (transcription_interrupted).
   5. The call budgets (core(105)): over one, or with the store down, the job
-     PAUSES and is re-queued after the window. Nothing is spent blind.
+     PAUSES. Over budget it waits out the cost window; a store outage retries
+     after 300 s, doubling per outage to 3600 s. A pause never costs an
+     attempt, even one taken at the charge. Nothing is spent blind.
   6. One attempt is claimed, the recording downloaded (core/audio_download.py)
      and its seconds charged, then transcribed. A transcription that failed
      and may succeed later is retried ONCE, as an attempt, its seconds charged
@@ -89,6 +91,12 @@ RETRY_DELAY_SECONDS = 30
 # BRD B6). Fixed by the brief, not a setting: a third is never paid for.
 TRANSCRIPTION_TRIES = 2
 INTERRUPTED = "transcription_interrupted"
+
+# A cost-store outage's pause: 300 s, doubling per outage, never over 3600 s.
+# Only an over-budget pause waits out the whole cost window (core(105)).
+OUTAGE_DELAY_SECONDS = 300
+OUTAGE_DELAY_CAP_SECONDS = 3600
+STORE_DOWN = "cost_store_unavailable"
 
 # The outcome labels a call can be done with before any paid call.
 _UNPAID_OUTCOMES = frozenset({"voicemail", "no_answer"})
@@ -329,7 +337,8 @@ async def _transcribe(
             try:
                 await charge_audio_seconds(scope, seconds)
             except CallsBudgetPaused as paused:
-                await _pause(job, paused.reason_code, run=run)
+                await _pause(job, paused.reason_code, claimed=True, run=run)
+                run.attempts = attempt - 1
                 return None
             count = await start_transcription(job, now=_now())
             if count is None:
@@ -447,21 +456,38 @@ async def _fail(
     await deliver(job, FAILED, config)
 
 
-async def _pause(job: Job, reason: str, *, run: CallRun | None = None) -> None:
-    """paused_budget, and back on the job's queue after the cost window."""
+def pause_delay(reason: str, outages: int, *, window_seconds: int) -> int:
+    """Seconds until a paused job runs again: the cost window when over
+    budget, else 300 s doubled per outage so far, capped at 3600 s."""
+    if reason != STORE_DOWN:
+        return window_seconds
+    # The exponent's own cap only keeps the number small; the delay cap decides.
+    doublings = min(max(outages - 1, 0), 8)
+    return min(OUTAGE_DELAY_SECONDS * 2**doublings, OUTAGE_DELAY_CAP_SECONDS)
+
+
+async def _pause(
+    job: Job, reason: str, *, claimed: bool = False, run: CallRun | None = None
+) -> None:
+    """paused_budget, and back on the job's queue after pause_delay. `claimed`
+    gives back the attempt this run took: a pause never costs one."""
     settings = get_settings()
-    count = await pause(job, now=_now(), reason=reason)
-    if count is None:
+    counts = await pause(
+        job, now=_now(), reason=reason, claimed=claimed, outage=reason == STORE_DOWN
+    )
+    if counts is None:
         return
+    pauses, outages = counts
     if run is not None:
         run.moved(JobStatus.PAUSED_BUDGET, reason)
+    delay = pause_delay(reason, outages, window_seconds=settings.cost_window_seconds)
     try:
         await enqueue_call(
             job.tenant,
             job.job_id,
             job.queue,
-            resume=count,
-            defer=timedelta(seconds=settings.cost_window_seconds),
+            resume=pauses,
+            defer=timedelta(seconds=delay),
         )
     except QueueUnavailable:
         # Paused with nothing to wake it: run this again soon, which pauses
