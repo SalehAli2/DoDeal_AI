@@ -276,7 +276,7 @@ async def test_callback_attempts_are_counted_and_named_by_job(
     from dodeal_ai.core.jobs import job_key
 
     await jobs_module.get_jobs_client().hset(
-        job_key("tenant-a", JOB), "status", "delivering"
+        job_key("tenant-a", JOB), mapping={"status": "done", "delivery": "pending"}
     )
     await deliver_callback(ctx, "tenant-a", JOB, "call.stage1", 1)
     after = _sample(

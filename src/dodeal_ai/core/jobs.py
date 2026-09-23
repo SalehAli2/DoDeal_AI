@@ -5,8 +5,8 @@ THREE KEYS, every one under the tenant, so a job id from one tenant can never
 address another tenant's job:
 
   call_job:{tenant}:{job_id}          a hash: status, attempts, transcriptions,
-                                      pauses, outages, reason, request_id,
-                                      queue, timestamps, metadata
+                                      pauses, outages, reason, delivery,
+                                      request_id, queue, timestamps, metadata
   call_job_by_call:{tenant}:{call_id} the job_id this call was admitted as
   call_result:{tenant}:{job_id}       the stage result, EX result_ttl_seconds
 
@@ -18,6 +18,11 @@ TERMINAL IS FINAL. done, failed and dead_letter refuse every later transition,
 claim and pause inside the same scripts, and on reaching one the job hash and
 its index take the tenant's result_ttl_seconds, so a finished job and its
 dedupe entry expire together. A job still running holds no TTL.
+
+DELIVERY IS APART FROM STATUS (register item 50). A job whose result exists is
+`done` whatever becomes of its callback; `delivery` says that: pending while
+the event is owed, then delivered or delivery_failed, and it moves only out of
+pending. No callback URL, no delivery: the field stays empty.
 
 FAILS CLOSED. The job store is the job: a store that cannot be read or written
 raises JobStoreUnavailable (a 503 at the route, a retry in the worker), never a
@@ -55,6 +60,14 @@ class JobStatus(StrEnum):
     DEAD_LETTER = "dead_letter"
 
 
+class DeliveryState(StrEnum):
+    """Where a job's one callback event is; read on GET beside the status."""
+
+    PENDING = "pending"
+    DELIVERED = "delivered"
+    DELIVERY_FAILED = "delivery_failed"
+
+
 # The statuses no transition, claim or pause may leave.
 TERMINAL: frozenset[JobStatus] = frozenset(
     {JobStatus.DONE, JobStatus.FAILED, JobStatus.DEAD_LETTER}
@@ -84,6 +97,8 @@ class Job:
     outages: int
     request_id: str
     reason: str | None
+    # The callback's state; None when the tenant has no callback to send to.
+    delivery: DeliveryState | None
     queue: str
     created_at: str
     updated_at: str
@@ -123,19 +138,23 @@ return {1, ARGV[1]}
 """
 
 # KEYS: the job, the call index. ARGV: status, now, reason, ttl, "1" when the
-# status is terminal, then every terminal status. 0 missing, -1 already
-# terminal, 1 moved; a terminal move sets finished_at and the TTL on both keys.
+# status is terminal, the delivery state or "" to leave it, then every terminal
+# status. 0 missing, -1 already terminal, 1 moved; a terminal move sets
+# finished_at and the TTL on both keys.
 _TRANSITION_SCRIPT = """
 if redis.call('EXISTS', KEYS[1]) == 0 then
   return 0
 end
 local current = redis.call('HGET', KEYS[1], 'status')
-for i = 6, #ARGV do
+for i = 7, #ARGV do
   if current == ARGV[i] then
     return -1
   end
 end
 redis.call('HSET', KEYS[1], 'status', ARGV[1], 'updated_at', ARGV[2], 'reason', ARGV[3])
+if ARGV[6] ~= '' then
+  redis.call('HSET', KEYS[1], 'delivery', ARGV[6])
+end
 if ARGV[5] == '1' then
   redis.call('HSET', KEYS[1], 'finished_at', ARGV[2])
   redis.call('EXPIRE', KEYS[1], ARGV[4])
@@ -208,6 +227,19 @@ redis.call('HSET', KEYS[1], 'status', ARGV[2], 'updated_at', ARGV[1], 'reason', 
 return redis.call('HINCRBY', KEYS[1], 'transcriptions', 1)
 """
 
+# KEYS: the job. ARGV: the settled state, now. 0 missing, -1 not pending
+# (settled already, or never owed), 1 settled. The status is never touched.
+_SETTLE_SCRIPT = """
+if redis.call('EXISTS', KEYS[1]) == 0 then
+  return 0
+end
+if redis.call('HGET', KEYS[1], 'delivery') ~= 'pending' then
+  return -1
+end
+redis.call('HSET', KEYS[1], 'delivery', ARGV[1], 'updated_at', ARGV[2])
+return 1
+"""
+
 _TERMINAL_ARGS = tuple(sorted(status.value for status in TERMINAL))
 
 
@@ -248,6 +280,7 @@ async def create_job(
         "outages": "0",
         "request_id": request_id,
         "reason": "",
+        "delivery": "",
         "queue": queue,
         "created_at": stamp,
         "updated_at": stamp,
@@ -289,6 +322,7 @@ async def read_job(tenant: str, job_id: str) -> Job | None:
         outages=int(raw.get("outages", "0")),
         request_id=raw["request_id"],
         reason=raw["reason"] or None,
+        delivery=DeliveryState(raw["delivery"]) if raw.get("delivery") else None,
         queue=raw["queue"],
         created_at=raw["created_at"],
         updated_at=raw["updated_at"],
@@ -304,10 +338,11 @@ async def transition(
     now: datetime,
     reason: str | None = None,
     ttl_seconds: int,
+    delivery: DeliveryState | None = None,
 ) -> bool:
-    """Move a job that is not terminal to `status`. A terminal status sets
-    finished_at and `ttl_seconds` on the job and its call index. False when the
-    job is gone or already terminal: nothing moved."""
+    """Move a job that is not terminal to `status`, and its delivery with it
+    when given. A terminal status sets finished_at and `ttl_seconds` on the job
+    and its call index. False when the job is gone or already terminal."""
     client = get_jobs_client()
     moved = await _call(
         lambda: client.eval(
@@ -320,10 +355,27 @@ async def transition(
             reason or "",
             ttl_seconds,
             "1" if status in TERMINAL else "0",
+            "" if delivery is None else delivery.value,
             *_TERMINAL_ARGS,
         )
     )
     return int(moved) == 1
+
+
+async def settle_delivery(job: Job, state: DeliveryState, *, now: datetime) -> bool:
+    """A pending delivery becomes `state`, whatever the job's status. False
+    when it was not pending -- settled already, or never owed -- or is gone."""
+    client = get_jobs_client()
+    settled = await _call(
+        lambda: client.eval(
+            _SETTLE_SCRIPT,
+            1,
+            job_key(job.tenant, job.job_id),
+            state.value,
+            now.isoformat(),
+        )
+    )
+    return int(settled) == 1
 
 
 async def claim_attempt(

@@ -12,6 +12,7 @@ import pytest
 
 from dodeal_ai.core import jobs
 from dodeal_ai.core.jobs import (
+    DeliveryState,
     JobStatus,
     JobStoreUnavailable,
     call_index_key,
@@ -22,6 +23,7 @@ from dodeal_ai.core.jobs import (
     read_job,
     read_result,
     result_key,
+    settle_delivery,
     start_transcription,
     store_result,
     transition,
@@ -163,6 +165,34 @@ async def test_a_claim_counts_attempts_up_to_the_cap() -> None:
     assert (claimed.attempts, claimed.reason) == (2, None)
 
 
+async def test_a_delivery_moves_with_a_transition_then_only_out_of_pending(
+    redis_fakes: RedisFakes,
+) -> None:
+    """Settled once, never again, and the status is never touched by it."""
+    await _create()
+    job = await _job()
+    assert job.delivery is None
+    assert not await settle_delivery(job, DeliveryState.DELIVERED, now=NOW)
+    await transition(
+        job,
+        JobStatus.DONE,
+        now=NOW,
+        ttl_seconds=TTL,
+        delivery=DeliveryState.PENDING,
+    )
+    assert (await _job()).delivery is DeliveryState.PENDING
+    assert await settle_delivery(job, DeliveryState.DELIVERY_FAILED, now=NOW)
+    assert not await settle_delivery(job, DeliveryState.DELIVERED, now=NOW)
+    settled = await _job()
+    assert (settled.status, settled.delivery) == (
+        JobStatus.DONE,
+        DeliveryState.DELIVERY_FAILED,
+    )
+    assert 0 < await redis_fakes.jobs.ttl(job_key("tenant-a", "job-1")) <= TTL
+    await redis_fakes.jobs.delete(job_key("tenant-a", "job-1"))
+    assert not await settle_delivery(job, DeliveryState.DELIVERED, now=NOW)
+
+
 async def test_a_transcription_is_counted_as_it_starts() -> None:
     """Each start is one more paid call, counted in the same script."""
     await _create()
@@ -271,6 +301,7 @@ async def test_every_operation_fails_closed_on_a_dead_store(dead_store) -> None:
         outages=0,
         request_id="req-1",
         reason=None,
+        delivery=None,
         queue="calls:normal",
         created_at="t",
         updated_at="t",
@@ -284,6 +315,7 @@ async def test_every_operation_fails_closed_on_a_dead_store(dead_store) -> None:
         claim_attempt(job, max_tries=2, now=NOW, status=JobStatus.DOWNLOADING),
         pause(job, now=NOW, reason="x"),
         start_transcription(job, now=NOW),
+        settle_delivery(job, DeliveryState.DELIVERED, now=NOW),
         store_result("tenant-a", "job-1", {}, ttl_seconds=TTL),
         read_result("tenant-a", "job-1"),
     ]

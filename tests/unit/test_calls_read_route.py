@@ -95,6 +95,7 @@ async def test_a_queued_job_reads_back_with_no_result(client) -> None:
         "job_id": job_id,
         "status": "queued",
         "reason": None,
+        "delivery": None,
         "result": None,
     }
 
@@ -104,14 +105,20 @@ async def test_a_done_job_reads_back_its_result_while_held(
 ) -> None:
     job_id = await _pushed(client)
     await redis_fakes.jobs.hset(
-        job_key("tenant-a", job_id), mapping={"status": "done", "reason": "voicemail"}
+        job_key("tenant-a", job_id),
+        mapping={
+            "status": "done",
+            "reason": "voicemail",
+            "delivery": "delivery_failed",
+        },
     )
     await store_result("tenant-a", job_id, {"stage": 1}, ttl_seconds=60)
 
     body = (await client.get(f"{PUSH_URL}/{job_id}", headers=_headers())).json()
-    assert (body["status"], body["reason"], body["result"]) == (
+    assert (body["status"], body["reason"], body["delivery"], body["result"]) == (
         "done",
         "voicemail",
+        "delivery_failed",
         {"stage": 1},
     )
 

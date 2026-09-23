@@ -1,5 +1,5 @@
-"""Reading a call job back (register item 50): status, reason, and the result
-while it is held.
+"""Reading a call job back (register item 50): status, reason, the callback's
+delivery beside the status, and the result while it is held.
 
 TENANT BY KEY. The job is looked up under the tenant the gates verified, so
 another tenant's job_id is simply not there: 404 call_job_not_found, the same
@@ -17,17 +17,25 @@ from pydantic import BaseModel
 
 from dodeal_ai.core.context import RequestContext
 from dodeal_ai.core.errors import CallJobNotFound, JobStoreUnavailableResponse
-from dodeal_ai.core.jobs import JobStatus, JobStoreUnavailable, read_job, read_result
+from dodeal_ai.core.jobs import (
+    DeliveryState,
+    JobStatus,
+    JobStoreUnavailable,
+    read_job,
+    read_result,
+)
 
 _audit = logging.getLogger("dodeal_ai.audit")
 
 
 class CallJobView(BaseModel):
-    """What the CRM reads: where the job is, why, and its result while held."""
+    """What the CRM reads: where the job is, why, whether its callback went
+    (None: no callback to send), and its result while held."""
 
     job_id: str
     status: JobStatus
     reason: str | None
+    delivery: DeliveryState | None
     result: dict[str, object] | None
 
 
@@ -53,5 +61,9 @@ async def read_call_job(context: RequestContext, job_id: str) -> CallJobView:
     if job is None:
         raise CallJobNotFound()
     return CallJobView(
-        job_id=job.job_id, status=job.status, reason=job.reason, result=result
+        job_id=job.job_id,
+        status=job.status,
+        reason=job.reason,
+        delivery=job.delivery,
+        result=result,
     )

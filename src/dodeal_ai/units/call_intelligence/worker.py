@@ -3,8 +3,9 @@
 THE ORDER, and what each step may cost:
 
   1. The job, and the tenant's rules as they are NOW. A job that is gone or
-     terminal is left alone; a tenant that switched calls off since the push
-     fails it (calls_not_enabled) before anything is spent.
+     terminal is left alone, but for its callback when still pending: the last
+     run died before it went, so it is sent again. A tenant that switched calls
+     off since the push fails the job (calls_not_enabled) before any spend.
   2. At CALL_MAX_TRIES attempts the job is dead-lettered with its last reason.
   3. FREE OUTCOMES FIRST (item 36): voicemail, no answer, or shorter than
      min_transcribe_seconds is `done` with that outcome label and no paid call.
@@ -22,9 +23,11 @@ THE ORDER, and what each step may cost:
      and may succeed later is retried ONCE, as an attempt, its seconds charged
      again; the second failure is dead_letter and call.failed. A download that
      may succeed later is retried until the attempts run out.
-  7. The transcript is stored for result_ttl_seconds, stage 1 is delivered,
-     and the job is `done`. eligible_for_full_analysis is at least
-     scoring_min_seconds long and not uncertain.
+  7. The transcript is stored for result_ttl_seconds and the job is `done`,
+     its delivery pending when the tenant has a callback (item 50); stage 1 is
+     then delivered, and what came of it is the delivery field, never the
+     status. eligible_for_full_analysis is at least scoring_min_seconds long
+     and not uncertain.
 
 The arq job carries only (tenant, job_id); everything else is read from db3.
 Nothing here logs the link, a hash, a voiceprint or a word of the transcript.
@@ -58,6 +61,7 @@ from dodeal_ai.core.cost.limiter import (
 from dodeal_ai.core.cost.spend import current_spend, spending
 from dodeal_ai.core.errors import QueueUnavailable
 from dodeal_ai.core.jobs import (
+    DeliveryState,
     Job,
     JobStatus,
     JobStoreUnavailable,
@@ -102,8 +106,8 @@ STORE_DOWN = "cost_store_unavailable"
 _UNPAID_OUTCOMES = frozenset({"voicemail", "no_answer"})
 TOO_SHORT = "too_short"
 
-# Delivers one event for a job; True once the CRM has it (or there is no
-# callback to send), False when delivery is left to its retry schedule.
+# Delivers one event for a job and settles its delivery field; True once the
+# CRM has it (or there is no callback), False when left to the schedule.
 type Deliver = Callable[[Job, str, CallsConfig], Awaitable[bool]]
 
 
@@ -233,6 +237,10 @@ async def _process(
         job.attempts,
     )
     if job.terminal:
+        if job.delivery is DeliveryState.PENDING:
+            config = await resolve_calls_config(tenant)
+            event = STAGE1 if job.status is JobStatus.DONE else FAILED
+            await _deliver(ctx, job, event, config, run)
         return
     config = await resolve_calls_config(tenant)
     if not config.calls_enabled:
@@ -287,22 +295,30 @@ async def _process(
         )
 
     await transition(
-        job, JobStatus.DELIVERING, now=_now(), ttl_seconds=config.result_ttl_seconds
+        job,
+        JobStatus.DONE,
+        now=_now(),
+        reason=label,
+        ttl_seconds=config.result_ttl_seconds,
+        delivery=owed_delivery(config),
     )
-    run.moved(JobStatus.DELIVERING)
+    run.moved(JobStatus.DONE, label)
+    await _deliver(ctx, job, STAGE1, config, run)
+
+
+def owed_delivery(config: CallsConfig) -> DeliveryState | None:
+    """pending when the tenant has a callback URL to send the event to."""
+    return None if config.callback_url is None else DeliveryState.PENDING
+
+
+async def _deliver(
+    ctx: dict[str, Any], job: Job, event: str, config: CallsConfig, run: CallRun
+) -> None:
+    """One inline attempt at `event`; the deliverer settles the field."""
     deliver: Deliver = ctx.get("deliver", deliver_nothing)
     started = time.monotonic()
-    delivered = await deliver(job, STAGE1, config)
+    await deliver(job, event, config)
     run.deliver_ms = _ms_since(started)
-    if delivered:
-        await transition(
-            job,
-            JobStatus.DONE,
-            now=_now(),
-            reason=label,
-            ttl_seconds=config.result_ttl_seconds,
-        )
-        run.moved(JobStatus.DONE, label)
 
 
 async def _transcribe(
@@ -446,7 +462,12 @@ async def _fail(
     """failed or dead_letter with `reason`, then call.failed to the CRM."""
     status = JobStatus.DEAD_LETTER if dead else JobStatus.FAILED
     moved = await transition(
-        job, status, now=_now(), reason=reason, ttl_seconds=config.result_ttl_seconds
+        job,
+        status,
+        now=_now(),
+        reason=reason,
+        ttl_seconds=config.result_ttl_seconds,
+        delivery=owed_delivery(config),
     )
     if not moved:
         return

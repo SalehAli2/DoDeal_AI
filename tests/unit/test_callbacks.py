@@ -28,7 +28,7 @@ from dodeal_ai.core.callbacks import (
     post_event,
 )
 from dodeal_ai.core.config import get_settings
-from dodeal_ai.core.jobs import JobStatus, create_job, read_job
+from dodeal_ai.core.jobs import DeliveryState, JobStatus, create_job, read_job
 from dodeal_ai.core.tenant_config import set_override
 from dodeal_ai.units.call_intelligence.admission import job_metadata
 from dodeal_ai.units.call_intelligence.config import (
@@ -182,7 +182,8 @@ async def test_stage1_goes_signed_to_the_callback_url_only(
     assert (body["job_id"], body["call_id"], body["lead_id"]) == (JOB, 7, 1656)
     for secret in ("SIGNED-LINK", AUDIO_HOST, "ab" * 32):
         assert secret not in post.content.decode()
-    assert (await _job()).status is JobStatus.DONE
+    job = await _job()
+    assert (job.status, job.delivery) == (JobStatus.DONE, DeliveryState.DELIVERED)
 
 
 async def test_a_dead_lettered_job_sends_call_failed_with_its_reason(
@@ -203,6 +204,29 @@ async def test_a_dead_lettered_job_sends_call_failed_with_its_reason(
         "audio_source_unavailable",
     )
     assert "result" not in body
+    assert (await _job()).delivery is DeliveryState.DELIVERED
+
+
+async def test_a_call_failed_retry_that_lands_settles_its_delivery(
+    ctx: dict, world: _World, redis_fakes: RedisFakes, monkeypatch
+) -> None:
+    """call.failed rides the same schedule and the same delivery field."""
+    await _setup()
+    monkeypatch.setenv("DODEAL_CALL_MAX_TRIES", "1")
+    get_settings.cache_clear()
+    world.audio_status = 503
+    world.crm_status = [500]
+
+    await process_call(ctx, "tenant-a", JOB)
+    assert (await _job()).delivery is DeliveryState.PENDING
+    (queued,) = await redis_fakes.queue.queued_jobs(queue_name=NORMAL_QUEUE)
+    await deliver_callback(ctx, *queued.args)
+
+    job = await _job()
+    assert (job.status, job.delivery) == (
+        JobStatus.DEAD_LETTER,
+        DeliveryState.DELIVERED,
+    )
 
 
 # --- the schedule ---------------------------------------------------------------
@@ -215,7 +239,8 @@ async def test_a_failed_delivery_is_retried_on_the_schedule_then_fails(
     world.crm_status = [500] * 5
 
     await process_call(ctx, "tenant-a", JOB)
-    assert (await _job()).status is JobStatus.DELIVERING
+    job = await _job()
+    assert (job.status, job.delivery) == (JobStatus.DONE, DeliveryState.PENDING)
 
     delays = []
     for attempt in range(1, 5):
@@ -236,10 +261,14 @@ async def test_a_failed_delivery_is_retried_on_the_schedule_then_fails(
         event_id("tenant-a", JOB, CALL_STAGE1)
     }
     job = await _job()
-    assert (job.status, job.reason) == (JobStatus.FAILED, "delivery_failed")
+    assert (job.status, job.reason, job.delivery) == (
+        JobStatus.DONE,
+        None,
+        DeliveryState.DELIVERY_FAILED,
+    )
 
 
-async def test_a_retry_that_lands_marks_the_job_done(
+async def test_a_retry_that_lands_marks_the_delivery_delivered(
     ctx: dict, world: _World, redis_fakes: RedisFakes
 ) -> None:
     await _setup()
@@ -249,7 +278,8 @@ async def test_a_retry_that_lands_marks_the_job_done(
 
     await deliver_callback(ctx, *queued.args)
 
-    assert (await _job()).status is JobStatus.DONE
+    job = await _job()
+    assert (job.status, job.delivery) == (JobStatus.DONE, DeliveryState.DELIVERED)
     await deliver_callback(ctx, *queued.args)
     assert len(world.posts) == 2
 
@@ -263,10 +293,14 @@ async def test_a_voicemail_retried_to_done_keeps_its_label(
     (queued,) = await redis_fakes.queue.queued_jobs(queue_name=NORMAL_QUEUE)
     await deliver_callback(ctx, *queued.args)
     job = await _job()
-    assert (job.status, job.reason) == (JobStatus.DONE, "voicemail")
+    assert (job.status, job.reason, job.delivery) == (
+        JobStatus.DONE,
+        "voicemail",
+        DeliveryState.DELIVERED,
+    )
 
 
-async def test_with_no_secret_nothing_is_sent_and_the_job_fails_at_once(
+async def test_with_no_secret_nothing_is_sent_and_the_delivery_fails_at_once(
     ctx: dict, world: _World, monkeypatch
 ) -> None:
     await _setup()
@@ -277,7 +311,31 @@ async def test_with_no_secret_nothing_is_sent_and_the_job_fails_at_once(
 
     assert world.posts == []
     job = await _job()
-    assert (job.status, job.reason) == (JobStatus.FAILED, "delivery_failed")
+    assert (job.status, job.reason, job.delivery) == (
+        JobStatus.DONE,
+        None,
+        DeliveryState.DELIVERY_FAILED,
+    )
+
+
+async def test_a_callback_removed_while_a_retry_waits_fails_the_delivery(
+    ctx: dict, world: _World, redis_fakes: RedisFakes
+) -> None:
+    """Nowhere left to send it: delivery_failed, and the job stays done."""
+    await _setup()
+    world.crm_status = [500]
+    await process_call(ctx, "tenant-a", JOB)
+    (queued,) = await redis_fakes.queue.queued_jobs(queue_name=NORMAL_QUEUE)
+    await _setup({"callback_url": None})
+
+    await deliver_callback(ctx, *queued.args)
+
+    job = await _job()
+    assert (job.status, job.delivery) == (
+        JobStatus.DONE,
+        DeliveryState.DELIVERY_FAILED,
+    )
+    assert len(world.posts) == 1
 
 
 async def test_a_refused_call_failed_leaves_the_job_as_it_was(
@@ -302,7 +360,8 @@ async def test_with_no_callback_url_the_job_is_done_for_get(
     await _setup({"callback_url": None})
     await process_call(ctx, "tenant-a", JOB)
     assert world.posts == []
-    assert (await _job()).status is JobStatus.DONE
+    job = await _job()
+    assert (job.status, job.delivery) == (JobStatus.DONE, None)
 
 
 async def test_a_retry_for_a_job_that_moved_on_or_is_gone_sends_nothing(

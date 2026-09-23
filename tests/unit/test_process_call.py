@@ -18,6 +18,7 @@ from arq import Retry
 
 from dodeal_ai.core.config import ConfigError, get_settings
 from dodeal_ai.core.jobs import (
+    DeliveryState,
     JobStatus,
     create_job,
     job_key,
@@ -244,18 +245,19 @@ async def test_a_short_or_unanswered_call_is_done_with_its_label_unpaid(
 async def test_a_crash_after_transcription_retries_delivery_only(
     ctx: dict, source: _Source
 ) -> None:
-    await _calls_on()
+    await _calls_on(callback_url="https://crm.tenant-a.example/hooks")
     await _push()
     ctx["deliver"].crash_on = {1}
 
     with pytest.raises(RuntimeError):
         await process_call(ctx, "tenant-a", JOB)
-    assert (await _job()).status is JobStatus.DELIVERING
+    job = await _job()
+    assert (job.status, job.delivery) == (JobStatus.DONE, DeliveryState.PENDING)
 
     await process_call(ctx, "tenant-a", JOB)
 
     job = await _job()
-    assert (job.status, job.attempts) == (JobStatus.DONE, 2)
+    assert (job.status, job.attempts) == (JobStatus.DONE, 1)
     assert len(ctx["transcriber"].calls) == 1 and source.requests == 1
     assert ctx["deliver"].events == [STAGE1, STAGE1]
 
@@ -493,6 +495,22 @@ async def test_calls_switched_off_after_the_push_fail_the_job(ctx: dict) -> None
     job = await _job()
     assert (job.status, job.reason) == (JobStatus.FAILED, "calls_not_enabled")
     assert ctx["transcriber"].calls == []
+
+
+async def test_a_failed_job_with_its_call_failed_pending_sends_it_again(
+    ctx: dict,
+) -> None:
+    """A run that died before call.failed went sends call.failed, not stage 1."""
+    await _calls_on(callback_url="https://crm.tenant-a.example/hooks")
+    await _push(audio_url_expires_at="2026-01-01T00:00:00+00:00")
+    ctx["deliver"].crash_on = {1}
+    with pytest.raises(RuntimeError):
+        await process_call(ctx, "tenant-a", JOB)
+
+    await process_call(ctx, "tenant-a", JOB)
+
+    assert ctx["deliver"].events == [FAILED, FAILED]
+    assert (await _job()).status is JobStatus.FAILED
 
 
 async def test_a_terminal_or_missing_job_is_left_alone(ctx: dict) -> None:

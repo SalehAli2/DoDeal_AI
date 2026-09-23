@@ -5,11 +5,16 @@ failed job's call.failed) once, straight away. A delivery that may succeed
 later is re-tried by the `deliver_callback` task after 60, 300, 1800 and 7200
 seconds (core/callbacks.py); after the last, the delivery has failed. A
 delivery that can never succeed -- no secret, a refused address -- fails at
-once. Either way a stage-1 job ends `failed` with reason delivery_failed, its
-result still held for GET.
+once.
 
-A tenant with no callback_url has nothing to deliver: the job is done and the
-CRM reads the result by GET.
+DELIVERY IS NOT STATUS (register item 50). The job's `delivery` field goes
+pending -> delivered or delivery_failed; the status is never touched here, so
+a job with a result stays `done` and its result is held for GET either way.
+A retry for a delivery no longer pending sends nothing.
+
+A tenant with no callback_url has nothing to deliver and no delivery field;
+the CRM reads the result by GET. One whose URL was removed while a retry was
+pending gets delivery_failed: there is nowhere left to send it.
 
 The body is built from db3 at every attempt: ids, the stage-1 result or the
 failure's status and reason. Never the audio link, a hash or a voiceprint.
@@ -33,7 +38,13 @@ from dodeal_ai.core.callbacks import (
     post_event,
 )
 from dodeal_ai.core.config import get_settings
-from dodeal_ai.core.jobs import Job, JobStatus, read_job, read_result, transition
+from dodeal_ai.core.jobs import (
+    DeliveryState,
+    Job,
+    read_job,
+    read_result,
+    settle_delivery,
+)
 from dodeal_ai.core.logging_config import job_log_context
 from dodeal_ai.units.call_intelligence.config import CallsConfig, resolve_calls_config
 from dodeal_ai.units.call_intelligence.queues import enqueue_delivery
@@ -86,12 +97,15 @@ async def deliver_event(
     no callback to send; False when it is left to the schedule or has failed."""
     outcome = await _attempt(ctx, job, event, config)
     _log(job, event, outcome, attempt=0)
-    if outcome is None or outcome is Delivery.DELIVERED:
+    if outcome is None:
+        return True
+    if outcome is Delivery.DELIVERED:
+        await settle_delivery(job, DeliveryState.DELIVERED, now=datetime.now(UTC))
         return True
     if outcome is Delivery.RETRY:
         await _schedule(job, event, attempt=1)
         return False
-    await _delivery_failed(job, event, config)
+    await _delivery_failed(job, event)
     return False
 
 
@@ -116,27 +130,18 @@ async def _retry(
     if job is None:
         return
     fields["request_id"] = job.request_id
-    if event == CALL_STAGE1 and job.status is not JobStatus.DELIVERING:
+    if job.delivery is not DeliveryState.PENDING:
         return
     config = await resolve_calls_config(tenant)
     outcome = await _attempt(ctx, job, event, config)
     _log(job, event, outcome, attempt=attempt)
-    if outcome is None or outcome is Delivery.DELIVERED:
-        if event == CALL_STAGE1:
-            result = await read_result(tenant, job_id) or {}
-            label = result.get("outcome_label")
-            await transition(
-                job,
-                JobStatus.DONE,
-                now=datetime.now(UTC),
-                reason=label if isinstance(label, str) else None,
-                ttl_seconds=config.result_ttl_seconds,
-            )
+    if outcome is Delivery.DELIVERED:
+        await settle_delivery(job, DeliveryState.DELIVERED, now=datetime.now(UTC))
         return
     if outcome is Delivery.RETRY and attempt < len(DELIVERY_DELAYS_SECONDS):
         await _schedule(job, event, attempt=attempt + 1)
         return
-    await _delivery_failed(job, event, config)
+    await _delivery_failed(job, event)
 
 
 async def _schedule(job: Job, event: str, *, attempt: int) -> None:
@@ -150,9 +155,8 @@ async def _schedule(job: Job, event: str, *, attempt: int) -> None:
     )
 
 
-async def _delivery_failed(job: Job, event: str, config: CallsConfig) -> None:
-    """A stage-1 job ends failed/delivery_failed, its result still held; a
-    call.failed that could not be sent leaves its job as it was."""
+async def _delivery_failed(job: Job, event: str) -> None:
+    """delivery_failed, the job's status and result left as they were."""
     _logger.warning(
         "callback_delivery_failed",
         extra={
@@ -162,14 +166,7 @@ async def _delivery_failed(job: Job, event: str, config: CallsConfig) -> None:
             "event": event,
         },
     )
-    if event == CALL_STAGE1:
-        await transition(
-            job,
-            JobStatus.FAILED,
-            now=datetime.now(UTC),
-            reason="delivery_failed",
-            ttl_seconds=config.result_ttl_seconds,
-        )
+    await settle_delivery(job, DeliveryState.DELIVERY_FAILED, now=datetime.now(UTC))
 
 
 def _log(job: Job, event: str, outcome: Delivery | None, *, attempt: int) -> None:
