@@ -252,6 +252,14 @@ async def test_the_optional_fields_are_optional(client) -> None:
     assert response.status_code == 202
 
 
+async def test_an_explicit_null_voiceprint_is_no_voiceprint(client) -> None:
+    await _calls_on(client, voice_id_enabled=True)
+    body = {**_body(), "agent_voiceprint": None}
+    accepted = (await client.post(URL, json=body, headers=_headers())).json()
+    job = await read_job("tenant-a", accepted["job_id"])
+    assert job is not None and "agent_voiceprint" not in job.metadata
+
+
 async def test_the_voiceprint_is_kept_only_under_the_voice_id_switch(client) -> None:
     await _calls_on(client)
     off = (await client.post(URL, json=_body(), headers=_headers())).json()

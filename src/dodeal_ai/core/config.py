@@ -172,6 +172,12 @@ class Settings(BaseSettings):
     # item 143): "crm" is the two CRM reads in tools/crm_reads.py, "none" is no
     # source (503). Off by default: the endpoints are unconfirmed (Q23).
     brief_source: Literal["none", "crm"] = "none"
+    # --- Unit B: call recordings (core/audio_download.py) -------------------
+    # The whole of one recording's download, connect to last byte. 60 s fetches
+    # 200 MiB on a modest link; too low fails long calls as audio_download_timeout
+    # (retried, and paid for again in time), too high holds a worker on a stall.
+    call_download_timeout_seconds: float = Field(default=60.0, gt=0)
+
     # --- Watchdog: timeout + retry policy for external calls (§6) -----------
     # Placeholder values; tune per real LLM/tool latency later.
     external_call_timeout_seconds: float = 10.0

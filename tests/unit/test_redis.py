@@ -277,3 +277,31 @@ async def test_the_two_probes_are_independent():
     ):
         assert await redis_module.check_cost_redis_ready() is True
         assert await redis_module.check_operational_redis_ready() is False
+
+
+def test_the_jobs_and_queue_clients_read_their_own_urls(monkeypatch):
+    """db3 for jobs (register item 50); db0 for pushes to arq, undecoded because
+    arq's job bodies are bytes; both bounded pools of their own."""
+    from arq.connections import ArqRedis
+
+    from dodeal_ai.core.config import get_settings
+
+    monkeypatch.setenv("DODEAL_REDIS_JOBS_URL", "redis://localhost:6379/3")
+    monkeypatch.setenv("DODEAL_REDIS_QUEUE_URL", "redis://localhost:6379/0")
+    get_settings.cache_clear()
+    redis_module.get_jobs_client.cache_clear()
+    redis_module.get_queue_client.cache_clear()
+
+    jobs_pool = redis_module.get_jobs_client().connection_pool
+    queue = redis_module.get_queue_client()
+
+    assert isinstance(queue, ArqRedis)
+    assert isinstance(jobs_pool, redis_module.BoundedPool)
+    assert isinstance(queue.connection_pool, redis_module.BoundedPool)
+    assert jobs_pool.connection_kwargs["db"] == 3
+    assert jobs_pool.connection_kwargs["decode_responses"] is True
+    assert queue.connection_pool.connection_kwargs["db"] == 0
+    assert queue.connection_pool.connection_kwargs["decode_responses"] is False
+    assert redis_module.get_jobs_client() is redis_module.get_jobs_client()
+    redis_module.get_jobs_client.cache_clear()
+    redis_module.get_queue_client.cache_clear()
