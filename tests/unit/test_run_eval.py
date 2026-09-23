@@ -19,6 +19,7 @@ THE THREE THINGS THAT MUST HOLD, and the reason each is here:
 
 from __future__ import annotations
 
+import ast
 import logging
 import shutil
 from pathlib import Path
@@ -475,3 +476,16 @@ async def test_a_live_run_charges_only_the_scratch_tenant(
     token_keys = {key for key in redis_fakes.cost.store if key.startswith("tokens:")}
     assert token_keys
     assert all(":eval-scratch" in key for key in token_keys)
+
+
+def test_run_eval_imports_only_public_names() -> None:
+    """Register item 182: run_eval.py imports no underscore name from anywhere."""
+    tree = ast.parse(Path("scripts/run_eval.py").read_text(encoding="utf-8"))
+    names = [
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+    ]
+    assert "guard_against_accidental_live_call" in names
+    assert [name for name in names if name.startswith("_")] == []

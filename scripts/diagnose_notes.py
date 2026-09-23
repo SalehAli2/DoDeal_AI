@@ -22,7 +22,7 @@ exactly as it is inside pipeline.py's.
 
 REAL PAID CALLS, SO --live IS REQUIRED, and the guard has two independent
 halves, like scripts/real_fetch_check.py: the dry run takes a different branch
-that never builds a provider client, AND `_guard_against_accidental_live_call`
+that never builds a provider client, AND `guard_against_accidental_live_call`
 refuses immediately before the client is built even if that branch is wrong.
 Without --live, the three prompts are assembled and printed and nothing is
 sent.
@@ -441,7 +441,7 @@ def build_scope(tenant: str = EVAL_SCRATCH_TENANT) -> TenantScope:
     )
 
 
-def _guard_against_accidental_live_call(live: bool) -> None:
+def guard_against_accidental_live_call(live: bool) -> None:
     """Defense in depth: refuse to build a provider client without --live.
 
     The dry run already takes a branch that never reaches here. This is the
@@ -459,7 +459,7 @@ def _guard_against_accidental_live_call(live: bool) -> None:
         raise SystemExit(3)
 
 
-def _refuse_an_oversized_run(rows: list[EvalRow]) -> None:
+def refuse_an_oversized_run(rows: list[EvalRow]) -> None:
     """The cost guard: how much this is about to spend, and a ceiling on it."""
     if len(rows) > MAX_LIVE_NOTES:
         print(
@@ -623,8 +623,8 @@ def main() -> int:
 
     # The flag guard first, the cost guard second: a run that is not allowed to
     # spend should be refused before it is told how much it was going to spend.
-    _guard_against_accidental_live_call(args.live)
-    _refuse_an_oversized_run(rows)
+    guard_against_accidental_live_call(args.live)
+    refuse_an_oversized_run(rows)
     runs = asyncio.run(_run_live(rows, config=config, settings=settings))
 
     destination = output_path(path, "diagnostics")

@@ -74,12 +74,12 @@ from scripts.diagnose_notes import (
     EVAL_SCRATCH_TENANT,
     PassRun,
     RecordingClient,
-    _guard_against_accidental_live_call,
-    _refuse_an_oversized_run,
     build_scope,
+    guard_against_accidental_live_call,
     load_rows_or_exit,
     output_path,
     print_prompts,
+    refuse_an_oversized_run,
     run_passes,
     use_utf8_output,
     write_csv,
@@ -574,8 +574,8 @@ def main() -> int:
     # 139's two guards, imported rather than rewritten: a second copy of a
     # refusal is a second thing to get wrong, and the one that is wrong is the
     # one that spends the money.
-    _guard_against_accidental_live_call(args.live)
-    _refuse_an_oversized_run(rows)
+    guard_against_accidental_live_call(args.live)
+    refuse_an_oversized_run(rows)
 
     runs = asyncio.run(_run_live(rows, config=config, settings=settings))
     summary = summarise(list(zip(rows, runs, strict=True)), config)

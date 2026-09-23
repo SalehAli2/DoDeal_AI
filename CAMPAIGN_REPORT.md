@@ -7181,3 +7181,14 @@ integer sub of any length still reaches the cost key, which this item leaves.
 Stress test: six shapes (65 chars, a trailing newline, a colon, a space, a
 non-ASCII letter, a dot) each refused (sabotage: skipping the check fails all
 six; `match` for `fullmatch` fails five).
+
+## Piece: register item 182, run_eval.py imports only public names
+
+diagnose_notes' two guards are public now (guard_against_accidental_live_call,
+refuse_an_oversized_run), and run_eval.py imports nothing with an underscore;
+an ast test holds it.
+Production failure modes: (1) a rename of a "private" helper in diagnose_notes
+silently breaks the eval script, which only a hand run would show; (2) the live
+guard is shared, so loosening it for one script loosens it for both.
+Stress test: the ast walk of run_eval.py finds no underscore import (sabotage:
+importing _row_for fails it).
