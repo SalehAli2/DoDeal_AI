@@ -7283,3 +7283,15 @@ drops unit_a's rules, so judgements fall back to the file or the default; (2) a
 PUT that loses the race merges into the stale record and erases the winner.
 Stress test: unit_a then unit_b PUT leaves unit_a's section, config_version,
 policy_version and set_at unchanged (sabotage: start from {} fails 5).
+
+## Piece: register item 50, the unit_b tenant section
+
+CallsConfig parses and stores a tenant's `unit_b` section (file or runtime
+PUT at /api/v1/admin/tenant-config/unit_b): callback_url https only, exact
+audio hosts, the call floors, a 72 h result hold and a 200 MiB ceiling, the
+priority statuses, alarm phrases and six switches, all off.
+Production failure modes: (1) an http callback puts a transcript on the wire
+in clear; (2) calls on with no audio host leaves the download with no list to
+hold a signed link to.
+Stress test: an http callback and calls on with no host are both refused, in
+the parser and as a 422 that stores nothing (sabotage: scheme check off fails 2).

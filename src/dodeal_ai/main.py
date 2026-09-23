@@ -35,6 +35,10 @@ from dodeal_ai.middleware.request_id import RequestIDMiddleware
 from dodeal_ai.tools.crm_reads import CrmJudgementStore, CrmUserDirectory
 from dodeal_ai.tools.httpx_transport import HttpxTransport
 from dodeal_ai.tools.keys import get_key_resolver
+from dodeal_ai.units.call_intelligence.config import (
+    UNIT_B_SECTION,
+    parse_unit_b_section,
+)
 from dodeal_ai.units.structured_intelligence.config import (
     UNIT_A_SECTION,
     parse_unit_a_section,
@@ -57,7 +61,10 @@ from dodeal_ai.units.structured_intelligence.user_directory import (
 LLM_CALLS_PER_JUDGEMENT = 2
 
 # Every unit's section in a `<tenant>.json` and the parser that validates it (F2).
-TENANT_CONFIG_SECTIONS = {UNIT_A_SECTION: parse_unit_a_section}
+TENANT_CONFIG_SECTIONS = {
+    UNIT_A_SECTION: parse_unit_a_section,
+    UNIT_B_SECTION: parse_unit_b_section,
+}
 
 # Backend reads one judgement has in flight at once: the lead and its notes,
 # fetched together (register item 9). The CRM pool is sized on it (item 4).

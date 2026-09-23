@@ -348,18 +348,18 @@ def test_an_unknown_section_is_ignored(tmp_path):
         tmp_path,
         "tenant-a",
         {
-            "unit_b": {"anything": [1, "two", None], "config_version": 3},
+            "unit_c": {"anything": [1, "two", None], "config_version": 3},
             UNIT_A_SECTION: {"config_version": "tenant-a-cfg-3"},
         },
     )
     _load(tmp_path)
     assert get_tenant_config("tenant-a").config_version == "tenant-a-cfg-3"
-    assert tenant_section("tenant-a", "unit_b") is None
+    assert tenant_section("tenant-a", "unit_c") is None
 
 
 def test_a_missing_unit_a_section_uses_the_default(tmp_path):
     """A file with no unit_a section is valid, and Unit A reads the default."""
-    _write_file(tmp_path, "tenant-a", {"unit_b": {"threshold": "not ours"}})
+    _write_file(tmp_path, "tenant-a", {"unit_c": {"threshold": "not ours"}})
     _load(tmp_path)
     assert get_tenant_config("tenant-a") is DEFAULT
     assert tenant_section("tenant-a", UNIT_A_SECTION) is None

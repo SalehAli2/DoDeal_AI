@@ -1,0 +1,169 @@
+"""CallsConfig -- a tenant's `unit_b` section, and the only source of a call
+threshold, a host list or a switch in this unit (register item 50).
+
+Parsed and stored ONLY. Every switch defaults off, so a tenant that has not
+asked for call intelligence has none: no job is admitted, no audio fetched and
+no model called. The section is set in the tenant file or at runtime through
+the admin route; either way this parser decides what is accepted, and the
+override store merges it beside `unit_a` (core/tenant_config.py, item 193).
+
+Two refusals are the point of the section: a callback that is not https (a
+transcript in clear on the wire), and calls switched on with no audio host (a
+job that could only fetch from anywhere, or from nowhere).
+"""
+
+from __future__ import annotations
+
+import re
+from typing import Annotated
+from urllib.parse import urlsplit
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from dodeal_ai.core.tenant_config import ResolvedSection, resolve_section
+
+__all__ = [
+    "UNIT_B_SECTION",
+    "CallsConfig",
+    "calls_config_of",
+    "calls_section_of",
+    "new_config_version",
+    "parse_unit_b_section",
+    "resolve_calls_config",
+]
+
+# This unit's section name in a `<tenant>.json` and in the override record.
+UNIT_B_SECTION = "unit_b"
+
+# The longest a transcript or a result is held, in seconds: 72 hours. A tenant
+# may hold less, never more -- the hold is a data-retention promise.
+_MAX_RESULT_TTL_SECONDS = 259_200
+
+# The largest recording fetched, in bytes: 200 MiB. A tenant may lower it and
+# never raise it, so a tenant file cannot size our disk.
+_MAX_AUDIO_BYTES = 209_715_200
+
+# One DNS name, lower case, no scheme, port, path or wildcard.
+_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+_HOSTNAME = re.compile(rf"{_LABEL}(?:\.{_LABEL})*")
+
+type _Word = Annotated[str, Field(min_length=1)]
+
+
+class CallsConfig(BaseModel):
+    """One tenant's call rules. Frozen, and every collection is a frozenset,
+    so the shared default cannot be changed by a caller."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    # Where stage results are POSTed. None: no callback, results by GET only.
+    callback_url: str | None = None
+    # The hosts a recording may be fetched from, exact names. Empty fetches none.
+    audio_hosts: frozenset[str] = frozenset()
+    # Below this many seconds a call is done with its outcome label, unpaid.
+    min_transcribe_seconds: int = Field(default=30, ge=0)
+    # At least this long, and not uncertain, a call is eligible for full analysis.
+    scoring_min_seconds: int = Field(default=120, ge=0)
+    # How long a job's result is held after it is stored; 72 h is the ceiling.
+    result_ttl_seconds: int = Field(
+        default=_MAX_RESULT_TTL_SECONDS, gt=0, le=_MAX_RESULT_TTL_SECONDS
+    )
+    # The largest recording fetched; over it the download stops and is refused.
+    max_audio_bytes: int = Field(default=_MAX_AUDIO_BYTES, gt=0, le=_MAX_AUDIO_BYTES)
+    # Lead statuses whose calls take the priority queue; stored casefolded.
+    priority_statuses: frozenset[_Word] = frozenset({"qualified", "negotiation"})
+    # Phrases a later pass may alarm on; stored casefolded. Parsed only.
+    alarm_phrases: frozenset[_Word] = frozenset()
+
+    # The switches, all off: calls_enabled admits jobs at all (403 otherwise);
+    # the other five name later passes and are parsed and stored only. A switch
+    # left on by mistake is caught by the pass it gates, never here.
+    calls_enabled: bool = False
+    scoring_enabled: bool = False
+    voice_id_enabled: bool = False
+    number_detection_enabled: bool = False
+    alarm_phrases_enabled: bool = False
+    prosody_enabled: bool = False
+
+    # Stamped by the override store on a runtime PUT (core/tenant_config.py);
+    # None under a tenant file that sets none, and under the default.
+    config_version: str | None = Field(default=None, min_length=1)
+
+    @field_validator("callback_url")
+    @classmethod
+    def _https_callback(cls, value: str | None) -> str | None:
+        """https with a host and no credentials. Fixed message: never the URL."""
+        if value is None:
+            return None
+        try:
+            parts = urlsplit(value)
+            has_credentials = parts.username is not None or parts.password is not None
+        except ValueError:
+            raise ValueError("callback_url") from None
+        if parts.scheme != "https" or not parts.hostname or has_credentials:
+            raise ValueError("callback_url")
+        return value
+
+    @field_validator("audio_hosts", mode="before")
+    @classmethod
+    def _hostnames(cls, value: object) -> object:
+        """Every entry a bare DNS name, lower-cased here."""
+        if not isinstance(value, list | tuple | set | frozenset):
+            return value
+        hosts = []
+        for host in value:
+            if not isinstance(host, str) or not _HOSTNAME.fullmatch(host.lower()):
+                raise ValueError("audio_hosts")
+            hosts.append(host.lower())
+        return frozenset(hosts)
+
+    @field_validator("priority_statuses", "alarm_phrases")
+    @classmethod
+    def _casefolded(cls, value: frozenset[str]) -> frozenset[str]:
+        return frozenset(word.casefold() for word in value)
+
+    @model_validator(mode="after")
+    def _coherent(self) -> CallsConfig:
+        """Calls on need somewhere to fetch from; full analysis never starts
+        below the transcription floor."""
+        if self.calls_enabled and not self.audio_hosts:
+            raise ValueError("audio_hosts_required")
+        if self.scoring_min_seconds < self.min_transcribe_seconds:
+            raise ValueError("scoring_min_seconds")
+        return self
+
+
+_DEFAULT_CONFIG = CallsConfig()
+
+
+def parse_unit_b_section(raw: object) -> CallsConfig:
+    """The `unit_b` section as a CallsConfig, or ValueError (pydantic's
+    ValidationError is one) for anything it refuses."""
+    return CallsConfig.model_validate(raw)
+
+
+def calls_config_of(resolved: ResolvedSection) -> CallsConfig:
+    """A resolved `unit_b` section as this unit's config; the default when the
+    resolution found neither an override nor a file."""
+    value = resolved.value
+    return value if isinstance(value, CallsConfig) else _DEFAULT_CONFIG
+
+
+async def resolve_calls_config(tenant: str) -> CallsConfig:
+    """The call rules in force for `tenant`: the runtime override, else the
+    file, else the default (everything off)."""
+    return calls_config_of(await resolve_section(tenant, UNIT_B_SECTION))
+
+
+def new_config_version(_body: dict, _in_force: object | None) -> None:
+    """The admin PUT's keeper for this section: every accepted PUT is a new
+    dated config_version, since no call rule is yet stamped on a judgement."""
+
+
+def calls_section_of(config: CallsConfig) -> dict[str, object]:
+    """A config as the `unit_b` section that produces it, sets as sorted lists:
+    what the admin route shows as in force."""
+    return {
+        name: sorted(value) if isinstance(value, frozenset) else value
+        for name, value in config.model_dump().items()
+    }
