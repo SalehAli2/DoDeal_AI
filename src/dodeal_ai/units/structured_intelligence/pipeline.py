@@ -111,6 +111,7 @@ from collections.abc import Awaitable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Literal
 
 from pydantic import ValidationError
 
@@ -273,6 +274,11 @@ class JudgementDeps:
     config: TenantConfig
     settings: Settings
 
+
+# Which entry point a judgement came in by (register item 72): on both outcome
+# lines and as the route label of judgements_total and judgement_seconds, so a
+# backfill's volume and latency never read as the live notes'.
+type Route = Literal["fetch", "direct", "history"]
 
 # Any request shape. All carry lead_id and note_id, which is all the shared
 # pipeline reads off a request -- the direct body's three extra fields are
@@ -771,6 +777,7 @@ async def judge_note(
     started = time.monotonic()
     return await _metered(
         started,
+        "fetch",
         _judge_fetched(
             scope, request, resubmission=resubmission, deps=deps, started=started
         ),
@@ -803,6 +810,7 @@ async def _judge_fetched(
                 resubmission=resubmission,
                 deps=deps,
                 started=started,
+                route="fetch",
                 copied_previous=copied,
             )
     except TimeoutError:
@@ -844,6 +852,7 @@ async def judge_note_direct(
     started = time.monotonic()
     return await _metered(
         started,
+        "direct",
         _judge_sent(
             scope,
             request,
@@ -853,7 +862,7 @@ async def judge_note_direct(
             # The CRM sends this right after the save, so arrival time stands
             # in for createdAt (item 32). Nothing reads it today.
             created_at=datetime.now(UTC),
-            history=False,
+            route="direct",
         ),
     )
 
@@ -876,6 +885,7 @@ async def judge_note_history(
     started = time.monotonic()
     return await _metered(
         started,
+        "history",
         _judge_sent(
             scope,
             request,
@@ -883,7 +893,7 @@ async def judge_note_history(
             deps=deps,
             started=started,
             created_at=request.note_created_at,
-            history=True,
+            route="history",
         ),
     )
 
@@ -915,7 +925,7 @@ async def _judge_sent(
     deps: JudgementDeps,
     started: float,
     created_at: datetime,
-    history: bool,
+    route: Route,
 ) -> Judgement:
     """The body of both note-in-the-body entry points: the deadline, the note
     as sent, the shared steps."""
@@ -946,7 +956,7 @@ async def _judge_sent(
                 resubmission=resubmission,
                 deps=deps,
                 started=started,
-                history=history,
+                route=route,
                 stage_change=_stage_change(request, deps.config),
                 copied_previous=_copied_by_fingerprint(request),
             )
@@ -954,32 +964,38 @@ async def _judge_sent(
         raise _deadline_exceeded(scope, started) from None
 
 
-async def _metered(started: float, judging: Awaitable[Judgement]) -> Judgement:
+async def _metered(
+    started: float, route: Route, judging: Awaitable[Judgement]
+) -> Judgement:
     """Count the judgement's outcome and observe its duration (register item
-    22): completed, suppressed, replayed, a reason code, cancelled or error."""
+    22), by route (item 72): completed, suppressed, replayed, a reason code,
+    cancelled or error."""
     try:
         judgement = await judging
     except DodealError as exc:
-        _observe(exc.reason_code, started)
+        _observe(exc.reason_code, started, route)
         raise
     except BaseException as exc:
         _observe(
             "cancelled" if isinstance(exc, asyncio.CancelledError) else "error",
             started,
+            route,
         )
         raise
     if isinstance(judgement, ReplayedJudgement):
-        _observe("replayed", started)
+        _observe("replayed", started, route)
     else:
         _observe(
-            "suppressed" if judgement.suppressed is not None else "completed", started
+            "suppressed" if judgement.suppressed is not None else "completed",
+            started,
+            route,
         )
     return judgement
 
 
-def _observe(outcome: str, started: float) -> None:
-    metrics.JUDGEMENTS.labels(outcome=outcome).inc()
-    metrics.JUDGEMENT_SECONDS.observe(time.monotonic() - started)
+def _observe(outcome: str, started: float, route: Route) -> None:
+    metrics.JUDGEMENTS.labels(outcome=outcome, route=route).inc()
+    metrics.JUDGEMENT_SECONDS.labels(route=route).observe(time.monotonic() - started)
 
 
 def _deadline_exceeded(scope: TenantScope, started: float) -> JudgementDeadlineExceeded:
@@ -1013,7 +1029,7 @@ async def _judge(
     resubmission: bool,
     deps: JudgementDeps,
     started: float,
-    history: bool = False,
+    route: Route,
     stage_change: bool = False,
     copied_previous: bool = False,
 ) -> Judgement:
@@ -1024,8 +1040,9 @@ async def _judge(
     reserves, everything that decides and everything that is logged is here, so
     the two routes cannot drift into judging the same text differently.
 
-    `history` (register item 127) withholds every prompt, reads and writes no
-    db2 counter, and reserves under its own idempotency namespace.
+    `route` (register item 72) names the entry point on both outcome lines.
+    The history route (register item 127) withholds every prompt, reads and
+    writes no db2 counter, and reserves under its own idempotency namespace.
     `stage_change` (register item 142) is the one boolean a CRM stage becomes;
     it reaches the enforcement block and nothing else.
 
@@ -1035,6 +1052,7 @@ async def _judge(
     compares it to a clock, and it is not on any line.
     """
     config = deps.config
+    history = route == "history"
     operation = state.JUDGE_HISTORY if history else state.JUDGE_NOTE
     # Register item 34: the note's script, on its own text, on every judgement.
     language = language_of(note.note)
@@ -1085,6 +1103,7 @@ async def _judge(
             redaction=redaction,
             request_ids=_no_request_ids(),
             recognised_short=recognised_short,
+            route=route,
         )
         return judgement
 
@@ -1401,6 +1420,7 @@ async def _judge(
         redaction=redaction,
         request_ids=request_ids,
         recognised_short=recognised_short,
+        route=route,
     )
     return judgement
 
@@ -1559,8 +1579,12 @@ def _log_outcome(
     redaction: Redaction,
     request_ids: dict[str, str | None],
     recognised_short: bool,
+    route: Route,
 ) -> None:
     """One structured line per judgement.
+
+    `route` (register item 72) is fetch, direct or history on BOTH outcome
+    lines, so a backfill's judgements never read as live ones in the logs.
 
     `redacted_phone`, `redacted_email` and `redacted_id` (register item 59) are
     counts of what the prompts did not see -- numbers, never the values.
@@ -1618,6 +1642,7 @@ def _log_outcome(
             extra={
                 "tenant": scope.tenant,
                 "request_id": scope.request_id,
+                "route": route,
                 "note_type": judgement.analysis.note_type,
                 "suppressed_reason": judgement.suppressed.reason.value,
                 "suppressed_detail": judgement.suppressed.detail_code.value,
@@ -1637,6 +1662,7 @@ def _log_outcome(
         extra={
             "tenant": scope.tenant,
             "request_id": scope.request_id,
+            "route": route,
             "note_type": judgement.analysis.note_type,
             "band": judgement.score.band.value,
             "denominator": judgement.score.denominator,

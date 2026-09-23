@@ -146,30 +146,35 @@ def test_the_page_is_not_in_the_openapi_schema():
 
 async def test_a_completed_judgement_counts_its_outcome_calls_and_time():
     """completed +1, three ok calls, one duration observed."""
-    completed = _value("judgements_total", {"outcome": "completed"})
+    completed = _value("judgements_total", {"outcome": "completed", "route": "fetch"})
     ok = {
         p: _value("model_calls_total", {"pass": p, "outcome": "ok"})
         for p in ("classify", "vague", "score")
     }
-    timed = _value("judgement_seconds_count")
+    timed = _value("judgement_seconds_count", {"route": "fetch"})
 
     await _judge(_deps(FakeLLM(*_happy())))
 
-    assert _value("judgements_total", {"outcome": "completed"}) == completed + 1
+    assert (
+        _value("judgements_total", {"outcome": "completed", "route": "fetch"})
+        == completed + 1
+    )
     for pass_name, count in ok.items():
         assert (
             _value("model_calls_total", {"pass": pass_name, "outcome": "ok"})
             == count + 1
         )
-    assert _value("judgement_seconds_count") == timed + 1
+    assert _value("judgement_seconds_count", {"route": "fetch"}) == timed + 1
 
 
 async def test_a_replay_a_failure_and_a_suppression_are_counted_by_outcome():
     """replayed, note_not_found and suppressed each have their own series."""
     deps = _deps(FakeLLM(*_happy()))
-    replayed = _value("judgements_total", {"outcome": "replayed"})
-    missing = _value("judgements_total", {"outcome": "note_not_found"})
-    suppressed = _value("judgements_total", {"outcome": "suppressed"})
+    replayed = _value("judgements_total", {"outcome": "replayed", "route": "fetch"})
+    missing = _value(
+        "judgements_total", {"outcome": "note_not_found", "route": "fetch"}
+    )
+    suppressed = _value("judgements_total", {"outcome": "suppressed", "route": "fetch"})
 
     await _judge(deps)
     await _judge(deps)
@@ -180,9 +185,18 @@ async def test_a_replay_a_failure_and_a_suppression_are_counted_by_outcome():
     )
     await _judge(_deps(FakeLLM(), thin))
 
-    assert _value("judgements_total", {"outcome": "replayed"}) == replayed + 1
-    assert _value("judgements_total", {"outcome": "note_not_found"}) == missing + 1
-    assert _value("judgements_total", {"outcome": "suppressed"}) == suppressed + 1
+    assert (
+        _value("judgements_total", {"outcome": "replayed", "route": "fetch"})
+        == replayed + 1
+    )
+    assert (
+        _value("judgements_total", {"outcome": "note_not_found", "route": "fetch"})
+        == missing + 1
+    )
+    assert (
+        _value("judgements_total", {"outcome": "suppressed", "route": "fetch"})
+        == suppressed + 1
+    )
 
 
 async def test_malformed_and_unavailable_calls_are_counted():
@@ -267,7 +281,7 @@ async def test_no_label_names_a_tenant_subject_note_or_lead(redis_fakes):
     ]
     for name in declared + emitted:
         assert not any(word in name.lower() for word in FORBIDDEN), name
-    assert set(declared) == {"outcome", "pass", "event", "kind"}
+    assert set(declared) == {"outcome", "pass", "event", "kind", "route"}
     assert "tenant-a" not in metrics.render().decode()
 
 

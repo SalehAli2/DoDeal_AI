@@ -1,9 +1,9 @@
 """Prometheus metrics (register item 22), on one registry of this service's own.
 
-Every label is a fixed vocabulary: an outcome or reason code, a pass name, a
-bypass event, a backend failure kind, a breaker name. Never a tenant, a subject,
-a note or a lead -- a label per tenant is a cardinality and a disclosure
-problem, and a test fails the build if one appears.
+Every label is a fixed vocabulary: an outcome or reason code, a judgement route,
+a pass name, a bypass event, a backend failure kind, a breaker name. Never a
+tenant, a subject, a note or a lead -- a label per tenant is a cardinality and
+a disclosure problem, and a test fails the build if one appears.
 
 `/metrics` (main.py) serves `render()` only when DODEAL_METRICS_ENABLED is set,
 outside the gates and the in-flight cap.
@@ -30,8 +30,9 @@ CONTENT_TYPE = CONTENT_TYPE_LATEST
 
 JUDGEMENTS = Counter(
     "judgements",
-    "Judgements by outcome: completed, suppressed, replayed, or the reason code.",
-    ["outcome"],
+    "Judgements by outcome (completed, suppressed, replayed, or the reason code) "
+    "and route (fetch, direct, history).",
+    ["outcome", "route"],
     registry=REGISTRY,
 )
 MODEL_CALLS = Counter(
@@ -66,10 +67,12 @@ BACKEND_ERRORS = Counter(
     registry=REGISTRY,
 )
 # Up to the 25 s default deadline and past it: a histogram that stops below the
-# deadline cannot show the requests that ran into it.
+# deadline cannot show the requests that ran into it. By route (register item
+# 72), so a backfill's latency never reads as the live notes'.
 JUDGEMENT_SECONDS = Histogram(
     "judgement_seconds",
-    "Wall time of one judgement, from the entry point to its answer.",
+    "Wall time of one judgement, from the entry point to its answer, by route.",
+    ["route"],
     buckets=(0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0),
     registry=REGISTRY,
 )

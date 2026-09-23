@@ -4,12 +4,14 @@ the tenant's history token budget alone, and bounded by its own bulkhead."""
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 
 import pytest
 from fastapi.testclient import TestClient
 
 import dodeal_ai.core.cost.limiter as cost_limiter
+from dodeal_ai.core import metrics
 from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.inflight import history_counter
 from dodeal_ai.core.llm import get_llm_client
@@ -109,6 +111,10 @@ def _counter_keys(operational: FakeOperationalRedis) -> list[str]:
     return [key for key in operational.store if key.startswith(_COUNTER_PREFIXES)]
 
 
+def _value(name: str, labels: dict[str, str]) -> float:
+    return metrics.REGISTRY.get_sample_value(name, labels) or 0.0
+
+
 # --- the judgement ----------------------------------------------------------
 
 
@@ -152,6 +158,35 @@ def test_only_the_history_token_key_moves(client, llm, cost) -> None:
     token_keys = {key for key in cost.store if key.startswith("tokens:")}
     assert token_keys == {"tokens:history:tenant:tenant-a"}
     assert cost.mgets == [("tokens:history:tenant:tenant-a",)]
+
+
+def test_a_history_judgements_outcome_lines_and_metrics_say_history(
+    client, llm, caplog
+) -> None:
+    """The guard (register item 72): both outcome lines, and both metrics."""
+    caplog.set_level(logging.INFO, logger="dodeal_ai")
+    completed = _value("judgements_total", {"outcome": "completed", "route": "history"})
+    thin = _value("judgements_total", {"outcome": "suppressed", "route": "history"})
+    timed = _value("judgement_seconds_count", {"route": "history"})
+    _script(llm)
+
+    client.post(HISTORY, json=_body(), headers=_headers())
+    client.post(HISTORY, json=_body("ok", note_id=11), headers=_headers())
+
+    lines = {
+        record.getMessage(): getattr(record, "route", None)
+        for record in caplog.records
+        if record.getMessage() in ("judgement_completed", "judgement_suppressed")
+    }
+    assert lines == {
+        "judgement_completed": "history",
+        "judgement_suppressed": "history",
+    }
+    labels = {"outcome": "completed", "route": "history"}
+    assert _value("judgements_total", labels) == completed + 1
+    labels = {"outcome": "suppressed", "route": "history"}
+    assert _value("judgements_total", labels) == thin + 1
+    assert _value("judgement_seconds_count", {"route": "history"}) == timed + 2
 
 
 def test_a_thin_old_note_withholds_its_fixed_question_as_history(

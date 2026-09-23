@@ -713,6 +713,30 @@ def test_a_direct_judgement_carries_the_five_numbers(client, llm, json_log):
     _assert_numbers(line, passes_ran=True)
 
 
+def test_both_direct_outcome_lines_say_direct(client, llm, json_log):
+    """Register item 72: the route names the entry point, scored or suppressed."""
+    _script(llm)
+    client.post(DIRECT, json=_direct_body(), headers=_headers())
+    client.post(
+        DIRECT, json=_direct_body("ok", note_id=NOTE_ID + 1), headers=_headers()
+    )
+
+    routes = {
+        x["message"]: x["route"]
+        for x in _lines(json_log)
+        if x["message"] in ("judgement_completed", "judgement_suppressed")
+    }
+    assert routes == {"judgement_completed": "direct", "judgement_suppressed": "direct"}
+
+
+def test_the_fetch_outcome_line_says_fetch(fetch_client, llm, json_log):
+    """Register item 72: the contract route names itself too."""
+    _script(llm)
+    fetch_client.post(JUDGE, json=_fetch_body(), headers=_user_headers())
+    line = next(x for x in _lines(json_log) if x["message"] == "judgement_completed")
+    assert line["route"] == "fetch"
+
+
 def test_a_suppressed_direct_judgement_carries_them_too(client, json_log):
     # The length gate, on this route: nothing ran, so the three pass fields are
     # null while elapsed_ms and inflight are still numbers.

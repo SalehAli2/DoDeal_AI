@@ -7250,3 +7250,15 @@ spends the live cap and 429s the notes being written; (2) a dependency left on
 the old gate counts one request on both keys.
 Stress test: six reads across the three route families leave only the reads key,
 at 6 (sabotage: reads on `cost:tenant` fails 2).
+
+## Piece: register item 72, the route on both outcome lines and on two metrics
+
+judgement_completed and judgement_suppressed carry `route` (fetch, direct,
+history), and judgements_total{outcome,route} and judgement_seconds{route} carry
+it as a label, set once at each entry point and passed down.
+Production failure modes: (1) a backfill's volume and latency read as the live
+notes' on a dashboard, hiding a slow live path behind fast history; (2) a
+dashboard or alert that summed the old unlabelled series now double-reads or
+misses series until it aggregates over route.
+Stress test: a history judgement's two lines say history and its series move
+under route="history" (sabotage: route off judgement_completed fails 3).
