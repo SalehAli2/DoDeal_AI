@@ -304,7 +304,10 @@ async def test_a_failed_pass_still_settles_stage2_done(
         await analyse_stage2(_stage2_ctx({}, {}), "tenant-a", JOB)
     assert (await _job()).stage2 is Stage2State.DONE
     (line,) = [r for r in caplog.records if r.getMessage() == "call_stage2_outcome"]
-    assert line.part_reasons == {"objections": "objections_malformed_output"}
+    assert line.part_reasons == {
+        "objections": "objections_malformed_output",
+        "score": "scoring_off",
+    }
 
 
 @pytest.mark.parametrize(

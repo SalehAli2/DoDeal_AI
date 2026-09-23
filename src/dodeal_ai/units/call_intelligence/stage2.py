@@ -60,6 +60,7 @@ from dodeal_ai.units.call_intelligence.wave2 import Wave2, wave2
 from dodeal_ai.units.call_intelligence.worker import (
     DEADLINE,
     deadline_seconds,
+    eligible_for_full_analysis,
     job_scope,
     pause_delay,
 )
@@ -166,16 +167,18 @@ async def _analyse(
         await _again_or_fail(ctx, run, paused.reason_code, delay)
         return
     config = await resolve_calls_config(tenant)
+    transcript = Transcript.model_validate(kept)
     try:
         run.wave = await wave2(
             client,
             job,
             config,
-            Transcript.model_validate(kept),
+            transcript,
             work=await read_work(tenant, job_id),
             scope=scope,
             settings=get_settings(),
             usage=run.usage,
+            eligible=eligible_for_full_analysis(job, config, transcript),
         )
     except JobGone:
         return

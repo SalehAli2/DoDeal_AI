@@ -17,7 +17,7 @@ from dodeal_ai.units.call_intelligence.prompts import (
 )
 
 PROMPT_SET = "unit_b_prompts_v2"
-PROMPT_SET_DIGEST = "5a6eef7d8899fd7ec44373c4f0ea2a72f37b2d017b88779c977f71ca8a13402f"
+PROMPT_SET_DIGEST = "4cc0dadf29769ab47266833d8b33e96046423e52fe53e265f44c79d1674b5570"
 
 _HOW_TO_UPDATE = (
     "A Unit B prompt template changed. Bump PROMPT_SET_VERSION in "

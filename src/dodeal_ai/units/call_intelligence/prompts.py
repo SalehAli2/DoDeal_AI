@@ -36,6 +36,7 @@ from dodeal_ai.units.call_intelligence.transcriber import Segment
 EXTRACT_TEMPLATE = "call_intelligence/extract_v2.txt"
 PROSE_TEMPLATE = "call_intelligence/prose_v1.txt"
 OBJECTIONS_TEMPLATE = "call_intelligence/objections_v1.txt"
+SCORE_TEMPLATE = "call_intelligence/score_v1.txt"
 REPROMPT_TAIL_TEMPLATE = "call_intelligence/reprompt_tail_v1.txt"
 
 # Replaced by extract_v2 (evidence for every element); never sent again.
@@ -51,6 +52,7 @@ UNIT_B_TEMPLATES: tuple[str, ...] = (
     EXTRACT_TEMPLATE,
     PROSE_TEMPLATE,
     OBJECTIONS_TEMPLATE,
+    SCORE_TEMPLATE,
     REPROMPT_TAIL_TEMPLATE,
     *RETIRED_TEMPLATES,
 )

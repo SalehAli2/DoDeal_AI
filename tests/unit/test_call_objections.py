@@ -254,6 +254,7 @@ async def _wave2(llm: FakeLLM, job, work: dict | None = None, usage=None):
         scope=SCOPE,
         settings=get_settings(),
         usage=usage or PassUsage(),
+        eligible=True,
     )
 
 
@@ -264,7 +265,10 @@ async def test_wave2_runs_the_objections_pass_and_keeps_its_answer() -> None:
 
     assert wave.parts[OBJECTIONS] is not None
     assert wave.parts[OBJECTIONS]["raised"] == 2
-    assert (wave.reasons, wave.models) == ({}, {OBJECTIONS: "fake-model-pinned"})
+    assert (wave.reasons, wave.models) == (
+        {"score": "scoring_off"},
+        {OBJECTIONS: "fake-model-pinned"},
+    )
     assert usage.tokens[OBJECTIONS]["calls"] == 1
     kept = await read_work("tenant-a", "job-1")
     assert kept[OBJECTIONS]["answer"] == ANSWER

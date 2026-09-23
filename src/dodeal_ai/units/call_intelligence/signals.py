@@ -62,9 +62,18 @@ def interruptions(segments: Sequence[Segment]) -> dict[str, int]:
     return counts
 
 
+def talk_share(segments: Sequence[Segment], role: str) -> float | None:
+    """The role's share of all spoken seconds, as stage 1 reports it; None
+    when nobody spoke."""
+    total = sum(segment.seconds for segment in segments)
+    if not total:
+        return None
+    seconds = sum(s.seconds for s in segments if role_of(s) == role)
+    return round(seconds / total, _SHARE_PLACES)
+
+
 def call_signals(segments: Sequence[Segment]) -> dict[str, object]:
     """The signals block stage 1 carries: its version, then one entry a role."""
-    total = sum(segment.seconds for segment in segments)
     cut_ins = interruptions(segments)
     block: dict[str, object] = {"version": SIGNALS_VERSION}
     for role in (AGENT, CLIENT):
@@ -72,7 +81,7 @@ def call_signals(segments: Sequence[Segment]) -> dict[str, object]:
         seconds = sum(segment.seconds for segment in spoken)
         words = sum(len(segment.text.split()) for segment in spoken)
         block[role] = {
-            "talk_share": round(seconds / total, _SHARE_PLACES) if total else None,
+            "talk_share": talk_share(segments, role),
             "words_per_minute": (
                 round(words / (seconds / _SECONDS_PER_MINUTE), _RATE_PLACES)
                 if seconds
