@@ -7158,3 +7158,14 @@ casefold apart (a stray space, a lookalike letter) are still two teams.
 Stress test: a rep in "North" and a leader in "north" give one team of eight
 notes in both briefs and a 200 on /teams/NORTH (sabotage: an identity key fails
 all three).
+
+## Piece: register item 183, build_prompt refuses zero template names
+
+build_prompt(caller_data=...) with no name used to return caller data under an
+empty system section. It now raises PromptError with fixed text.
+Production failure modes: (1) a refactor that builds the name list dynamically
+and yields nothing would send a note to the model with no instruction; (2) the
+refusal surfaces as the pass's error path, so a caller that swallows PromptError
+turns it into a silent unscored note.
+Stress test: build_prompt(caller_data="data") raises PromptError (sabotage:
+skipping the check fails it).

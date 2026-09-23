@@ -26,6 +26,12 @@ def test_missing_template_is_hard_error():
         build_prompt("does_not_exist_v9.txt", caller_data="data")
 
 
+def test_zero_template_names_is_refused():
+    """Register item 183: caller data with no system template is never a prompt."""
+    with pytest.raises(PromptError):
+        build_prompt(caller_data="data")
+
+
 def test_injected_instruction_stays_in_data_section():
     # A classic injection attempt. It must appear as DATA, below the system
     # section, not replace or precede the system instructions.

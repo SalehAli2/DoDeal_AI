@@ -180,6 +180,10 @@ def build_prompt(*template_names: str, caller_data: str) -> AssembledPrompt:
     Any delimiter-like text inside caller_data is neutralised so a caller
     cannot forge an early END marker to escape the data section.
     """
+    if not template_names:
+        # Register item 183: no name would be caller data under an empty system
+        # section -- untrusted text with no instruction above it. Refused.
+        raise PromptError("build_prompt needs at least one template name")
     system = _SECTION_SEP.join(_load_template(name) for name in template_names)
     safe_data = _neutralise_delimiters(caller_data)
     return AssembledPrompt(
