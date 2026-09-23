@@ -252,6 +252,39 @@ def test_the_history_budget_is_its_own(client, llm, cost, monkeypatch) -> None:
     assert r.json()["reason"] == "token_budget_exceeded"
 
 
+def test_ten_history_requests_leave_the_live_request_counter_untouched(
+    client, llm, cost
+) -> None:
+    """The guard (register item 127): history counts on its own request key."""
+    _script(llm, judgements=10)
+    for note_id in range(10, 20):
+        r = client.post(HISTORY, json=_body(note_id=note_id), headers=_headers())
+        assert r.status_code == 200
+
+    assert "cost:tenant:tenant-a" not in cost.store
+    assert cost.store["cost:history:tenant:tenant-a"] == 10
+
+
+def test_a_spent_history_request_cap_is_429_and_live_notes_still_pass(
+    client, llm, monkeypatch
+) -> None:
+    """Over its own cap history is refused at Gate 4; the live route is not."""
+    monkeypatch.setenv("DODEAL_COST_HISTORY_PER_TENANT_LIMIT", "1")
+    get_settings.cache_clear()
+    _script(llm, judgements=2)
+    assert client.post(HISTORY, json=_body(), headers=_headers()).status_code == 200
+
+    refused = client.post(HISTORY, json=_body(note_id=11), headers=_headers())
+    direct = {k: v for k, v in _body(note_id=12).items() if k != "note_created_at"}
+    live = client.post(DIRECT, json=direct, headers=_headers())
+
+    assert (refused.status_code, refused.json()) == (
+        429,
+        {"detail": "Too Many Requests"},
+    )
+    assert live.status_code == 200
+
+
 # --- the bulkhead -----------------------------------------------------------
 
 

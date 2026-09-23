@@ -14,6 +14,7 @@ from dodeal_ai.core.context import PrincipalMismatchError, RequestContext
 from dodeal_ai.core.cost.limiter import (
     _INCR_TENANT_SCRIPT,
     CostLimitError,
+    enforce_history_cost,
     enforce_tenant_cost,
 )
 from tests.conftest import RedisFakes
@@ -120,6 +121,26 @@ async def test_the_tenant_counter_denies_over_the_cap(
     with pytest.raises(CostLimitError) as raised:
         await enforce_tenant_cost("tenant-a")
     assert raised.value.reason_code == "tenant_quota_exceeded"
+
+
+async def test_the_history_counter_is_its_own_key_and_cap(
+    monkeypatch: pytest.MonkeyPatch, redis_fakes: RedisFakes
+) -> None:
+    """Register item 127: its own key, its own cap, its own reason."""
+    monkeypatch.setenv("DODEAL_COST_HISTORY_PER_TENANT_LIMIT", "2")
+    get_settings.cache_clear()
+    await enforce_history_cost("tenant-a", amount=2)
+    with pytest.raises(CostLimitError) as raised:
+        await enforce_history_cost("tenant-a")
+    assert raised.value.reason_code == "history_quota_exceeded"
+    assert redis_fakes.cost.store == {"cost:history:tenant:tenant-a": 3}
+
+
+async def test_the_history_counter_fails_open(redis_fakes: RedisFakes, caplog) -> None:
+    """A dead cost store allows a history request and says so."""
+    redis_fakes.cost.fail = True
+    await enforce_history_cost("tenant-a")
+    assert "cost_cap_bypassed" in caplog.text
 
 
 async def test_the_tenant_script_runs_on_real_lua_and_sets_a_window() -> None:

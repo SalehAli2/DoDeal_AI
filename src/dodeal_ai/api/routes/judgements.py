@@ -53,6 +53,7 @@ from dodeal_ai.core.auth.dependencies import (
     gate4_cost,
     gate4_either_principal,
     service_gate4_cost,
+    service_gate4_history_cost,
 )
 from dodeal_ai.core.config import Settings, get_settings
 from dodeal_ai.core.context import RequestContext
@@ -265,7 +266,7 @@ async def _history_slot(request: Request) -> AsyncIterator[None]:
 async def create_history_judgement(
     request: HistoryJudgementRequest,
     response: Response,
-    context: Annotated[RequestContext, Depends(service_gate4_cost)],
+    context: Annotated[RequestContext, Depends(service_gate4_history_cost)],
     _slot: Annotated[None, Depends(_history_slot)],
     llm: Annotated[LLMClient, Depends(get_llm_client)],
     settings: Annotated[Settings, Depends(get_settings)],
@@ -274,9 +275,10 @@ async def create_history_judgement(
 
     The service chain, the direct body plus `note_created_at` (an aware time;
     naive is 422), and the direct route's pipeline with no question ever sent,
-    no db2 counter touched and the tokens charged to the tenant's HISTORY
-    budget alone -- so a backfill can neither pester anyone nor spend the live
-    budget. The history bulkhead bounds how many run at once.
+    no db2 counter touched, the request counted on the tenant's HISTORY request
+    counter and the tokens charged to its HISTORY budget -- so a backfill can
+    neither pester anyone nor spend the live cap or the live budget. The
+    history bulkhead bounds how many run at once.
     """
     judgement = await judge_note_history(
         context.scope_for_author(request.author_id, budget="history"),

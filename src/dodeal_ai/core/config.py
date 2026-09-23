@@ -277,6 +277,10 @@ class Settings(BaseSettings):
     cost_per_tenant_limit: int = 10000
     cost_per_user_limit: int = 1000
     cost_window_seconds: int = 86400  # 24h
+    # The tenant's request cap for HISTORY judgements, per window, on its own
+    # counter (register item 127): a backfill of old notes never spends the live
+    # cap. 50000 is a backfill's worth; too low stalls a backfill with 429s.
+    cost_history_per_tenant_limit: int = Field(default=50_000, gt=0)
 
     # Token budget (core/cost/limiter.py), on the SAME window as the request
     # caps above but on its own keys: "requests made" and "tokens spent" are

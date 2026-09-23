@@ -36,6 +36,11 @@ context.
 get_usage() is a separate, read-only path (MGET, no increment) for reporting
 current usage without affecting it.
 
+THE SERVICE CHAIN'S REQUEST COUNTERS are one per tenant and per kind of work,
+each its own key and cap on the one-key script: `cost:tenant:{t}` for live
+judgements, `cost:history:tenant:{t}` for history judgements (register item
+127), so a backfill counts apart from the notes being written today.
+
 THE TOKEN COUNTERS ARE A SECOND, DISJOINT PAIR. `tokens:tenant:{t}` and
 `tokens:user:{t}:{s}` are moved by their own Lua script, share no key with the
 `cost:*` counters above, and answer a different question: what was SPENT, not
@@ -191,18 +196,44 @@ return {count}
 async def enforce_tenant_cost(tenant: str, amount: int = 1) -> None:
     """The service chain's Gate 4: move `cost:tenant:{t}` by `amount` and deny
     over the tenant cap. Fails OPEN on a Redis error, exactly as enforce_cost."""
+    await _enforce_one_counter(
+        tenant,
+        f"cost:tenant:{tenant}",
+        limit=get_settings().cost_per_tenant_limit,
+        reason_code="tenant_quota_exceeded",
+        amount=amount,
+    )
+
+
+async def enforce_history_cost(tenant: str, amount: int = 1) -> None:
+    """Gate 4 for a HISTORY judgement (register item 127): `cost:history:
+    tenant:{t}` against its own cap and never `cost:tenant`, so a backfill
+    cannot spend the live cap. Fails OPEN, as every request counter does."""
+    await _enforce_one_counter(
+        tenant,
+        f"cost:history:tenant:{tenant}",
+        limit=get_settings().cost_history_per_tenant_limit,
+        reason_code="history_quota_exceeded",
+        amount=amount,
+    )
+
+
+async def _enforce_one_counter(
+    tenant: str, key: str, *, limit: int, reason_code: str, amount: int
+) -> None:
+    """Move one tenant request counter by `amount` and deny over `limit`, with
+    `reason_code`. One script for every such counter; its own key each."""
     settings = get_settings()
     client = get_cost_client()
-    tenant_key = f"cost:tenant:{tenant}"
 
     async def _incr() -> int:
         (count,) = await client.eval(
-            _INCR_TENANT_SCRIPT, 1, tenant_key, amount, settings.cost_window_seconds
+            _INCR_TENANT_SCRIPT, 1, key, amount, settings.cost_window_seconds
         )
         return int(count)
 
     try:
-        tenant_count = await cost_breaker().call(_incr)
+        count = await cost_breaker().call(_incr)
     except redis.RedisError as exc:
         metrics.BYPASSES.labels(event="cost_cap_bypassed").inc()
         _logger.warning(
@@ -215,8 +246,8 @@ async def enforce_tenant_cost(tenant: str, amount: int = 1) -> None:
         )
         return
 
-    if tenant_count > settings.cost_per_tenant_limit:
-        raise CostLimitError("tenant_quota_exceeded")
+    if count > limit:
+        raise CostLimitError(reason_code)
 
 
 # --- the token counters ----------------------------------------------------

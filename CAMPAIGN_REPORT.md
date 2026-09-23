@@ -7228,3 +7228,14 @@ config_version across a rubric change, silently mixing incomparable totals;
 (2) a caller that PUTs without GET first resets unsent fields to the default.
 Stress test: a mode-only PUT keeps config_version, and ten rows either side of it
 average with none excluded (sabotage: a new config_version per PUT fails 10).
+
+## Piece: register item 127, history judgements count on their own request key
+
+The history route's Gate 4 is service_gate4_history_cost: `cost:history:tenant:{t}`
+against cost_history_per_tenant_limit (50000), never `cost:tenant`, on the same
+one-key script and the same fail-open path.
+Production failure modes: (1) a backfill sharing the live counter 429s today's
+notes once it has spent the cap; (2) a Redis outage lets a backfill run uncapped
+(fail open, logged as cost_cap_bypassed).
+Stress test: ten history judgements leave `cost:tenant` absent and the history
+key at 10 (sabotage: history on `cost:tenant` fails 2).

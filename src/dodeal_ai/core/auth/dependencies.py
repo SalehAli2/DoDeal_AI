@@ -24,11 +24,14 @@ own server-to-server token: service_gate1_identity (ServiceTokenVerifier, audit
 gate "service_auth") -> service_gate2_tenant (the same Host match, audit gate
 "service_tenancy") -> build_service_context (principal "service") ->
 service_gate4_cost (the TENANT request counter only). A user token is 401 on it,
-and a service token is 401 on the user chain: the verifiers share no key.
+and a service token is 401 on the user chain: the verifiers share no key. The
+history route ends in service_gate4_history_cost instead (register item 127):
+the same chain, counted on the tenant's history counter.
 """
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Annotated
 
 import jwt
@@ -53,6 +56,7 @@ from dodeal_ai.core.context import RequestContext
 from dodeal_ai.core.cost.limiter import (
     CostLimitError,
     enforce_cost,
+    enforce_history_cost,
     enforce_tenant_cost,
 )
 from dodeal_ai.core.tenancy import TenantMismatchError, check_tenant
@@ -341,9 +345,27 @@ async def service_gate4_cost(
 ) -> RequestContext:
     """Gate 4 for the service chain: the TENANT counter only. The token names no
     person, so a per-user request cap here would be one bucket for everyone."""
+    return await _service_gate4(request, context, enforce_tenant_cost)
+
+
+async def service_gate4_history_cost(
+    request: Request,
+    context: Annotated[RequestContext, Depends(build_service_context)],
+) -> RequestContext:
+    """Gate 4 for history judgements (register item 127): the tenant's HISTORY
+    request counter alone, so a backfill never moves `cost:tenant`."""
+    return await _service_gate4(request, context, enforce_history_cost)
+
+
+async def _service_gate4(
+    request: Request,
+    context: RequestContext,
+    enforce: Callable[[str], Awaitable[None]],
+) -> RequestContext:
+    """One service Gate 4: move the counter `enforce` owns, audit, 429 over."""
     request_id = getattr(request.state, "request_id", "unknown")
     try:
-        await enforce_tenant_cost(context.tenant)
+        await enforce(context.tenant)
     except CostLimitError as exc:
         audit(
             decision="deny",
