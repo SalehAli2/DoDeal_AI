@@ -363,6 +363,7 @@ def _versions(config: TenantConfig, model_version: str = NO_MODEL) -> Versions:
         prompt_version=PROMPT_SET_VERSION,
         model_version=model_version,
         config_version=config.config_version,
+        policy_version=config.policy_version,
     )
 
 

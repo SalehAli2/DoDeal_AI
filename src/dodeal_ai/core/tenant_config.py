@@ -41,6 +41,11 @@ _logger = logging.getLogger("dodeal_ai.tenant_config")
 # raises ValueError (pydantic's ValidationError is one) for anything invalid.
 type SectionParser = Callable[[object], object]
 
+# A unit's answer to "does this body mark notes as the section in force does?"
+# (register item 97): the body and the parsed section in force (None for the
+# default) in; that section's config_version when it does, None when not.
+type VersionKeeper = Callable[[dict, object | None], str | None]
+
 # Tenant -> section name -> that unit's parsed config, filled once at startup.
 _LOADED: dict[str, dict[str, object]] = {}
 
@@ -99,7 +104,10 @@ def clear_tenant_configs() -> None:
 #
 # An administrator changes a tenant's rules without a release: the CRM PUTs a
 # section, it is validated by the SAME parser the tenant file uses, stamped with
-# a dated version and stored in db2. Every judgement then resolves its rules in
+# TWO versions and stored in db2. The dated policy_version moves on every PUT;
+# the config_version moves only when the unit's keeper says a mark would, so a
+# stored judgement's config_version still groups the judgements that mark
+# alike. Every judgement then resolves its rules in
 # the one order below -- override, else the startup file, else the unit's
 # default -- through a per-process cache, and fails SAFE: a store it cannot
 # reach falls back to the last value it saw, then the file, then the default,
@@ -167,15 +175,23 @@ class OverrideConflict(Exception):
 
 @dataclass(frozen=True, slots=True)
 class OverrideRecord:
-    """One stored override: its version, when it was set, the raw sections."""
+    """One stored override: the config_version its section is judged under,
+    when it was set, the raw sections, and the PUT's own dated policy_version
+    (None on a record stored before register item 97 gave it one)."""
 
     version: str
     set_at: str
     sections: dict[str, object]
+    policy_version: str | None = None
 
     def to_json(self) -> str:
         return json.dumps(
-            {"version": self.version, "set_at": self.set_at, "sections": self.sections},
+            {
+                "version": self.version,
+                "policy_version": self.policy_version,
+                "set_at": self.set_at,
+                "sections": self.sections,
+            },
             sort_keys=True,
         )
 
@@ -183,12 +199,13 @@ class OverrideRecord:
 @dataclass(frozen=True, slots=True)
 class ResolvedSection:
     """What a tenant's section resolved to, and from where. `value` is None when
-    the unit's own default applies."""
+    the unit's own default applies; `policy_version` only an override has."""
 
     value: object | None
     version: str | None
     set_at: str | None
     source: Literal["override", "file", "default"]
+    policy_version: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,10 +238,15 @@ def _record(tenant: str, raw: str | None) -> OverrideRecord | None:
         return None
     try:
         document = json.loads(raw)
+        version, set_at = str(document["version"]), str(document["set_at"])
+        sections = dict(document["sections"])
+        # Indexed above, so a dict here: .get cannot meet a list or a string.
+        policy_version = document.get("policy_version")
         return OverrideRecord(
-            version=str(document["version"]),
-            set_at=str(document["set_at"]),
-            sections=dict(document["sections"]),
+            version=version,
+            set_at=set_at,
+            sections=sections,
+            policy_version=None if policy_version is None else str(policy_version),
         )
     except (ValueError, KeyError, TypeError):
         _invalid(tenant)
@@ -301,6 +323,7 @@ async def resolve_section(tenant: str, section: str) -> ResolvedSection:
             version=entry.record.version,
             set_at=entry.record.set_at,
             source="override",
+            policy_version=entry.record.policy_version,
         )
     from_file = tenant_section(tenant, section)
     if from_file is not None:
@@ -308,19 +331,27 @@ async def resolve_section(tenant: str, section: str) -> ResolvedSection:
     return ResolvedSection(None, None, None, "default")
 
 
-def _next_version(tenant: str, current: OverrideRecord | None, today: str) -> str:
-    """tenant-cfg-<tenant>-<YYYYMMDD>-<n>, n counting that day's versions."""
-    prefix = f"tenant-cfg-{tenant}-{today}-"
-    if current is not None and current.version.startswith(prefix):
-        return f"{prefix}{int(current.version.removeprefix(prefix)) + 1}"
+def _next_version(kind: str, tenant: str, current: str | None, today: str) -> str:
+    """tenant-<kind>-<tenant>-<YYYYMMDD>-<n>, n counting that day's versions of
+    this kind: `current` is the one in force, None when there is none."""
+    prefix = f"tenant-{kind}-{tenant}-{today}-"
+    if current is not None and current.startswith(prefix):
+        return f"{prefix}{int(current.removeprefix(prefix)) + 1}"
     return f"{prefix}1"
 
 
 async def set_override(
-    tenant: str, section: str, body: object, *, now: datetime
+    tenant: str,
+    section: str,
+    body: object,
+    *,
+    now: datetime,
+    keep_version: VersionKeeper,
 ) -> OverrideRecord:
-    """Validate `body` with the section's parser, stamp it with the next dated
-    version as its config_version, and store it as the version in force.
+    """Validate `body` with the section's parser and store it as the version in
+    force, with two stamps (register item 97): the next dated policy_version,
+    always, and as its config_version the one in force when `keep_version` says
+    the body marks alike, else the next dated one.
 
     InvalidOverride for a body its parser refuses (nothing is written);
     OverrideUnavailable when the store cannot be read or written;
@@ -335,10 +366,19 @@ async def set_override(
             raw = await _read(tenant)
         except redis.RedisError:
             raise OverrideUnavailable() from None
-        current, _parsed = _decode(tenant, raw)
-        version = _next_version(tenant, current, today)
-        stamped = {**body, "config_version": version}
+        current, current_parsed = _decode(tenant, raw)
+        # The section a judgement made now would use: override, else file.
+        in_force = current_parsed.get(section, tenant_section(tenant, section))
         try:
+            kept = keep_version(body, in_force)
+            version = (
+                kept
+                if kept is not None
+                else _next_version(
+                    "cfg", tenant, current.version if current else None, today
+                )
+            )
+            stamped = {**body, "config_version": version}
             parsed = parser(stamped)
         except Exception:  # noqa: BLE001 - any parser failure is an invalid body
             raise InvalidOverride() from None
@@ -346,6 +386,9 @@ async def set_override(
             version=version,
             set_at=now.astimezone(UTC).isoformat(),
             sections={section: stamped},
+            policy_version=_next_version(
+                "policy", tenant, current.policy_version if current else None, today
+            ),
         )
         record_json = record.to_json()
         try:
@@ -360,7 +403,12 @@ async def set_override(
                 parsed={section: parsed},
             )
             _logger.info(
-                "tenant_config_changed", extra={"tenant": tenant, "version": version}
+                "tenant_config_changed",
+                extra={
+                    "tenant": tenant,
+                    "version": version,
+                    "policy_version": record.policy_version,
+                },
             )
             return record
     raise OverrideConflict()

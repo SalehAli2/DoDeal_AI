@@ -554,6 +554,8 @@ def test_a_judgement_carries_all_four_versions(client):
         # configured pin, and not "".
         "model_version": FAKE_MODEL,
         "config_version": "tenant-cfg-default-4",
+        # Register item 97: no runtime PUT is in force.
+        "policy_version": None,
     }
 
 
@@ -695,6 +697,7 @@ def test_meta_versions_returns_the_four_strings(client):
         "prompt_version": "unit_a_prompts_v3",
         "model_version": "",  # the configured pin; no model is pinned yet
         "config_version": "tenant-cfg-default-4",
+        "policy_version": None,  # register item 97: no runtime PUT in force
     }
 
 

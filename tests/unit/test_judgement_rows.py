@@ -122,7 +122,16 @@ def test_the_row_carries_exactly_these_fields_and_no_note_text() -> None:
         "prompt_version",
         "model_version",
         "config_version",
+        "policy_version",
     }
+
+
+def test_a_row_without_a_policy_version_still_validates() -> None:
+    """Register item 97: a row stored before the field existed is still a row."""
+    row = JudgementRow.model_validate(_scored())
+    assert row.policy_version is None
+    stamped = JudgementRow.model_validate(_scored(policy_version="p-1"))
+    assert stamped.policy_version == "p-1"
 
 
 @pytest.mark.parametrize("name", ["note", "note_text", "text", "body", "content"])

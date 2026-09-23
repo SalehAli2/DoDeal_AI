@@ -1,9 +1,10 @@
 """Runtime tenant rules (register item 97): an administrator's PUT becomes the
-rules in force, stamped with a dated version, without a release; resolution is
-override, then file, then default, cached per process, and fails safe."""
+rules in force, with a dated policy_version and a config_version that moves only
+on a mark-affecting change; resolution is override, file, default, and safe."""
 
 from __future__ import annotations
 
+import dataclasses
 import io
 import json
 import logging
@@ -31,12 +32,17 @@ from dodeal_ai.core.tenant_config import (
 from dodeal_ai.main import TENANT_CONFIG_SECTIONS, app
 from dodeal_ai.units.structured_intelligence.classify import CLASSIFY_TEMPLATE
 from dodeal_ai.units.structured_intelligence.config import (
+    MARK_AFFECTING_FIELDS,
     UNIT_A_SECTION,
+    TenantConfig,
     get_tenant_config,
+    kept_config_version,
     parse_unit_a_section,
     resolve_tenant_config,
     section_of,
 )
+from dodeal_ai.units.structured_intelligence.judgement_rows import JudgementRow
+from dodeal_ai.units.structured_intelligence.measures import average_band
 from dodeal_ai.units.structured_intelligence.schemas import NoteType
 from dodeal_ai.units.structured_intelligence.scoring import SCORE_TEMPLATE
 from dodeal_ai.units.structured_intelligence.vague import template_for
@@ -51,6 +57,15 @@ DIRECT = "/api/v1/notes/judgements/direct"
 DEFAULT = get_tenant_config("tenant-a")
 TODAY = datetime.now(UTC).strftime("%Y%m%d")
 FIRST = f"tenant-cfg-tenant-a-{TODAY}-1"
+POLICY = f"tenant-policy-tenant-a-{TODAY}-"
+# A rubric other than the default's: a mark-affecting change.
+OTHER_WEIGHTS = {
+    "what_happened": 30,
+    "client_said": 15,
+    "next_step_date": 25,
+    "deal_specifics": 20,
+    "clarity": 10,
+}
 
 
 @pytest.fixture
@@ -101,6 +116,17 @@ def _put(client: TestClient, body: object):
     return client.put(CONFIG_URL, content=content, headers=_headers())
 
 
+def _set(body: dict, now: datetime | None = None):
+    """set_override as the admin PUT calls it, keeper included."""
+    return set_override(
+        "tenant-a",
+        UNIT_A_SECTION,
+        body,
+        now=now or NOW,
+        keep_version=kept_config_version,
+    )
+
+
 def _judge(client: TestClient, llm: FakeLLM, note_id: int) -> dict:
     llm.script_for(CLASSIFY_TEMPLATE, json_response({"note_type": "discovery"}))
     llm.script_for(
@@ -136,18 +162,22 @@ def _judge(client: TestClient, llm: FakeLLM, note_id: int) -> dict:
 
 
 def test_a_put_changes_the_next_judgements_thresholds_and_stamp(client, llm) -> None:
-    """The version in force stamps the next judgement and its thresholds decide."""
+    """The PUT's policy_version stamps the next judgement and its thresholds
+    decide; a threshold marks nothing, so the config_version stays."""
     before = _judge(client, llm, note_id=10)
     total = before["score"]["total"]
     assert before["versions"]["config_version"] == DEFAULT.config_version
+    assert before["versions"]["policy_version"] is None
     assert before["decision"]["action"] != "accept_silent"
 
     put = _put(client, {"accept_threshold": total, "flag_threshold": total - 1})
     assert put.status_code == 200
-    assert put.json()["version"] == FIRST
+    assert put.json()["version"] == DEFAULT.config_version
+    assert put.json()["policy_version"] == f"{POLICY}1"
 
     after = _judge(client, llm, note_id=11)
-    assert after["versions"]["config_version"] == FIRST
+    assert after["versions"]["config_version"] == DEFAULT.config_version
+    assert after["versions"]["policy_version"] == f"{POLICY}1"
     assert after["decision"]["action"] == "accept_silent"
 
 
@@ -160,9 +190,7 @@ def test_another_process_sees_the_change_once_its_cache_expires(
     assert run(resolve_section("tenant-a", UNIT_A_SECTION)).source == "default"
 
     # Another pod's PUT: the store changes, this process's cache does not.
-    record = run(
-        set_override("tenant-a", UNIT_A_SECTION, {"rate_limit_per_hour": 9}, now=NOW)
-    )
+    record = run(_set({"rate_limit_per_hour": 9}))
     tenant_config._CACHE["tenant-a"] = tenant_config._CACHE["tenant-a"].__class__(
         fetched_at=clock[0], raw=None, record=None, parsed={}
     )
@@ -190,11 +218,18 @@ def tenant_file(tmp_path: Path) -> Iterator[Path]:
     tenant_config.register_section_parsers(TENANT_CONFIG_SECTIONS)
 
 
+def _stamps(config: TenantConfig) -> tuple[str, str | None]:
+    return config.config_version, config.policy_version
+
+
 def test_an_override_wins_over_the_tenant_file(tenant_file) -> None:
-    """Override first, then the file: the runtime rule is the one in force."""
-    assert run(resolve_tenant_config("tenant-a")).config_version == "tenant-a-file-1"
-    run(set_override("tenant-a", UNIT_A_SECTION, {}, now=NOW))
-    assert run(resolve_tenant_config("tenant-a")).config_version == FIRST
+    """Override first, then the file: the runtime rule is the one in force, and
+    a PUT that marks as the file does keeps the file's config_version."""
+    assert _stamps(run(resolve_tenant_config("tenant-a"))) == ("tenant-a-file-1", None)
+    run(_set({"enforcement_mode": "off"}))
+    config = run(resolve_tenant_config("tenant-a"))
+    assert _stamps(config) == ("tenant-a-file-1", f"{POLICY}1")
+    assert config.enforcement_mode == "off"
 
 
 def test_redis_down_falls_back_to_the_file(
@@ -236,10 +271,10 @@ def test_redis_down_after_a_read_keeps_the_last_override(
     """A stale cached override beats the file when the store is gone."""
     clock = [1000.0]
     monkeypatch.setattr(tenant_config.time, "monotonic", lambda: clock[0])
-    run(set_override("tenant-a", UNIT_A_SECTION, {}, now=NOW))
+    run(_set({"weights": OTHER_WEIGHTS}))
     clock[0] += 3600
     redis_fakes.operational.raise_on.add("get")
-    assert run(resolve_tenant_config("tenant-a")).config_version == FIRST
+    assert _stamps(run(resolve_tenant_config("tenant-a"))) == (FIRST, f"{POLICY}1")
 
 
 def test_redis_down_with_no_file_is_the_safe_default(redis_fakes: RedisFakes) -> None:
@@ -276,49 +311,62 @@ def test_a_corrupt_stored_record_is_ignored_and_logged(
 def test_get_shows_the_rules_in_force_with_their_version_and_source(client) -> None:
     """Default first; after a PUT the override, its set_at and its values."""
     first = client.get(CONFIG_URL, headers=_headers()).json()
-    assert (first["version"], first["source"], first["set_at"]) == (
-        DEFAULT.config_version,
-        "default",
-        None,
-    )
+    assert (
+        first["version"],
+        first["policy_version"],
+        first["source"],
+        first["set_at"],
+    ) == (DEFAULT.config_version, None, "default", None)
     assert first[UNIT_A_SECTION]["accept_threshold"] == DEFAULT.accept_threshold
 
     _put(client, {"accept_threshold": 80})
     now = client.get(CONFIG_URL, headers=_headers()).json()
-    assert (now["version"], now["source"]) == (FIRST, "override")
+    assert (now["version"], now["policy_version"], now["source"]) == (
+        DEFAULT.config_version,
+        f"{POLICY}1",
+        "override",
+    )
     assert now["set_at"].startswith(datetime.now(UTC).strftime("%Y-%m-%d"))
     assert now[UNIT_A_SECTION]["accept_threshold"] == 80
 
 
 def test_versions_count_up_within_a_day_and_history_is_newest_first(client) -> None:
-    """-1, -2, -3; the history lists them in reverse."""
+    """policy -1, -2, -3; the history lists them in reverse, each with the
+    config_version in force, which three thresholds never moved."""
     for threshold in (71, 72, 73):
         assert _put(client, {"accept_threshold": threshold}).status_code == 200
     history = client.get(HISTORY_URL, headers=_headers()).json()["versions"]
-    assert [entry["version"] for entry in history] == [
-        f"tenant-cfg-tenant-a-{TODAY}-{n}" for n in (3, 2, 1)
+    assert [entry["policy_version"] for entry in history] == [
+        f"{POLICY}{n}" for n in (3, 2, 1)
     ]
+    assert {entry["version"] for entry in history} == {DEFAULT.config_version}
     assert history[0][UNIT_A_SECTION]["accept_threshold"] == 73
 
 
 def test_a_new_day_starts_the_count_again(redis_fakes: RedisFakes) -> None:
-    """The date in the version is the day it was set, in UTC. Both instants
+    """The date in both stamps is the day it was set, in UTC. Both instants
     are fixed: the test must not depend on the day it is run."""
     first = datetime(2026, 9, 22, 23, 30, tzinfo=UTC)
-    earlier = run(set_override("tenant-a", UNIT_A_SECTION, {}, now=first))
-    assert earlier.version == "tenant-cfg-tenant-a-20260922-1"
+    earlier = run(_set({"weights": OTHER_WEIGHTS}, now=first))
+    assert (earlier.version, earlier.policy_version) == (
+        "tenant-cfg-tenant-a-20260922-1",
+        "tenant-policy-tenant-a-20260922-1",
+    )
     later = datetime(2026, 9, 23, 0, 30, tzinfo=UTC)
-    record = run(set_override("tenant-a", UNIT_A_SECTION, {}, now=later))
-    assert record.version == "tenant-cfg-tenant-a-20260923-1"
+    record = run(_set({}, now=later))
+    assert (record.version, record.policy_version) == (
+        "tenant-cfg-tenant-a-20260923-1",
+        "tenant-policy-tenant-a-20260923-1",
+    )
 
 
 def test_the_history_keeps_at_most_fifty(redis_fakes: RedisFakes) -> None:
     """The capped list drops the oldest."""
     for _ in range(HISTORY_LIMIT + 1):
-        run(set_override("tenant-a", UNIT_A_SECTION, {}, now=NOW))
+        run(_set({}))
     history = run(tenant_config.override_history("tenant-a"))
     assert len(history) == HISTORY_LIMIT
-    assert history[0].version.endswith(f"-{HISTORY_LIMIT + 1}")
+    assert history[0].policy_version == f"{POLICY}{HISTORY_LIMIT + 1}"
 
 
 @pytest.mark.parametrize(
@@ -335,26 +383,31 @@ def test_an_invalid_body_is_422_and_leaves_the_version_in_force(
     assert refused.status_code == 422
     assert refused.json()["reason"] == "invalid_tenant_config"
     assert "accept_threshold" not in refused.text and "no_such_rule" not in refused.text
-    assert client.get(CONFIG_URL, headers=_headers()).json()["version"] == FIRST
+    in_force = client.get(CONFIG_URL, headers=_headers()).json()
+    assert in_force["policy_version"] == f"{POLICY}1"
     assert "no_such_rule" not in json_log.getvalue()
 
 
 def test_a_client_version_is_replaced_by_the_dated_one(client) -> None:
-    """config_version is the service's to set, never the caller's."""
+    """config_version is the service's to set, never the caller's: kept on a
+    change that marks nothing, the next dated one on a change that does."""
     put = _put(client, {"config_version": "mine", "accept_threshold": 75})
+    assert put.json()["version"] == DEFAULT.config_version
+    put = _put(client, {"config_version": "mine", "weights": OTHER_WEIGHTS})
     assert put.json()["version"] == FIRST
     assert client.get(CONFIG_URL, headers=_headers()).json()["version"] == FIRST
 
 
 def test_the_change_is_one_info_line_with_tenant_and_version(client, json_log) -> None:
-    """tenant_config_changed carries the tenant and the version, no values."""
+    """tenant_config_changed carries the tenant and both stamps, no values."""
     _put(client, {"accept_threshold": 77})
     line = next(x for x in _lines(json_log) if x["message"] == "tenant_config_changed")
-    assert (line["level"], line["tenant"], line["version"]) == (
-        "INFO",
-        "tenant-a",
-        FIRST,
-    )
+    assert (
+        line["level"],
+        line["tenant"],
+        line["version"],
+        line["policy_version"],
+    ) == ("INFO", "tenant-a", DEFAULT.config_version, f"{POLICY}1")
     assert "accept_threshold" not in json.dumps(line)
 
 
@@ -381,7 +434,7 @@ def test_a_lost_race_is_retried_and_then_409(client, monkeypatch) -> None:
     r = _put(client, {})
     assert (r.status_code, r.json()["reason"]) == (409, "tenant_config_conflict")
     with pytest.raises(OverrideConflict):
-        run(set_override("tenant-a", UNIT_A_SECTION, {}, now=NOW))
+        run(_set({}))
 
 
 def test_the_admin_routes_refuse_a_user_token(client) -> None:
@@ -396,15 +449,121 @@ def test_the_admin_routes_refuse_a_user_token(client) -> None:
 
 
 def test_versions_reads_the_resolved_stamp(client) -> None:
-    """/meta/versions reports the version in force, not the file's."""
-    _put(client, {})
+    """/meta/versions reports both stamps in force, not the default's."""
+    _put(client, {"weights": OTHER_WEIGHTS})
     body = client.get("/api/v1/meta/versions", headers=_headers()).json()
-    assert body["config_version"] == FIRST
+    assert (body["config_version"], body["policy_version"]) == (FIRST, f"{POLICY}1")
 
 
 def test_a_config_round_trips_through_its_section() -> None:
     """section_of is what the admin screen shows; parsing it gives it back."""
     assert parse_unit_a_section(section_of(DEFAULT)) == DEFAULT
+
+
+# --- two stamps (register item 97) ------------------------------------------
+
+
+def test_a_mode_only_put_keeps_config_version_and_moves_policy_version(
+    client,
+) -> None:
+    """The guard: switching the mode marks nothing, so only the policy moves."""
+    for n, mode in enumerate(("off", "strict"), start=1):
+        put = _put(client, {"enforcement_mode": mode})
+        assert (put.json()["version"], put.json()["policy_version"]) == (
+            DEFAULT.config_version,
+            f"{POLICY}{n}",
+        )
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"weights": OTHER_WEIGHTS},
+        {
+            "band_boundaries": [
+                ["poor", 49],
+                ["fair", 69],
+                ["good", 84],
+                ["excellent", 100],
+            ]
+        },
+        {"deal_specifics_applicable": True},
+    ],
+)
+def test_a_mark_affecting_put_moves_both_stamps(client, change: dict) -> None:
+    """The guard: a weight, a band boundary or the Q13 switch is a new rubric."""
+    put = _put(client, change)
+    assert (put.json()["version"], put.json()["policy_version"]) == (
+        FIRST,
+        f"{POLICY}1",
+    )
+
+
+def test_a_put_that_leaves_the_weights_out_puts_them_back(client) -> None:
+    """PUT replaces the whole section: GET first, or the default returns."""
+    _put(client, {"weights": OTHER_WEIGHTS})
+    section = client.get(CONFIG_URL, headers=_headers()).json()[UNIT_A_SECTION]
+    kept = _put(client, {**section, "enforcement_mode": "off"}).json()
+    assert (kept["version"], kept["policy_version"]) == (FIRST, f"{POLICY}2")
+    dropped = _put(client, {"enforcement_mode": "strict"}).json()
+    assert (dropped["version"], dropped["policy_version"]) == (
+        f"tenant-cfg-tenant-a-{TODAY}-2",
+        f"{POLICY}3",
+    )
+
+
+def _row(note_id: int, judgement: dict) -> JudgementRow:
+    """A scored row as the CRM would store this judgement."""
+    return JudgementRow.model_validate(
+        {
+            "note_id": note_id,
+            "lead_id": judgement["lead_id"],
+            "author_id": judgement["author_id"],
+            "note_created_at": NOW,
+            "note_type": judgement["analysis"]["note_type"],
+            "band": judgement["score"]["band"],
+            "total": judgement["score"]["total"],
+            "denominator": judgement["score"]["denominator"],
+            "prompt_sent": judgement["decision"]["prompt_sent"],
+            "enforcement_verdict": judgement["enforcement"]["verdict"],
+            **judgement["versions"],
+        }
+    )
+
+
+def test_the_average_band_stays_computed_across_a_mode_only_change(client, llm) -> None:
+    """The guard: rows either side of a mode-only PUT are one comparable set."""
+    before = _judge(client, llm, note_id=20)
+    _put(client, {"enforcement_mode": "off"})
+    after = _judge(client, llm, note_id=21)
+    assert after["versions"]["policy_version"] == f"{POLICY}1"
+
+    rows = [_row(n, before) for n in range(1, 6)] + [
+        _row(n, after) for n in range(6, 11)
+    ]
+    measure = average_band(rows, DEFAULT)
+    assert (measure.suppressed, measure.notes, measure.excluded) == (None, 10, 0)
+
+
+def test_a_record_stored_before_the_second_stamp_starts_the_policy_count(
+    redis_fakes: RedisFakes,
+) -> None:
+    """An old record has no policy_version: it resolves null, the next is -1."""
+    section = {UNIT_A_SECTION: {"config_version": FIRST}}
+    redis_fakes.operational.store[override_key("tenant-a")] = json.dumps(
+        {"version": FIRST, "set_at": "t", "sections": section}
+    )
+    resolved = run(resolve_section("tenant-a", UNIT_A_SECTION))
+    assert (resolved.source, resolved.policy_version) == ("override", None)
+    record = run(_set({"enforcement_mode": "off"}))
+    assert (record.version, record.policy_version) == (FIRST, f"{POLICY}1")
+
+
+def test_every_mark_affecting_field_is_a_config_field() -> None:
+    """A renamed field must not silently drop out of the one list."""
+    assert set(MARK_AFFECTING_FIELDS) <= {
+        field.name for field in dataclasses.fields(TenantConfig)
+    }
 
 
 # --- helpers ----------------------------------------------------------------

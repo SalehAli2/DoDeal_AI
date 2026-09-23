@@ -140,6 +140,10 @@ class JudgementRow(BaseModel):
     # model ran, which is the honest value on a judgement nothing was spent on.
     model_version: str
     config_version: str = Field(min_length=1)
+    # Register item 97: the runtime PUT whose rules were in force. Not a
+    # comparability stamp -- no measure reads it. Optional, so a row stored
+    # before it existed, or made under a tenant file or the default, validates.
+    policy_version: str | None = Field(default=None, min_length=1)
 
     @field_validator("note_created_at")
     @classmethod

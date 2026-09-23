@@ -617,12 +617,18 @@ class Versions(BaseModel):
     and the tenant config. A judgement is only comparable with another that
     carries the same four -- which is what makes it safe to change a weight or
     a prompt without rescoring history.
+
+    `policy_version` (register item 97) is NOT a fifth comparability stamp: it
+    names the runtime PUT whose rules were in force -- mode and switches
+    included -- and moves where config_version does not. Null under a tenant
+    file or the default, and on a judgement stored before it existed.
     """
 
     rubric_version: str
     prompt_version: str
     model_version: str
     config_version: str
+    policy_version: str | None = None
 
 
 class Judgement(BaseModel):

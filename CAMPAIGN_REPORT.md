@@ -7217,3 +7217,14 @@ real warning behind a familiar one; (2) the guard reads only tests/helpers, so a
 helper elsewhere named test_* would still be collected.
 Stress test: the suite runs with no warning (sabotage: the old name fails the
 guard).
+
+## Piece: register item 97, two stamps -- config_version on marks, policy on every PUT
+
+A PUT moves config_version only when a MARK_AFFECTING_FIELDS value changes
+(config.py, the one list); every accepted PUT gets a dated policy_version,
+carried on Versions, JudgementRow, the admin answers and the history.
+Production failure modes: (1) a mark-affecting field missing from the list keeps
+config_version across a rubric change, silently mixing incomparable totals;
+(2) a caller that PUTs without GET first resets unsent fields to the default.
+Stress test: a mode-only PUT keeps config_version, and ten rows either side of it
+average with none excluded (sabotage: a new config_version per PUT fails 10).

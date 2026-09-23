@@ -22,6 +22,12 @@ no file, or no `unit_a` section, gets the default.
 `config_version` is stamped on every judgement, so judgements made under the
 default remain identifiable and are never rescored.
 
+TWO STAMPS (register item 97, second half). A runtime PUT moves
+`config_version` ONLY when a field in MARK_AFFECTING_FIELDS changes -- the
+fields that decide what the same checks are worth -- so the average band keeps
+comparing across a change of mode or of a switch. Every PUT gets its own dated
+`policy_version`, which is what says exactly which rules a judgement ran under.
+
 The values are placeholders in the same sense as the cost caps in core/config.py
 (ASSUMPTIONS §8.1): structurally correct, numerically provisional.
 
@@ -62,11 +68,13 @@ from dodeal_ai.units.structured_intelligence.schemas import (
 # schemas.py, but config.py is where a tenant's mode is chosen and where every
 # caller has always imported it from. Named here so ruff keeps the import.
 __all__ = [
+    "MARK_AFFECTING_FIELDS",
     "UNIT_A_SECTION",
     "EnforcementMode",
     "TenantConfig",
     "config_of",
     "get_tenant_config",
+    "kept_config_version",
     "resolve_tenant_config",
     "section_of",
 ]
@@ -316,6 +324,10 @@ class TenantConfig:
     # deployment never publishes a person's numbers by accident. Off is 403.
     rep_numbers_enabled: bool
     config_version: str
+    # Register item 97: the dated stamp of the runtime PUT these rules came from,
+    # moved by every PUT. None under a tenant file or the default, where no PUT
+    # is in force. Never set by a section: config_of copies it off the record.
+    policy_version: str | None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -398,6 +410,19 @@ _DEFAULT_CONFIG = TenantConfig(
     # RUBRIC_VERSION did not either -- this stamp is what makes an old
     # judgement, made under the old vocabulary, still identifiable.
     config_version="tenant-cfg-default-4",
+    policy_version=None,
+)
+
+# The fields a config_version vouches for (register item 97): change one and the
+# same checks earn different marks or bands, so the version moves. Every other
+# field -- the mode, the switches, the thresholds, the limits -- is policy only.
+MARK_AFFECTING_FIELDS: tuple[str, ...] = (
+    "weights",
+    "checks_by_component",
+    "suppressed_components_by_type",
+    "allowed_missing_by_type",
+    "band_boundaries",
+    "deal_specifics_applicable",
 )
 
 
@@ -547,10 +572,29 @@ def get_tenant_config(tenant: str) -> TenantConfig:
 
 
 def config_of(resolved: ResolvedSection) -> TenantConfig:
-    """A resolved `unit_a` section as this unit's config; the default when the
-    resolution found neither an override nor a file."""
+    """A resolved `unit_a` section as this unit's config, carrying the
+    override's policy_version; the default when the resolution found neither
+    an override nor a file."""
     value = resolved.value
-    return value if isinstance(value, TenantConfig) else _DEFAULT_CONFIG
+    if not isinstance(value, TenantConfig):
+        return _DEFAULT_CONFIG
+    if resolved.policy_version is None:
+        return value
+    return dataclasses.replace(value, policy_version=resolved.policy_version)
+
+
+def kept_config_version(body: dict, in_force: object | None) -> str | None:
+    """The config_version in force when `body` marks exactly as the section in
+    force does, None when a MARK_AFFECTING_FIELDS value changes (register item
+    97). The admin PUT's keeper; ValueError for a body the parser refuses."""
+    current = in_force if isinstance(in_force, TenantConfig) else _DEFAULT_CONFIG
+    proposed = parse_unit_a_section({**body, "config_version": current.config_version})
+    if all(
+        getattr(proposed, name) == getattr(current, name)
+        for name in MARK_AFFECTING_FIELDS
+    ):
+        return current.config_version
+    return None
 
 
 async def resolve_tenant_config(tenant: str) -> TenantConfig:

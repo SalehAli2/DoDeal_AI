@@ -291,7 +291,7 @@ async def read_versions(
     context: Annotated[RequestContext, Depends(gate4_either_principal)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> Versions:
-    """The four version strings a judgement is stamped with.
+    """The version strings a judgement is stamped with, policy_version included.
 
     CAREFUL, one field means something slightly different here than on a
     judgement. On a judgement, `model_version` is what the provider REPORTED it
@@ -303,11 +303,13 @@ async def read_versions(
     fingerprint of the deployment -- either principal's, since the CRM reads
     them with its service token and a person's client with theirs.
     """
+    config = await resolve_tenant_config(context.tenant)
     return Versions(
         rubric_version=RUBRIC_VERSION,
         prompt_version=PROMPT_SET_VERSION,
         model_version=settings.llm_model,
-        config_version=(await resolve_tenant_config(context.tenant)).config_version,
+        config_version=config.config_version,
+        policy_version=config.policy_version,
     )
 
 
