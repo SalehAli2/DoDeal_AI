@@ -59,6 +59,7 @@ from dodeal_ai.core import metrics
 from dodeal_ai.core.config import Settings
 from dodeal_ai.core.context import TenantScope
 from dodeal_ai.core.cost.limiter import enforce_token_cost
+from dodeal_ai.core.cost.spend import record_model_call
 from dodeal_ai.core.errors import MalformedOutputError, ModelUnavailableError
 from dodeal_ai.core.llm import FinishReason, LLMClient, LLMProviderError, LLMResponse
 from dodeal_ai.core.log_safety import safe_error_fields
@@ -186,6 +187,8 @@ async def complete_once(
         ).inc()
         raise ModelUnavailableError() from None
 
+    # Counted on the task's spend whatever it reported: it was a paid call.
+    record_model_call(response, label)
     # No usage reported means nothing to charge and nothing to say about it: a
     # zero-token line would read as a free call rather than an unmeasured one.
     if response.total_tokens:
@@ -194,6 +197,8 @@ async def complete_once(
             input_tokens=response.input_tokens,
             output_tokens=response.output_tokens,
             profile=profile,
+            cached_input_tokens=response.cached_input_tokens,
+            reasoning_tokens=response.reasoning_tokens,
         )
     return response
 

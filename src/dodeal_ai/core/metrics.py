@@ -124,6 +124,20 @@ CALL_TOKENS = Counter(
     registry=REGISTRY,
 )
 
+# --- Spend (register item "cost") ----------------------------------------
+LLM_TOKENS = Counter(
+    "llm_tokens",
+    "Model tokens by unit, pass and kind (input, cached_input, output, reasoning).",
+    ["unit", "pass", "kind"],
+    registry=REGISTRY,
+)
+TASK_COST_USD = Counter(
+    "task_cost_usd",
+    "Priced cost of finished tasks in USD, by unit and outcome; unpriced ones are not counted.",
+    ["unit", "outcome"],
+    registry=REGISTRY,
+)
+
 # The breaker states as numbers: 0 closed, 1 half open, 2 open.
 _BREAKER_VALUES = {"closed": 0, "half_open": 1, "open": 2}
 

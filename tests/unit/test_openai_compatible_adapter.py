@@ -33,6 +33,7 @@ from dodeal_ai.core.llm.client import (
     LLMConfigurationError,
     LLMErrorReason,
     LLMProviderError,
+    LLMResponse,
 )
 from dodeal_ai.core.llm.openai_compatible import (
     _HTTP_TIMEOUT_SHARE,
@@ -1046,3 +1047,59 @@ async def test_an_openai_profile_on_a_groq_client_fails_at_resolution(
     assert "llm_profile_provider_mismatch" in str(caught.value)
     assert "gpt-something" not in str(caught.value)
     assert recorder.calls == 0
+
+
+# --- usage details (register item "cost") ------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("usage", "cached", "reasoning"),
+    [
+        (
+            {
+                "prompt_tokens_details": {"cached_tokens": 128},
+                "completion_tokens_details": {"reasoning_tokens": 12},
+            },
+            128,
+            12,
+        ),
+        ({}, 0, 0),
+        (
+            {
+                "prompt_tokens_details": None,
+                "completion_tokens_details": {"reasoning_tokens": None},
+            },
+            0,
+            0,
+        ),
+        (
+            {
+                "prompt_tokens_details": {"cached_tokens": "lots"},
+                "completion_tokens_details": {"reasoning_tokens": -3},
+            },
+            0,
+            0,
+        ),
+        ({"prompt_tokens_details": {"cached_tokens": True}}, 0, 0),
+    ],
+    ids=["reported", "absent", "null", "garbled", "boolean"],
+)
+async def test_cached_and_reasoning_tokens_come_from_usage_details(
+    monkeypatch, usage: dict, cached: int, reasoning: int
+) -> None:
+    """Parts of input and output, 0 unless reported as a whole number; an odd
+    detail never fails a call that was answered."""
+    body = _ok_body()
+    body["usage"] = {
+        "prompt_tokens": 411,
+        "completion_tokens": 29,
+        "total_tokens": 440,
+        **usage,
+    }
+    recorder = Recorder(httpx.Response(200, json=body))
+    response = await _call(_settings(monkeypatch), GROQ_BASE_URL, recorder)
+    assert isinstance(response, LLMResponse)
+    assert (response.cached_input_tokens, response.reasoning_tokens) == (
+        cached,
+        reasoning,
+    )

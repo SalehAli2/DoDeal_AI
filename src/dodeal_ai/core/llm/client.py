@@ -57,6 +57,10 @@ class LLMResponse:
 
     `provider_request_id` is safe to audit-log and is the only handle for
     reconciling a call that timed out on our side but was billed on theirs.
+
+    `cached_input_tokens` is the PART of input_tokens the provider served from
+    its prompt cache, and `reasoning_tokens` the PART of output_tokens spent on
+    reasoning; 0 when the provider does not say (register item "cost").
     """
 
     text: str = field(repr=False)
@@ -65,6 +69,8 @@ class LLMResponse:
     model: str
     finish_reason: FinishReason
     provider_request_id: str | None = None
+    cached_input_tokens: int = 0
+    reasoning_tokens: int = 0
 
     @property
     def total_tokens(self) -> int:

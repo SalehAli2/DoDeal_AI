@@ -60,6 +60,8 @@ def response(
     finish_reason: FinishReason = FinishReason.STOP,
     model: str = FAKE_MODEL,
     provider_request_id: str | None = None,
+    cached_input_tokens: int = 0,
+    reasoning_tokens: int = 0,
 ) -> LLMResponse:
     """Build a scripted reply. Defaults are deliberately round so a cost test
     can compute the expected charge by eye."""
@@ -70,6 +72,8 @@ def response(
         model=model,
         finish_reason=finish_reason,
         provider_request_id=provider_request_id,
+        cached_input_tokens=cached_input_tokens,
+        reasoning_tokens=reasoning_tokens,
     )
 
 

@@ -52,6 +52,7 @@ from dodeal_ai.core.cost.limiter import (
     calls_budget_preflight,
     charge_audio_seconds,
 )
+from dodeal_ai.core.cost.spend import current_spend, spending
 from dodeal_ai.core.errors import QueueUnavailable
 from dodeal_ai.core.jobs import (
     Job,
@@ -175,7 +176,10 @@ async def process_call(ctx: dict[str, Any], tenant: str, job_id: str) -> None:
     logs names the job (core/logging_config.py), and it ends in one outcome
     line whatever happened."""
     run = CallRun()
-    with job_log_context(tenant=tenant, job_id=job_id) as fields:
+    with (
+        job_log_context(tenant=tenant, job_id=job_id) as fields,
+        spending("unit_b"),
+    ):
         try:
             await _process(ctx, tenant, job_id, run, fields)
         except JobStoreUnavailable:
@@ -328,12 +332,20 @@ async def _transcribe(
             metrics.AUDIO_SECONDS_PROCESSED.inc(seconds)
             hint = meta.get("language_hint")
             started = time.monotonic()
+            spend = current_spend()
             try:
                 run.transcript = await transcriber.transcribe(
                     audio.path, language_hint=hint if isinstance(hint, str) else None
                 )
+            except TranscriptionError:
+                # Possibly billed, by a model it never named: unpriced, not free.
+                if spend is not None:
+                    spend.record_audio(_UNKNOWN_MODEL, seconds)
+                raise
             finally:
                 run.transcribe_ms = _ms_since(started)
+            if spend is not None:
+                spend.record_audio(run.transcript.model, seconds)
             return run.transcript
     except AudioDownloadError as refused:
         if run.download_ms is None:
@@ -443,6 +455,10 @@ def _log_outcome(run: CallRun) -> None:
         "model": None if transcript is None else transcript.model,
         "pass_tokens": None,
     }
+    spend = current_spend()
+    if spend is not None:
+        fields.update(spend.fields())
+        spend.count(status)
     level = logging.INFO if status not in _FAILURES else logging.WARNING
     _logger.log(level, "call_job_outcome", extra=fields)
     metrics.CALL_JOBS.labels(status=status).inc()
@@ -456,6 +472,9 @@ def _log_outcome(run: CallRun) -> None:
         if ms is not None:
             metrics.CALL_STAGE_SECONDS.labels(stage=stage).observe(ms / 1000)
 
+
+# What a failed transcription's seconds are recorded under: no price has it.
+_UNKNOWN_MODEL = "unknown"
 
 # Statuses whose outcome line is a WARNING, not INFO.
 _FAILURES = frozenset({JobStatus.FAILED.value, JobStatus.DEAD_LETTER.value, "error"})

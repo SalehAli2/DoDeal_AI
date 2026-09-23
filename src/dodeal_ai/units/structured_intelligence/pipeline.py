@@ -119,6 +119,7 @@ from dodeal_ai.core import metrics
 from dodeal_ai.core.config import Settings
 from dodeal_ai.core.context import TenantScope
 from dodeal_ai.core.cost.limiter import token_preflight
+from dodeal_ai.core.cost.spend import Spend, current_spend, spending
 from dodeal_ai.core.errors import (
     BackendRejectedError,
     BackendUnavailableError,
@@ -969,28 +970,42 @@ async def _metered(
 ) -> Judgement:
     """Count the judgement's outcome and observe its duration (register item
     22), by route (item 72): completed, suppressed, replayed, a reason code,
-    cancelled or error."""
-    try:
-        judgement = await judging
-    except DodealError as exc:
-        _observe(exc.reason_code, started, route)
-        raise
-    except BaseException as exc:
-        _observe(
-            "cancelled" if isinstance(exc, asyncio.CancelledError) else "error",
-            started,
-            route,
-        )
-        raise
-    if isinstance(judgement, ReplayedJudgement):
-        _observe("replayed", started, route)
-    else:
-        _observe(
-            "suppressed" if judgement.suppressed is not None else "completed",
-            started,
-            route,
-        )
-    return judgement
+    cancelled or error. Everything it spends is one Spend (register item
+    "cost"): on the outcome line when it answers, on `judgement_spend` when
+    it fails after paying."""
+    with spending("unit_a") as spend:
+        try:
+            judgement = await judging
+        except DodealError as exc:
+            _observe(exc.reason_code, started, route)
+            _failed_spend(spend, exc.reason_code, route)
+            raise
+        except BaseException as exc:
+            outcome = (
+                "cancelled" if isinstance(exc, asyncio.CancelledError) else "error"
+            )
+            _observe(outcome, started, route)
+            _failed_spend(spend, outcome, route)
+            raise
+        if isinstance(judgement, ReplayedJudgement):
+            outcome = "replayed"
+        else:
+            outcome = "suppressed" if judgement.suppressed is not None else "completed"
+        _observe(outcome, started, route)
+        spend.count(outcome)
+        return judgement
+
+
+def _failed_spend(spend: Spend, outcome: str, route: Route) -> None:
+    """A judgement that failed after paying still says what it spent: one
+    line, numbers only. Nothing spent, nothing to say."""
+    if spend.model_calls == 0:
+        return
+    _logger.warning(
+        "judgement_spend",
+        extra={"reason_code": outcome, "route": route, **spend.fields()},
+    )
+    spend.count(outcome)
 
 
 def _observe(outcome: str, started: float, route: Route) -> None:
@@ -1636,6 +1651,9 @@ def _log_outcome(
     """
     if recognised_short:
         metrics.RECOGNISED_SHORT.inc()
+    # Register item "cost": the judgement's calls, tokens and priced cost.
+    spend = current_spend()
+    spent = {} if spend is None else spend.fields()
     if judgement.suppressed is not None:
         _logger.info(
             "judgement_suppressed",
@@ -1651,6 +1669,7 @@ def _log_outcome(
                 **timings.fields(),
                 **redaction.fields(),
                 **request_ids,
+                **spent,
             },
         )
         return
@@ -1675,5 +1694,6 @@ def _log_outcome(
             **timings.fields(),
             **redaction.fields(),
             **request_ids,
+            **spent,
         },
     )

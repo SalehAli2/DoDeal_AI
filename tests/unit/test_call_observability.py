@@ -357,3 +357,50 @@ def test_configure_logging_puts_the_filter_on_the_handler() -> None:
     finally:
         root.handlers, root.level = saved[0], saved[1]
         logging.getLogger("dodeal_ai").setLevel(saved[2])
+
+
+# --- spend on the outcome line (register item "cost") ---------------------------
+
+
+async def test_the_outcome_line_carries_the_calls_spend(
+    ctx: dict, lines: io.StringIO, monkeypatch
+) -> None:
+    monkeypatch.setenv("DODEAL_STT_PRICES", json.dumps({"fake-stt-1": 0.006}))
+    monkeypatch.setenv("DODEAL_PRICE_TABLE_VERSION", "prices-2026-09")
+    get_settings.cache_clear()
+    await _push()
+    await process_call(ctx, "tenant-a", JOB)
+    (outcome,) = [x for x in _parsed(lines) if x["message"] == "call_job_outcome"]
+    assert (
+        outcome["model_calls"],
+        outcome["input_tokens"],
+        outcome["audio_seconds"],
+    ) == (
+        0,
+        0,
+        150,
+    )
+    assert outcome["cost_usd"] == pytest.approx(150 / 60 * 0.006)
+    assert outcome["price_table_version"] == "prices-2026-09"
+
+
+async def test_a_failed_transcription_logs_its_seconds_unpriced(
+    ctx: dict, lines: io.StringIO, monkeypatch
+) -> None:
+    from dodeal_ai.units.call_intelligence.transcriber import TranscriptionError
+
+    monkeypatch.setenv("DODEAL_STT_PRICES", json.dumps({"fake-stt-1": 0.006}))
+    get_settings.cache_clear()
+    ctx["transcriber"] = FakeTranscriber(
+        fail=TranscriptionError("stt_unavailable", retryable=True)
+    )
+    await _push()
+    await process_call(ctx, "tenant-a", JOB)
+    (outcome,) = [x for x in _parsed(lines) if x["message"] == "call_job_outcome"]
+    assert (outcome["status"], outcome["audio_seconds"], outcome["cost_usd"]) == (
+        "failed",
+        150,
+        None,
+    )
+    (warning,) = [x for x in _parsed(lines) if x["message"] == "price_unknown"]
+    assert warning["model"] == "unknown"

@@ -18,7 +18,7 @@ from __future__ import annotations
 from enum import Enum
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, SecretStr, ValidationError, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -65,6 +65,16 @@ class ModelProfile(BaseModel):
     model: str = Field(min_length=1)
     temperature: float = Field(default=0.0, ge=0.0, le=1.0)
     max_output_tokens: int | None = None
+
+
+class ModelPrice(BaseModel):
+    """One model's price, USD per million tokens (register item "cost")."""
+
+    model_config = {"frozen": True}
+
+    input: float = Field(ge=0)
+    cached_input: float = Field(ge=0)
+    output: float = Field(ge=0)
 
 
 class Settings(BaseSettings):
@@ -326,6 +336,20 @@ class Settings(BaseSettings):
     # charged on download to `audio_seconds:calls:tenant`. 360000 is 100 hours;
     # too low pauses a busy floor's calls, too high bounds no bill.
     cost_audio_seconds_per_tenant_limit: int = Field(default=360_000, gt=0)
+    # --- Prices (core/cost/spend.py) ---------------------------------------
+    # USD per million tokens by the model name a provider REPORTS, JSON
+    # {"<model>":{"input":..,"cached_input":..,"output":..}}. Empty: every
+    # cost is null with one warning per task; a wrong price is a wrong bill.
+    model_prices: dict[str, ModelPrice] = {}
+    # USD per audio minute by speech-to-text model name, JSON {"<model>": 0.006}.
+    # Empty: every call's cost is null with one warning; a wrong value
+    # misstates every call's cost, never what is charged against a budget.
+    stt_prices: dict[str, Annotated[float, Field(ge=0)]] = {}
+    # The name of the price table above, on every outcome line beside its cost,
+    # so a figure is read against the table that made it. "unset" says there is
+    # no table; left stale after a price change, old and new costs mix silently.
+    price_table_version: str = Field(default="unset", min_length=1)
+
     # The fraction of a limit at which a running total earns one WARNING.
     # STRICTLY between 0 and 1: 0 warns on the first token, 1 warns only once
     # the budget is already spent, and neither is a warning.

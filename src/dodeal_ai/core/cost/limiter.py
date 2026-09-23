@@ -432,6 +432,8 @@ async def enforce_token_cost(
     input_tokens: int,
     output_tokens: int,
     profile: str,
+    cached_input_tokens: int = 0,
+    reasoning_tokens: int = 0,
 ) -> None:
     """Charge one model response's tokens to the tenant and the user.
 
@@ -487,6 +489,9 @@ async def enforce_token_cost(
             "profile": profile,
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
+            # Parts of the two above, logged and never charged twice.
+            "cached_input_tokens": cached_input_tokens,
+            "reasoning_tokens": reasoning_tokens,
             **{
                 f"{name}_total": after
                 for (name, _, _), after in zip(budgets, totals, strict=True)

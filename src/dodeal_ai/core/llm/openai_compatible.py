@@ -378,6 +378,12 @@ class OpenAICompatibleClient:
                     choice["finish_reason"], FinishReason.OTHER
                 ),
                 provider_request_id=_request_id(response, body),
+                cached_input_tokens=_detail(
+                    usage, "prompt_tokens_details", "cached_tokens"
+                ),
+                reasoning_tokens=_detail(
+                    usage, "completion_tokens_details", "reasoning_tokens"
+                ),
             )
         except (KeyError, IndexError, TypeError, ValueError):
             # ValueError covers json.JSONDecodeError (non-JSON) and a token count
@@ -447,6 +453,17 @@ class OpenAICompatibleClient:
             trips_breaker=trips_breaker,
             fallback_eligible=fallback_eligible,
         )
+
+
+def _detail(usage: dict[str, Any], section: str, name: str) -> int:
+    """A count from usage's optional details, or 0. Missing, null, or not a
+    whole non-negative number all read 0: an optional detail never turns an
+    answered call into a failure."""
+    details = usage.get(section)
+    value = details.get(name) if isinstance(details, dict) else None
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return 0
 
 
 def _request_id(response: httpx.Response, body: dict[str, Any]) -> str | None:
