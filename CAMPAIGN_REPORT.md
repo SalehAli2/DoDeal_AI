@@ -7026,3 +7026,16 @@ output_truncated and reprompted once (tests/unit/test_reprompt.py covers it).
 now and hardcoded 2026-09-23 as "the next day"; it went red when the calendar
 reached that date. Both instants are now fixed. The code was right; the test
 was not.
+
+## Piece: register item 77, a profile must name the client's own provider
+
+Item 77 -- `OpenAICompatibleClient._resolve` refuses any profile whose provider
+is not the client's configured one (it refused only unsupported vendors
+before), so a groq profile on an openai client is a ConfigError; the startup
+sweep inherits it and refuses to start.
+Production failure modes: (1) a fallback client built from the primary's
+profiles would refuse every task -- it is built with the table emptied, and
+must stay so; (2) a proxy base URL for one vendor with the other vendor's
+provider setting passes the check and posts to the wrong API shape.
+Stress test: an openai profile on a groq client raises before the transport is
+entered, and the error names no model.

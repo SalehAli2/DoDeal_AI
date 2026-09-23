@@ -267,7 +267,9 @@ async def test_a_profile_may_lower_the_ceiling_never_raise_it(
     profiles = json.dumps(
         {
             PROFILE_UNIT_A_CLASSIFY: {
-                "provider": "openai",
+                # The client's own provider: a cross-vendor profile is refused
+                # before any ceiling is read (register item 77).
+                "provider": "groq",
                 "model": PINNED_MODEL,
                 "max_output_tokens": profile_ceiling,
             }
@@ -1025,3 +1027,22 @@ async def test_a_malformed_body_id_is_none(monkeypatch: pytest.MonkeyPatch) -> N
     recorder = Recorder(_with_headers({}, id="id with\nnewline"))
     result = await _call(_settings(monkeypatch), GROQ_BASE_URL, recorder)
     assert result.provider_request_id is None
+
+
+# --- register item 77: a supported vendor that is not this client's ----------
+
+
+@BOTH_URLS
+async def test_an_openai_profile_on_a_groq_client_fails_at_resolution(
+    monkeypatch: pytest.MonkeyPatch, base_url: str
+) -> None:
+    """Both vendors have an adapter; a profile must still name the client's own."""
+    profiles = json.dumps(
+        {PROFILE_UNIT_A_CLASSIFY: {"provider": "openai", "model": "gpt-something"}}
+    )
+    recorder = Recorder(httpx.Response(200, json=_ok_body()))
+    with pytest.raises(ConfigError) as caught:
+        await _call(_settings(monkeypatch, PROFILES=profiles), base_url, recorder)
+    assert "llm_profile_provider_mismatch" in str(caught.value)
+    assert "gpt-something" not in str(caught.value)
+    assert recorder.calls == 0

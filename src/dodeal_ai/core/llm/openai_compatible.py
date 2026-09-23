@@ -310,10 +310,11 @@ class OpenAICompatibleClient:
         profile costs nothing.
         """
         resolved = resolve_profile(self._settings, profile)
-        if resolved.provider not in BASE_URLS:
-            # A profile naming anthropic/gemini would otherwise post that
-            # vendor's model id to this vendor's URL. Routing per profile is the
-            # gateway's job (item 84), not this class's.
+        if resolved.provider is not self._settings.llm_provider:
+            # A profile naming another vendor -- anthropic, or even groq on an
+            # openai client (register item 77) -- would post that vendor's model
+            # id to this vendor's URL. Routing per profile is the gateway's job
+            # (item 84), not this class's; the startup sweep inherits this.
             raise ConfigError(f"llm_profile_provider_mismatch:{self._provider}")
         if not TEMPERATURE_MIN <= resolved.temperature <= TEMPERATURE_MAX:
             # The value is deliberately not interpolated: the rule is to name

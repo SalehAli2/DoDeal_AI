@@ -531,3 +531,21 @@ def test_a_set_service_key_logs_no_such_line(monkeypatch, json_lines):
 
     assert _events(json_lines(), SERVICE_EVENT) == []
     get_settings.cache_clear()
+
+
+def test_a_profile_for_the_other_supported_vendor_refuses_to_start(monkeypatch):
+    """Register item 77: the sweep inherits the check -- a groq profile on an
+    openai deployment refuses at startup, not on the first judgement."""
+    _llm_env(
+        monkeypatch,
+        PROVIDER="openai",
+        MODEL="pinned-model",
+        API_KEY="k",
+        PROFILES=json.dumps({_PROFILE: {"provider": "groq", "model": "llama-x"}}),
+    )
+
+    with pytest.raises(ConfigError) as caught, TestClient(app):
+        pass
+
+    assert "llm_profile_provider_mismatch" in str(caught.value)
+    assert "llama-x" not in str(caught.value)
