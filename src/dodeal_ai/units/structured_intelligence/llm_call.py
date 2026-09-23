@@ -263,6 +263,7 @@ async def call_model[M: BaseModel](
     max_output_tokens: int,
     check: Callable[[M], None] | None = None,
     reprompt: bool = True,
+    reprompt_tail: str = REPROMPT_TAIL_TEMPLATE,
 ) -> tuple[M, LLMResponse]:
     """Send a prompt, validate the answer, and on a malformed one send it ONCE
     more with a stricter tail. Returns the validated output beside the raw
@@ -299,6 +300,10 @@ async def call_model[M: BaseModel](
     AND BOTH ARE CHARGED, separately, inside `complete_once`. A reprompted pass
     costs two responses' tokens because it cost two calls; the discarded first
     answer was still paid for.
+
+    `reprompt_tail` names the tail's template: Unit A's by default, and a unit
+    with a prompt set of its own (Unit B) passes that set's tail, so a Unit A
+    tail edit never changes a prompt stamped with another unit's version.
     """
     response = await complete_once(
         client,
@@ -332,7 +337,7 @@ async def call_model[M: BaseModel](
 
     second = await complete_once(
         client,
-        with_tail(prompt, REPROMPT_TAIL_TEMPLATE),
+        with_tail(prompt, reprompt_tail),
         label,
         scope=scope,
         settings=settings,
