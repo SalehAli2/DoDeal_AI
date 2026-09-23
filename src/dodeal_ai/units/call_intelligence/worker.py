@@ -9,16 +9,17 @@ THE ORDER, and what each step may cost:
   3. FREE OUTCOMES FIRST (item 36): voicemail, no answer, or shorter than
      min_transcribe_seconds is `done` with that outcome label and no paid call.
   4. A STORED TRANSCRIPT IS NEVER RE-PAID: a run that finds one delivers it.
-     A run that finds the job `transcribing` with nothing stored may already
-     have paid for a transcription that was lost, so it dead-letters
-     (transcription_interrupted) rather than pay again (CLAUDE.md: never retry
-     a paid call).
+     A run that finds the job `transcribing` with nothing stored was
+     interrupted: it is transcribed again ONCE (BRD B6, the lead's override of
+     CLAUDE.md's never-retry rule for this case only), and the second
+     interruption dead-letters (transcription_interrupted).
   5. The call budgets (core(105)): over one, or with the store down, the job
      PAUSES and is re-queued after the window. Nothing is spent blind.
   6. One attempt is claimed, the recording downloaded (core/audio_download.py)
-     and its seconds charged, then transcribed ONCE: a transcription failure is
-     never retried. A download that may succeed later is retried until the
-     attempts run out.
+     and its seconds charged, then transcribed. A transcription that failed
+     and may succeed later is retried ONCE, as an attempt, its seconds charged
+     again; the second failure is dead_letter and call.failed. A download that
+     may succeed later is retried until the attempts run out.
   7. The transcript is stored for result_ttl_seconds, stage 1 is delivered,
      and the job is `done`. eligible_for_full_analysis is at least
      scoring_min_seconds long and not uncertain.
@@ -62,6 +63,7 @@ from dodeal_ai.core.jobs import (
     pause,
     read_job,
     read_result,
+    start_transcription,
     store_result,
     transition,
 )
@@ -82,6 +84,11 @@ FAILED = CALL_FAILED
 
 # How long a retryable failure waits per attempt already made: 30 s, then 60 s.
 RETRY_DELAY_SECONDS = 30
+
+# Transcriptions a job may start, each paid: the first and ONE retry (item 35,
+# BRD B6). Fixed by the brief, not a setting: a third is never paid for.
+TRANSCRIPTION_TRIES = 2
+INTERRUPTED = "transcription_interrupted"
 
 # The outcome labels a call can be done with before any paid call.
 _UNPAID_OUTCOMES = frozenset({"voicemail", "no_answer"})
@@ -223,16 +230,16 @@ async def _process(
     if not config.calls_enabled:
         await _fail(ctx, job, config, "calls_not_enabled", dead=False, run=run)
         return
-    if job.attempts >= settings.call_max_tries:
-        reason = job.reason or "max_tries_exceeded"
-        await _fail(ctx, job, config, reason, dead=True, run=run)
-        return
-
     label = unpaid_outcome(job, config)
     stored = None if label is not None else await read_result(tenant, job_id)
     paid = label is None and stored is None
-    if paid and job.status is JobStatus.TRANSCRIBING:
-        await _fail(ctx, job, config, "transcription_interrupted", dead=True, run=run)
+    # `transcribing` with nothing stored: the last run died mid-transcription.
+    interrupted = paid and job.status is JobStatus.TRANSCRIBING
+    if job.attempts >= settings.call_max_tries or (
+        interrupted and job.transcriptions >= TRANSCRIPTION_TRIES
+    ):
+        reason = INTERRUPTED if interrupted else job.reason or "max_tries_exceeded"
+        await _fail(ctx, job, config, reason, dead=True, run=run)
         return
 
     scope = job_scope(job)
@@ -298,12 +305,13 @@ async def _transcribe(
     attempt: int,
     run: CallRun,
 ) -> Transcript | None:
-    """Download, charge the seconds, transcribe once. None when the job was
+    """Download, charge the seconds, transcribe. None when the job was
     failed, paused or scheduled to retry instead."""
     settings = get_settings()
     transcriber: Transcriber = ctx["transcriber"]
     meta = job.metadata
     started = time.monotonic()
+    transcriptions = 0
     try:
         async with downloaded_audio(
             str(meta["audio_url"]),
@@ -323,12 +331,10 @@ async def _transcribe(
             except CallsBudgetPaused as paused:
                 await _pause(job, paused.reason_code, run=run)
                 return None
-            await transition(
-                job,
-                JobStatus.TRANSCRIBING,
-                now=_now(),
-                ttl_seconds=config.result_ttl_seconds,
-            )
+            count = await start_transcription(job, now=_now())
+            if count is None:
+                return None
+            transcriptions = count
             run.moved(JobStatus.TRANSCRIBING)
             metrics.AUDIO_SECONDS_PROCESSED.inc(seconds)
             hint = meta.get("language_hint")
@@ -354,9 +360,42 @@ async def _transcribe(
         await _download_failed(ctx, job, config, refused, attempt, run)
         return None
     except TranscriptionError as failed:
-        # Never retried, retryable or not: the provider may have billed it.
-        await _fail(ctx, job, config, failed.reason, dead=False, run=run)
+        await _transcription_failed(
+            ctx, job, config, failed, attempt, transcriptions, run
+        )
         return None
+
+
+async def _transcription_failed(
+    ctx: dict[str, Any],
+    job: Job,
+    config: CallsConfig,
+    failed: TranscriptionError,
+    attempt: int,
+    transcriptions: int,
+    run: CallRun,
+) -> None:
+    """A failure the same audio cannot get past fails the job. One that may
+    pass is retried once while an attempt is left; else it is dead-lettered."""
+    if not failed.retryable:
+        await _fail(ctx, job, config, failed.reason, dead=False, run=run)
+        return
+    if (
+        transcriptions >= TRANSCRIPTION_TRIES
+        or attempt >= get_settings().call_max_tries
+    ):
+        await _fail(ctx, job, config, failed.reason, dead=True, run=run)
+        return
+    # CLAUDE.md never-retry overridden by the lead for this case only (BRD B6).
+    await transition(
+        job,
+        JobStatus.QUEUED,
+        now=_now(),
+        reason=failed.reason,
+        ttl_seconds=config.result_ttl_seconds,
+    )
+    run.moved(JobStatus.QUEUED, failed.reason)
+    raise Retry(defer=RETRY_DELAY_SECONDS * attempt)
 
 
 async def _download_failed(

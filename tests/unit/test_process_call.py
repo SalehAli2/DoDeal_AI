@@ -1,5 +1,5 @@
 """process_call (register items 35, 36): free outcomes first, budgets before
-spend, one transcription ever, CALL_MAX_TRIES then dead_letter, and a crash
+spend, at most two transcriptions, CALL_MAX_TRIES then dead_letter, and a crash
 after the transcript is stored retries delivery only."""
 
 from __future__ import annotations
@@ -260,22 +260,56 @@ async def test_a_crash_after_transcription_retries_delivery_only(
     assert ctx["deliver"].events == [STAGE1, STAGE1]
 
 
-async def test_a_lost_transcription_is_dead_lettered_not_paid_again(
+class _DyingTranscriber(FakeTranscriber):
+    """Counts the call, then dies the way a killed worker does mid-request."""
+
+    async def transcribe(self, audio_path: Path, *, language_hint: str | None):
+        await super().transcribe(audio_path, language_hint=language_hint)
+        raise RuntimeError("the worker died mid-transcription")
+
+
+async def test_an_interrupted_job_is_transcribed_again_once_then_dead_letters(
     ctx: dict, redis_fakes: RedisFakes
 ) -> None:
+    """Two paid transcriptions, each charged, then transcription_interrupted."""
     await _calls_on()
     await _push()
-    await redis_fakes.jobs.hset(job_key("tenant-a", JOB), "status", "transcribing")
+    ctx["transcriber"] = _DyingTranscriber()
+
+    for _ in range(2):
+        with pytest.raises(RuntimeError):
+            await process_call(ctx, "tenant-a", JOB)
+        assert (await _job()).status is JobStatus.TRANSCRIBING
+    await process_call(ctx, "tenant-a", JOB)
+
+    job = await _job()
+    assert (job.status, job.reason, job.attempts, job.transcriptions) == (
+        JobStatus.DEAD_LETTER,
+        "transcription_interrupted",
+        2,
+        2,
+    )
+    assert len(ctx["transcriber"].calls) == 2
+    assert redis_fakes.cost.store["audio_seconds:calls:tenant:tenant-a"] == 300
+    assert ctx["deliver"].events == [FAILED]
+
+
+async def test_an_interrupted_job_retried_once_can_still_succeed(
+    ctx: dict, redis_fakes: RedisFakes
+) -> None:
+    """The retry that lands is done, with both attempts and both starts counted."""
+    await _calls_on()
+    await _push()
+    await redis_fakes.jobs.hset(
+        job_key("tenant-a", JOB),
+        mapping={"status": "transcribing", "attempts": "1", "transcriptions": "1"},
+    )
 
     await process_call(ctx, "tenant-a", JOB)
 
     job = await _job()
-    assert (job.status, job.reason) == (
-        JobStatus.DEAD_LETTER,
-        "transcription_interrupted",
-    )
-    assert ctx["transcriber"].calls == []
-    assert ctx["deliver"].events == [FAILED]
+    assert (job.status, job.attempts, job.transcriptions) == (JobStatus.DONE, 2, 2)
+    assert len(ctx["transcriber"].calls) == 1
 
 
 # --- tries, failures and dead letters (item 35) ---------------------------------
@@ -324,21 +358,89 @@ async def test_an_expired_link_fails_and_is_never_retried(
     assert ctx["deliver"].events == [FAILED]
 
 
-@pytest.mark.parametrize("retryable", [True, False])
-async def test_a_transcription_failure_is_never_retried(
-    ctx: dict, retryable: bool
+async def test_a_failed_transcription_is_retried_once_then_dead_lettered(
+    ctx: dict, redis_fakes: RedisFakes
 ) -> None:
+    """One retry as an attempt, its seconds charged again, then call.failed."""
     await _calls_on()
     await _push()
     ctx["transcriber"] = FakeTranscriber(
-        fail=TranscriptionError("stt_unavailable", retryable=retryable)
+        fail=TranscriptionError("stt_timeout", retryable=True)
+    )
+
+    with pytest.raises(Retry) as retried:
+        await process_call(ctx, "tenant-a", JOB)
+    job = await _job()
+    assert (job.status, job.reason, job.attempts) == (
+        JobStatus.QUEUED,
+        "stt_timeout",
+        1,
+    )
+    assert retried.value.defer_score == worker.RETRY_DELAY_SECONDS * 1000
+
+    await process_call(ctx, "tenant-a", JOB)
+
+    job = await _job()
+    assert (job.status, job.reason, job.attempts, job.transcriptions) == (
+        JobStatus.DEAD_LETTER,
+        "stt_timeout",
+        2,
+        2,
+    )
+    assert len(ctx["transcriber"].calls) == 2
+    assert redis_fakes.cost.store["audio_seconds:calls:tenant:tenant-a"] == 300
+    assert ctx["deliver"].events == [FAILED]
+
+
+async def test_a_failure_the_same_audio_cannot_pass_is_never_retried(
+    ctx: dict,
+) -> None:
+    """A non-retryable failure fails at once: a retry would pay for nothing."""
+    await _calls_on()
+    await _push()
+    ctx["transcriber"] = FakeTranscriber(
+        fail=TranscriptionError("audio_unsupported", retryable=False)
     )
 
     await process_call(ctx, "tenant-a", JOB)
 
     job = await _job()
-    assert (job.status, job.reason) == (JobStatus.FAILED, "stt_unavailable")
+    assert (job.status, job.reason) == (JobStatus.FAILED, "audio_unsupported")
     assert len(ctx["transcriber"].calls) == 1
+
+
+async def test_a_failed_transcription_on_the_last_attempt_dead_letters(
+    ctx: dict, redis_fakes: RedisFakes
+) -> None:
+    """A download retry spent the spare attempt, so there is no second call."""
+    await _calls_on()
+    await _push()
+    await redis_fakes.jobs.hset(job_key("tenant-a", JOB), "attempts", "1")
+    ctx["transcriber"] = FakeTranscriber(
+        fail=TranscriptionError("stt_unavailable", retryable=True)
+    )
+
+    await process_call(ctx, "tenant-a", JOB)
+
+    job = await _job()
+    assert (job.status, job.reason) == (JobStatus.DEAD_LETTER, "stt_unavailable")
+    assert len(ctx["transcriber"].calls) == 1
+
+
+async def test_a_job_gone_terminal_before_transcription_is_not_paid_for(
+    ctx: dict, monkeypatch
+) -> None:
+    """No count, no transcription, and nothing sent for a job that is gone."""
+    await _calls_on()
+    await _push()
+
+    async def gone(*args: object, **kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(worker, "start_transcription", gone)
+    await process_call(ctx, "tenant-a", JOB)
+    assert ctx["transcriber"].calls == []
+    assert ctx["deliver"].events == []
 
 
 async def test_a_job_at_its_tries_on_entry_is_dead_lettered(

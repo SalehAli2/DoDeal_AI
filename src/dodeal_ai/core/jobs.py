@@ -4,8 +4,9 @@ at most one per (tenant, call_id), and its result held apart from it.
 THREE KEYS, every one under the tenant, so a job id from one tenant can never
 address another tenant's job:
 
-  call_job:{tenant}:{job_id}          a hash: status, attempts, pauses, reason,
-                                      request_id, queue, timestamps, metadata
+  call_job:{tenant}:{job_id}          a hash: status, attempts, transcriptions,
+                                      pauses, reason, request_id, queue,
+                                      timestamps, metadata
   call_job_by_call:{tenant}:{call_id} the job_id this call was admitted as
   call_result:{tenant}:{job_id}       the stage result, EX result_ttl_seconds
 
@@ -76,6 +77,8 @@ class Job:
     call_id: int
     status: JobStatus
     attempts: int
+    # Transcriptions started, a paid call each; item 35 allows two.
+    transcriptions: int
     pauses: int
     request_id: str
     reason: str | None
@@ -177,6 +180,23 @@ redis.call('HSET', KEYS[1], 'status', ARGV[1], 'updated_at', ARGV[2], 'reason', 
 return redis.call('HINCRBY', KEYS[1], 'pauses', 1)
 """
 
+# KEYS: the job. ARGV: now, the transcribing status, then every terminal
+# status. 0 missing, -1 terminal, else the job's transcriptions after this one:
+# `transcribing` and counted in one step, before the paid call is made.
+_TRANSCRIBE_SCRIPT = """
+if redis.call('EXISTS', KEYS[1]) == 0 then
+  return 0
+end
+local current = redis.call('HGET', KEYS[1], 'status')
+for i = 3, #ARGV do
+  if current == ARGV[i] then
+    return -1
+  end
+end
+redis.call('HSET', KEYS[1], 'status', ARGV[2], 'updated_at', ARGV[1], 'reason', '')
+return redis.call('HINCRBY', KEYS[1], 'transcriptions', 1)
+"""
+
 _TERMINAL_ARGS = tuple(sorted(status.value for status in TERMINAL))
 
 
@@ -212,6 +232,7 @@ async def create_job(
         "call_id": str(call_id),
         "status": JobStatus.QUEUED.value,
         "attempts": "0",
+        "transcriptions": "0",
         "pauses": "0",
         "request_id": request_id,
         "reason": "",
@@ -249,6 +270,8 @@ async def read_job(tenant: str, job_id: str) -> Job | None:
         call_id=int(raw["call_id"]),
         status=JobStatus(raw["status"]),
         attempts=int(raw["attempts"]),
+        # A job stored before the count existed has started none.
+        transcriptions=int(raw.get("transcriptions", "0")),
         pauses=int(raw["pauses"]),
         request_id=raw["request_id"],
         reason=raw["reason"] or None,
@@ -309,6 +332,23 @@ async def claim_attempt(
     if int(outcome) < 0:
         return None
     return int(attempts) if int(outcome) == 1 else 0
+
+
+async def start_transcription(job: Job, *, now: datetime) -> int | None:
+    """`transcribing`, counting one more transcription, before the paid call.
+    The job's transcriptions after this one, or None when terminal or gone."""
+    client = get_jobs_client()
+    count = await _call(
+        lambda: client.eval(
+            _TRANSCRIBE_SCRIPT,
+            1,
+            job_key(job.tenant, job.job_id),
+            now.isoformat(),
+            JobStatus.TRANSCRIBING.value,
+            *_TERMINAL_ARGS,
+        )
+    )
+    return int(count) if int(count) > 0 else None
 
 
 async def pause(job: Job, *, now: datetime, reason: str) -> int | None:

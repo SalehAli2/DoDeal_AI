@@ -392,7 +392,7 @@ async def test_a_failed_transcription_logs_its_seconds_unpriced(
     monkeypatch.setenv("DODEAL_STT_PRICES", json.dumps({"fake-stt-1": 0.006}))
     get_settings.cache_clear()
     ctx["transcriber"] = FakeTranscriber(
-        fail=TranscriptionError("stt_unavailable", retryable=True)
+        fail=TranscriptionError("stt_unavailable", retryable=False)
     )
     await _push()
     await process_call(ctx, "tenant-a", JOB)

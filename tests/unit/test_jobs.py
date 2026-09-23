@@ -22,6 +22,7 @@ from dodeal_ai.core.jobs import (
     read_job,
     read_result,
     result_key,
+    start_transcription,
     store_result,
     transition,
 )
@@ -162,6 +163,42 @@ async def test_a_claim_counts_attempts_up_to_the_cap() -> None:
     assert (claimed.attempts, claimed.reason) == (2, None)
 
 
+async def test_a_transcription_is_counted_as_it_starts() -> None:
+    """Each start is one more paid call, counted in the same script."""
+    await _create()
+    job = await _job()
+    assert job.transcriptions == 0
+    assert await start_transcription(job, now=NOW) == 1
+    assert await start_transcription(job, now=NOW) == 2
+    started = await _job()
+    assert (started.status, started.transcriptions, started.reason) == (
+        JobStatus.TRANSCRIBING,
+        2,
+        None,
+    )
+
+
+async def test_a_terminal_or_missing_job_starts_no_transcription(
+    redis_fakes: RedisFakes,
+) -> None:
+    """Terminal is final and a gone job is not revived by the count."""
+    await _create()
+    job = await _job()
+    await transition(job, JobStatus.FAILED, now=NOW, ttl_seconds=TTL)
+    assert await start_transcription(job, now=NOW) is None
+    await redis_fakes.jobs.delete(job_key("tenant-a", "job-1"))
+    assert await start_transcription(job, now=NOW) is None
+
+
+async def test_a_job_stored_before_the_count_reads_as_none_started(
+    redis_fakes: RedisFakes,
+) -> None:
+    """A hash with no transcriptions field reads as zero, never a KeyError."""
+    await _create()
+    await redis_fakes.jobs.hdel(job_key("tenant-a", "job-1"), "transcriptions")
+    assert (await _job()).transcriptions == 0
+
+
 async def test_a_pause_counts_and_leaves_attempts_alone() -> None:
     await _create()
     job = await _job()
@@ -201,6 +238,7 @@ async def test_every_operation_fails_closed_on_a_dead_store(dead_store) -> None:
         call_id=7,
         status=JobStatus.QUEUED,
         attempts=0,
+        transcriptions=0,
         pauses=0,
         request_id="req-1",
         reason=None,
@@ -216,6 +254,7 @@ async def test_every_operation_fails_closed_on_a_dead_store(dead_store) -> None:
         transition(job, JobStatus.DONE, now=NOW, ttl_seconds=TTL),
         claim_attempt(job, max_tries=2, now=NOW, status=JobStatus.DOWNLOADING),
         pause(job, now=NOW, reason="x"),
+        start_transcription(job, now=NOW),
         store_result("tenant-a", "job-1", {}, ttl_seconds=TTL),
         read_result("tenant-a", "job-1"),
     ]

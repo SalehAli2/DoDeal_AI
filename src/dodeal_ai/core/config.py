@@ -188,8 +188,8 @@ class Settings(BaseSettings):
     # (retried, and paid for again in time), too high holds a worker on a stall.
     call_download_timeout_seconds: float = Field(default=60.0, gt=0)
     # Processing attempts a call job gets before it is dead-lettered (register
-    # item 35). 2 rides out one bad download; a transcription is never re-paid
-    # whatever this says. Higher re-fetches a dead link; 1 never retries at all.
+    # item 35). 2 rides out one bad download or one failed transcription, never
+    # more than one re-paid. Higher re-fetches a dead link; 1 never retries.
     call_max_tries: int = Field(default=2, ge=1)
     # Each tenant's callback signing secret, JSON {"tenant": "secret"}; SecretStr
     # so a repr prints stars. Read once, in core/callbacks.py. A tenant missing
