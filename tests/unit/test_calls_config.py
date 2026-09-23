@@ -88,6 +88,7 @@ def test_the_default_has_every_switch_off_and_the_listed_values() -> None:
         config.max_audio_bytes,
         config.priority_statuses,
         config.alarm_phrases,
+        config.phone_country_code,
     ) == (
         None,
         frozenset(),
@@ -97,6 +98,7 @@ def test_the_default_has_every_switch_off_and_the_listed_values() -> None:
         209_715_200,
         frozenset({"qualified", "negotiation"}),
         frozenset(),
+        "971",
     )
 
 
@@ -133,6 +135,10 @@ def test_the_guard_refuses_an_http_callback_or_calls_on_with_no_host(
         {"min_transcribe_seconds": 200},
         {"priority_statuses": [""]},
         {"config_version": ""},
+        {"phone_country_code": "0971"},
+        {"phone_country_code": "+971"},
+        {"phone_country_code": "9715"},
+        {"phone_country_code": ""},
         {"unknown_switch": True},
     ],
 )

@@ -9,16 +9,20 @@ Arabic, Gulf, Levantine and Egyptian forms included ("zero five oh", "صفر
 or "زائد" first stands for +. A chain may hold more than one number, so the
 longest phone-shaped stretch is taken from each place in it, left to right.
 
-THE PHONE RULE, and the rule the CRM must hash with:
+THE PHONE RULE, and the rule the CRM must hash with. C is the tenant's
+phone_country_code (config.py, default 971):
 
   1. every digit as an ASCII digit, every separator dropped;
   2. a leading + or 00 is dropped (+971 and 00971 both become 971);
-  3. otherwise a leading 05 becomes 9715;
+  3. otherwise a leading single 0 is replaced by C, for mobiles and landlines
+     alike (050 123 4567 becomes 971501234567, 04 123 4567 97141234567);
   4. it is a phone number when it had a + or 00 and is 8 to 15 digits, or
-     starts with 971 and is 11 or 12, or starts with 0 and is 9 to 11.
+     starts with C and has 8 or 9 digits after it, or starts with a single 0
+     and is 9 to 11 digits.
 
-Anything else -- a price, a year, a unit number -- has no leading 0, + or 971
-and is left alone: "1,200,000 AED" is not a phone number and is not masked.
+Anything else -- a price, a year, a unit number -- has no leading 0, + or C
+and is left alone: "1,200,000 AED" is not a phone number and is not masked. A
+number said with another country's code and no + or 00 is not found either.
 
 WHAT A FIND CARRIES: who said it (agent or client), when, which segment, the
 last four digits and what it matched -- never the number or its hash. The
@@ -53,12 +57,15 @@ MATCH_NEW_CLIENT = "new_client_number"
 MATCH_AGENT_PERSONAL = "agent_personal"
 MATCH_AGENT_UNVERIFIED = "agent_unverified"
 
+# The country code a local number is read under when the tenant sets none.
+DEFAULT_COUNTRY_CODE = "971"
+
 # The phone rule's lengths (module docstring, step 4). E.164 caps a number at
-# 15 digits; the shortest international number in use is 8.
+# 15 digits; the shortest international number in use is 8. A number led by
+# the country code has 8 or 9 digits after it; a local one 8 to 10 after its 0.
 _INTERNATIONAL = range(8, 16)
-_UAE = range(11, 13)
+_NATIONAL = range(8, 10)
 _LOCAL = range(9, 12)
-_UAE_CODE = "971"
 _LAST_DIGITS = 4
 
 # A token is a maximal stretch without a separator.
@@ -130,16 +137,19 @@ class _Piece:
     digits: str
 
 
-def phone_digits(digits: str, *, plus: bool) -> str | None:
+def phone_digits(
+    digits: str, *, plus: bool, country_code: str = DEFAULT_COUNTRY_CODE
+) -> str | None:
     """The phone rule (module docstring): the digits to hash, or None when
     these digits are not a phone number."""
     if plus or digits.startswith("00"):
         number = digits if plus else digits[2:]
         return number if len(number) in _INTERNATIONAL else None
-    if digits.startswith(_UAE_CODE):
-        return digits if len(digits) in _UAE else None
+    if digits.startswith(country_code):
+        national = len(digits) - len(country_code)
+        return digits if national in _NATIONAL else None
     if digits.startswith("0") and len(digits) in _LOCAL:
-        return f"{_UAE_CODE}{digits[1:]}" if digits.startswith("05") else digits
+        return f"{country_code}{digits[1:]}"
     return None
 
 
@@ -202,14 +212,16 @@ def _chains(text: str) -> list[tuple[int | None, list[_Piece]]]:
     return chains
 
 
-def phone_spans(text: str) -> list[PhoneSpan]:
+def phone_spans(
+    text: str, *, country_code: str = DEFAULT_COUNTRY_CODE
+) -> list[PhoneSpan]:
     """Every phone number in `text`, left to right, never overlapping."""
     found: list[PhoneSpan] = []
     for plus, pieces in _chains(text):
         first = 0
         while first < len(pieces):
             led = plus if first == 0 else None
-            span = _longest_phone(pieces, first, plus=led)
+            span = _longest_phone(pieces, first, plus=led, country_code=country_code)
             if span is None:
                 first += 1
                 continue
@@ -219,24 +231,24 @@ def phone_spans(text: str) -> list[PhoneSpan]:
 
 
 def _longest_phone(
-    pieces: list[_Piece], first: int, *, plus: int | None
+    pieces: list[_Piece], first: int, *, plus: int | None, country_code: str
 ) -> tuple[PhoneSpan, int] | None:
     """The longest phone number starting at pieces[first] -- at the + that led
     it, when one did -- and its last piece."""
     start = pieces[first].start if plus is None else plus
     for last in range(len(pieces) - 1, first - 1, -1):
         digits = "".join(piece.digits for piece in pieces[first : last + 1])
-        number = phone_digits(digits, plus=plus is not None)
+        number = phone_digits(digits, plus=plus is not None, country_code=country_code)
         if number is not None:
             return PhoneSpan(start, pieces[last].end, number), last
     return None
 
 
-def prompt_copy(text: str) -> str:
+def prompt_copy(text: str, *, country_code: str = DEFAULT_COUNTRY_CODE) -> str:
     """`text` as a model may read it: emails and phone numbers masked,
     everything else -- prices among it -- as said."""
     masked = _EMAIL.sub(EMAIL_MASK, text)
-    for span in reversed(phone_spans(masked)):
+    for span in reversed(phone_spans(masked, country_code=country_code)):
         masked = f"{masked[: span.start]}{PHONE_MASK}{masked[span.end :]}"
     return masked
 
@@ -264,6 +276,7 @@ def detect_numbers(
     *,
     lead_phone_hash: str | None,
     agent_phone_hash: str | None,
+    country_code: str,
 ) -> NumberFindings:
     """Every phone number said, matched against the two hashes."""
     finds: list[dict[str, object]] = []
@@ -272,7 +285,8 @@ def detect_numbers(
     agent = agent_phone_hash.lower() if agent_phone_hash else None
     for index, segment in enumerate(segments):
         role = role_of(segment)
-        for span in phone_spans(_EMAIL.sub(EMAIL_MASK, segment.text)):
+        said = _EMAIL.sub(EMAIL_MASK, segment.text)
+        for span in phone_spans(said, country_code=country_code):
             match = _match(phone_hash(span.digits), role, lead, agent)
             where = {
                 "speaker": role,
@@ -293,11 +307,15 @@ def numbers_if_enabled(
     enabled: bool,
     lead_phone_hash: str | None,
     agent_phone_hash: str | None,
+    country_code: str,
 ) -> NumberFindings | None:
     """detect_numbers under the tenant's number_detection_enabled switch; None,
     and nothing looked for, while it is off."""
     if not enabled:
         return None
     return detect_numbers(
-        segments, lead_phone_hash=lead_phone_hash, agent_phone_hash=agent_phone_hash
+        segments,
+        lead_phone_hash=lead_phone_hash,
+        agent_phone_hash=agent_phone_hash,
+        country_code=country_code,
     )

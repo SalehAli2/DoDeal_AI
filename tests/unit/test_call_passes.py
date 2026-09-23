@@ -57,7 +57,7 @@ SEGMENTS = (
 
 def _call(*segments: Segment) -> CallText:
     transcript = Transcript.of(segments or SEGMENTS, provider="fake", model="fake")
-    return CallText.of(transcript)
+    return CallText.of(transcript, country_code="971")
 
 
 def _detail(

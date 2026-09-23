@@ -168,10 +168,14 @@ class CallText:
     uncertain: bool
 
     @classmethod
-    def of(cls, transcript: Transcript) -> CallText:
+    def of(cls, transcript: Transcript, *, country_code: str) -> CallText:
+        """`country_code` is the tenant's, which a local number is masked under."""
         return cls(
             segments=transcript.segments,
-            shown=tuple(prompt_copy(segment.text) for segment in transcript.segments),
+            shown=tuple(
+                prompt_copy(segment.text, country_code=country_code)
+                for segment in transcript.segments
+            ),
             language=summary_language(transcript),
             uncertain=transcript.uncertain,
         )

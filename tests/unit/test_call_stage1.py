@@ -137,7 +137,9 @@ async def ctx() -> AsyncIterator[dict[str, Any]]:
         }
 
 
-async def _push(duration: int = 150, **config: object) -> None:
+async def _push(
+    duration: int = 150, lead_hash: str | None = None, **config: object
+) -> None:
     await set_override(
         "tenant-a",
         UNIT_B_SECTION,
@@ -157,6 +159,7 @@ async def _push(duration: int = 150, **config: object) -> None:
                 datetime.now(UTC) + timedelta(hours=2)
             ).isoformat(),
             "agent_phone_hash": COMPANY_HASH,
+            "lead_phone_hash": lead_hash,
         }
     )
     await create_job(
@@ -249,6 +252,19 @@ async def test_the_model_never_reads_the_agents_number(ctx: dict) -> None:
     for prompt in ctx["llm"].prompts:
         assert "765 4321" not in prompt.text
         assert "Text me on my own mobile [PHONE] for photos." in prompt.text
+
+
+async def test_the_tenants_country_code_reaches_the_number_match(ctx: dict) -> None:
+    """A Saudi tenant's lead number, said locally, matches its 966 hash."""
+    ctx["transcriber"] = FakeTranscriber(
+        (_say(0, "lead", "Call me back on 050 123 4567 please."),)
+    )
+    saudi = hashlib.sha256(b"966501234567").hexdigest()
+    await _push(lead_hash=saudi, phone_country_code="966")
+    await process_call(ctx, "tenant-a", JOB)
+
+    (find,) = (await _result())["signals"]["numbers"]
+    assert (find["match"], find["last4"]) == ("lead", "4567")
 
 
 async def test_the_switches_off_find_no_numbers_or_phrases(ctx: dict) -> None:

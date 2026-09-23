@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.tenant_config import ResolvedSection, resolve_section
+from dodeal_ai.units.call_intelligence.numbers import DEFAULT_COUNTRY_CODE
 
 __all__ = [
     "UNIT_B_SECTION",
@@ -75,6 +76,12 @@ class CallsConfig(BaseModel):
     priority_statuses: frozenset[_Word] = frozenset({"qualified", "negotiation"})
     # Phrases a later pass may alarm on; stored casefolded. Parsed only.
     alarm_phrases: frozenset[_Word] = frozenset()
+    # The country code a number said with a leading single 0 is hashed under
+    # (numbers.py), 1 to 3 digits: 971, the UAE, where the agencies are. A wrong
+    # one hashes every local number as another country's, so none matches.
+    phone_country_code: str = Field(
+        default=DEFAULT_COUNTRY_CODE, pattern=r"^[1-9][0-9]{0,2}$"
+    )
 
     # The switches, all off: calls_enabled admits jobs at all (403 otherwise);
     # the other five name later passes and are parsed and stored only. A switch

@@ -227,6 +227,7 @@ def _found_in_code(
         enabled=config.number_detection_enabled,
         lead_phone_hash=lead if isinstance(lead, str) else None,
         agent_phone_hash=agent if isinstance(agent, str) else None,
+        country_code=config.phone_country_code,
     )
     alarms = alarms_if_enabled(
         segments, enabled=config.alarm_phrases_enabled, phrases=config.alarm_phrases
@@ -257,7 +258,7 @@ async def wave1(
     usage: PassUsage,
 ) -> Wave1:
     """Wave 1 for one transcript. JobGone when the job stopped under it."""
-    call = CallText.of(transcript)
+    call = CallText.of(transcript, country_code=config.phone_country_code)
     code, digest = _found_in_code(transcript, config, job)
     models: list[str] = []
     versions: dict[str, object] = {

@@ -38,7 +38,10 @@ def _say(speaker: str, text: str, start: float = 12.5) -> Segment:
 
 def _detect(*segments: Segment) -> NumberFindings:
     return detect_numbers(
-        segments, lead_phone_hash=LEAD_HASH, agent_phone_hash=COMPANY_HASH
+        segments,
+        lead_phone_hash=LEAD_HASH,
+        agent_phone_hash=COMPANY_HASH,
+        country_code="971",
     )
 
 
@@ -114,6 +117,7 @@ def test_with_no_company_hash_an_agents_number_is_unverified_and_never_escalates
         (_say("agent", "text me on my own mobile, 055 765 4321"),),
         lead_phone_hash=lead,
         agent_phone_hash=None,
+        country_code="971",
     )
     assert [f["match"] for f in findings.finds] == ["agent_unverified"]
     assert findings.escalations == []
@@ -124,6 +128,7 @@ def test_with_no_company_hash_the_leads_number_still_matches() -> None:
         (_say("agent", "I have you on 050 123 4567"),),
         lead_phone_hash=LEAD_HASH,
         agent_phone_hash=None,
+        country_code="971",
     )
     assert [f["match"] for f in findings.finds] == ["lead"]
 
@@ -133,6 +138,7 @@ def test_a_hash_is_compared_whatever_its_case() -> None:
         (_say("lead", "050 123 4567"),),
         lead_phone_hash=LEAD_HASH.upper(),
         agent_phone_hash=None,
+        country_code="971",
     )
     assert [f["match"] for f in findings.finds] == ["lead"]
 
@@ -180,7 +186,9 @@ def test_arabic_dialect_digits_with_a_leading_and() -> None:
         ("00971501234567", False, "971501234567"),
         ("971501234567", True, "971501234567"),
         ("971501234567", False, "971501234567"),
-        ("041234567", False, "041234567"),
+        ("041234567", False, "97141234567"),
+        ("97141234567", False, "97141234567"),
+        ("9714123456", False, None),
         ("00201001234567", False, "201001234567"),
         ("97150123", False, None),
         ("0501234", False, None),
@@ -192,6 +200,35 @@ def test_arabic_dialect_digits_with_a_leading_and() -> None:
 )
 def test_the_phone_rule(digits: str, plus: bool, expected: str | None) -> None:
     assert phone_digits(digits, plus=plus) == expected
+
+
+@pytest.mark.parametrize(
+    "said", ["04 123 4567", "+971 4 123 4567", "00971 4 1234567", "971 4 123 4567"]
+)
+def test_a_landline_hashes_the_same_in_every_form(said: str) -> None:
+    """A leading single 0 takes the country code for landlines too."""
+    assert _digits(said) == ["97141234567"]
+
+
+def test_the_tenants_country_code_replaces_the_leading_zero() -> None:
+    assert phone_digits("0501234567", plus=False, country_code="966") == (
+        "966501234567"
+    )
+    assert phone_spans("966 50 123 4567", country_code="966")[0].digits == (
+        "966501234567"
+    )
+    assert prompt_copy("call 050 123 4567", country_code="966") == "call [PHONE]"
+
+
+def test_a_saudi_tenants_client_giving_the_leads_number_matches_lead() -> None:
+    saudi_lead = hashlib.sha256(b"966501234567").hexdigest()
+    findings = detect_numbers(
+        (_say("lead", "my number is 050 123 4567"),),
+        lead_phone_hash=saudi_lead,
+        agent_phone_hash=None,
+        country_code="966",
+    )
+    assert [f["match"] for f in findings.finds] == ["lead"]
 
 
 def test_two_numbers_in_one_run_are_two_finds() -> None:
@@ -251,7 +288,11 @@ def test_a_spoken_number_is_masked_whole() -> None:
 
 def test_nothing_is_looked_for_while_the_switch_is_off() -> None:
     segments = (_say("agent", "055 765 4321"),)
-    kwargs = {"lead_phone_hash": LEAD_HASH, "agent_phone_hash": COMPANY_HASH}
+    kwargs = {
+        "lead_phone_hash": LEAD_HASH,
+        "agent_phone_hash": COMPANY_HASH,
+        "country_code": "971",
+    }
     assert numbers_if_enabled(segments, enabled=False, **kwargs) is None
     found = numbers_if_enabled(segments, enabled=True, **kwargs)
     assert found is not None and len(found.escalations) == 1
