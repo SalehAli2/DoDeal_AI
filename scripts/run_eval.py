@@ -71,6 +71,7 @@ from dodeal_ai.units.structured_intelligence.scoring import (
 from scripts.diagnose_notes import (
     DEFAULT_ASSUMED_TYPE,
     DEFAULT_TENANT,
+    EVAL_SCRATCH_TENANT,
     PassRun,
     RecordingClient,
     _guard_against_accidental_live_call,
@@ -508,9 +509,9 @@ def disagreement_rows(summary: Summary) -> list[dict[str, object]]:
 
 
 async def _run_live(
-    rows: list[EvalRow], *, tenant: str, config: TenantConfig, settings: Settings
+    rows: list[EvalRow], *, config: TenantConfig, settings: Settings
 ) -> list[PassRun]:
-    scope = build_scope(tenant)
+    scope = build_scope()  # charged to eval-scratch; `config` is --tenant's
     async with httpx.AsyncClient(
         timeout=settings.external_call_timeout_seconds
     ) as http:
@@ -563,6 +564,7 @@ def main() -> int:
     print(f"Mode:       {mode}")
     print(f"Scored set: {path}  ({len(rows)} notes)")
     print(f"Tenant:     {args.tenant}  (config_version {config.config_version})")
+    print(f"Charged to: {EVAL_SCRATCH_TENANT}  (tokens only; the rubric is --tenant's)")
 
     if not args.live:
         print_prompts(rows, config, NoteType(args.assume_type))
@@ -575,9 +577,7 @@ def main() -> int:
     _guard_against_accidental_live_call(args.live)
     _refuse_an_oversized_run(rows)
 
-    runs = asyncio.run(
-        _run_live(rows, tenant=args.tenant, config=config, settings=settings)
-    )
+    runs = asyncio.run(_run_live(rows, config=config, settings=settings))
     summary = summarise(list(zip(rows, runs, strict=True)), config)
     _report(summary)
 

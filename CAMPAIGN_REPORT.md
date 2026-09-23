@@ -7086,3 +7086,15 @@ notes that reads as a rate; (2) a prompt change that asks about everything
 raises the caught share and hides in it until the false-alarm line is read.
 Stress test: one vague note missed and one clear note wrongly marked print
 "n-1/n" and "1/m" on the two lines.
+
+## Piece: register item 140, the eval runs charge a scratch tenant
+
+Item 140 -- scripts/run_eval.py and scripts/diagnose_notes.py charge every
+token to tenant `eval-scratch` while scoring with `--tenant`'s rubric, and
+print both ("Tenant:" and "Charged to:"), so an eval run never spends a real
+tenant's budget.
+Production failure modes: (1) nobody watches eval-scratch's budget, so a
+runaway eval is visible only on the provider's bill; (2) a real tenant later
+named eval-scratch would share the charges.
+Stress test: a live-shaped run over the fixture leaves token keys for
+eval-scratch only, none for tenant-a.

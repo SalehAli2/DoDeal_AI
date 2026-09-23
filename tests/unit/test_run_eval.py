@@ -431,3 +431,47 @@ def test_a_pass_that_did_not_run_is_not_marked_vague(rows):
     summary = summarise(pairs, CONFIG)
     assert summary.vague_caught.matched == 0
     assert summary.clear_marked_vague.matched == 0
+
+
+# --- the scratch tenant (register item 140) -----------------------------------
+
+
+def test_the_default_scope_is_the_scratch_tenant():
+    """Tokens are charged to eval-scratch unless a caller says otherwise."""
+    from scripts.diagnose_notes import EVAL_SCRATCH_TENANT
+
+    assert build_scope().tenant == EVAL_SCRATCH_TENANT == "eval-scratch"
+
+
+@pytest.mark.parametrize("module_name", ["run_eval", "diagnose_notes"])
+def test_a_dry_run_prints_the_rubric_tenant_and_the_charged_one(
+    rows, tmp_path, monkeypatch, capsys, module_name
+):
+    """Both scripts say whose rubric scores the run and who pays for it."""
+    import importlib
+    import sys
+
+    module = importlib.import_module(f"scripts.{module_name}")
+    destination = tmp_path / FIXTURE.name
+    monkeypatch.setenv("DODEAL_EVAL_SET_PATH", str(destination))
+    monkeypatch.setattr(sys, "argv", [module_name, "--tenant", "tenant-a"])
+    assert module.main() == 0
+    out = capsys.readouterr().out
+    assert "Tenant:     tenant-a" in out
+    assert "Charged to: eval-scratch" in out
+
+
+async def test_a_live_run_charges_only_the_scratch_tenant(
+    rows, monkeypatch, redis_fakes
+):
+    """The rubric is tenant-a's; every token lands on eval-scratch."""
+    import scripts.run_eval as run_eval_module
+
+    llm = FakeLLM()
+    _script(llm, rows)
+    monkeypatch.setattr(run_eval_module, "build_llm_client", lambda *_: llm)
+    runs = await run_eval_module._run_live(rows, config=CONFIG, settings=get_settings())
+    assert len(runs) == len(rows)
+    token_keys = {key for key in redis_fakes.cost.store if key.startswith("tokens:")}
+    assert token_keys
+    assert all(":eval-scratch" in key for key in token_keys)

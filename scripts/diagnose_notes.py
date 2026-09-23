@@ -130,6 +130,11 @@ CALLS_PER_NOTE = 3
 # reason.
 DEFAULT_TENANT = "tenant-a"
 
+# The tenant every eval run's tokens are CHARGED to (register item 140), whose
+# rubric is never read: --tenant chooses the rubric, this keeps a diagnostic run
+# out of a real tenant's token budget. Printed beside the rubric's tenant.
+EVAL_SCRATCH_TENANT = "eval-scratch"
+
 # The note type the DRY RUN assembles the vague and score prompts for. A real
 # run learns the type from pass one; a dry run has not called anything, so it
 # has to assume one and say so. Discovery is the type with the most applicable
@@ -418,8 +423,10 @@ def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
         writer.writerows(rows)
 
 
-def build_scope(tenant: str) -> TenantScope:
-    """The minimal scope the three passes read: a tenant and a subject.
+def build_scope(tenant: str = EVAL_SCRATCH_TENANT) -> TenantScope:
+    """The minimal scope the three passes read: a tenant and a subject. The
+    tenant is who the tokens are charged to -- eval-scratch by default
+    (register item 140), never the tenant whose rubric scores the run.
 
     A TenantScope built directly, as scripts/real_fetch_check.py builds one:
     there is no gate chain here to narrow a context from, which is the
@@ -503,10 +510,10 @@ def print_prompts(rows: list[EvalRow], config: TenantConfig, assumed: NoteType) 
 
 
 async def _run_live(
-    rows: list[EvalRow], *, tenant: str, config: TenantConfig, settings: Settings
+    rows: list[EvalRow], *, config: TenantConfig, settings: Settings
 ) -> list[PassRun]:
     """Every note through the three passes, against the real provider."""
-    scope = build_scope(tenant)
+    scope = build_scope()  # charged to eval-scratch; `config` is --tenant's
     runs: list[PassRun] = []
     async with httpx.AsyncClient(
         timeout=settings.external_call_timeout_seconds
@@ -603,6 +610,7 @@ def main() -> int:
     print(f"Mode:       {mode}")
     print(f"Scored set: {path}  ({len(rows)} notes)")
     print(f"Tenant:     {args.tenant}  (config_version {config.config_version})")
+    print(f"Charged to: {EVAL_SCRATCH_TENANT}  (tokens only; the rubric is --tenant's)")
 
     if not args.live:
         try:
@@ -617,9 +625,7 @@ def main() -> int:
     # spend should be refused before it is told how much it was going to spend.
     _guard_against_accidental_live_call(args.live)
     _refuse_an_oversized_run(rows)
-    runs = asyncio.run(
-        _run_live(rows, tenant=args.tenant, config=config, settings=settings)
-    )
+    runs = asyncio.run(_run_live(rows, config=config, settings=settings))
 
     destination = output_path(path, "diagnostics")
     write_csv(destination, [_row_for(run) for run in runs])
