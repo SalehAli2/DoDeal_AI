@@ -110,8 +110,8 @@ class JudgementRow(BaseModel):
     # --- the scored half -----------------------------------------------------
     # `total` is already rescaled to 0-100 by compute_score, so it does NOT sit
     # inside `denominator`: the denominator is the sum of the applicable weights
-    # (100, 80 or 60 today) and is carried because it says which components
-    # could be answered at all.
+    # (80, or 35 for no_contact, today) and is carried because it says which
+    # components could be answered at all.
     band: Band | None = None
     total: int | None = Field(default=None, ge=0, le=100)
     denominator: int | None = Field(default=None, ge=1, le=100)

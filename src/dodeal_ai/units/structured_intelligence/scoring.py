@@ -24,11 +24,11 @@ could arrive from a model, the same note could carry two different bands with
 no recorded reason.
 
 SUPPRESSION IS NOT A ZERO. A component that does not apply leaves the
-DENOMINATOR; it is not marked 0. Scoring a no_contact note 0 for "what the
-client said" would cap an honest note at 60/100 and teach salespeople to pad
-notes with invented conversation. `applicable_components` decides what counts,
-`applicable_checks` decides what is even asked, and everything downstream
-follows from them.
+DENOMINATOR; it is not marked 0. Scoring a no_contact note 0 on the three
+components it cannot answer would cap an honest note at 35 of 100 and teach
+salespeople to pad notes with invented conversation. `applicable_components`
+decides what counts, `applicable_checks` decides what is even asked, and
+everything downstream follows from them.
 
 THE TWO WAYS AN ANSWER CAN BE WRONG -- an answer for a check that was not
 asked, and a missing answer for one that was -- are both
@@ -86,8 +86,8 @@ def applicable_components(
     Two independent reasons a component drops out, and they compose:
 
       BY TYPE      the rubric says this kind of note cannot answer it. A
-                   no_contact note has no client_said and no deal_specifics --
-                   the client was never reached.
+                   no_contact note has no what_happened, no client_said and no
+                   deal_specifics -- the client was never reached.
 
       ASSUMPTION[Q13]  no field on the lead is CONFIRMED to carry the business
                    line, so there is no per-line checklist to mark
@@ -208,7 +208,7 @@ def compute_score(
 
         applicable  = components not suppressed by type and not suppressed by Q13
         mark        = marks_by_true_count[component][how many of its checks are true]
-        denominator = sum of the applicable weights   (100 / 80 / 60 today)
+        denominator = sum of the applicable weights   (80, or 35 for no_contact)
         raw         = sum of the applicable marks
         total       = (raw * 100 + denominator // 2) // denominator
 

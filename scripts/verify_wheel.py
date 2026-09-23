@@ -16,18 +16,21 @@ Usage:
 
 stdlib only — this must run before dev dependencies are known to be sound.
 
-The required CI checks, in order (.github/workflows/ci.yml). All six must be
-green before a branch merges -- see CONTRIBUTING, "Branch protection":
+The required CI checks, in order (.github/workflows/ci.yml, the main job).
+All seven must be green before a branch merges -- see CONTRIBUTING, "Branch
+protection":
 
     1. uv run ruff check .
     2. uv run ruff format --check .
     3. uv run mypy
-    4. uv run pytest                              (total coverage floor: 92%)
-    5. uv run python scripts/check_coverage_floors.py   (per-FILE floors)
-    6. uv build --wheel  +  this script            (installs and imports)
+    4. uv run lint-imports                        (the import layers)
+    5. uv run pytest                              (total coverage floor: 92%)
+    6. uv run python scripts/check_coverage_floors.py   (per-FILE floors)
+    7. uv build --wheel  +  this script            (installs and imports)
 
-This script is step 6: it is the last gate, and the only one that tests the
-artifact a deploy actually receives rather than the source tree.
+This script is step 7: it is the last gate, and the only one that tests the
+artifact a deploy actually receives rather than the source tree. The dependency
+audit and the real-Redis and load lanes run as jobs of their own.
 """
 
 from __future__ import annotations

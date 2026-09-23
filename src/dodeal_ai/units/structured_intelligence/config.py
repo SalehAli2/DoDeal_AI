@@ -225,10 +225,10 @@ class TenantConfig:
 
     # Register item 132: a note below the length floor that is a known outcome
     # is judged, not asked "what happened". Codes take a trailing attempt number
-    # (na1, cb2); phrases match the whole stripped note. Tables, not a model
-    # call: over half of real notes are this short. Empty recognises nothing.
-    # Fillers ("tmrw", "am") may follow a code; every word must be a code or a
-    # filler. All three tables are stored casefolded (__post_init__ folds them).
+    # (na1, cb2); a phrase matches when it OPENS the note and only fillers
+    # follow it. Otherwise every word must be a code, a number or a filler, and
+    # at least one must be a code (item 137). Tables, not a model call. Empty
+    # recognises nothing. All three are stored casefolded (__post_init__).
     short_note_codes: frozenset[str]
     short_note_phrases: frozenset[str]
     short_note_fillers: frozenset[str]

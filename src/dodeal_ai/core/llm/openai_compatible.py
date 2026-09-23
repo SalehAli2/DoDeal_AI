@@ -7,7 +7,7 @@ than one class per vendor (report R16) -- a second vendor class would have been
 a copy whose two halves drift, and the conformance tests run the same
 assertions against both URLs precisely to keep that true.
 
-Gemini is NOT this shape and gets its own class (item 76.3).
+Gemini is NOT this shape; it would need a class of its own, and has none.
 
 WHAT THIS MODULE PROMISES, and what each promise is worth:
 

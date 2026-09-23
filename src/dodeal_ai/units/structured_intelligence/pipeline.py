@@ -1,11 +1,12 @@
 """judge_note — the Unit A pipeline, in the one order it may run in.
 
-TWO ENTRY POINTS, ONE PIPELINE. `judge_note` FETCHES the note by id (Design A,
-the contract route). `judge_note_direct` is handed the note in the request body
-by the CRM, which has just saved it (DECISION[DIRECT_ROUTE]). They differ in
-steps 1 and 2 and in nothing else: both join `_judge` at step 3 and every step
-from there down is one shared function, so the two routes cannot drift into
-judging the same text differently.
+THREE ENTRY POINTS, ONE PIPELINE. `judge_note` FETCHES the note by id (Design
+A, the contract route). `judge_note_direct` is handed the note in the request
+body by the CRM, which has just saved it (DECISION[DIRECT_ROUTE]).
+`judge_note_history` is handed an OLD note, to give the measures a past
+(register item 127): it asks nothing and touches no db2 counter. All three join
+`_judge` at step 3 and every step from there down is one shared function, so
+no two routes can drift into judging the same text differently.
 
 The order is not incidental; each step is placed where it is because of what
 the step after it costs:
@@ -14,8 +15,8 @@ the step after it costs:
   2. fetch page one of its notes, match  404 note_not_found
      (1 and 2 start together, register item 9; the lead's error always
       wins, register item 89; a note not found is re-read once, item 17)
-     (the direct route skips 1 and 2: the CRM sent the note, and no
-      LeadsClient call is made at all)
+     (the direct and history routes skip 1 and 2: the CRM sent the
+      note, and no LeadsClient call is made at all)
   3. too thin, or too long?              -> suppressed, STOP. No reservation,
                                             no model call, nothing spent. A
                                             too-thin note still takes its
@@ -26,8 +27,10 @@ the step after it costs:
   5. read the attempt count              (fail open; provisional, see step 8)
   6. token pre-flight                    429 token_budget_exceeded
   7. classify, THEN vague + score        three passes, two round-trips
-  8. compute, decide -- and the attempt  ONE db2 trip, and only when it can
-     cap and rate limit in one breath    change the answer (fail open)
+  8. compute, decide -- and the attempt  ONE db2 trip when a prompt would be
+     cap and rate limit in one breath    sent; a read of both rate keys when
+                                         there is nothing to ask; none for
+                                         history (fail open)
   9. confirm the reservation, LONG       the judgement exists (fail open);
                                          a classifier suppression confirms too
  10. record the prompted note's          ONLY if a prompt was actually sent
@@ -816,7 +819,7 @@ async def judge_note_direct(
 
     The one exception to "note text is never accepted in a request body",
     admitted for this entry point only, because the CRM's read surface has been
-    unavailable for six weeks and it can send the saved note server-side after
+    unavailable and it can send the saved note server-side after
     the save. The fetch route above is still the contract and is unchanged.
 
     THE ONLY DIFFERENCE IS WHERE THE TEXT CAME FROM. There is no fetch, so

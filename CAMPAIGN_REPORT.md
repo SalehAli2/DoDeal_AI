@@ -7124,3 +7124,14 @@ judgement with no shared cache, so a burst on one lead multiplies reads; (2)
 the re-read's 250 ms wait sits inside the deadline and in the slot count.
 Stress test: the scenario itself, run three times; the late note alone makes
 it 2N+1 reads.
+
+## Docs: register item 174, stale comments brought up to the code
+
+Comments only, no behaviour: the scoring denominators (80, or 35 for
+no_contact), the short-note recognition rule, ten templates not nine, three
+pipeline entry points and the step 8 trip, the parked 76.2/76.3 references,
+the resilience callers, the probe's two chains, and seven CI steps.
+Production failure modes: (1) a reviewer trusts a stale comment over the code
+and approves a wrong change; (2) a comment's number drifts again when the rubric
+changes, since nothing tests prose.
+Stress test: the full suite unchanged before and after (2223 passed).

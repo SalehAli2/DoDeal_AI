@@ -355,7 +355,7 @@ class DirectJudgementRequest(_SentNote):
 
     DECISION[DIRECT_ROUTE] -- the ONE exception to "note text is never accepted
     in a request body", admitted for this route only because the CRM's read
-    surface has been unavailable for six weeks. The fetch route is still the
+    surface has been unavailable. The fetch route is still the
     contract; see ASSUMPTIONS.md.
 
     `author_id` is the CRM's STORED author for the note, trusted as such. The

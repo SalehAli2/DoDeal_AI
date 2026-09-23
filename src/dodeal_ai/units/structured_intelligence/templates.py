@@ -2,7 +2,7 @@
 
 WHY THE UNIT OWNS THIS LIST AND core/ DOES NOT. `core/prompting.py` knows how to
 read a template; it has never known which ones exist, and a hardcoded list of
-nine filenames there would be a second place to edit every time this unit gains
+ten filenames there would be a second place to edit every time this unit gains
 a pass. The unit names them, main.py hands them to core at startup.
 
 BUILT FROM THE CONSTANTS, NEVER RETYPED. Each entry is the same object the
@@ -35,9 +35,10 @@ VAGUE_CHECKED_TYPES: tuple[NoteType, ...] = tuple(
     note_type for note_type in NoteType if note_type is not NoteType.SYSTEM_EVENT
 )
 
-# The nine, in pipeline order: classify, the six vague templates, score, and the
-# reprompt tail every pass can append. A tuple, not a set: the preload's error
-# names the first missing file, and a stable order makes that reproducible.
+# The ten, in pipeline order: classify, the shared vague block, the six vague
+# type blocks, score, and the reprompt tail every pass can append. A tuple, not
+# a set: the preload's error names the first missing file, and a stable order
+# makes that reproducible.
 UNIT_A_TEMPLATES: tuple[str, ...] = (
     CLASSIFY_TEMPLATE,
     VAGUE_SHARED_TEMPLATE,

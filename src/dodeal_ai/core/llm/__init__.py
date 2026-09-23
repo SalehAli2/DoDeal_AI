@@ -45,8 +45,8 @@ def build_llm_client(settings: Settings, http: httpx.AsyncClient) -> LLMClient:
     Takes its two dependencies as ARGUMENTS rather than reading them: lifespan
     (item 84) owns the pooled AsyncClient and builds this once at startup, so a
     ConfigError is a refusal to start rather than a 500 on the first judgement.
-    get_llm_client() below is the request-scoped dependency and is unchanged
-    until 76.2 wires the two together.
+    get_llm_client() below is the request-scoped dependency; it reads the
+    client lifespan built here and never builds one.
 
     Every refusal NAMES THE PROVIDER and never a key value -- a message that
     quoted the key would put it in the startup log, which is the one log line
@@ -77,7 +77,8 @@ def _build_one(
     provider = settings.llm_provider
     assert provider is not None  # both callers checked
     if provider not in BASE_URLS:
-        # anthropic and gemini parse but have no adapter yet (gemini is 76.3).
+        # anthropic and gemini parse but have no adapter; one is added when
+        # a deployment needs that vendor.
         # Named rather than silently unsupported: a deployment that set this on
         # purpose deserves to be told which half is missing.
         raise ConfigError(f"{prefix}_provider_not_supported:{provider.value}")

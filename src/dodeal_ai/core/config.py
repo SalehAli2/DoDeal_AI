@@ -43,8 +43,8 @@ class LLMProvider(str, Enum):
     fails at settings load (ConfigError), not at the first model call.
 
     Membership here means "the name parses", NOT "an adapter exists":
-    build_llm_client() refuses ANTHROPIC and GEMINI by name until their
-    adapters land (76.3), which is a clearer failure than a rejected enum.
+    build_llm_client() refuses ANTHROPIC and GEMINI by name while they have
+    no adapter, which is a clearer failure than a rejected enum.
     """
 
     ANTHROPIC = "anthropic"

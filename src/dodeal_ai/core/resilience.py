@@ -5,8 +5,8 @@ under an explicit timeout and retries at most ONCE on failure/timeout, then
 fails closed with a clear error. This policy is defined HERE, once, so no call
 site invents its own timeout/retry behaviour.
 
-Nothing calls the LLM or tools yet — this is the reusable wrapper, ready to wrap
-those calls when they exist. Built and tested in isolation.
+Every paid model call (units/structured_intelligence/llm_call.py) and every
+CRM read (tools/leads.py, tools/crm_reads.py) runs through it.
 
 IDEMPOTENCY NOTE: retry-once is safe for READS. For a non-idempotent call a
 blind retry could double-execute; there is no write path today
