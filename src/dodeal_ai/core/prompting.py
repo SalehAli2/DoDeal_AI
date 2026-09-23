@@ -64,6 +64,9 @@ class AssembledPrompt:
               so the cached prefix still hits"). Always sourced from a versioned
               file, never from a caller. build_prompt() leaves it empty; only
               with_tail() fills it, and only from a template name.
+    data_first: the delimited data renders BEFORE the stable template. Unit B
+              sets it: a transcript is long, and its instructions read after
+              it. The halves themselves are the same either way.
 
     `.text` renders the flat prompt. With an empty tail it is byte-identical to
     what build_prompt() returned before this type existed — a test guards that.
@@ -72,11 +75,17 @@ class AssembledPrompt:
     stable: str
     variable: str = field(repr=False)
     tail: str = ""
+    data_first: bool = False
 
     @property
     def text(self) -> str:
         """The flat prompt, exactly as it goes to the model."""
-        rendered = f"{self.stable}{_SECTION_SEP}{self.variable}"
+        halves = (
+            (self.variable, self.stable)
+            if self.data_first
+            else (self.stable, self.variable)
+        )
+        rendered = _SECTION_SEP.join(halves)
         if self.tail:
             rendered = f"{rendered}{_SECTION_SEP}{self.tail}"
         return rendered
@@ -165,7 +174,9 @@ def _load_template(name: str) -> str:
     return _read_template_file(name)
 
 
-def build_prompt(*template_names: str, caller_data: str) -> AssembledPrompt:
+def build_prompt(
+    *template_names: str, caller_data: str, data_first: bool = False
+) -> AssembledPrompt:
     """Assemble the final prompt: trusted system templates + delimited caller
     data. The caller can only ever contribute to the data section.
 
@@ -179,6 +190,8 @@ def build_prompt(*template_names: str, caller_data: str) -> AssembledPrompt:
 
     Any delimiter-like text inside caller_data is neutralised so a caller
     cannot forge an early END marker to escape the data section.
+
+    `data_first` puts the delimited data before the templates (AssembledPrompt).
     """
     if not template_names:
         # Register item 183: no name would be caller data under an empty system
@@ -189,6 +202,7 @@ def build_prompt(*template_names: str, caller_data: str) -> AssembledPrompt:
     return AssembledPrompt(
         stable=system,
         variable=f"{_DATA_START}\n{safe_data}\n{_DATA_END}",
+        data_first=data_first,
     )
 
 

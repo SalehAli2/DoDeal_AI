@@ -79,6 +79,14 @@ def test_tail_is_rendered_after_variable_when_set() -> None:
     assert p.text.index("V") < p.text.index("T")
 
 
+def test_data_first_renders_the_data_then_the_template_then_the_tail(
+    template_dir: Path,
+) -> None:
+    p = build_prompt("t.txt", caller_data="D", data_first=True)
+    assert p.text == f"{p.variable}\n\n{TEMPLATE}"
+    assert with_tail(p, "tail.txt").text == f"{p.variable}\n\n{TEMPLATE}\n\n{TAIL}"
+
+
 def test_empty_tail_adds_nothing() -> None:
     p = AssembledPrompt(stable="S", variable="V")
     assert p.text == "S\n\nV"
