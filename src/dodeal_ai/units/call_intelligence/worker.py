@@ -80,6 +80,7 @@ from dodeal_ai.core.jobs import (
     JobStoreUnavailable,
     claim_attempt,
     clear_work,
+    note_wake,
     pause,
     read_job,
     read_result,
@@ -643,8 +644,9 @@ def pause_delay(reason: str, outages: int, *, window_seconds: int) -> int:
 async def _pause(
     job: Job, reason: str, *, claimed: bool = False, run: CallRun | None = None
 ) -> None:
-    """paused_budget, and back on the job's queue after pause_delay. `claimed`
-    gives back the attempt this run took: a pause never costs one."""
+    """paused_budget, scored at its wake-up for the sweep, and back on the
+    job's queue after pause_delay. `claimed` gives back the attempt this run
+    took: a pause never costs one."""
     settings = get_settings()
     counts = await pause(
         job, now=_now(), reason=reason, claimed=claimed, outage=reason == STORE_DOWN
@@ -655,6 +657,7 @@ async def _pause(
     if run is not None:
         run.moved(JobStatus.PAUSED_BUDGET, reason)
     delay = pause_delay(reason, outages, window_seconds=settings.cost_window_seconds)
+    await note_wake(job, wake_at=_now() + timedelta(seconds=delay))
     try:
         await enqueue_call(
             job.tenant,

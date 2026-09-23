@@ -14,7 +14,9 @@ another tenant's job, and one index of every running job across tenants:
                                       outcome -- EX result_ttl_seconds
   call_jobs_active                    a sorted set: `<tenant>:<job_id>` for
                                       every job not yet terminal, scored by
-                                      its last transition's unix time
+                                      its last transition's unix time -- a
+                                      paused job by its wake-up time, once
+                                      noted
 
 ONE JOB PER CALL is one Lua script: the index is read and, only if absent, the
 index and the job are written together. Two concurrent pushes of one call
@@ -28,9 +30,10 @@ dedupe entry expire together, and it leaves the active set.
 NOTHING LIVES FOREVER. Every other move -- the push, a claim, a pause, a
 transcription's start, a transition -- gives the job and its index
 CALL_JOB_RECORD_TTL_SECONDS from that moment, in the same script, and scores
-the job in the active set at that moment. The sweep (sweep.py in the unit)
-reads that set for jobs no run has moved for too long; one it re-enqueues is
-marked with the transition it found, so it is re-enqueued once per stall.
+the job in the active set at that moment; a pause then re-scores it at its
+wake-up time (note_wake). The sweep (sweep.py in the unit) reads that set for
+jobs left too long past their score; one it re-enqueues is marked with the
+transition it found, so it is re-enqueued once per stall.
 
 DELIVERY IS APART FROM STATUS (register item 50). A job whose result exists is
 `done` whatever becomes of its callback; `delivery` says that: pending while
@@ -48,7 +51,7 @@ is never logged, never on a repr, and never in an exception.
 from __future__ import annotations
 
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -109,6 +112,8 @@ class Job:
     pauses: int
     # The pauses a cost-store outage caused: what the resume's backoff doubles on.
     outages: int
+    # Re-enqueues by the stuck-job sweep, each under an arq id of its own.
+    sweeps: int
     # Starts per analysis pass, a paid call each; a pass may start twice.
     passes: dict[str, int]
     request_id: str
@@ -343,29 +348,59 @@ redis.call('EXPIRE', KEYS[1], ARGV[3])
 return 1
 """
 
-# KEYS: the job, the active set. ARGV: the member, then every status a sweep
-# may re-enqueue. A job gone leaves the set: {0}. One in another status, or
-# swept at its last transition already: {-1}. Else it is marked swept at that
-# transition, and {1, its sweeps so far, its queue}.
+# KEYS: the job, the active set. ARGV: the member, now's score, then pairs of
+# a status the sweep may re-enqueue and the seconds past its score it waits. A
+# job gone leaves the set: {0}. One in another status, not yet past its wait,
+# or swept at its last transition already: {-1}. Else it is marked swept at
+# that transition: {1, its sweeps so far, its queue, its status, its pauses}.
 _SWEEP_SCRIPT = """
 if redis.call('EXISTS', KEYS[1]) == 0 then
   redis.call('ZREM', KEYS[2], ARGV[1])
   return {0}
 end
 local current = redis.call('HGET', KEYS[1], 'status')
-local stuck = false
-for i = 2, #ARGV do
+local wait = nil
+for i = 3, #ARGV, 2 do
   if current == ARGV[i] then
-    stuck = true
+    wait = tonumber(ARGV[i + 1])
   end
 end
+local score = redis.call('ZSCORE', KEYS[2], ARGV[1])
 local moved = redis.call('HGET', KEYS[1], 'updated_at')
-if not stuck or redis.call('HGET', KEYS[1], 'swept') == moved then
+if wait == nil or not score or tonumber(score) > tonumber(ARGV[2]) - wait then
+  return {-1}
+end
+if redis.call('HGET', KEYS[1], 'swept') == moved then
   return {-1}
 end
 redis.call('HSET', KEYS[1], 'swept', moved)
 local sweeps = redis.call('HINCRBY', KEYS[1], 'sweeps', 1)
-return {1, sweeps, redis.call('HGET', KEYS[1], 'queue')}
+local pauses = redis.call('HGET', KEYS[1], 'pauses') or '0'
+return {1, sweeps, redis.call('HGET', KEYS[1], 'queue'), current, pauses}
+"""
+
+# KEYS: the job. ARGV: "1" to take back the sweep count too. The mark goes, so
+# the next sweep may re-enqueue the job; nothing is written to a job gone.
+_UNMARK_SCRIPT = """
+if redis.call('EXISTS', KEYS[1]) == 0 then
+  return 0
+end
+redis.call('HDEL', KEYS[1], 'swept')
+if ARGV[1] == '1' then
+  redis.call('HINCRBY', KEYS[1], 'sweeps', -1)
+end
+return 1
+"""
+
+# KEYS: the job, the active set. ARGV: the paused status, the wake-up score,
+# the member. A job still paused is scored at its wake-up, so the sweep counts
+# its wait from then; 0 when it is gone or has moved on.
+_WAKE_SCRIPT = """
+if redis.call('HGET', KEYS[1], 'status') ~= ARGV[1] then
+  return 0
+end
+redis.call('ZADD', KEYS[2], 'XX', ARGV[2], ARGV[3])
+return 1
 """
 
 _TERMINAL_ARGS = tuple(sorted(status.value for status in TERMINAL))
@@ -465,6 +500,7 @@ async def read_job(tenant: str, job_id: str) -> Job | None:
         pauses=int(raw["pauses"]),
         # A job stored before the outage count existed has had none.
         outages=int(raw.get("outages", "0")),
+        sweeps=int(raw.get("sweeps", "0")),
         passes={
             name.removeprefix(_PASS_FIELD): int(value)
             for name, value in raw.items()
@@ -656,13 +692,30 @@ async def stale_jobs(before: datetime, *, limit: int) -> list[tuple[str, str]]:
     return [(tenant, job_id) for tenant, job_id in pairs]
 
 
+@dataclass(frozen=True, slots=True)
+class Swept:
+    """A job the sweep marked: its sweeps so far (this one counted), its queue,
+    the status it was left in, and its pauses."""
+
+    sweeps: int
+    queue: str
+    status: JobStatus
+    pauses: int
+
+
 async def mark_swept(
-    tenant: str, job_id: str, *, statuses: frozenset[JobStatus]
-) -> tuple[int, str] | None:
-    """Mark a job in one of `statuses` as swept at its last transition: (its
-    sweeps so far, its queue). None when it is gone (it then leaves the
-    active set), in another status, or swept at this transition already."""
+    tenant: str,
+    job_id: str,
+    *,
+    now: datetime,
+    waits: Mapping[JobStatus, int],
+) -> Swept | None:
+    """Mark a job as swept at its last transition when its status is one of
+    `waits` and it is that many seconds past its score at `now`. None when it
+    is gone (it then leaves the active set), in another status, not yet past
+    its wait, or swept at this transition already."""
     client = get_jobs_client()
+    pairs = [str(item) for status in sorted(waits) for item in (status, waits[status])]
     marked = await _call(
         lambda: client.eval(
             _SWEEP_SCRIPT,
@@ -670,18 +723,47 @@ async def mark_swept(
             job_key(tenant, job_id),
             ACTIVE_JOBS_KEY,
             active_member(tenant, job_id),
-            *sorted(status.value for status in statuses),
+            now.timestamp(),
+            *pairs,
         )
     )
     if int(marked[0]) != 1:
         return None
-    return int(marked[1]), _text(marked[2])
+    return Swept(
+        sweeps=int(marked[1]),
+        queue=_text(marked[2]),
+        status=JobStatus(_text(marked[3])),
+        pauses=int(marked[4]),
+    )
 
 
-async def unmark_swept(tenant: str, job_id: str) -> None:
-    """Forget a sweep's mark, so the next sweep may re-enqueue the job."""
+async def unmark_swept(tenant: str, job_id: str, *, uncount: bool = False) -> None:
+    """Forget a sweep's mark, so the next sweep may re-enqueue the job;
+    `uncount` takes its sweep back too, when nothing was re-enqueued."""
     client = get_jobs_client()
-    await _call(lambda: client.hdel(job_key(tenant, job_id), "swept"))
+    await _call(
+        lambda: client.eval(
+            _UNMARK_SCRIPT, 1, job_key(tenant, job_id), "1" if uncount else "0"
+        )
+    )
+
+
+async def note_wake(job: Job, *, wake_at: datetime) -> bool:
+    """Score a paused job at its wake-up, so the sweep counts from then. False
+    when it is gone or no longer paused."""
+    client = get_jobs_client()
+    noted = await _call(
+        lambda: client.eval(
+            _WAKE_SCRIPT,
+            2,
+            job_key(job.tenant, job.job_id),
+            ACTIVE_JOBS_KEY,
+            JobStatus.PAUSED_BUDGET.value,
+            wake_at.timestamp(),
+            active_member(job.tenant, job.job_id),
+        )
+    )
+    return int(noted) == 1
 
 
 async def store_work(

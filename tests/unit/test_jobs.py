@@ -17,12 +17,14 @@ from dodeal_ai.core.jobs import (
     DeliveryState,
     JobStatus,
     JobStoreUnavailable,
+    Swept,
     call_index_key,
     claim_attempt,
     clear_work,
     create_job,
     job_key,
     mark_swept,
+    note_wake,
     pause,
     read_job,
     read_result,
@@ -361,6 +363,7 @@ async def test_every_operation_fails_closed_on_a_dead_store(dead_store) -> None:
         transcriptions=0,
         pauses=0,
         outages=0,
+        sweeps=0,
         passes={},
         request_id="req-1",
         reason=None,
@@ -386,8 +389,9 @@ async def test_every_operation_fails_closed_on_a_dead_store(dead_store) -> None:
         store_work("tenant-a", "job-1", "transcript", {}, ttl_seconds=TTL),
         read_work("tenant-a", "job-1"),
         clear_work("tenant-a", "job-1"),
-        mark_swept("tenant-a", "job-1", statuses=frozenset({JobStatus.QUEUED})),
+        mark_swept("tenant-a", "job-1", now=NOW, waits={JobStatus.QUEUED: 0}),
         unmark_swept("tenant-a", "job-1"),
+        note_wake(job, wake_at=NOW),
     ]
     for operation in operations:
         with pytest.raises(JobStoreUnavailable) as caught:
@@ -402,7 +406,11 @@ def test_a_hash_value_is_read_as_text_whichever_way_the_client_decodes() -> None
 
 # --- the active set and the sweep's mark ---------------------------------------
 
-STUCK = frozenset({JobStatus.TRANSCRIBING})
+STUCK = {JobStatus.TRANSCRIBING: 0}
+
+
+def _swept(sweeps: int, status: JobStatus = JobStatus.TRANSCRIBING) -> Swept:
+    return Swept(sweeps=sweeps, queue="calls:normal", status=status, pauses=0)
 
 
 async def test_stale_jobs_are_read_oldest_first_up_to_the_limit() -> None:
@@ -426,34 +434,72 @@ async def test_a_stuck_job_is_marked_once_per_transition() -> None:
     await _create()
     assert await start_transcription(await _job(), now=NOW) == 1
 
-    assert await mark_swept("tenant-a", "job-1", statuses=STUCK) == (
-        1,
-        "calls:normal",
-    )
-    assert await mark_swept("tenant-a", "job-1", statuses=STUCK) is None
+    assert await mark_swept("tenant-a", "job-1", now=NOW, waits=STUCK) == _swept(1)
+    assert await mark_swept("tenant-a", "job-1", now=NOW, waits=STUCK) is None
 
     await unmark_swept("tenant-a", "job-1")
-    assert await mark_swept("tenant-a", "job-1", statuses=STUCK) == (
-        2,
-        "calls:normal",
-    )
+    assert await mark_swept("tenant-a", "job-1", now=NOW, waits=STUCK) == _swept(2)
     await transition(await _job(), JobStatus.TRANSCRIBING, now=LATER, ttl_seconds=TTL)
-    assert await mark_swept("tenant-a", "job-1", statuses=STUCK) == (
-        3,
-        "calls:normal",
-    )
+    assert await mark_swept("tenant-a", "job-1", now=LATER, waits=STUCK) == _swept(3)
+    assert (await _job()).sweeps == 3
 
 
 async def test_a_job_in_another_status_is_not_marked() -> None:
     await _create()
-    assert await mark_swept("tenant-a", "job-1", statuses=STUCK) is None
+    assert await mark_swept("tenant-a", "job-1", now=NOW, waits=STUCK) is None
+
+
+async def test_a_job_is_marked_only_once_past_its_wait() -> None:
+    """The wait runs from the job's score in the active set."""
+    await _create()
+    waits = {JobStatus.QUEUED: 60}
+    early = NOW + timedelta(seconds=59)
+    assert await mark_swept("tenant-a", "job-1", now=early, waits=waits) is None
+    marked = await mark_swept(
+        "tenant-a", "job-1", now=NOW + timedelta(seconds=60), waits=waits
+    )
+    assert marked == _swept(1, JobStatus.QUEUED)
+
+
+async def test_taking_a_sweep_back_uncounts_it_and_a_gone_job_is_not_written(
+    redis_fakes: RedisFakes,
+) -> None:
+    await _create()
+    waits = {JobStatus.QUEUED: 0}
+    assert await mark_swept("tenant-a", "job-1", now=NOW, waits=waits) is not None
+    await unmark_swept("tenant-a", "job-1", uncount=True)
+    assert (await _job()).sweeps == 0
+    assert await mark_swept("tenant-a", "job-1", now=NOW, waits=waits) == _swept(
+        1, JobStatus.QUEUED
+    )
+    await unmark_swept("tenant-a", "job-2", uncount=True)
+    assert not await redis_fakes.jobs.exists(job_key("tenant-a", "job-2"))
+
+
+async def test_a_paused_job_is_scored_at_its_wake_up(redis_fakes: RedisFakes) -> None:
+    await _create()
+    job = await _job()
+    wake = NOW + timedelta(hours=24)
+    await pause(job, now=NOW, reason="token_budget_exceeded")
+    assert await note_wake(job, wake_at=wake) is True
+    assert await _score(redis_fakes) == wake.timestamp()
+    marked = await mark_swept(
+        "tenant-a", "job-1", now=wake, waits={JobStatus.PAUSED_BUDGET: 0}
+    )
+    assert marked == Swept(
+        sweeps=1, queue="calls:normal", status=JobStatus.PAUSED_BUDGET, pauses=1
+    )
+
+    await transition(job, JobStatus.DOWNLOADING, now=LATER, ttl_seconds=TTL)
+    assert await note_wake(job, wake_at=wake) is False
+    assert await _score(redis_fakes) == LATER.timestamp()
 
 
 async def test_a_job_gone_leaves_the_active_set(redis_fakes: RedisFakes) -> None:
     await _create()
     await redis_fakes.jobs.delete(job_key("tenant-a", "job-1"))
 
-    assert await mark_swept("tenant-a", "job-1", statuses=STUCK) is None
+    assert await mark_swept("tenant-a", "job-1", now=NOW, waits=STUCK) is None
     assert await _score(redis_fakes) is None
 
 

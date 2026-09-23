@@ -192,9 +192,9 @@ class Settings(BaseSettings):
     # more than one re-paid. Higher re-fetches a dead link; 1 never retries.
     call_max_tries: int = Field(default=2, ge=1)
     # arq's timeout for one run of a call-queue task; the run stops itself 60 s
-    # sooner (worker.py). 1800 s holds a long call's transcription; too low kills
-    # paid work mid-flight, too high lets a hung run hold a worker slot.
-    call_job_timeout_seconds: int = Field(default=1800, gt=60)
+    # sooner (worker.py), so under 120 is refused. 1800 s holds a long call's
+    # transcription; too low kills paid work mid-flight, too high holds a slot.
+    call_job_timeout_seconds: int = Field(default=1800, ge=120)
     # How long a call job's record lives after its last transition (core/jobs.py):
     # a week outlives any retry and pause, so nothing is stranded forever. Too
     # low loses a paused job's record; too high keeps a dead job's link longer.

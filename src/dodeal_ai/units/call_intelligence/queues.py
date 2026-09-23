@@ -13,7 +13,8 @@ the voiceprint stay in db3 with the job, so nothing sensitive sits in db0.
 
 The arq job id is `<tenant>:<job_id>`, so pushing the same job twice puts it on
 its queue once. A pause (core(105)) re-queues under `...:resume:<n>`, and the
-stuck-job sweep (sweep.py) under `...:sweep:<n>`.
+stuck-job sweep (sweep.py) under `...:sweep:<n>`. `on_the_queue` asks arq
+whether any of those ids is still queued, deferred or running.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 import redis
+from arq.constants import in_progress_key_prefix, job_key_prefix
 
 from dodeal_ai.core import metrics
 from dodeal_ai.core.breaker import queue_breaker
@@ -71,6 +73,27 @@ def arq_job_id(tenant: str, job_id: str, *, resume: int = 0, sweep: int = 0) -> 
     if sweep:
         return f"{base}:sweep:{sweep}"
     return base if resume == 0 else f"{base}:resume:{resume}"
+
+
+async def on_the_queue(tenant: str, job_id: str, *, pauses: int, sweeps: int) -> bool:
+    """Whether arq holds this job under any id it can have had -- the push's,
+    each resume's, each sweep's -- queued, deferred or running."""
+    ids = [
+        arq_job_id(tenant, job_id),
+        *(arq_job_id(tenant, job_id, resume=n) for n in range(1, pauses + 1)),
+        *(arq_job_id(tenant, job_id, sweep=n) for n in range(1, sweeps + 1)),
+    ]
+    keys = [f"{prefix}{arq_id}" for arq_id in ids for prefix in _ARQ_PREFIXES]
+    client = get_queue_client()
+    try:
+        held = await queue_breaker().call(lambda: client.exists(*keys))
+    except redis.RedisError:
+        raise QueueUnavailable() from None
+    return int(held) > 0
+
+
+# Where arq keeps a job while it is queued or deferred, and while it runs.
+_ARQ_PREFIXES = (job_key_prefix, in_progress_key_prefix)
 
 
 async def enqueue_delivery(

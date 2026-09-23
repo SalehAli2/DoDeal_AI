@@ -134,8 +134,10 @@ async def test_a_running_job_expires_and_is_swept_once_per_stall(
     assert await real_redis.zscore(active, member) == _SCORE
 
     async def _sweep() -> list[object]:
-        return await real_redis.eval(_SWEEP_SCRIPT, 2, job, active, member, "queued")
+        return await real_redis.eval(
+            _SWEEP_SCRIPT, 2, job, active, member, _SCORE, "queued", 0
+        )
 
     first, second = await _sweep(), await _sweep()
-    assert first == [1, 1, "arq:calls:normal"]
+    assert first == [1, 1, "arq:calls:normal", "queued", "0"]
     assert second == [-1]

@@ -686,6 +686,20 @@ def test_the_deadline_is_the_job_timeout_less_its_margin(monkeypatch) -> None:
         get_settings()
 
 
+@pytest.mark.parametrize(("seconds", "refused"), [(119, True), (120, False)])
+def test_a_job_timeout_under_120_is_refused(
+    monkeypatch, seconds: int, refused: bool
+) -> None:
+    """A run gets at least 60 s before it stops itself."""
+    monkeypatch.setenv("DODEAL_CALL_JOB_TIMEOUT_SECONDS", str(seconds))
+    get_settings.cache_clear()
+    if refused:
+        with pytest.raises(ConfigError):
+            get_settings()
+    else:
+        assert get_settings().call_job_timeout_seconds == 120
+
+
 # --- stuck jobs: the sweep ------------------------------------------------------
 
 
@@ -764,6 +778,110 @@ async def test_a_sweep_with_the_queue_down_takes_its_mark_back(
 
     assert await sweep.sweep(now=_stuck_later()) == 1
     assert await _swept_ids(redis_fakes) == [f"arq:job:tenant-a:{JOB}:sweep:2"]
+
+
+def _later(seconds: float) -> datetime:
+    return datetime.now(UTC) + timedelta(seconds=seconds)
+
+
+async def test_a_queued_job_with_no_arq_entry_is_re_enqueued_after_an_hour(
+    ctx: dict, redis_fakes: RedisFakes
+) -> None:
+    """The push lost its queue entry: the sweep puts the job back once."""
+    await _calls_on()
+    await _push()
+    assert await sweep.sweep(now=_later(sweep.QUEUED_WAIT_SECONDS - 60)) == 0
+    assert await sweep.sweep(now=_later(sweep.QUEUED_WAIT_SECONDS + 5)) == 1
+    assert await sweep.sweep(now=_later(sweep.QUEUED_WAIT_SECONDS + 5)) == 0
+    assert await _swept_ids(redis_fakes) == [f"arq:job:tenant-a:{JOB}:sweep:1"]
+    (queued,) = await redis_fakes.queue.queued_jobs(queue_name=NORMAL_QUEUE)
+
+    await process_call(ctx, *queued.args)
+    assert (await _job()).status is JobStatus.DONE
+
+
+async def test_a_queued_job_arq_still_holds_is_left_waiting(
+    ctx: dict, redis_fakes: RedisFakes
+) -> None:
+    """A backlog is not a stall: no second copy that could pay twice."""
+    from dodeal_ai.units.call_intelligence.queues import enqueue_call
+
+    await _calls_on()
+    await _push()
+    await enqueue_call("tenant-a", JOB, NORMAL_QUEUE)
+
+    assert await sweep.sweep(now=_later(sweep.QUEUED_WAIT_SECONDS + 5)) == 0
+    assert await _swept_ids(redis_fakes) == []
+    job = await _job()
+    assert job.sweeps == 0
+    assert await redis_fakes.jobs.hget(job_key("tenant-a", JOB), "swept") is None
+
+
+async def test_a_paused_job_is_swept_only_past_its_wake_up_and_off_arq(
+    ctx: dict, redis_fakes: RedisFakes
+) -> None:
+    """Over budget it waits the window; its resume lost, the sweep wakes it."""
+    await _calls_on()
+    await _push()
+    redis_fakes.cost.store["tokens:calls:tenant:tenant-a"] = 20_000_000
+    await process_call(ctx, "tenant-a", JOB)
+    assert (await _job()).status is JobStatus.PAUSED_BUDGET
+    window = get_settings().cost_window_seconds
+    wake = await redis_fakes.jobs.zscore("call_jobs_active", f"tenant-a:{JOB}")
+    assert abs(wake - _later(window).timestamp()) < 5
+
+    past_wake = _later(window + sweep.PAUSED_WAIT_SECONDS + 5)
+    assert await sweep.sweep(now=_later(sweep.QUEUED_WAIT_SECONDS + 5)) == 0
+    assert await sweep.sweep(now=past_wake) == 0
+    assert (await _job()).sweeps == 0
+
+    await redis_fakes.queue.delete(f"arq:job:tenant-a:{JOB}:resume:1")
+    assert await sweep.sweep(now=past_wake) == 1
+    assert await _swept_ids(redis_fakes) == [f"arq:job:tenant-a:{JOB}:sweep:1"]
+
+
+async def test_a_sweep_that_cannot_ask_arq_stops_and_takes_its_mark_back(
+    ctx: dict, redis_fakes: RedisFakes, monkeypatch
+) -> None:
+    from dodeal_ai.core.errors import QueueUnavailable
+
+    await _calls_on()
+    await _push()
+
+    async def no_queue(*args: object, **kwargs: object) -> bool:
+        raise QueueUnavailable()
+
+    monkeypatch.setattr(sweep, "on_the_queue", no_queue)
+    assert await sweep.sweep(now=_later(sweep.QUEUED_WAIT_SECONDS + 5)) == 0
+    assert await redis_fakes.jobs.hget(job_key("tenant-a", JOB), "swept") is None
+
+
+async def test_arq_is_asked_under_every_id_the_job_can_have_had(
+    redis_fakes: RedisFakes,
+) -> None:
+    from dodeal_ai.units.call_intelligence.queues import enqueue_call, on_the_queue
+
+    assert not await on_the_queue("tenant-a", JOB, pauses=2, sweeps=2)
+    await enqueue_call("tenant-a", JOB, NORMAL_QUEUE, sweep=2)
+    assert await on_the_queue("tenant-a", JOB, pauses=2, sweeps=2)
+    assert not await on_the_queue("tenant-a", JOB, pauses=2, sweeps=1)
+    await redis_fakes.queue.set(f"arq:in-progress:tenant-a:{JOB}:resume:2", b"1")
+    assert await on_the_queue("tenant-a", JOB, pauses=2, sweeps=0)
+
+
+async def test_arq_unreachable_is_queue_unavailable(monkeypatch) -> None:
+    import redis as redis_lib
+
+    from dodeal_ai.core.errors import QueueUnavailable
+    from dodeal_ai.units.call_intelligence import queues
+
+    class _Down:
+        async def exists(self, *keys: str) -> int:
+            raise redis_lib.ConnectionError("down")
+
+    monkeypatch.setattr(queues, "get_queue_client", lambda: _Down())
+    with pytest.raises(QueueUnavailable):
+        await queues.on_the_queue("tenant-a", JOB, pauses=0, sweeps=0)
 
 
 async def test_the_cron_task_sweeps_now() -> None:
