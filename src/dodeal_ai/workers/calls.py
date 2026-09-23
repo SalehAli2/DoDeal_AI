@@ -22,6 +22,14 @@ arq runs a cron once per slot however many normal workers there are.
 THE TRANSCRIBER IS BUILT BY THE FACTORY, which refuses while no adapter exists,
 so a worker with nothing to transcribe with does not start. A test or the demo
 passes one in, and the worker starts with it only under the demo flag.
+
+THE MODEL CLIENT IS BUILT AS THE SERVICE BUILDS IT: core/llm's
+build_llm_client, from the same DODEAL_LLM_* settings, with the same startup
+sweep of every configured profile. There is no second configuration. Unlike the
+service, which starts without a provider so /ready can say so, a call worker
+with no model client refuses to start: it would pay for transcripts and deliver
+every one with analysis null. Wave 1's templates are read once here too, so a
+missing one refuses the start rather than a paid call.
 """
 
 from __future__ import annotations
@@ -35,11 +43,14 @@ from arq.connections import RedisSettings
 from arq.worker import run_worker
 
 from dodeal_ai.core.config import get_settings
+from dodeal_ai.core.llm import build_llm_client
 from dodeal_ai.core.logging_config import configure_logging, warn_if_demo_audio
+from dodeal_ai.core.prompting import clear_templates, preload_templates
 from dodeal_ai.units.call_intelligence.delivery import (
     deliver_callback,
     deliver_event,
 )
+from dodeal_ai.units.call_intelligence.prompts import UNIT_B_TEMPLATES
 from dodeal_ai.units.call_intelligence.queues import (
     NORMAL_QUEUE,
     OVERNIGHT_QUEUE,
@@ -78,6 +89,16 @@ def worker_settings(
         configure_logging()
         warn_if_demo_audio(settings)
         ctx["transcriber"] = select_transcriber(settings, transcriber)
+        preload_templates(UNIT_B_TEMPLATES)
+        # The model's own pool, apart from the download's pinned client.
+        llm_http = httpx.AsyncClient()
+        try:
+            ctx["llm"] = build_llm_client(settings, llm_http)
+        except BaseException:
+            await llm_http.aclose()
+            clear_templates()
+            raise
+        ctx["llm_http"] = llm_http
         # No proxies from the environment and no redirects: the download pins
         # the address it checked, and a proxy would bypass that.
         ctx["http"] = httpx.AsyncClient(trust_env=False, follow_redirects=False)
@@ -87,9 +108,11 @@ def worker_settings(
         )
 
     async def shutdown(ctx: dict[str, Any]) -> None:
-        http = ctx.get("http")
-        if http is not None:
-            await http.aclose()
+        for name in ("http", "llm_http"):
+            client = ctx.get(name)
+            if client is not None:
+                await client.aclose()
+        clear_templates()
 
     sweeps = (
         [cron(sweep_stuck_jobs, minute=_every(SWEEP_INTERVAL_SECONDS))]

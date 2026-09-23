@@ -26,6 +26,7 @@ from dodeal_ai.core.jobs import (
     read_job,
     read_result,
 )
+from dodeal_ai.core.llm import OpenAICompatibleClient
 from dodeal_ai.core.tenant_config import set_override
 from dodeal_ai.units.call_intelligence import sweep, worker
 from dodeal_ai.units.call_intelligence.admission import job_metadata
@@ -935,12 +936,24 @@ async def test_a_pause_of_a_job_gone_terminal_queues_nothing(
 # --- the worker process -----------------------------------------------------------
 
 
+def _llm_env(monkeypatch, **more: str) -> None:
+    """A provider and pinned model, as a deployment sets them for the service."""
+    for name, value in {
+        "PROVIDER": "groq",
+        "MODEL": "model-pinned-2026-01-01",
+        "API_KEY": "test-only-key",
+        **more,
+    }.items():
+        monkeypatch.setenv(f"DODEAL_LLM_{name}", value)
+    get_settings.cache_clear()
+
+
 async def test_the_worker_settings_carry_one_more_arq_try_than_the_job(
     monkeypatch,
 ) -> None:
     """The demo flag on, a handed-in transcriber is the worker's."""
     monkeypatch.setenv("DODEAL_CALL_DEMO_ALLOW_LOCAL_AUDIO", "true")
-    get_settings.cache_clear()
+    _llm_env(monkeypatch)
     fake = FakeTranscriber()
     built = calls_worker.worker_settings(NORMAL_QUEUE, transcriber=fake)
     assert [(f.name, f.max_tries) for f in built["functions"]] == [
@@ -956,9 +969,33 @@ async def test_the_worker_settings_carry_one_more_arq_try_than_the_job(
     assert callable(ctx["deliver"])
     assert isinstance(ctx["http"], httpx.AsyncClient)
     assert ctx["http"].follow_redirects is False
+    assert isinstance(ctx["llm"], OpenAICompatibleClient)
     await built["on_shutdown"](ctx)
-    assert ctx["http"].is_closed
+    assert ctx["http"].is_closed and ctx["llm_http"].is_closed
     await built["on_shutdown"]({})
+
+
+async def test_a_worker_with_no_llm_client_refuses_to_start(monkeypatch) -> None:
+    """No model, no start: never a transcript paid for with nothing to read it."""
+    monkeypatch.setenv("DODEAL_CALL_DEMO_ALLOW_LOCAL_AUDIO", "true")
+    get_settings.cache_clear()
+    built = calls_worker.worker_settings(NORMAL_QUEUE, transcriber=FakeTranscriber())
+    ctx: dict[str, Any] = {}
+    with pytest.raises(ConfigError, match="^llm_not_configured$"):
+        await built["on_startup"](ctx)
+    assert "llm" not in ctx and "http" not in ctx
+
+
+async def test_the_workers_client_runs_the_services_profile_sweep(
+    monkeypatch,
+) -> None:
+    """The same factory as main.py: a profile naming another vendor refuses."""
+    monkeypatch.setenv("DODEAL_CALL_DEMO_ALLOW_LOCAL_AUDIO", "true")
+    profile = '{"unit_b.extract":{"provider":"openai","model":"m"}}'
+    _llm_env(monkeypatch, PROFILES=profile)
+    built = calls_worker.worker_settings(NORMAL_QUEUE, transcriber=FakeTranscriber())
+    with pytest.raises(ConfigError, match="^llm_profile_provider_mismatch"):
+        await built["on_startup"]({})
 
 
 def test_each_queue_carries_the_configured_job_timeout(monkeypatch) -> None:
