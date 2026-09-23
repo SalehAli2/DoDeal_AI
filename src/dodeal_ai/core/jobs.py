@@ -9,6 +9,9 @@ another tenant's job, and one index of every running job across tenants:
                                       request_id, queue, timestamps, metadata
   call_job_by_call:{tenant}:{call_id} the job_id this call was admitted as
   call_result:{tenant}:{job_id}       the stage result, EX result_ttl_seconds
+  call_work:{tenant}:{job_id}         a hash of what stage 1 has paid for so
+                                      far -- the transcript, each pass's
+                                      outcome -- EX result_ttl_seconds
   call_jobs_active                    a sorted set: `<tenant>:<job_id>` for
                                       every job not yet terminal, scored by
                                       its last transition's unix time
@@ -106,6 +109,8 @@ class Job:
     pauses: int
     # The pauses a cost-store outage caused: what the resume's backoff doubles on.
     outages: int
+    # Starts per analysis pass, a paid call each; a pass may start twice.
+    passes: dict[str, int]
     request_id: str
     reason: str | None
     # The callback's state; None when the tenant has no callback to send to.
@@ -131,6 +136,14 @@ def call_index_key(tenant: str, call_id: int) -> str:
 
 def result_key(tenant: str, job_id: str) -> str:
     return f"call_result:{tenant}:{job_id}"
+
+
+def work_key(tenant: str, job_id: str) -> str:
+    return f"call_work:{tenant}:{job_id}"
+
+
+# A pass's start count lives in the job hash under this prefix and its name.
+_PASS_FIELD = "pass:"
 
 
 # Every job not yet terminal, across tenants, scored by its last transition.
@@ -300,6 +313,36 @@ redis.call('HSET', KEYS[1], 'delivery', ARGV[1], 'updated_at', ARGV[2])
 return 1
 """
 
+# KEYS: the job, the call index, the active set. ARGV: now, the pass's field,
+# the record TTL, now's score, the member, then every terminal status. 0
+# missing, -1 terminal, else the pass's starts after this one: counted before
+# the paid call is made, the status left as it is.
+_PASS_SCRIPT = (
+    _TOUCH
+    + """
+if redis.call('EXISTS', KEYS[1]) == 0 then
+  return 0
+end
+local current = redis.call('HGET', KEYS[1], 'status')
+for i = 6, #ARGV do
+  if current == ARGV[i] then
+    return -1
+  end
+end
+redis.call('HSET', KEYS[1], 'updated_at', ARGV[1])
+touch(ARGV[3], ARGV[4], ARGV[5])
+return redis.call('HINCRBY', KEYS[1], ARGV[2], 1)
+"""
+)
+
+# KEYS: the work hash. ARGV: the field, its JSON, the TTL. One step, so the
+# hash never holds a field without its expiry.
+_WORK_SCRIPT = """
+redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
+redis.call('EXPIRE', KEYS[1], ARGV[3])
+return 1
+"""
+
 # KEYS: the job, the active set. ARGV: the member, then every status a sweep
 # may re-enqueue. A job gone leaves the set: {0}. One in another status, or
 # swept at its last transition already: {-1}. Else it is marked swept at that
@@ -422,6 +465,11 @@ async def read_job(tenant: str, job_id: str) -> Job | None:
         pauses=int(raw["pauses"]),
         # A job stored before the outage count existed has had none.
         outages=int(raw.get("outages", "0")),
+        passes={
+            name.removeprefix(_PASS_FIELD): int(value)
+            for name, value in raw.items()
+            if name.startswith(_PASS_FIELD)
+        },
         request_id=raw["request_id"],
         reason=raw["reason"] or None,
         delivery=DeliveryState(raw["delivery"]) if raw.get("delivery") else None,
@@ -515,6 +563,24 @@ async def start_transcription(job: Job, *, now: datetime) -> int | None:
             *_keys(job),
             now.isoformat(),
             JobStatus.TRANSCRIBING.value,
+            *_touch_args(job.tenant, job.job_id, now),
+            *_TERMINAL_ARGS,
+        )
+    )
+    return int(count) if int(count) > 0 else None
+
+
+async def start_pass(job: Job, name: str, *, now: datetime) -> int | None:
+    """Count one more start of analysis pass `name`, before its paid call.
+    The pass's starts after this one, or None when the job is terminal or gone."""
+    client = get_jobs_client()
+    count = await _call(
+        lambda: client.eval(
+            _PASS_SCRIPT,
+            3,
+            *_keys(job),
+            now.isoformat(),
+            f"{_PASS_FIELD}{name}",
             *_touch_args(job.tenant, job.job_id, now),
             *_TERMINAL_ARGS,
         )
@@ -616,3 +682,39 @@ async def unmark_swept(tenant: str, job_id: str) -> None:
     """Forget a sweep's mark, so the next sweep may re-enqueue the job."""
     client = get_jobs_client()
     await _call(lambda: client.hdel(job_key(tenant, job_id), "swept"))
+
+
+async def store_work(
+    tenant: str,
+    job_id: str,
+    field: str,
+    value: dict[str, object],
+    *,
+    ttl_seconds: int,
+) -> None:
+    """Keep one piece of stage 1's paid work -- the transcript, or a pass's
+    outcome -- for `ttl_seconds`, so a later run never pays for it again."""
+    client = get_jobs_client()
+    await _call(
+        lambda: client.eval(
+            _WORK_SCRIPT,
+            1,
+            work_key(tenant, job_id),
+            field,
+            json.dumps(value, sort_keys=True),
+            ttl_seconds,
+        )
+    )
+
+
+async def read_work(tenant: str, job_id: str) -> dict[str, dict[str, object]]:
+    """Every piece of work kept for the job, by field; {} when none is."""
+    client = get_jobs_client()
+    stored = await _call(lambda: client.hgetall(work_key(tenant, job_id)))
+    return {str(name): json.loads(_text(value)) for name, value in stored.items()}
+
+
+async def clear_work(tenant: str, job_id: str) -> None:
+    """Drop the work once the stage-1 result holds it all."""
+    client = get_jobs_client()
+    await _call(lambda: client.delete(work_key(tenant, job_id)))

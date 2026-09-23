@@ -19,17 +19,21 @@ from dodeal_ai.core.jobs import (
     JobStoreUnavailable,
     call_index_key,
     claim_attempt,
+    clear_work,
     create_job,
     job_key,
     mark_swept,
     pause,
     read_job,
     read_result,
+    read_work,
     result_key,
     settle_delivery,
     stale_jobs,
+    start_pass,
     start_transcription,
     store_result,
+    store_work,
     transition,
     unmark_swept,
 )
@@ -357,6 +361,7 @@ async def test_every_operation_fails_closed_on_a_dead_store(dead_store) -> None:
         transcriptions=0,
         pauses=0,
         outages=0,
+        passes={},
         request_id="req-1",
         reason=None,
         delivery=None,
@@ -377,6 +382,10 @@ async def test_every_operation_fails_closed_on_a_dead_store(dead_store) -> None:
         store_result("tenant-a", "job-1", {}, ttl_seconds=TTL),
         read_result("tenant-a", "job-1"),
         stale_jobs(NOW, limit=10),
+        start_pass(job, "extract", now=NOW),
+        store_work("tenant-a", "job-1", "transcript", {}, ttl_seconds=TTL),
+        read_work("tenant-a", "job-1"),
+        clear_work("tenant-a", "job-1"),
         mark_swept("tenant-a", "job-1", statuses=frozenset({JobStatus.QUEUED})),
         unmark_swept("tenant-a", "job-1"),
     ]
@@ -446,3 +455,47 @@ async def test_a_job_gone_leaves_the_active_set(redis_fakes: RedisFakes) -> None
 
     assert await mark_swept("tenant-a", "job-1", statuses=STUCK) is None
     assert await _score(redis_fakes) is None
+
+
+# --- stage 1's work and the pass counts ------------------------------------------
+
+
+async def test_a_pass_start_is_counted_and_touches_the_job(
+    redis_fakes: RedisFakes,
+) -> None:
+    await _create()
+    job = await _job()
+    assert await start_pass(job, "extract", now=LATER) == 1
+    assert await start_pass(job, "extract", now=LATER) == 2
+    assert await start_pass(job, "prose", now=LATER) == 1
+
+    moved = await _job()
+    assert moved.passes == {"extract": 2, "prose": 1}
+    assert (moved.status, moved.updated_at) == (JobStatus.QUEUED, LATER.isoformat())
+    assert await _score(redis_fakes) == LATER.timestamp()
+
+
+async def test_a_terminal_or_missing_job_starts_no_pass() -> None:
+    await _create()
+    job = await _job()
+    await transition(job, JobStatus.FAILED, now=NOW, ttl_seconds=TTL)
+    assert await start_pass(job, "extract", now=NOW) is None
+    await _create("job-2", call_id=8)
+    gone = await _job("job-2")
+    await jobs.get_jobs_client().delete(job_key("tenant-a", "job-2"))
+    assert await start_pass(gone, "extract", now=NOW) is None
+
+
+async def test_the_work_is_kept_for_its_ttl_then_cleared(
+    redis_fakes: RedisFakes,
+) -> None:
+    await store_work("tenant-a", "job-1", "transcript", {"a": 1}, ttl_seconds=TTL)
+    await store_work("tenant-a", "job-1", "extract", {"failed": "x"}, ttl_seconds=TTL)
+
+    assert await read_work("tenant-a", "job-1") == {
+        "transcript": {"a": 1},
+        "extract": {"failed": "x"},
+    }
+    assert 0 < await redis_fakes.jobs.ttl(jobs.work_key("tenant-a", "job-1")) <= TTL
+    await clear_work("tenant-a", "job-1")
+    assert await read_work("tenant-a", "job-1") == {}

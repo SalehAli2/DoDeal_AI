@@ -1,4 +1,5 @@
-"""process_call: one call job, from the queue to stage 1 (register items 35, 36).
+"""process_call: one call job, from the queue to stage 1 (register items 35, 36,
+and wave 1).
 
 THE ORDER, and what each step may cost:
 
@@ -23,11 +24,17 @@ THE ORDER, and what each step may cost:
      and may succeed later is retried ONCE, as an attempt, its seconds charged
      again; the second failure is dead_letter and call.failed. A download that
      may succeed later is retried until the attempts run out.
-  7. The transcript is stored for result_ttl_seconds and the job is `done`,
-     its delivery pending when the tenant has a callback (item 50); stage 1 is
-     then delivered, and what came of it is the delivery field, never the
-     status. eligible_for_full_analysis is at least scoring_min_seconds long
-     and not uncertain.
+  7. The transcript is kept in the job's work (core/jobs.py) the moment it
+     exists, and the job moves to `analysing` for wave 1 (analysis.py): the
+     language, the two passes, signals, numbers, alarm phrases and their
+     escalations. A pass that fails leaves analysis null with its reason; the
+     transcript still goes. A run that finds a kept transcript resumes wave 1
+     there, with no attempt spent and nothing received paid for again.
+  8. The stage-1 result is stored for result_ttl_seconds and the job is
+     `done`, its delivery pending when the tenant has a callback (item 50);
+     call.stage1 is then delivered, and what came of it is the delivery field,
+     never the status. eligible_for_full_analysis is at least
+     scoring_min_seconds long and not uncertain.
 
 THE DEADLINE: a run stops itself at CALL_JOB_TIMEOUT_SECONDS less 60, before
 arq's own cancel. The step it cut off is failed as retryable: a download or a
@@ -71,14 +78,18 @@ from dodeal_ai.core.jobs import (
     JobStatus,
     JobStoreUnavailable,
     claim_attempt,
+    clear_work,
     pause,
     read_job,
     read_result,
+    read_work,
     start_transcription,
     store_result,
+    store_work,
     transition,
 )
 from dodeal_ai.core.logging_config import job_log_context
+from dodeal_ai.units.call_intelligence.analysis import JobGone, PassUsage, Wave1, wave1
 from dodeal_ai.units.call_intelligence.config import CallsConfig, resolve_calls_config
 from dodeal_ai.units.call_intelligence.queues import enqueue_call
 from dodeal_ai.units.call_intelligence.transcriber import (
@@ -115,6 +126,11 @@ DEADLINE = "job_deadline_exceeded"
 # The outcome labels a call can be done with before any paid call.
 _UNPAID_OUTCOMES = frozenset({"voicemail", "no_answer"})
 TOO_SHORT = "too_short"
+
+# The work field a transcript is kept under until stage 1 is stored, and the
+# analysis_reason of a call done with no transcript at all.
+TRANSCRIPT = "transcript"
+NO_TRANSCRIPT = "no_transcript"
 
 # Delivers one event for a job and settles its delivery field; True once the
 # CRM has it (or there is no callback), False when left to the schedule.
@@ -155,8 +171,10 @@ def stage1_result(
     *,
     transcript: Transcript | None,
     outcome_label: str | None,
+    wave: Wave1 | None = None,
 ) -> dict[str, object]:
-    """The stage-1 result, held in db3 and delivered as call.stage1."""
+    """The stage-1 result, held in db3 and delivered as call.stage1: the
+    transcript, wave 1's analysis (or null and why) and the versions."""
     duration = int(str(job.metadata["duration_seconds"]))
     eligible = (
         transcript is not None
@@ -172,6 +190,9 @@ def stage1_result(
         "transcript": None
         if transcript is None
         else transcript.model_dump(mode="json"),
+        "analysis": None if wave is None else wave.analysis,
+        "analysis_reason": NO_TRANSCRIPT if wave is None else wave.reason,
+        "versions": None if wave is None else wave.versions,
     }
 
 
@@ -191,6 +212,8 @@ class CallRun:
     transcribe_ms: int | None = None
     analyse_ms: int | None = None
     deliver_ms: int | None = None
+    usage: PassUsage = field(default_factory=PassUsage)
+    analysis_reason: str | None = None
 
     def moved(self, status: JobStatus, reason: str | None = None) -> None:
         self.status, self.reason = status.value, reason
@@ -303,23 +326,37 @@ async def _process(
         return
     label = unpaid_outcome(job, config)
     stored = None if label is not None else await read_result(tenant, job_id)
-    paid = label is None and stored is None
+    work = (
+        {}
+        if label is not None or stored is not None
+        else await read_work(tenant, job_id)
+    )
+    # A transcript wave 1 has not finished with: resumed without an attempt.
+    kept = work.get(TRANSCRIPT)
+    paid = label is None and stored is None and kept is None
     # `transcribing` with nothing stored: the last run died mid-transcription.
     interrupted = paid and job.status is JobStatus.TRANSCRIBING
-    if job.attempts >= settings.call_max_tries or (
-        interrupted and job.transcriptions >= TRANSCRIPTION_TRIES
+    if kept is None and (
+        job.attempts >= settings.call_max_tries
+        or (interrupted and job.transcriptions >= TRANSCRIPTION_TRIES)
     ):
         reason = INTERRUPTED if interrupted else job.reason or "max_tries_exceeded"
         await _fail(ctx, job, config, reason, dead=True, run=run)
         return
 
     scope = job_scope(job)
-    if paid:
+    if paid or kept is not None:
         try:
             await calls_budget_preflight(scope)
         except CallsBudgetPaused as paused:
             await _pause(job, paused.reason_code, run=run)
             return
+
+    if kept is not None:
+        run.transcript = Transcript.model_validate(kept)
+        if await _stage1(ctx, job, config, run.transcript, work, scope, run):
+            await _done(ctx, job, config, None, run)
+        return
 
     attempt = await claim_attempt(
         job,
@@ -344,11 +381,69 @@ async def _process(
         transcript = await _transcribe(ctx, job, config, scope, attempt, run)
         if transcript is None:
             return
-        result = stage1_result(job, config, transcript=transcript, outcome_label=None)
-        await store_result(
-            tenant, job_id, result, ttl_seconds=config.result_ttl_seconds
+        await store_work(
+            tenant,
+            job_id,
+            TRANSCRIPT,
+            transcript.model_dump(mode="json"),
+            ttl_seconds=config.result_ttl_seconds,
         )
+        if not await _stage1(ctx, job, config, transcript, {}, scope, run):
+            return
+    await _done(ctx, job, config, label, run)
 
+
+async def _stage1(
+    ctx: dict[str, Any],
+    job: Job,
+    config: CallsConfig,
+    transcript: Transcript,
+    work: dict[str, dict[str, object]],
+    scope: TenantScope,
+    run: CallRun,
+) -> bool:
+    """`analysing`, wave 1, and the stage-1 result stored. False when the job
+    went terminal or expired under it: there is nothing left to finish."""
+    if not await transition(
+        job, JobStatus.ANALYSING, now=_now(), ttl_seconds=config.result_ttl_seconds
+    ):
+        return False
+    run.moved(JobStatus.ANALYSING)
+    started = time.monotonic()
+    try:
+        wave = await wave1(
+            ctx.get("llm"),
+            job,
+            config,
+            transcript,
+            work=work,
+            scope=scope,
+            settings=get_settings(),
+            usage=run.usage,
+        )
+    except JobGone:
+        return False
+    finally:
+        run.analyse_ms = _ms_since(started)
+    run.analysis_reason = wave.reason
+    result = stage1_result(
+        job, config, transcript=transcript, outcome_label=None, wave=wave
+    )
+    await store_result(
+        job.tenant, job.job_id, result, ttl_seconds=config.result_ttl_seconds
+    )
+    await clear_work(job.tenant, job.job_id)
+    return True
+
+
+async def _done(
+    ctx: dict[str, Any],
+    job: Job,
+    config: CallsConfig,
+    label: str | None,
+    run: CallRun,
+) -> None:
+    """`done` with its delivery owed, then call.stage1 sent once."""
     await transition(
         job,
         JobStatus.DONE,
@@ -574,7 +669,7 @@ async def _pause(
 def _log_outcome(run: CallRun) -> None:
     """ONE line per task run, and its metrics (register item 54). Numbers,
     ids and fixed words only -- never the link, a hash or a word said.
-    `pass_tokens` is null until an analysis pass exists to spend any."""
+    `pass_tokens` is each pass's tokens in this run, null when none ran."""
     assert run.job is not None
     job, transcript = run.job, run.transcript
     status = run.status or job.status.value
@@ -595,7 +690,8 @@ def _log_outcome(run: CallRun) -> None:
         "elapsed_ms": int(elapsed * 1000),
         "provider": None if transcript is None else transcript.provider,
         "model": None if transcript is None else transcript.model,
-        "pass_tokens": None,
+        "pass_tokens": run.usage.tokens or None,
+        "analysis_reason": run.analysis_reason,
     }
     spend = current_spend()
     if spend is not None:

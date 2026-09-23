@@ -166,7 +166,11 @@ async def test_the_outcome_line_is_complete_and_carries_no_content(
         isinstance(outcome[k], int)
         for k in ("download_ms", "transcribe_ms", "deliver_ms")
     )
-    assert (outcome["analyse_ms"], outcome["pass_tokens"]) == (None, None)
+    assert isinstance(outcome["analyse_ms"], int)
+    assert (outcome["pass_tokens"], outcome["analysis_reason"]) == (
+        None,
+        "llm_not_configured",
+    )
     text = lines.getvalue()
     for secret in ["SIGNED-LINK", HOST, PHONE, *(s.text for s in DEFAULT_SEGMENTS)]:
         assert secret not in text
