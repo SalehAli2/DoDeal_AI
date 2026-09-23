@@ -7098,3 +7098,15 @@ runaway eval is visible only on the provider's bill; (2) a real tenant later
 named eval-scratch would share the charges.
 Stress test: a live-shaped run over the fixture leaves token keys for
 eval-scratch only, none for tenant-a.
+
+## Test: register item 74, load scenario S7 -- a 429 burst on the primary
+
+S7 -- fifteen direct judgements at once through the real OpenAICompatibleClient
+pair behind FallbackLLMClient over httpx.MockTransport: the primary answers
+429 to everything, the fallback answers. The primary's breaker opens, every
+paid call reaches the fallback exactly once, no prompt is sent twice to either
+provider, all fifteen answer 200; p95 printed (188-235 ms over three runs).
+Production failure modes: (1) the fallback provider has its own rate limit and
+the burst moves to it whole; (2) the open breaker holds for 30 s after the
+primary recovers, paying the fallback's price for that window.
+Stress test: the scenario itself, run three times.
