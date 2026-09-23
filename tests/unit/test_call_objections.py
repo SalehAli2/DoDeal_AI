@@ -268,15 +268,14 @@ async def test_wave2_runs_the_objections_pass_and_keeps_its_answer() -> None:
 
     assert wave.parts[OBJECTIONS] is not None
     assert wave.parts[OBJECTIONS]["raised"] == 2
-    assert wave.reasons == {"score": "scoring_off"}
+    assert OBJECTIONS not in wave.reasons
+    assert wave.reasons["score"] == "scoring_off"
     assert wave.models[OBJECTIONS] == "fake-model-pinned"
     assert usage.tokens[OBJECTIONS]["calls"] == 1
     kept = await read_work("tenant-a", "job-1")
     assert kept[OBJECTIONS]["answer"] == ANSWER
-    assert (await read_job("tenant-a", "job-1")).passes == {
-        OBJECTIONS: 1,
-        "escalations": 1,
-    }
+    passes = (await read_job("tenant-a", "job-1")).passes
+    assert (passes[OBJECTIONS], passes["escalations"]) == (1, 1)
 
 
 async def test_a_failed_pass_leaves_its_part_null_with_its_reason() -> None:
@@ -293,7 +292,7 @@ async def test_a_kept_answer_is_never_paid_for_again() -> None:
     work = {OBJECTIONS: {"answer": ANSWER, "model": "kept-model"}}
     llm = FakeLLM()
     wave = await _wave2(llm, job, work)
-    assert [call.profile for call in llm.calls] == ["unit_b.escalations"]
+    assert "unit_b.objections" not in [call.profile for call in llm.calls]
     assert wave.models[OBJECTIONS] == "kept-model"
 
 

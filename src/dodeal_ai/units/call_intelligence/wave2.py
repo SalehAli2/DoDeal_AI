@@ -6,6 +6,8 @@ another, each on its own profile.
                                  not run at all when the call gets no score
   escalations unit_b.escalations the five BRD issues, merged with stage 1's
                                  off_channel_contact (escalations.py)
+  coaching    unit_b.coaching    observations, moments, a plan and the call's
+                                 stages, tone-checked in code (coaching.py)
 
 EACH PASS STANDS ALONE. Its answer becomes its part; a pass that fails --
 twice unanswered, or malformed after its one reprompt -- leaves its part null
@@ -28,6 +30,11 @@ from dodeal_ai.core.config import Settings
 from dodeal_ai.core.context import TenantScope
 from dodeal_ai.core.jobs import Job, start_stage2_pass
 from dodeal_ai.core.llm import LLMClient, LLMResponse
+from dodeal_ai.units.call_intelligence.coaching import (
+    Coaching,
+    coach,
+    coaching_part,
+)
 from dodeal_ai.units.call_intelligence.config import CallsConfig
 from dodeal_ai.units.call_intelligence.escalations import (
     Flags,
@@ -59,6 +66,7 @@ from dodeal_ai.units.call_intelligence.transcriber import Transcript
 OBJECTIONS = "objections"
 SCORE = "score"
 ESCALATIONS = "escalations"
+COACHING = "coaching"
 
 
 @dataclass(slots=True)
@@ -110,6 +118,14 @@ async def wave2(
     wave.parts[ESCALATIONS] = (
         None if flags is None else escalations_part(call, flags, stage1_escalations)
     )
+    coached = await _part(
+        run,
+        wave,
+        COACHING,
+        Coaching,
+        lambda metered: coach(metered, call, scope=scope, settings=settings),
+    )
+    wave.parts[COACHING] = None if coached is None else coaching_part(call, coached)
     return wave
 
 

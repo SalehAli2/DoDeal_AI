@@ -7373,3 +7373,40 @@ failure modes, then one stress test (sabotage in brackets).
 - demo: a real call's transcript is read from, and committed in, the repo; a
   malformed file reaches the model. Test: a repo path is refused.
 - docs(owasp): not code; every test the four rewritten items cite exists.
+
+## Batch: Unit B batch 2 fixes F1 to F6 and batch 3 wave 2 (branch call-intelligence)
+
+One block for the batch, by the lead's instruction; stopped by the lead after
+item 12, so items 13 to 19 are not here. Per item: two production failure
+modes, then one stress test (sabotage in brackets).
+
+- signals: a model outage drops the off-channel escalation with analysis; a
+  no-transcript call carries half a block. Test: outage and no client still
+  deliver off_channel_contact (signals tied to analysis fails 2).
+- numbers (hash): no company hash escalates every agent number; a lead's number
+  said by the agent is flagged. Test: no hash, agent_unverified, no escalation
+  (no-hash branch off fails 2).
+- numbers (country): 04 landlines never match the CRM's hash; a Saudi tenant's
+  050 hashes as UAE. Test: every landline form hashes 97141234567 (05-only rule
+  fails 2).
+- stuck: a queued job whose arq entry was lost never runs; a backlog job is
+  swept into a second paid copy. Test: queued, no arq entry, re-enqueued once
+  after 3600 s (queued wait off fails 1).
+- ceilings: a long Arabic extraction truncates and spends its reprompt; prose
+  fails the same way. Test: extract names 2500 (1500 back fails 1).
+- evidence: an invented agreement reaches the CRM; an English summary passes
+  as Arabic on one name. Test: agreed item with a false quote reprompts then
+  fails (element check off fails 3).
+- 147: a profile field leaks into Unit A's body; a reasoning model refuses a
+  temperature. Test: Unit A bodies byte-identical (seed always sent fails 4).
+- stage2: an ineligible call pays for wave 2; stage 2 held up stage 1. Test:
+  short, voicemail and uncertain calls queue nothing (always queue fails 3).
+- objections: an invented or wrong-speaker quote counts; a failed pass loses
+  the rest. Test: invented quote fails after one reprompt (client quote check
+  off fails 3).
+- score: 12.5 rounds to 12 on banker's rounding; a scoring-off call is paid
+  for. Test: a table per component and each null reason (round() fails 4).
+- escalations: a flag with no real quote reaches a manager; a price claim is
+  shown as proven wrong. Test: invented flag rejected (flag check off fails 3).
+- coaching: coaching with no strength ships; a harsh phrase reaches an agent.
+  Test: no strength or improvement is malformed (kinds check off fails 2).

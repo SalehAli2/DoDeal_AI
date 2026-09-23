@@ -412,7 +412,7 @@ async def test_a_scored_call_runs_the_pass_on_its_own_profile() -> None:
     wave = await _wave2(llm)
 
     scored = wave.parts[SCORE]
-    assert scored is not None and wave.reasons == {}
+    assert scored is not None and SCORE not in wave.reasons
     assert (scored["raw"], scored["applicable_weight"]) == (30, 60)
     assert (scored["total"], scored["band"]) == (50, "needs_work")
     assert [c.profile for c in llm.calls][1] == PROFILE_UNIT_B_SCORE

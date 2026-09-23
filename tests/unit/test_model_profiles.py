@@ -338,5 +338,5 @@ def test_every_profile_named_under_units_is_a_known_profile() -> None:
 
 
 def test_the_names_are_distinct_and_namespaced() -> None:
-    assert len(set(KNOWN_PROFILES)) == 8
+    assert len(set(KNOWN_PROFILES)) == 9
     assert all(name.startswith(("unit_a.", "unit_b.")) for name in KNOWN_PROFILES)
