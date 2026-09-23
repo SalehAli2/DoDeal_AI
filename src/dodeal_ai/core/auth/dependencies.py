@@ -27,7 +27,8 @@ service_gate4_cost (the TENANT request counter only). A user token is 401 on it,
 and a service token is 401 on the user chain: the verifiers share no key. The
 history route ends in service_gate4_history_cost instead (register item 127),
 and the brief, measures and admin routes in service_gate4_reads_cost (item
-153): the same chain, each counted on the tenant's own counter for that work.
+153), and a call-job push in service_gate4_calls_cost (item 50): the same
+chain, each counted on the tenant's own counter for that work.
 """
 
 from __future__ import annotations
@@ -56,6 +57,7 @@ from dodeal_ai.core.config import Settings, get_settings
 from dodeal_ai.core.context import RequestContext
 from dodeal_ai.core.cost.limiter import (
     CostLimitError,
+    enforce_calls_cost,
     enforce_cost,
     enforce_history_cost,
     enforce_reads_cost,
@@ -366,6 +368,15 @@ async def service_gate4_reads_cost(
     """Gate 4 for the brief, measures and admin routes (register item 153): the
     tenant's READS request counter alone, so reads never move `cost:tenant`."""
     return await _service_gate4(request, context, enforce_reads_cost)
+
+
+async def service_gate4_calls_cost(
+    request: Request,
+    context: Annotated[RequestContext, Depends(build_service_context)],
+) -> RequestContext:
+    """Gate 4 for a call-job push (register item 50): the tenant's CALLS
+    request counter alone, so a burst of recordings never moves `cost:tenant`."""
+    return await _service_gate4(request, context, enforce_calls_cost)
 
 
 async def _service_gate4(

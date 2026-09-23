@@ -260,6 +260,38 @@ class PayloadTooLarge(DodealError):
         super().__init__("payload_too_large", 413)
 
 
+class CallsNotEnabled(DodealError):
+    """A call job pushed for a tenant whose `unit_b.calls_enabled` is off
+    (register item 50). 403: understood, and this tenant has not switched it on."""
+
+    def __init__(self) -> None:
+        super().__init__("calls_not_enabled", 403)
+
+
+class CallJobNotFound(DodealError):
+    """No job by that id for this tenant, or it has expired (register item 50).
+    Another tenant's job is this 404 too: its existence is not ours to confirm."""
+
+    def __init__(self) -> None:
+        super().__init__("call_job_not_found", 404)
+
+
+class JobStoreUnavailableResponse(DodealError):
+    """db3 could not be read or written (register item 50). Fails closed: the
+    job store is the job, so there is no answer to guess."""
+
+    def __init__(self) -> None:
+        super().__init__("job_store_unavailable", 503)
+
+
+class QueueUnavailable(DodealError):
+    """The job was admitted but could not be put on its queue. 503: the same
+    push again finds the queued job and puts it on the queue then."""
+
+    def __init__(self) -> None:
+        super().__init__("queue_unavailable", 503)
+
+
 def _request_id(request: Request) -> str:
     return getattr(request.state, "request_id", "unknown")
 

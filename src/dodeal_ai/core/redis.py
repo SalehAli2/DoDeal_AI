@@ -17,10 +17,10 @@ idempotency store fails CLOSED (a duplicate-work guard). Keeping them apart
 means an outage, a flush or a migration aimed at one cannot silently change
 the other's policy.
 
-The work queue has its own connection, owned by arq and configured from
-`redis_queue_url` in workers/runner.py -- a bare factory here had no caller, so
-it is not duplicated. The two use different logical DBs, so their keys never
-collide. The connection URL comes from config; real hosts and credentials are
+The work queue (db0) is arq's. The worker reads it through arq's own settings
+in workers/runner.py; the call-job route (register item 50) PUSHES to it through
+get_queue_client below, an ArqRedis on the same bounded pool shape, undecoded
+because arq stores pickled job bodies. The DBs differ, so no keys collide. The connection URL comes from config; real hosts and credentials are
 provided by DevOps later with no code change.
 
 The client is a `redis.asyncio` client (Decision 2 -- one execution model). The
@@ -47,6 +47,7 @@ from functools import lru_cache
 from typing import Any
 
 import redis
+from arq.connections import ArqRedis
 
 # Aliased for readability. NOT the separate, archived PyPI package whose
 # name this used to borrow -- this is redis-py's own asyncio namespace.
@@ -90,7 +91,7 @@ class BoundedPool(redis_async.BlockingConnectionPool):
             raise
 
 
-def _build_pool(url: str) -> BoundedPool:
+def _build_pool(url: str, *, decode_responses: bool = True) -> BoundedPool:
     """A bounded pool for `url`, sized entirely from Settings.
 
     Blocking, not a plain ConnectionPool: at the cap the plain pool RAISES
@@ -108,7 +109,7 @@ def _build_pool(url: str) -> BoundedPool:
     settings = get_settings()
     return BoundedPool.from_url(
         url,
-        decode_responses=True,
+        decode_responses=decode_responses,
         max_connections=settings.redis_pool_size,
         timeout=settings.redis_pool_acquire_timeout_seconds,
         socket_connect_timeout=settings.redis_connect_timeout_seconds,
@@ -144,6 +145,18 @@ def get_jobs_client() -> redis_async.Redis:
     results. Same shape and settings as the other two, on its own pool, so a
     burst of job polling can never take db2's reservations' connections."""
     return redis_async.Redis(connection_pool=_build_pool(get_settings().redis_jobs_url))
+
+
+@lru_cache
+def get_queue_client() -> ArqRedis:
+    """The queue connection (db0) as the API pushes to it: an ArqRedis, so a
+    job lands in arq's own format, on a bounded pool of its own. Not decoded:
+    arq's job bodies are bytes."""
+    return ArqRedis(
+        connection_pool=_build_pool(
+            get_settings().redis_queue_url, decode_responses=False
+        )
+    )
 
 
 async def _ping(client: redis_async.Redis) -> bool:

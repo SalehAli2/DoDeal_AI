@@ -1,4 +1,4 @@
-"""Circuit breaker for the three Redis connections, and for each model provider.
+"""Circuit breaker for each Redis connection, and for each model provider.
 
 After `failure_threshold` consecutive failures a breaker OPENS and refuses calls
 for `open_seconds` without touching a socket; then ONE probe decides whether it
@@ -262,8 +262,16 @@ def jobs_breaker() -> CircuitBreaker:
     return _from_settings("jobs")
 
 
+@lru_cache
+def queue_breaker() -> CircuitBreaker:
+    """The db0 breaker for pushes to arq's queues (register item 50), its own so
+    a dead queue refuses pushes without refusing any other store."""
+    return _from_settings("queue")
+
+
 def reset_breakers() -> None:
     """Drop every cached breaker; the next use builds fresh ones from settings."""
     cost_breaker.cache_clear()
     operational_breaker.cache_clear()
     jobs_breaker.cache_clear()
+    queue_breaker.cache_clear()

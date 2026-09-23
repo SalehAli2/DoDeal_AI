@@ -289,6 +289,10 @@ class Settings(BaseSettings):
     # window, on its own counter (register item 153): reads never spend the live
     # cap. 5000 covers a CRM's dashboards; too low 429s them, too high bounds none.
     cost_reads_per_tenant_limit: int = Field(default=5_000, gt=0)
+    # The tenant's call-job pushes per window, on `cost:calls:tenant` (register
+    # item 50): a job is minutes of audio and paid passes, so its own cap, never
+    # the live one. 2000 is a busy sales floor's day; too low 429s real calls.
+    cost_calls_per_tenant_limit: int = Field(default=2_000, gt=0)
 
     # Token budget (core/cost/limiter.py), on the SAME window as the request
     # caps above but on its own keys: "requests made" and "tokens spent" are

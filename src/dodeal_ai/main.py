@@ -6,7 +6,7 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
-from dodeal_ai.api.routes import admin, judgements, measures
+from dodeal_ai.api.routes import admin, calls, judgements, measures
 from dodeal_ai.core import metrics as service_metrics
 from dodeal_ai.core.config import (
     REDIS_POOL_HEADROOM,
@@ -25,6 +25,7 @@ from dodeal_ai.core.redis import (
     get_cost_client,
     get_jobs_client,
     get_operational_client,
+    get_queue_client,
 )
 from dodeal_ai.core.tenant_config import (
     clear_tenant_configs,
@@ -259,6 +260,7 @@ async def lifespan(app: FastAPI):
     await get_cost_client().aclose(close_connection_pool=True)
     await get_operational_client().aclose(close_connection_pool=True)
     await get_jobs_client().aclose(close_connection_pool=True)
+    await get_queue_client().aclose(close_connection_pool=True)
 
 
 async def health() -> dict[str, str]:
@@ -359,6 +361,7 @@ def create_app() -> FastAPI:
     application.include_router(judgements.router)
     application.include_router(admin.router)
     application.include_router(measures.router)
+    application.include_router(calls.router)
     application.add_api_route("/health", health, methods=["GET"])
     register_error_handlers(application)
     application.add_api_route("/ready", ready, methods=["GET"])

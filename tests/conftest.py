@@ -29,6 +29,7 @@ from dataclasses import dataclass
 
 import fakeredis
 import pytest
+from arq.connections import ArqRedis
 
 from dodeal_ai import main
 from dodeal_ai.core import jobs, tenant_config
@@ -36,6 +37,7 @@ from dodeal_ai.core import redis as redis_module
 from dodeal_ai.core.breaker import reset_breakers
 from dodeal_ai.core.config import Settings, get_settings
 from dodeal_ai.core.cost import limiter
+from dodeal_ai.units.call_intelligence import queues
 from dodeal_ai.units.structured_intelligence import state
 from tests.helpers.fake_cost_redis import FakeCostRedis
 from tests.helpers.fake_operational_redis import FakeOperationalRedis
@@ -47,6 +49,7 @@ from tests.helpers.fake_operational_redis import FakeOperationalRedis
 _COST_CLIENT_HOLDERS = (limiter, main)
 _OPERATIONAL_CLIENT_HOLDERS = (state, main, tenant_config)
 _JOBS_CLIENT_HOLDERS = (jobs, main)
+_QUEUE_CLIENT_HOLDERS = (queues, main)
 
 # A closed port on loopback. db 1 and db 2 are kept so each URL still names the
 # store it stands in for; tests/unit/test_redis.py asserts the two differ and
@@ -55,6 +58,7 @@ _CLOSED_PORT_REDIS_URLS = {
     "DODEAL_REDIS_COST_URL": "redis://127.0.0.1:1/1",
     "DODEAL_REDIS_OPERATIONAL_URL": "redis://127.0.0.1:1/2",
     "DODEAL_REDIS_JOBS_URL": "redis://127.0.0.1:1/3",
+    "DODEAL_REDIS_QUEUE_URL": "redis://127.0.0.1:1/0",
 }
 
 _REAL_POOL_BUILDS = pytest.StashKey[list[str]]()
@@ -99,6 +103,8 @@ class RedisFakes:
     cost: FakeCostRedis
     operational: FakeOperationalRedis
     jobs: fakeredis.FakeAsyncRedis
+    # arq's own client over fakeredis: pushes land in arq's real format.
+    queue: ArqRedis
 
 
 @pytest.fixture(autouse=True)
@@ -137,12 +143,14 @@ def redis_fakes(
     redis_module.get_cost_client.cache_clear()
     redis_module.get_operational_client.cache_clear()
     redis_module.get_jobs_client.cache_clear()
+    redis_module.get_queue_client.cache_clear()
     # One test's outage must not refuse the next test's calls.
     reset_breakers()
     fakes = RedisFakes(
         cost=FakeCostRedis(),
         operational=FakeOperationalRedis(),
         jobs=fakeredis.FakeAsyncRedis(decode_responses=True),
+        queue=ArqRedis(connection_pool=fakeredis.FakeAsyncRedis().connection_pool),
     )
     if not any(request.node.get_closest_marker(m) for m in _REAL_REDIS_MARKERS):
         for module in _COST_CLIENT_HOLDERS:
@@ -153,11 +161,14 @@ def redis_fakes(
             )
         for module in _JOBS_CLIENT_HOLDERS:
             monkeypatch.setattr(module, "get_jobs_client", lambda: fakes.jobs)
+        for module in _QUEUE_CLIENT_HOLDERS:
+            monkeypatch.setattr(module, "get_queue_client", lambda: fakes.queue)
     yield fakes
     reset_breakers()
     redis_module.get_cost_client.cache_clear()
     redis_module.get_operational_client.cache_clear()
     redis_module.get_jobs_client.cache_clear()
+    redis_module.get_queue_client.cache_clear()
 
 
 @pytest.fixture(autouse=True)
@@ -235,9 +246,9 @@ def _real_pool_builds(request: pytest.FixtureRequest) -> Iterator[list[str]]:
     real = redis_module._build_pool
 
     @functools.wraps(real)
-    def counted(url: str) -> redis_module.BoundedPool:
+    def counted(url: str, **kwargs: bool) -> redis_module.BoundedPool:
         builds.append(os.environ.get("PYTEST_CURRENT_TEST", "outside any test"))
-        return real(url)
+        return real(url, **kwargs)
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(redis_module, "_build_pool", counted)

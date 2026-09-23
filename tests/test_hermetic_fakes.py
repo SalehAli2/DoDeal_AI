@@ -29,9 +29,15 @@ _KNOWN_HOLDERS = {
     "dodeal_ai.core.cost.limiter",
     "dodeal_ai.units.structured_intelligence.state",
     "dodeal_ai.core.jobs",
+    "dodeal_ai.units.call_intelligence.queues",
     "dodeal_ai.main",
 }
-_PATCHED_NAMES = {"get_cost_client", "get_operational_client", "get_jobs_client"}
+_PATCHED_NAMES = {
+    "get_cost_client",
+    "get_operational_client",
+    "get_jobs_client",
+    "get_queue_client",
+}
 # The module whose own tests legitimately hand these factories something else.
 _FACTORY_MODULE = "dodeal_ai.core.redis"
 _HELPER_PACKAGE = "tests.helpers"
@@ -174,6 +180,7 @@ def test_no_test_reaches_a_real_redis_client_factory(redis_fakes) -> None:
         "get_cost_client": redis_fakes.cost,
         "get_operational_client": redis_fakes.operational,
         "get_jobs_client": redis_fakes.jobs,
+        "get_queue_client": redis_fakes.queue,
     }
     unreplaced = []
     for module_name, factory, local in bindings:
@@ -190,6 +197,7 @@ def test_no_test_reaches_a_real_redis_client_factory(redis_fakes) -> None:
     assert hasattr(redis_module.get_cost_client, "cache_clear")
     assert hasattr(redis_module.get_operational_client, "cache_clear")
     assert hasattr(redis_module.get_jobs_client, "cache_clear")
+    assert hasattr(redis_module.get_queue_client, "cache_clear")
     assert hasattr(redis_module._build_pool, "__wrapped__"), (
         "core/redis.py's _build_pool is not wrapped by the session's counter"
     )
@@ -208,6 +216,7 @@ def test_the_service_urls_point_at_a_closed_port_and_the_lane_keeps_its_own() ->
         ("DODEAL_REDIS_COST_URL", settings.redis_cost_url),
         ("DODEAL_REDIS_OPERATIONAL_URL", settings.redis_operational_url),
         ("DODEAL_REDIS_JOBS_URL", settings.redis_jobs_url),
+        ("DODEAL_REDIS_QUEUE_URL", settings.redis_queue_url),
     ):
         assert os.environ[variable] == url
         parts = urlsplit(url)
