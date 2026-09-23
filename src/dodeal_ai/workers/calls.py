@@ -1,5 +1,5 @@
 """The call workers (Unit B, register items 35 and 50): one arq worker per call
-queue, running process_call.
+queue, running process_call. THE worker entry point; there is no other.
 
     python -m dodeal_ai.workers.calls priority
     python -m dodeal_ai.workers.calls normal
@@ -27,6 +27,7 @@ from typing import Any
 
 import httpx
 from arq import func
+from arq.connections import RedisSettings
 from arq.worker import run_worker
 
 from dodeal_ai.core.config import get_settings
@@ -45,13 +46,17 @@ from dodeal_ai.units.call_intelligence.transcriber import (
     select_transcriber,
 )
 from dodeal_ai.units.call_intelligence.worker import process_call
-from dodeal_ai.workers.runner import redis_settings
 
 QUEUES = {
     "priority": PRIORITY_QUEUE,
     "normal": NORMAL_QUEUE,
     "overnight": OVERNIGHT_QUEUE,
 }
+
+
+def redis_settings() -> RedisSettings:
+    """arq's Redis settings, parsed from redis_queue_url; opens nothing."""
+    return RedisSettings.from_dsn(get_settings().redis_queue_url)
 
 
 def worker_settings(

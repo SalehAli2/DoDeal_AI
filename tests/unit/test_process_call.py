@@ -753,6 +753,21 @@ def test_the_command_line_names_one_of_three_queues(monkeypatch) -> None:
     assert ran[0]["queue_name"] == "arq:calls:overnight"
 
 
+def test_the_queue_redis_is_derived_from_the_configured_url(monkeypatch) -> None:
+    """Every field of arq's settings comes from DODEAL_REDIS_QUEUE_URL."""
+    monkeypatch.setenv("DODEAL_REDIS_QUEUE_URL", "redis://queue.example:6380/7")
+    get_settings.cache_clear()
+    built = calls_worker.worker_settings(NORMAL_QUEUE)["redis_settings"]
+    assert (built.host, built.port, built.database) == ("queue.example", 6380, 7)
+
+
+def test_the_call_workers_are_the_only_worker_entry_point() -> None:
+    """The empty runner skeleton is gone and nothing can import it."""
+    import importlib.util
+
+    assert importlib.util.find_spec("dodeal_ai.workers.runner") is None
+
+
 def test_importing_the_call_workers_reads_no_settings() -> None:
     """The wheel check and pytest collection import it with no environment."""
     probe = (

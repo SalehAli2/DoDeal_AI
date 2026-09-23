@@ -18,7 +18,7 @@ means an outage, a flush or a migration aimed at one cannot silently change
 the other's policy.
 
 The work queue (db0) is arq's. The worker reads it through arq's own settings
-in workers/runner.py; the call-job route (register item 50) PUSHES to it through
+in workers/calls.py; the call-job route (register item 50) PUSHES to it through
 get_queue_client below, an ArqRedis on the same bounded pool shape, undecoded
 because arq stores pickled job bodies. The DBs differ, so no keys collide. The connection URL comes from config; real hosts and credentials are
 provided by DevOps later with no code change.
