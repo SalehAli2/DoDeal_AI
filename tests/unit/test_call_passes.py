@@ -69,13 +69,23 @@ def _detail(
     return {"value": value, "state": state, "quote": quote, "segment": segment}
 
 
+def _said(text: str, quote: str, segment: str) -> dict[str, str]:
+    return {"text": text, "quote": quote, "segment": segment}
+
+
 def _extraction(**details: dict[str, Any]) -> dict[str, Any]:
     answer: dict[str, Any] = {
-        "wanted": "A villa within budget.",
+        "wanted": _said("A villa within budget.", "My budget is 1,200,000 AED", "s2"),
         "discussed": ["budget", "viewing"],
         "concerns": [],
-        "agreed": ["a viewing on Tuesday"],
-        "next_step": {"action": "Viewing", "owner": "agent", "due": "Tuesday at four"},
+        "agreed": [_said("a viewing on Tuesday", "Yes, Tuesday works", "s4")],
+        "next_step": {
+            "action": "Viewing",
+            "owner": "agent",
+            "due": "Tuesday at four",
+            "quote": "Shall we book the viewing on Tuesday at four?",
+            "segment": "s3",
+        },
         "ending": "moved_forward",
         "details": {name: _detail() for name in passes.DETAIL_NAMES},
         "mood": {"value": "positive", "quote": "I am happy with that", "segment": "s4"},
@@ -167,6 +177,99 @@ def test_a_masked_number_may_be_quoted_as_masked() -> None:
     passes.check_extraction(_call())(answer)
 
 
+def _refused(answer: dict[str, Any]) -> tuple[tuple[str, str], ...]:
+    from dodeal_ai.core.validation import OutputValidationError
+
+    with pytest.raises(OutputValidationError) as refused:
+        passes.check_extraction(_call())(passes.Extraction.model_validate(answer))
+    return refused.value.errors
+
+
+async def test_an_agreed_item_without_a_real_quote_reprompts_then_fails() -> None:
+    """The guard: every element's evidence goes through the quote check."""
+    answer = _extraction()
+    answer["agreed"] = [_said("a discount of ten percent", "I give you 10%", "s3")]
+    llm = FakeLLM(json_response(answer), json_response(answer))
+
+    with pytest.raises(MalformedOutputError):
+        await _extract(llm)
+    assert llm.call_count == 2
+    assert _refused(answer) == (("agreed.0", "quote_not_in_segment"),)
+
+
+@pytest.mark.parametrize(
+    ("change", "error"),
+    [
+        (
+            {"concerns": [_said("price", "too expensive", "s2")]},
+            ("concerns.0", "quote_not_in_segment"),
+        ),
+        (
+            {"wanted": _said("A villa.", "I want a penthouse", "s2")},
+            ("wanted", "quote_not_in_segment"),
+        ),
+        (
+            {"agreed": [_said("a viewing", "Yes, Tuesday works", "s9")]},
+            ("agreed.0", "segment_unknown"),
+        ),
+    ],
+    ids=["concern", "wanted", "agreed-segment"],
+)
+def test_every_elements_evidence_is_quote_checked(
+    change: dict[str, Any], error: tuple[str, str]
+) -> None:
+    assert _refused({**_extraction(), **change}) == (error,)
+
+
+@pytest.mark.parametrize(
+    ("quote", "segment", "error"),
+    [
+        (None, None, "quote_missing"),
+        ("Shall we book", None, "quote_without_segment"),
+        ("We will sign tomorrow", "s3", "quote_not_in_segment"),
+    ],
+)
+def test_a_next_step_with_an_action_needs_its_quote(
+    quote: str | None, segment: str | None, error: str
+) -> None:
+    answer = _extraction()
+    answer["next_step"].update(quote=quote, segment=segment)
+    assert _refused(answer) == (("next_step", error),)
+
+
+def test_no_next_action_needs_no_quote_but_a_given_one_is_checked() -> None:
+    answer = _extraction()
+    answer["next_step"] = {
+        "action": None,
+        "owner": "unknown",
+        "due": None,
+        "quote": None,
+        "segment": None,
+    }
+    answer["wanted"] = None
+    passes.check_extraction(_call())(passes.Extraction.model_validate(answer))
+    answer["next_step"].update(quote="nothing was said", segment="s1")
+    assert _refused(answer) == (("next_step", "quote_not_in_segment"),)
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        {"text": "a viewing", "quote": None, "segment": "s4"},
+        {"text": "a viewing", "quote": "Yes, Tuesday works", "segment": None},
+        "a viewing on Tuesday",
+    ],
+    ids=["no-quote", "no-segment", "bare-string"],
+)
+def test_an_agreement_without_its_evidence_is_refused_by_the_schema(
+    item: object,
+) -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        passes.Extraction.model_validate({**_extraction(), "agreed": [item]})
+
+
 def test_a_mood_quote_is_checked_too() -> None:
     from dodeal_ai.core.validation import OutputValidationError
 
@@ -251,7 +354,10 @@ async def test_the_prose_pass_reads_the_settled_extraction() -> None:
     [
         ({"crm_note": "word " * 81}, "crm_note_too_long"),
         ({"summary": "العميل يريد فيلا."}, "wrong_language"),
+        ({"summary": "العميل يريد فيلا near the park."}, "wrong_language"),
+        ({"crm_note": '"1,200,000"'}, "wrong_language"),
     ],
+    ids=["long-note", "arabic", "arabic-mostly", "only-a-quote"],
 )
 async def test_a_long_note_or_the_wrong_language_is_malformed(
     change: dict, error: str
@@ -278,3 +384,47 @@ def test_an_arabic_call_wants_arabic_prose() -> None:
     )
     check = passes.check_prose(_call(*arabic))
     check(passes.Prose(summary="العميل يريد فيلا.", crm_note="فيلا، معاينة الثلاثاء."))
+
+
+def _arabic_call() -> CallText:
+    return _call(
+        *(
+            Segment(
+                start_s=s.start_s,
+                end_s=s.end_s,
+                speaker=s.speaker,
+                text="نعم",
+                language="ar",
+                confidence=0.9,
+            )
+            for s in SEGMENTS
+        )
+    )
+
+
+def test_an_english_summary_with_one_arabic_name_fails_the_arabic_check() -> None:
+    """The guard: one Arabic word no longer passes for an Arabic summary."""
+    from dodeal_ai.core.validation import OutputValidationError
+
+    english = "The client محمد wants a villa near the park and a viewing on Tuesday."
+    answer = passes.Prose(summary=english, crm_note="فيلا، معاينة الثلاثاء.")
+    with pytest.raises(OutputValidationError) as refused:
+        passes.check_prose(_arabic_call())(answer)
+    assert refused.value.errors == (("summary", "wrong_language"),)
+
+
+@pytest.mark.parametrize(
+    ("language", "text"),
+    [
+        ("ar", 'قال العميل "I want a villa near the park with a garden" وهو جاد.'),
+        ("en", "The client said «أريد فيلا قريبة من الحديقة» and means it."),
+        ("en", "The client, محمد, wants a villa near the park on Tuesday."),
+    ],
+    ids=["ar-quoting-english", "en-quoting-arabic", "en-one-arabic-name"],
+)
+def test_words_inside_quotes_do_not_count_and_one_name_does_not_fail_it(
+    language: str, text: str
+) -> None:
+    from dodeal_ai.units.call_intelligence.evidence import in_language
+
+    assert in_language(text, language)  # type: ignore[arg-type]

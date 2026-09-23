@@ -73,11 +73,23 @@ def _detail(value=None, state="not_mentioned", quote=None, segment=None) -> dict
 
 
 EXTRACTION: dict[str, Any] = {
-    "wanted": "A villa.",
+    "wanted": {"text": "A villa.", "quote": "I want a villa", "segment": "s2"},
     "discussed": ["budget", "viewing"],
     "concerns": [],
-    "agreed": ["a meeting on Tuesday"],
-    "next_step": {"action": "Meet", "owner": "agent", "due": "Tuesday"},
+    "agreed": [
+        {
+            "text": "a meeting on Tuesday",
+            "quote": "Shall we meet on Tuesday?",
+            "segment": "s4",
+        }
+    ],
+    "next_step": {
+        "action": "Meet",
+        "owner": "agent",
+        "due": "Tuesday",
+        "quote": "Shall we meet on Tuesday?",
+        "segment": "s4",
+    },
     "ending": "moved_forward",
     "details": {
         "budget": _detail(
@@ -211,6 +223,8 @@ async def test_a_call_is_analysed_and_delivered_with_its_stage1_payload(
     }
     assert (analysis_["language"], analysis_["summary"]) == ("en", PROSE["summary"])
     assert analysis_["elements"]["ending"] == "moved_forward"
+    assert analysis_["elements"]["agreed"] == EXTRACTION["agreed"]
+    assert analysis_["elements"]["next_step"]["segment"] == "s4"
     assert analysis_["details"]["budget"]["state"] == "stated"
     assert analysis_["details"]["area"] == _detail()
     assert analysis_["mood"]["uncertain"] is False
@@ -237,7 +251,7 @@ async def test_a_call_is_analysed_and_delivered_with_its_stage1_payload(
         ("alarm_phrase", "s3"),
     ]
     assert result["versions"] == {
-        "prompt": "unit_b_prompts_v1",
+        "prompt": "unit_b_prompts_v2",
         "signals": "call_signals_v1",
         "model": "fake-model-pinned",
         "transcriber": "fake/fake-stt-1",

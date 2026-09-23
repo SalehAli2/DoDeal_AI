@@ -6,19 +6,20 @@ and a fixed output ceiling sized for a non-reasoning model.
   unit_b.extract  the six elements, six details and the client's mood
   unit_b.prose    a summary and a CRM note, in the language decided in code
 
-THE QUOTE CHECK, in code, on every quote the extraction returns: at most 25
-words; the segment it cites exists; and its words, normalised as the alarm
-matcher normalises (alarms.py), appear in that segment in order and unbroken.
-The segment is read as the model read it -- the prompt copy, numbers and
-emails masked -- so a quote can never carry a number back out. Any failure is
-a malformed answer: the pass is reprompted once, then fails.
+EVIDENCE FOR EVERY ELEMENT (extract_v2). What the client wanted, each concern
+and each agreement carry the quote and segment they rest on, and so does the
+next step whenever it names an action. Each detail and the mood may cite one.
+Every quote goes through the quote check (evidence.py); a missing or failing
+quote is a malformed answer: the pass is reprompted once, then fails.
 
 WHAT THE MODEL MAY NOT DECIDE. A detail not mentioned has no value, quote or
 segment, and one stated has all three: either broken is malformed, never
 repaired. A detail stated from a segment below the transcript's confidence
 floor is marked uncertain in code, and every detail of an uncertain
 transcript is (settled()). The CRM note is at most 80 words, and the summary
-and note must be written in the language asked for; both are checked here.
+and note must be written in the language asked for -- at least 60 % of their
+letters outside quotes in its script (evidence.in_language); both are checked
+here.
 
 The prose pass reads the transcript and the SETTLED extraction -- validated
 and quote-checked output, in the data half and neutralised like the
@@ -28,9 +29,7 @@ transcript -- never a rejected answer.
 from __future__ import annotations
 
 import json
-import re
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -39,23 +38,18 @@ from dodeal_ai.core.config import Settings
 from dodeal_ai.core.context import TenantScope
 from dodeal_ai.core.llm import LLMClient, LLMResponse
 from dodeal_ai.core.llm.profiles import PROFILE_UNIT_B_EXTRACT, PROFILE_UNIT_B_PROSE
-from dodeal_ai.units.call_intelligence.alarms import words
-from dodeal_ai.units.call_intelligence.language import (
-    SummaryLanguage,
-    summary_language,
+from dodeal_ai.units.call_intelligence.evidence import (
+    CallText,
+    Errors,
+    evidence_errors,
+    in_language,
+    quote_errors,
 )
-from dodeal_ai.units.call_intelligence.numbers import prompt_copy
 from dodeal_ai.units.call_intelligence.prompts import (
     EXTRACT_TEMPLATE,
     PROSE_TEMPLATE,
     REPROMPT_TAIL_TEMPLATE,
     build_call_prompt,
-    render_transcript,
-)
-from dodeal_ai.units.call_intelligence.transcriber import (
-    MIN_MEAN_CONFIDENCE,
-    Segment,
-    Transcript,
 )
 from dodeal_ai.units.structured_intelligence.llm_call import (
     call_model,
@@ -66,13 +60,12 @@ EXTRACT_LABEL = "llm.unit_b.extract"
 PROSE_LABEL = "llm.unit_b.prose"
 
 # What each answer may cost (register item 15), sized against the longest
-# ARABIC answer: the extraction is six elements, six details with a quote each
-# and the mood; the prose is six sentences and an 80-word note. Register item
-# 116: a reasoning model would spend hidden tokens from these and truncate.
+# ARABIC answer: the extraction is six elements with their quotes, six details
+# with a quote each and the mood; the prose is six sentences and an 80-word
+# note. Register item 116: a reasoning model would spend hidden tokens here.
 EXTRACT_MAX_OUTPUT_TOKENS = 2500
 PROSE_MAX_OUTPUT_TOKENS = 1500
 
-MAX_QUOTE_WORDS = 25
 MAX_CRM_NOTE_WORDS = 80
 
 STATED = "stated"
@@ -100,9 +93,8 @@ type _Item = Annotated[str, Field(min_length=1, max_length=_ITEM_CHARS)]
 type _Items = Annotated[list[_Item], Field(max_length=_ITEMS)]
 type _Quote = Annotated[str | None, Field(max_length=_SENTENCE_CHARS)]
 type _SegmentId = Annotated[str | None, Field(pattern=_SEGMENT)]
-
-_ARABIC_LETTER = re.compile(r"[ء-ي]")
-_LATIN_LETTER = re.compile(r"[A-Za-z]")
+type _Said = Annotated[str, Field(min_length=1, max_length=_SENTENCE_CHARS)]
+type _Cited = Annotated[str, Field(pattern=_SEGMENT)]
 
 
 class _Strict(BaseModel):
@@ -125,10 +117,30 @@ class Details(_Strict):
     decision_maker: Detail
 
 
+class Item(_Strict):
+    """A concern or an agreement, and the quote it rests on."""
+
+    text: _Item
+    quote: _Said
+    segment: _Cited
+
+
+class Wanted(_Strict):
+    """What the client wants, in one sentence, and the quote it rests on."""
+
+    text: _Said
+    quote: _Said
+    segment: _Cited
+
+
 class NextStep(_Strict):
+    """The next action, and the quote it rests on whenever there is one."""
+
     action: Annotated[str | None, Field(max_length=_SENTENCE_CHARS)]
     owner: Literal["agent", "client", "unknown"]
     due: Annotated[str | None, Field(max_length=_ITEM_CHARS)]
+    quote: _Quote
+    segment: _SegmentId
 
 
 class Mood(_Strict):
@@ -138,12 +150,12 @@ class Mood(_Strict):
 
 
 class Extraction(_Strict):
-    """unit_b.extract's answer, exactly."""
+    """unit_b.extract's answer, exactly (extract_v2)."""
 
-    wanted: Annotated[str | None, Field(max_length=_SENTENCE_CHARS)]
+    wanted: Wanted | None
     discussed: _Items
-    concerns: _Items
-    agreed: _Items
+    concerns: Annotated[list[Item], Field(max_length=_ITEMS)]
+    agreed: Annotated[list[Item], Field(max_length=_ITEMS)]
     next_step: NextStep
     ending: Literal["moved_forward", "stalled", "needs_follow_up", "dead"]
     details: Details
@@ -157,75 +169,28 @@ class Prose(_Strict):
     crm_note: Annotated[str, Field(min_length=1, max_length=_NOTE_CHARS)]
 
 
-@dataclass(frozen=True, slots=True)
-class CallText:
-    """The transcript as both passes see it: each segment's prompt copy, the
-    summary language, and whether the transcript as a whole is uncertain."""
-
-    segments: tuple[Segment, ...]
-    shown: tuple[str, ...]
-    language: SummaryLanguage
-    uncertain: bool
-
-    @classmethod
-    def of(cls, transcript: Transcript, *, country_code: str) -> CallText:
-        """`country_code` is the tenant's, which a local number is masked under."""
-        return cls(
-            segments=transcript.segments,
-            shown=tuple(
-                prompt_copy(segment.text, country_code=country_code)
-                for segment in transcript.segments
-            ),
-            language=summary_language(transcript),
-            uncertain=transcript.uncertain,
+def _element_errors(call: CallText, answer: Extraction) -> Errors:
+    """The quote check on each summary element's evidence."""
+    errors: Errors = []
+    if answer.wanted is not None:
+        errors += quote_errors(
+            call, "wanted", answer.wanted.quote, answer.wanted.segment
         )
-
-    def data(self) -> str:
-        """The transcript first, then the language line."""
-        transcript = render_transcript(self.segments, self.shown)
-        return f"TRANSCRIPT:\n{transcript}\n\nLANGUAGE: {self.language}"
-
-    def index_of(self, segment: str) -> int | None:
-        """The position of the segment an id names, or None for none."""
-        index = int(segment[1:]) - 1
-        return index if index < len(self.segments) else None
-
-    def low_confidence(self, segment: str | None) -> bool:
-        index = None if segment is None else self.index_of(segment)
-        return index is not None and (
-            self.segments[index].confidence < MIN_MEAN_CONFIDENCE
-        )
-
-
-def _contains(said: Sequence[str], quote: Sequence[str]) -> bool:
-    size = len(quote)
-    return any(said[at : at + size] == quote for at in range(len(said) - size + 1))
-
-
-def _quote_errors(
-    call: CallText, where: str, quote: str | None, segment: str | None
-) -> list[tuple[str, str]]:
-    """The quote check for one cited quote; [] when it passes."""
-    if quote is None and segment is None:
-        return []
-    if quote is None or segment is None:
-        return [(where, "quote_without_segment")]
-    index = call.index_of(segment)
-    if index is None:
-        return [(where, "segment_unknown")]
-    quoted = words(quote)
-    if not quoted or len(quoted) > MAX_QUOTE_WORDS:
-        return [(where, "quote_length")]
-    if not _contains(words(call.shown[index]), quoted):
-        return [(where, "quote_not_in_segment")]
-    return []
+    for field in ("concerns", "agreed"):
+        items: list[Item] = getattr(answer, field)
+        for n, item in enumerate(items):
+            errors += quote_errors(call, f"{field}.{n}", item.quote, item.segment)
+    step = answer.next_step
+    check = quote_errors if step.action is None else evidence_errors
+    errors += check(call, "next_step", step.quote, step.segment)
+    return errors
 
 
 def check_extraction(call: CallText) -> Callable[[Extraction], None]:
     """The rules the schema cannot hold (module docstring), for call_model."""
 
     def check(answer: Extraction) -> None:
-        errors: list[tuple[str, str]] = []
+        errors: Errors = []
         for name in DETAIL_NAMES:
             detail: Detail = getattr(answer.details, name)
             where = f"details.{name}"
@@ -234,28 +199,24 @@ def check_extraction(call: CallText) -> Callable[[Extraction], None]:
                 errors.append((where, "not_mentioned_with_value"))
             if detail.state == STATED and None in given:
                 errors.append((where, "stated_without_quote"))
-            errors += _quote_errors(call, where, detail.quote, detail.segment)
-        errors += _quote_errors(call, "mood", answer.mood.quote, answer.mood.segment)
+            errors += quote_errors(call, where, detail.quote, detail.segment)
+        errors += quote_errors(call, "mood", answer.mood.quote, answer.mood.segment)
+        errors += _element_errors(call, answer)
         if errors:
             raise output_rejected(EXTRACT_LABEL, tuple(errors))
 
     return check
 
 
-def _in_language(text: str, language: SummaryLanguage) -> bool:
-    letters = _ARABIC_LETTER if language == "ar" else _LATIN_LETTER
-    return letters.search(text) is not None
-
-
 def check_prose(call: CallText) -> Callable[[Prose], None]:
     """The CRM note's length, and both texts in the language asked for."""
 
     def check(answer: Prose) -> None:
-        errors: list[tuple[str, str]] = []
+        errors: Errors = []
         if len(answer.crm_note.split()) > MAX_CRM_NOTE_WORDS:
             errors.append(("crm_note", "crm_note_too_long"))
         for field, text in (("summary", answer.summary), ("crm_note", answer.crm_note)):
-            if not _in_language(text, call.language):
+            if not in_language(text, call.language):
                 errors.append((field, "wrong_language"))
         if errors:
             raise output_rejected(PROSE_LABEL, tuple(errors))

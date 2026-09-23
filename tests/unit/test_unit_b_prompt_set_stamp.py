@@ -1,8 +1,8 @@
 """Unit B's prompt set and its stamp move together, or the build fails.
 
-The same guard as Unit A's (register item 146): the three templates
-UNIT_B_TEMPLATES names are hashed, name and stripped text, and the digest is
-pinned beside PROMPT_SET_VERSION. A prompt edit without a bump is a red build.
+The same guard as Unit A's (register item 146): the templates UNIT_B_TEMPLATES
+names are hashed, name and stripped text, and the digest is pinned beside
+PROMPT_SET_VERSION. A prompt edit without a bump is a red build.
 Both constants are written down by hand, together, when the stamp moves.
 """
 
@@ -16,8 +16,8 @@ from dodeal_ai.units.call_intelligence.prompts import (
     UNIT_B_TEMPLATES,
 )
 
-PROMPT_SET = "unit_b_prompts_v1"
-PROMPT_SET_DIGEST = "61db949fa483baad224c9594b2d07f543b93fcb1b24d2dc6fc916e2e8b83b29f"
+PROMPT_SET = "unit_b_prompts_v2"
+PROMPT_SET_DIGEST = "c19f6c22a34caa84758454fdb98e70f3d059367ca5677c47d1575368a1476da6"
 
 _HOW_TO_UPDATE = (
     "A Unit B prompt template changed. Bump PROMPT_SET_VERSION in "
@@ -40,6 +40,6 @@ def _digest() -> str:
 
 
 def test_the_unit_b_prompt_set_digest_matches_its_stamp() -> None:
-    """The three shipped templates hash to the digest pinned for this stamp."""
+    """The shipped templates hash to the digest pinned for this stamp."""
     assert PROMPT_SET_VERSION == PROMPT_SET, _HOW_TO_UPDATE
     assert _digest() == PROMPT_SET_DIGEST, _HOW_TO_UPDATE
