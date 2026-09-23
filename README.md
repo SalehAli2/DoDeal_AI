@@ -122,6 +122,16 @@ docker compose up --build
 
 The API reads `.env` (copy `.env.example` first) and talks to the `redis` service's queue and cost databases automatically.
 
+The same `up` starts the three call workers (Unit B), one container per queue, each running:
+
+```bash
+python -m dodeal_ai.workers.calls priority   # worker-priority
+python -m dodeal_ai.workers.calls normal     # worker-normal
+python -m dodeal_ai.workers.calls overnight  # worker-overnight
+```
+
+Outside Docker, run the same line with `uv run` in front, one terminal per queue. Until a speech-to-text adapter exists, each worker refuses to start with `stt_not_configured`, so a worker that is down in `docker compose ps` is expected. The FakeTranscriber can only be handed in by `scripts/call_demo.py --worker`, and only with `DODEAL_CALL_DEMO_ALLOW_LOCAL_AUDIO=true`.
+
 #### The demo
 
 One command brings up Redis and the API against the committed demo runtime (`.env.demo`, register item 78):
@@ -195,7 +205,7 @@ dodeal-ai/
 │   │   └── lead.py
 │   ├── tools/{leads.py,httpx_transport.py}
 │   ├── units/{structured_intelligence,call_intelligence,assistant,sales_automation}/
-│   └── workers/runner.py
+│   └── workers/calls.py
 ├── study.py
 ├── tests/
 │   ├── helpers/{tokens.py,test_tokens.py}
@@ -222,7 +232,7 @@ dodeal-ai/
 | `.dockerignore` | Keeps the build context small and secrets out of it: the virtual environment, `.git`, `.env*`, tests, docs, build artifacts, caches, and `study.py`. |
 | `Dockerfile` | Multi-stage build. Installs the locked dependencies and the project **non-editable** into a venv, then copies only that venv into a slim runtime image — no source tree in the final image, so this is the same installed-wheel shape `scripts/verify_wheel.py` checks in CI. |
 | `.pre-commit-config.yaml` | Local git hooks: ruff lint, ruff format check, and mypy, all run through `uv run` so they use the exact versions locked in `uv.lock`. |
-| `docker-compose.yml` | `api` (built from the `Dockerfile`) plus a local Redis 7 container for the cost and queue gates. Its `.env` is `required: false`, so a clean checkout comes up and fails closed in `Settings` with a reason rather than in Compose without one. |
+| `docker-compose.yml` | `api` (built from the `Dockerfile`), the three call workers `worker-priority`, `worker-normal` and `worker-overnight` (each `extends: api` minus its port and HEALTHCHECK), plus a local Redis 7 container for the cost and queue gates. Its `.env` is `required: false`, so a clean checkout comes up and fails closed in `Settings` with a reason rather than in Compose without one. |
 | `ASSUMPTIONS.md` | The single seam ledger for the service. Every provisional decision, organized by status (confirmed, built, parked, pending, deferred), the seam it lives behind, and how to correct it when the real answer lands. |
 | `CONTRIBUTING.md` | The contributor guide: local setup, shared vs personal Claude Code permissions, architectural rules that tooling cannot enforce, deliberate decisions not to reverse, branch-protection requirements, the OWASP LLM Top 10 checkpoint habit, and commit style. |
 | `.gitattributes` | `* text=auto eol=lf` plus explicit `binary` for `*.png` and `*.pdf`. Line endings are decided here rather than by each developer's `core.autocrlf`. |
@@ -369,7 +379,7 @@ Root contracts owned by the backend, kept inside the package for the same reason
 
 | File | Purpose |
 | --- | --- |
-| `runner.py` | The arq worker entrypoint (Decision 2): `WorkerSettings` with Redis derived from `redis_queue_url` and an empty `functions` list. Importing it opens no connection. Step 14 adds the lanes and the real tasks. |
+| `calls.py` | The only worker entry point (Decision 2): one arq worker per call queue, `python -m dodeal_ai.workers.calls priority\|normal\|overnight`, running `process_call` and `deliver_callback` with Redis derived from `redis_queue_url` and each run cut off at `DODEAL_CALL_JOB_TIMEOUT_SECONDS`. Importing it opens no connection. |
 
 ### `tests/` (repo-wide guards)
 
@@ -484,7 +494,7 @@ All configuration is read through `Settings` in `core/config.py`. Every variable
 | `DODEAL_LLM_TIMEOUT_SECONDS` | `60.0` | Per-call timeout for a model call, passed into the watchdog with `retry=False`. Deliberately separate from the 10s external-call timeout. **It is the outer bound:** the HTTP call itself gets a strict share of it (`_HTTP_TIMEOUT_SHARE`), so httpx gives up first and the failure names the provider instead of arriving as a bare `TimeoutError`. |
 | `DODEAL_LLM_MAX_OUTPUT_TOKENS` | `1024` | Default output ceiling, sized with headroom for Arabic. |
 | `DODEAL_LLM_PROFILES` | `{}` (empty map) | JSON map of profile name to that task's model choice, e.g. `{"unit_a.classify":{"provider":"anthropic","model":"<id>","temperature":0},"unit_a.vague":{"provider":"anthropic","model":"<id>"},"unit_a.score":{"provider":"anthropic","model":"<id>"}}`. A profile may carry `temperature` (0–1) and `max_output_tokens`. **The fallback rule:** a profile name that is not in this map resolves to the `DODEAL_LLM_PROVIDER` / `DODEAL_LLM_MODEL` pair at temperature 0, so a single-model deployment configures that pair and writes no profiles at all. A profile's `max_output_tokens` may only **lower** a task's ceiling, never raise it. Every value is validated when settings are built: a malformed map, an empty `model`, an unknown provider or a temperature outside 0–1 refuses to start. |
-| `DODEAL_REDIS_QUEUE_URL` | `redis://localhost:6379/0` | The work-queue Redis connection, read by the arq worker (`workers/runner.py`). |
+| `DODEAL_REDIS_QUEUE_URL` | `redis://localhost:6379/0` | The work-queue Redis connection, read by the call workers (`workers/calls.py`). |
 | `DODEAL_REDIS_COST_URL` | `redis://localhost:6379/1` | The cost and quota Redis connection used by Gate 4. |
 | `DODEAL_REDIS_OPERATIONAL_URL` | `redis://localhost:6379/2` | The operational Redis connection used by the feature units for idempotency reservations, clarification rate limits and per-note attempt counters. A separate logical DB from the cost connection because the failure policies differ: losing the cost store fails open, losing the idempotency store fails closed. |
 | `DODEAL_REDIS_CONNECT_TIMEOUT_SECONDS` | `0.25` | How long a connection attempt to either Redis may take. Deliberately far shorter than the read timeout: reaching a listening socket on the same network is a sub-millisecond operation, so a slow connect means the host is gone rather than busy. **Provisional** — sized against a same-network Redis, not measured. Must be positive; `0` is refused at startup. |

@@ -17,6 +17,26 @@ services:
       DODEAL_REDIS_JOBS_URL: redis://redis:6379/3
     depends_on: [redis]
 
+  # The call workers (Unit B): the api service's image, env files and Redis
+  # URLs, minus its port, one container per queue so each gets its own SIGTERM
+  # and exit. Until a speech-to-text adapter exists each refuses to start.
+  worker-priority: &call-worker
+    extends:
+      service: api
+    command: ["python", "-m", "dodeal_ai.workers.calls", "priority"]
+    ports: !reset []
+    # The image's HEALTHCHECK probes the api's port, which a worker never opens.
+    healthcheck:
+      disable: true
+
+  worker-normal:
+    <<: *call-worker
+    command: ["python", "-m", "dodeal_ai.workers.calls", "normal"]
+
+  worker-overnight:
+    <<: *call-worker
+    command: ["python", "-m", "dodeal_ai.workers.calls", "overnight"]
+
   redis:
     image: redis:7-alpine
     ports:
