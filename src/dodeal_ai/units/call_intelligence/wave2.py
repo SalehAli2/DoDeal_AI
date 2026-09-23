@@ -4,6 +4,8 @@ another, each on its own profile.
   objections  unit_b.objections  the client's objections (objections.py)
   score       unit_b.score       yes-or-no checks, marked in code (score.py);
                                  not run at all when the call gets no score
+  escalations unit_b.escalations the five BRD issues, merged with stage 1's
+                                 off_channel_contact (escalations.py)
 
 EACH PASS STANDS ALONE. Its answer becomes its part; a pass that fails --
 twice unanswered, or malformed after its one reprompt -- leaves its part null
@@ -17,13 +19,21 @@ tenant's country code, the summary language decided in code.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
+
+from pydantic import BaseModel
 
 from dodeal_ai.core.config import Settings
 from dodeal_ai.core.context import TenantScope
 from dodeal_ai.core.jobs import Job, start_stage2_pass
-from dodeal_ai.core.llm import LLMClient
+from dodeal_ai.core.llm import LLMClient, LLMResponse
 from dodeal_ai.units.call_intelligence.config import CallsConfig
+from dodeal_ai.units.call_intelligence.escalations import (
+    Flags,
+    escalations_part,
+    find_flags,
+)
 from dodeal_ai.units.call_intelligence.evidence import CallText
 from dodeal_ai.units.call_intelligence.objections import (
     Objections,
@@ -48,6 +58,7 @@ from dodeal_ai.units.call_intelligence.transcriber import Transcript
 
 OBJECTIONS = "objections"
 SCORE = "score"
+ESCALATIONS = "escalations"
 
 
 @dataclass(slots=True)
@@ -70,30 +81,55 @@ async def wave2(
     settings: Settings,
     usage: PassUsage,
     eligible: bool,
+    stage1_escalations: Sequence[dict[str, object]],
 ) -> Wave2:
     """Wave 2 for one transcript. JobGone when stage 2 stopped under it.
-    `eligible` is the call's eligibility for full analysis, as it is now."""
+    `eligible` is the call's eligibility for full analysis, as it is now;
+    `stage1_escalations` are the ones stage 1 found in code."""
     call = CallText.of(transcript, country_code=config.phone_country_code)
     run = PassRun(
         job, work, config.result_ttl_seconds, client, usage, start_stage2_pass
     )
     wave = Wave2()
-    try:
-        found, model = await run_pass(
-            run,
-            OBJECTIONS,
-            Objections,
-            lambda metered: find_objections(
-                metered, call, scope=scope, settings=settings
-            ),
-        )
-        wave.parts[OBJECTIONS] = objections_part(found)
-        wave.models[OBJECTIONS] = model
-    except PassFailed as failed:
-        wave.parts[OBJECTIONS] = None
-        wave.reasons[OBJECTIONS] = str(failed)
+    found = await _part(
+        run,
+        wave,
+        OBJECTIONS,
+        Objections,
+        lambda metered: find_objections(metered, call, scope=scope, settings=settings),
+    )
+    wave.parts[OBJECTIONS] = None if found is None else objections_part(found)
     await _score(run, wave, call, config, scope, settings, eligible)
+    flags = await _part(
+        run,
+        wave,
+        ESCALATIONS,
+        Flags,
+        lambda metered: find_flags(metered, call, scope=scope, settings=settings),
+    )
+    wave.parts[ESCALATIONS] = (
+        None if flags is None else escalations_part(call, flags, stage1_escalations)
+    )
     return wave
+
+
+async def _part[M: BaseModel](
+    run: PassRun,
+    wave: Wave2,
+    name: str,
+    schema: type[M],
+    call: Callable[[LLMClient], Awaitable[tuple[M, LLMResponse]]],
+) -> M | None:
+    """One pass's answer, its model noted; None, the part null with why, when
+    it has failed."""
+    try:
+        answer, model = await run_pass(run, name, schema, call)
+    except PassFailed as failed:
+        wave.parts[name] = None
+        wave.reasons[name] = str(failed)
+        return None
+    wave.models[name] = model
+    return answer
 
 
 async def _score(
@@ -120,21 +156,17 @@ async def _score(
         return
     # The gate passes only with both: a share, and the objections answered.
     assert share is not None and objections is not None
-    try:
-        checks, model = await run_pass(
-            run,
-            SCORE,
-            ScoreChecks,
-            lambda metered: ask_checks(metered, call, scope=scope, settings=settings),
-        )
-    except PassFailed as failed:
-        wave.parts[SCORE] = None
-        wave.reasons[SCORE] = str(failed)
-        return
-    wave.parts[SCORE] = score_call(
-        checks,
-        objections,
-        client_share=share,
-        agent_interruptions=interruptions(call.segments)[AGENT],
+    checks = await _part(
+        run,
+        wave,
+        SCORE,
+        ScoreChecks,
+        lambda metered: ask_checks(metered, call, scope=scope, settings=settings),
     )
-    wave.models[SCORE] = model
+    if checks is not None:
+        wave.parts[SCORE] = score_call(
+            checks,
+            objections,
+            client_share=share,
+            agent_interruptions=interruptions(call.segments)[AGENT],
+        )

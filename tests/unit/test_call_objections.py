@@ -37,6 +37,7 @@ from dodeal_ai.units.call_intelligence.objections import (
 )
 from dodeal_ai.units.call_intelligence.paid import JobGone, PassUsage
 from dodeal_ai.units.call_intelligence.prompts import (
+    ESCALATIONS_TEMPLATE,
     OBJECTIONS_TEMPLATE,
     REPROMPT_TAIL_TEMPLATE,
 )
@@ -245,6 +246,7 @@ async def _done_job():
 
 
 async def _wave2(llm: FakeLLM, job, work: dict | None = None, usage=None):
+    llm.script_for(ESCALATIONS_TEMPLATE, json_response({"escalations": []}))
     return await wave2(
         llm,
         job,
@@ -255,6 +257,7 @@ async def _wave2(llm: FakeLLM, job, work: dict | None = None, usage=None):
         settings=get_settings(),
         usage=usage or PassUsage(),
         eligible=True,
+        stage1_escalations=[],
     )
 
 
@@ -265,14 +268,15 @@ async def test_wave2_runs_the_objections_pass_and_keeps_its_answer() -> None:
 
     assert wave.parts[OBJECTIONS] is not None
     assert wave.parts[OBJECTIONS]["raised"] == 2
-    assert (wave.reasons, wave.models) == (
-        {"score": "scoring_off"},
-        {OBJECTIONS: "fake-model-pinned"},
-    )
+    assert wave.reasons == {"score": "scoring_off"}
+    assert wave.models[OBJECTIONS] == "fake-model-pinned"
     assert usage.tokens[OBJECTIONS]["calls"] == 1
     kept = await read_work("tenant-a", "job-1")
     assert kept[OBJECTIONS]["answer"] == ANSWER
-    assert (await read_job("tenant-a", "job-1")).passes == {OBJECTIONS: 1}
+    assert (await read_job("tenant-a", "job-1")).passes == {
+        OBJECTIONS: 1,
+        "escalations": 1,
+    }
 
 
 async def test_a_failed_pass_leaves_its_part_null_with_its_reason() -> None:
@@ -289,8 +293,8 @@ async def test_a_kept_answer_is_never_paid_for_again() -> None:
     work = {OBJECTIONS: {"answer": ANSWER, "model": "kept-model"}}
     llm = FakeLLM()
     wave = await _wave2(llm, job, work)
-    assert llm.call_count == 0
-    assert wave.models == {OBJECTIONS: "kept-model"}
+    assert [call.profile for call in llm.calls] == ["unit_b.escalations"]
+    assert wave.models[OBJECTIONS] == "kept-model"
 
 
 async def test_a_stage2_no_longer_pending_stops_before_any_call() -> None:

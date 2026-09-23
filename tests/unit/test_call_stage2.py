@@ -32,6 +32,7 @@ from dodeal_ai.units.call_intelligence.config import (
     parse_unit_b_section,
 )
 from dodeal_ai.units.call_intelligence.fake_transcriber import FakeTranscriber
+from dodeal_ai.units.call_intelligence.prompts import ESCALATIONS_TEMPLATE
 from dodeal_ai.units.call_intelligence.queues import NORMAL_QUEUE, STAGE2_QUEUE
 from dodeal_ai.units.call_intelligence.schemas import CallJobRequest
 from dodeal_ai.units.call_intelligence.stage2 import RESULT_GONE, analyse_stage2
@@ -235,6 +236,7 @@ NONE_RAISED = {"objections": []}
 
 def _stage2_ctx(*answers: object, job_try: int = 1) -> dict[str, Any]:
     llm = FakeLLM(*(json_response(a) for a in answers or (NONE_RAISED,)))
+    llm.script_for(ESCALATIONS_TEMPLATE, json_response({"escalations": []}))
     return {"llm": llm, "job_try": job_try}
 
 
@@ -251,7 +253,10 @@ async def test_stage2_settles_done_on_the_stage1_transcript(
     stage2_ctx = _stage2_ctx()
     with caplog.at_level(logging.INFO, logger="dodeal_ai.unit_b"):
         await analyse_stage2(stage2_ctx, "tenant-a", JOB)
-    assert stage2_ctx["llm"].call_count == 1
+    assert [c.profile for c in stage2_ctx["llm"].calls] == [
+        "unit_b.objections",
+        "unit_b.escalations",
+    ]
 
     job = await _job()
     assert (job.status, job.stage2, job.stage2_reason) == (
@@ -364,7 +369,10 @@ async def test_a_run_cut_off_by_its_deadline_runs_again_and_resumes(
     resumed = _stage2_ctx(job_try=2)
     await analyse_stage2(resumed, "tenant-a", JOB)
     job = await _job()
-    assert (job.stage2, job.passes) == (Stage2State.DONE, {"objections": 2})
+    assert (job.stage2, job.passes) == (
+        Stage2State.DONE,
+        {"objections": 2, "escalations": 1},
+    )
 
 
 async def test_a_deadline_on_the_last_run_fails_stage2(ctx: dict, monkeypatch) -> None:
@@ -405,6 +413,21 @@ async def test_stage2_that_stops_under_its_passes_settles_nothing(
     monkeypatch.setattr(stage2, "wave2", gone)
     await analyse_stage2(_stage2_ctx(), "tenant-a", JOB)
     assert (await _job()).stage2 is Stage2State.PENDING
+
+
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [
+        ({"signals": {"escalations": [{"type": "x"}, "junk"]}}, [{"type": "x"}]),
+        ({"signals": None}, []),
+        ({"signals": {"escalations": None}}, []),
+        ({}, []),
+    ],
+)
+def test_stage1_escalations_are_read_from_its_signals_block(
+    result: dict, expected: list
+) -> None:
+    assert stage2._stage1_escalations(result) == expected
 
 
 async def test_a_dead_job_store_is_retried_by_arq(monkeypatch) -> None:

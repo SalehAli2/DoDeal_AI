@@ -18,6 +18,7 @@ from dodeal_ai.core.validation import OutputValidationError
 from dodeal_ai.units.call_intelligence.config import CallsConfig
 from dodeal_ai.units.call_intelligence.evidence import CallText
 from dodeal_ai.units.call_intelligence.paid import PassUsage
+from dodeal_ai.units.call_intelligence.prompts import ESCALATIONS_TEMPLATE
 from dodeal_ai.units.call_intelligence.score import (
     CHECK_NAMES,
     RUBRIC,
@@ -391,6 +392,7 @@ async def _done_job():
 async def _wave2(
     llm: FakeLLM, *, scoring: bool = True, eligible: bool = True, segments=SEGMENTS
 ):
+    llm.script_for(ESCALATIONS_TEMPLATE, json_response({"escalations": []}))
     return await wave2(
         llm,
         await _done_job(),
@@ -401,6 +403,7 @@ async def _wave2(
         settings=get_settings(),
         usage=PassUsage(),
         eligible=eligible,
+        stage1_escalations=[],
     )
 
 

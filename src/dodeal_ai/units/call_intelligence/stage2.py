@@ -150,7 +150,7 @@ async def _analyse(
     run.job = job
     result = await read_result(tenant, job_id)
     kept = None if result is None else result.get("transcript")
-    if not isinstance(kept, dict):
+    if result is None or not isinstance(kept, dict):
         await _settle(job, run, Stage2State.FAILED, RESULT_GONE)
         return
     client = ctx.get("llm")
@@ -179,10 +179,18 @@ async def _analyse(
             settings=get_settings(),
             usage=run.usage,
             eligible=eligible_for_full_analysis(job, config, transcript),
+            stage1_escalations=_stage1_escalations(result),
         )
     except JobGone:
         return
     await _settle(job, run, Stage2State.DONE, None)
+
+
+def _stage1_escalations(result: dict[str, object]) -> list[dict[str, object]]:
+    """The escalations stage 1 found in code, from its stored signals block."""
+    signals = result.get("signals")
+    found = signals.get("escalations") if isinstance(signals, dict) else None
+    return [item for item in found or () if isinstance(item, dict)]
 
 
 async def _again_or_fail(
