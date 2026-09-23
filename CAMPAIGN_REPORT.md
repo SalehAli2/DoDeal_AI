@@ -7337,3 +7337,39 @@ modes, then one stress test (sabotage in brackets).
 - 156 CODEOWNERS: Unit B owned by the wrong person; a rename re-owns it. Test:
   rules pinned and the path exists (owner added fails 2).
 - docs(owasp): not code; every test it cites is checked to exist.
+
+## Batch: Unit B batch 2, stuck jobs then wave 1 (branch call-intelligence)
+
+One block for the batch, by the lead's instruction. Per item: two production
+failure modes, then one stress test (sabotage in brackets).
+
+- stuck deadline: a hung transcriber holds a worker until arq cancels it and
+  records nothing; a cut-off download is never retried. Test: a hung
+  transcriber retries, then dead_letter + call.failed (deadline wrapper off
+  fails 5).
+- stuck sweep: a job whose worker died stays running forever; a sweep
+  re-enqueues the same stall every 300 s. Test: a job left transcribing is
+  swept once and ends done or dead-lettered (enqueue off fails 3).
+- prompts: an edited template ships under an old stamp; a segment forges a
+  line or a delimiter. Test: the digest and the leak checks (no sabotage).
+- language: a mixed call summarised in the wrong language; a tie flips per
+  run. Test: one table row per case (tie to en fails 1).
+- signals: float noise counts a 0.3 s gap as an interruption; a quick reply
+  to a finished sentence counts. Test: scripted call gives the numbers
+  (punctuation rule off fails 2).
+- numbers: a price masked or an agent's personal number missed; a spoken
+  number read by the model. Test: lead number matches, agent's own number
+  escalates, 1,200,000 AED unmasked (agent match off fails 3).
+- alarms: a variant spelling or one extra word slips past; a client's words
+  escalate. Test: variant + one extra word matches, client does not escalate
+  (gap of 0 fails 4).
+- passes: an invented quote reaches the CRM; a not-mentioned detail is
+  guessed. Test: invented quote reprompts then fails (quote check off fails 7).
+- stage1: a crash after wave 1 pays the model again; a model outage loses the
+  transcript. Test: crash after the passes re-pays nothing (kept work ignored
+  fails 2).
+- llm: a worker starts with no model and pays for transcripts it cannot read;
+  a second config drifts from the service's. Test: no client, no start.
+- demo: a real call's transcript is read from, and committed in, the repo; a
+  malformed file reaches the model. Test: a repo path is refused.
+- docs(owasp): not code; every test the four rewritten items cite exists.
