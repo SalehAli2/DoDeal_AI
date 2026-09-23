@@ -33,6 +33,8 @@ CALL_QUEUES = (PRIORITY_QUEUE, NORMAL_QUEUE, OVERNIGHT_QUEUE)
 
 # The task every call queue runs (units/call_intelligence/worker.py).
 PROCESS_CALL = "process_call"
+# The task that retries a callback on its schedule (delivery.py).
+DELIVER_CALLBACK = "deliver_callback"
 
 
 def queue_for(lead_status: str | None, config: CallsConfig) -> str:
@@ -47,6 +49,34 @@ def arq_job_id(tenant: str, job_id: str, *, resume: int = 0) -> str:
     """The arq id: one per job, and one per resume after a pause."""
     base = f"{tenant}:{job_id}"
     return base if resume == 0 else f"{base}:resume:{resume}"
+
+
+async def enqueue_delivery(
+    tenant: str,
+    job_id: str,
+    event: str,
+    *,
+    attempt: int,
+    queue: str,
+    defer: timedelta,
+) -> None:
+    """Put the `attempt`-th retry of one event on the job's queue, once."""
+    client = get_queue_client()
+    try:
+        await queue_breaker().call(
+            lambda: client.enqueue_job(
+                DELIVER_CALLBACK,
+                tenant,
+                job_id,
+                event,
+                attempt,
+                _job_id=f"{tenant}:{job_id}:{event}:{attempt}",
+                _queue_name=queue,
+                _defer_by=defer,
+            )
+        )
+    except redis.RedisError:
+        raise QueueUnavailable() from None
 
 
 async def enqueue_call(

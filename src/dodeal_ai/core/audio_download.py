@@ -103,8 +103,9 @@ def _checked_host(url: str, allowed_hosts: frozenset[str]) -> tuple[str, int]:
     return host, port
 
 
-async def _public_address(host: str, port: int, resolve: Resolver) -> str:
-    """Rule 4: the first address, once every address has been checked."""
+async def public_address(host: str, port: int, resolve: Resolver) -> str:
+    """Rule 4: the first address, once every address has been checked. Also
+    what a callback is sent to (core/callbacks.py)."""
     try:
         addresses = await resolve(host, port)
     except OSError:
@@ -169,7 +170,7 @@ async def downloaded_audio(
     if expires_at <= now:
         raise _refused("audio_link_expired")
     host, port = _checked_host(url, allowed_hosts)
-    address = await _public_address(host, port, resolve)
+    address = await public_address(host, port, resolve)
     pinned = httpx.URL(url).copy_with(host=address)
 
     # Made only once the headers have passed, so a refusal leaves no file.

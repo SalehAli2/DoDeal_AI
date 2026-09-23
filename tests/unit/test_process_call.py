@@ -517,13 +517,16 @@ async def test_a_pause_of_a_job_gone_terminal_queues_nothing(
 async def test_the_worker_settings_carry_one_more_arq_try_than_the_job() -> None:
     fake = FakeTranscriber()
     built = calls_worker.worker_settings(NORMAL_QUEUE, transcriber=fake)
-    (function,) = built["functions"]
-    assert (function.name, function.max_tries) == ("process_call", 3)
+    assert [(f.name, f.max_tries) for f in built["functions"]] == [
+        ("process_call", 3),
+        ("deliver_callback", 2),
+    ]
     assert built["queue_name"] == NORMAL_QUEUE
 
     ctx: dict[str, Any] = {}
     await built["on_startup"](ctx)
     assert ctx["transcriber"] is fake
+    assert callable(ctx["deliver"])
     assert isinstance(ctx["http"], httpx.AsyncClient)
     assert ctx["http"].follow_redirects is False
     await built["on_shutdown"](ctx)

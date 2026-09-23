@@ -41,6 +41,7 @@ from dodeal_ai.core.audio_download import (
     downloaded_audio,
     resolve_host,
 )
+from dodeal_ai.core.callbacks import CALL_FAILED, CALL_STAGE1
 from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.context import RequestContext, TenantScope
 from dodeal_ai.core.cost.limiter import (
@@ -71,8 +72,8 @@ from dodeal_ai.units.call_intelligence.transcriber import (
 _logger = logging.getLogger("dodeal_ai.unit_b")
 
 # The stage-1 event, and the one a dead-lettered or failed job sends.
-STAGE1 = "call.stage1"
-FAILED = "call.failed"
+STAGE1 = CALL_STAGE1
+FAILED = CALL_FAILED
 
 # How long a retryable failure waits per attempt already made: 30 s, then 60 s.
 RETRY_DELAY_SECONDS = 30

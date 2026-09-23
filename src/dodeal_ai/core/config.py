@@ -181,6 +181,10 @@ class Settings(BaseSettings):
     # item 35). 2 rides out one bad download; a transcription is never re-paid
     # whatever this says. Higher re-fetches a dead link; 1 never retries at all.
     call_max_tries: int = Field(default=2, ge=1)
+    # Each tenant's callback signing secret, JSON {"tenant": "secret"}; SecretStr
+    # so a repr prints stars. Read once, in core/callbacks.py. A tenant missing
+    # here gets NO callback -- never an unsigned one -- and polls GET instead.
+    call_callback_secrets: dict[str, SecretStr] = {}
 
     # --- Watchdog: timeout + retry policy for external calls (§6) -----------
     # Placeholder values; tune per real LLM/tool latency later.

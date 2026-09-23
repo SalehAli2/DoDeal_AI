@@ -31,6 +31,10 @@ from arq.worker import run_worker
 
 from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.logging_config import configure_logging
+from dodeal_ai.units.call_intelligence.delivery import (
+    deliver_callback,
+    deliver_event,
+)
 from dodeal_ai.units.call_intelligence.queues import (
     NORMAL_QUEUE,
     OVERNIGHT_QUEUE,
@@ -63,6 +67,10 @@ def worker_settings(
         # No proxies from the environment and no redirects: the download pins
         # the address it checked, and a proxy would bypass that.
         ctx["http"] = httpx.AsyncClient(trust_env=False, follow_redirects=False)
+        # Signed callbacks to the tenant's URL, retried on their own schedule.
+        ctx["deliver"] = lambda job, event, config: deliver_event(
+            ctx, job, event, config
+        )
 
     async def shutdown(ctx: dict[str, Any]) -> None:
         http = ctx.get("http")
@@ -70,7 +78,11 @@ def worker_settings(
             await http.aclose()
 
     return {
-        "functions": [func(process_call, max_tries=settings.call_max_tries + 1)],
+        "functions": [
+            func(process_call, max_tries=settings.call_max_tries + 1),
+            # One re-run for a worker that died mid-POST; the schedule is ours.
+            func(deliver_callback, max_tries=2),
+        ],
         "queue_name": queue,
         "redis_settings": redis_settings(),
         "on_startup": startup,
