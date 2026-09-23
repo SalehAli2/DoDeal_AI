@@ -45,6 +45,9 @@ type Resolver = Callable[[str, int], Awaitable[list[str]]]
 
 _HTTPS_PORT = 443
 
+# DEMO ONLY (CALL_DEMO_ALLOW_LOCAL_AUDIO): the schemes a local link may use.
+_LOCAL_SCHEMES = frozenset({"http", "https"})
+
 
 class AudioDownloadError(Exception):
     """A refused or failed download. str() is the reason code alone; `retryable`
@@ -73,12 +76,14 @@ async def resolve_host(host: str, port: int) -> list[str]:
     return [str(info[4][0]) for info in infos]
 
 
-def _is_public(address: str) -> bool:
-    """Globally routable and not multicast. An IPv4-mapped IPv6 address is
-    judged as the IPv4 address it carries."""
+def _is_public(address: str, *, allow_loopback: bool = False) -> bool:
+    """Globally routable and not multicast -- or loopback, for the demo only.
+    An IPv4-mapped IPv6 address is judged as the IPv4 address it carries."""
     ip = ipaddress.ip_address(address)
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
         ip = ip.ipv4_mapped
+    if allow_loopback and ip.is_loopback:
+        return True
     return ip.is_global and not ip.is_multicast
 
 
@@ -86,24 +91,35 @@ def _refused(reason: str) -> AudioDownloadError:
     return AudioDownloadError(reason, retryable=False)
 
 
-def _checked_host(url: str, allowed_hosts: frozenset[str]) -> tuple[str, int]:
-    """Rules 2 and 3: the host and port of an https link to a listed host."""
+def link_parts(url: str, *, allow_local: bool) -> tuple[str, str, int]:
+    """Rule 2: the scheme, host and port of an https link on 443 -- or, for
+    the demo only, http on any port. AudioDownloadError otherwise."""
     try:
         parts = urlsplit(url)
-        port = parts.port or _HTTPS_PORT
+        port = parts.port or (_HTTPS_PORT if parts.scheme == "https" else 80)
     except ValueError:
         raise _refused("audio_url_invalid") from None
-    if parts.scheme != "https":
+    allowed = _LOCAL_SCHEMES if allow_local else frozenset({"https"})
+    if parts.scheme not in allowed:
         raise _refused("audio_scheme_refused")
-    if port != _HTTPS_PORT:
+    if port != _HTTPS_PORT and not allow_local:
         raise _refused("audio_port_refused")
-    host = (parts.hostname or "").lower()
+    return parts.scheme, (parts.hostname or "").lower(), port
+
+
+def _checked_host(
+    url: str, allowed_hosts: frozenset[str], *, allow_local: bool
+) -> tuple[str, str, int]:
+    """Rules 2 and 3: scheme, host and port of a permitted link to a listed host."""
+    scheme, host, port = link_parts(url, allow_local=allow_local)
     if host not in allowed_hosts:
         raise _refused("audio_host_not_allowed")
-    return host, port
+    return scheme, host, port
 
 
-async def public_address(host: str, port: int, resolve: Resolver) -> str:
+async def public_address(
+    host: str, port: int, resolve: Resolver, *, allow_loopback: bool = False
+) -> str:
     """Rule 4: the first address, once every address has been checked. Also
     what a callback is sent to (core/callbacks.py)."""
     try:
@@ -112,9 +128,20 @@ async def public_address(host: str, port: int, resolve: Resolver) -> str:
         raise AudioDownloadError("audio_host_unresolved", retryable=True) from None
     if not addresses:
         raise AudioDownloadError("audio_host_unresolved", retryable=True)
-    if not all(_is_public(address) for address in addresses):
+    if not all(_is_public(a, allow_loopback=allow_loopback) for a in addresses):
         raise _refused("audio_address_refused")
     return addresses[0]
+
+
+def pinned_request(
+    url: str, scheme: str, host: str, port: int, address: str
+) -> tuple[httpx.URL, dict[str, str], dict[str, str]]:
+    """The URL aimed at the checked address, the Host header naming the host,
+    and the TLS server name for https (rule 5)."""
+    default = _HTTPS_PORT if scheme == "https" else 80
+    host_header = host if port == default else f"{host}:{port}"
+    extensions = {"sni_hostname": host} if scheme == "https" else {}
+    return httpx.URL(url).copy_with(host=address), {"Host": host_header}, extensions
 
 
 def _media_type(response: httpx.Response) -> str:
@@ -164,14 +191,16 @@ async def downloaded_audio(
     timeout_seconds: float,
     http: httpx.AsyncClient,
     resolve: Resolver = resolve_host,
+    allow_local: bool = False,
 ) -> AsyncIterator[DownloadedAudio]:
     """Fetch `url` under every rule above and yield it on disk; the file is
-    deleted when the block exits, however it exits."""
+    deleted when the block exits, however it exits. `allow_local` is
+    CALL_DEMO_ALLOW_LOCAL_AUDIO: http, any port, and loopback, for the demo."""
     if expires_at <= now:
         raise _refused("audio_link_expired")
-    host, port = _checked_host(url, allowed_hosts)
-    address = await public_address(host, port, resolve)
-    pinned = httpx.URL(url).copy_with(host=address)
+    scheme, host, port = _checked_host(url, allowed_hosts, allow_local=allow_local)
+    address = await public_address(host, port, resolve, allow_loopback=allow_local)
+    pinned, headers, extensions = pinned_request(url, scheme, host, port, address)
 
     # Made only once the headers have passed, so a refusal leaves no file.
     path: Path | None = None
@@ -181,8 +210,8 @@ async def downloaded_audio(
                 async with http.stream(
                     "GET",
                     pinned,
-                    headers={"Host": host},
-                    extensions={"sni_hostname": host},
+                    headers=headers,
+                    extensions=extensions,
                     follow_redirects=False,
                 ) as response:
                     _check_response(response, max_bytes)

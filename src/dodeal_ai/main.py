@@ -16,7 +16,7 @@ from dodeal_ai.core.config import (
 )
 from dodeal_ai.core.errors import register_error_handlers
 from dodeal_ai.core.llm import build_llm_client
-from dodeal_ai.core.logging_config import configure_logging
+from dodeal_ai.core.logging_config import configure_logging, warn_if_demo_audio
 from dodeal_ai.core.prompting import clear_templates, preload_templates
 from dodeal_ai.core.redis import (
     check_cost_redis_ready,
@@ -173,6 +173,9 @@ async def lifespan(app: FastAPI):
             "service_token_not_configured",
             extra={"event": "service_token_not_configured"},
         )
+
+    # Unit B's demo flag (register item "demo"): loud, never a refusal.
+    warn_if_demo_audio(settings)
 
     if settings.backend_scheme == "http":
         # NOT a refusal, and never one: the demo needs http, so this is the

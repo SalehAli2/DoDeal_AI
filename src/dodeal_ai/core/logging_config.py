@@ -21,7 +21,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
 
-from dodeal_ai.core.config import get_settings
+from dodeal_ai.core.config import Settings, get_settings
 from dodeal_ai.core.log_safety import cause_frames_only, chained, frames_only
 
 # Every attribute a stock LogRecord carries. Anything ELSE on the record --
@@ -143,6 +143,19 @@ class JsonFormatter(logging.Formatter):
         payload["logger"] = record.name
 
         return json.dumps(payload, default=str, separators=(",", ":"), sort_keys=True)
+
+
+def warn_if_demo_audio(settings: Settings) -> None:
+    """One ERROR at startup while CALL_DEMO_ALLOW_LOCAL_AUDIO is on: the
+    service will fetch from and post to http and loopback. Not a refusal --
+    the demo needs it -- but never quiet (register item "demo")."""
+    if settings.call_demo_allow_local_audio:
+        logging.getLogger("dodeal_ai.startup").error(
+            "call_demo_audio_insecure -- call audio and callbacks may use http "
+            "and loopback. Demo only; anywhere real a push can aim this "
+            "service at its own network.",
+            extra={"event": "call_demo_audio_insecure"},
+        )
 
 
 def configure_logging() -> None:

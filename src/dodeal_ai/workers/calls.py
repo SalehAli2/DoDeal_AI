@@ -30,7 +30,7 @@ from arq import func
 from arq.worker import run_worker
 
 from dodeal_ai.core.config import get_settings
-from dodeal_ai.core.logging_config import configure_logging
+from dodeal_ai.core.logging_config import configure_logging, warn_if_demo_audio
 from dodeal_ai.units.call_intelligence.delivery import (
     deliver_callback,
     deliver_event,
@@ -63,6 +63,7 @@ def worker_settings(
 
     async def startup(ctx: dict[str, Any]) -> None:
         configure_logging()
+        warn_if_demo_audio(settings)
         ctx["transcriber"] = transcriber or build_transcriber(settings)
         # No proxies from the environment and no redirects: the download pins
         # the address it checked, and a proxy would bypass that.

@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator
 
+from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.jobs import JobStatus
 
 # The longest audio link accepted, in characters. A signed link with its
@@ -28,6 +29,13 @@ MAX_VOICEPRINT_CHARS = 16_384
 
 # A phone number's SHA-256, as the CRM hashes it: 64 lower-case hex.
 _PHONE_HASH = r"^[0-9a-f]{64}$"
+
+
+def _schemes() -> frozenset[str]:
+    """https, and http as well only under the demo's local-audio flag."""
+    if get_settings().call_demo_allow_local_audio:
+        return frozenset({"https", "http"})
+    return frozenset({"https"})
 
 
 class CallJobRequest(BaseModel):
@@ -54,14 +62,15 @@ class CallJobRequest(BaseModel):
     @field_validator("audio_url")
     @classmethod
     def _https_link(cls, value: str) -> str:
-        """https with a host and no credentials. Which hosts are allowed is the
-        download's rule (core/audio_download.py), not the schema's."""
+        """https with a host and no credentials -- http too under the demo's
+        CALL_DEMO_ALLOW_LOCAL_AUDIO. Which hosts are allowed is the download's
+        rule (core/audio_download.py), not the schema's."""
         try:
             parts = urlsplit(value)
             has_credentials = parts.username is not None or parts.password is not None
         except ValueError:
             raise ValueError("audio_url") from None
-        if parts.scheme != "https" or not parts.hostname or has_credentials:
+        if parts.scheme not in _schemes() or not parts.hostname or has_credentials:
             raise ValueError("audio_url")
         return value
 

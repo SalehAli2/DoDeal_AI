@@ -32,6 +32,7 @@ from dodeal_ai.core.callbacks import (
     event_id,
     post_event,
 )
+from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.jobs import Job, JobStatus, read_job, read_result, transition
 from dodeal_ai.core.logging_config import job_log_context
 from dodeal_ai.units.call_intelligence.config import CallsConfig, resolve_calls_config
@@ -74,6 +75,7 @@ async def _attempt(
         timestamp=str(int(time.time())),
         http=ctx["http"],
         resolve=ctx.get("resolve", resolve_host),
+        allow_local=get_settings().call_demo_allow_local_audio,
     )
 
 

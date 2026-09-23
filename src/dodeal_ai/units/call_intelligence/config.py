@@ -20,6 +20,7 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.tenant_config import ResolvedSection, resolve_section
 
 __all__ = [
@@ -92,7 +93,8 @@ class CallsConfig(BaseModel):
     @field_validator("callback_url")
     @classmethod
     def _https_callback(cls, value: str | None) -> str | None:
-        """https with a host and no credentials. Fixed message: never the URL."""
+        """https with a host and no credentials -- http too, for the demo
+        only, under CALL_DEMO_ALLOW_LOCAL_AUDIO. Fixed message: never the URL."""
         if value is None:
             return None
         try:
@@ -100,7 +102,12 @@ class CallsConfig(BaseModel):
             has_credentials = parts.username is not None or parts.password is not None
         except ValueError:
             raise ValueError("callback_url") from None
-        if parts.scheme != "https" or not parts.hostname or has_credentials:
+        schemes = (
+            {"https", "http"}
+            if get_settings().call_demo_allow_local_audio
+            else {"https"}
+        )
+        if parts.scheme not in schemes or not parts.hostname or has_credentials:
             raise ValueError("callback_url")
         return value
 

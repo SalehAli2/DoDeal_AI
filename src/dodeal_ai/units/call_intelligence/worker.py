@@ -314,6 +314,7 @@ async def _transcribe(
             timeout_seconds=settings.call_download_timeout_seconds,
             http=ctx["http"],
             resolve=ctx.get("resolve", resolve_host),
+            allow_local=settings.call_demo_allow_local_audio,
         ) as audio:
             run.download_ms, run.bytes = _ms_since(started), audio.size_bytes
             seconds = int(str(meta["duration_seconds"]))

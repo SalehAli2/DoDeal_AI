@@ -195,6 +195,10 @@ class Settings(BaseSettings):
     # so a repr prints stars. Read once, in core/callbacks.py. A tenant missing
     # here gets NO callback -- never an unsigned one -- and polls GET instead.
     call_callback_secrets: dict[str, SecretStr] = {}
+    # DEMO ONLY: admit http links and loopback addresses for call audio and
+    # callbacks, so a laptop can serve both. False refuses them; True anywhere
+    # real lets a push make this service fetch from and post to itself.
+    call_demo_allow_local_audio: bool = False
 
     # --- Watchdog: timeout + retry policy for external calls (§6) -----------
     # Placeholder values; tune per real LLM/tool latency later.

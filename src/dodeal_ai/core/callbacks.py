@@ -27,11 +27,16 @@ import hashlib
 import hmac
 import uuid
 from enum import StrEnum
-from urllib.parse import urlsplit
 
 import httpx
 
-from dodeal_ai.core.audio_download import AudioDownloadError, Resolver, public_address
+from dodeal_ai.core.audio_download import (
+    AudioDownloadError,
+    Resolver,
+    link_parts,
+    pinned_request,
+    public_address,
+)
 from dodeal_ai.core.config import get_settings
 
 CALL_STAGE1 = "call.stage1"
@@ -48,8 +53,6 @@ EVENT_HEADER = "X-DODEAL-Event"
 TIMESTAMP_HEADER = "X-DODEAL-Timestamp"
 EVENT_ID_HEADER = "X-DODEAL-Event-Id"
 SIGNATURE_HEADER = "X-DODEAL-Signature"
-
-_HTTPS_PORT = 443
 
 # Fixes every event id to this service's namespace.
 _EVENT_NAMESPACE = uuid.UUID("5b1d3c3e-8e5f-4f0e-9a44-6c1f0d2b7a91")
@@ -79,18 +82,6 @@ def _signature(tenant: str, timestamp: str, body: bytes) -> str | None:
     return hmac.new(key, message, hashlib.sha256).hexdigest()
 
 
-def _host(url: str) -> str | None:
-    """The host of an https link on the default port, else None."""
-    try:
-        parts = urlsplit(url)
-        port = parts.port or _HTTPS_PORT
-    except ValueError:
-        return None
-    if parts.scheme != "https" or port != _HTTPS_PORT or not parts.hostname:
-        return None
-    return parts.hostname.lower()
-
-
 async def post_event(
     url: str,
     *,
@@ -101,20 +92,27 @@ async def post_event(
     timestamp: str,
     http: httpx.AsyncClient,
     resolve: Resolver,
+    allow_local: bool = False,
 ) -> Delivery:
     """Sign and POST one event to `url`, the tenant's callback URL. REFUSED
     when it can never be sent -- no secret, a bad URL, a private address --
-    RETRY for anything the CRM or the network might answer differently later."""
+    RETRY for anything the CRM or the network might answer differently later.
+    `allow_local` is the demo's flag: http, any port and loopback."""
     signature = _signature(tenant, timestamp, body)
-    host = _host(url)
-    if signature is None or host is None:
+    if signature is None:
         return Delivery.REFUSED
     try:
-        address = await public_address(host, _HTTPS_PORT, resolve)
+        scheme, host, port = link_parts(url, allow_local=allow_local)
+        if not host:
+            return Delivery.REFUSED
+        address = await public_address(host, port, resolve, allow_loopback=allow_local)
     except AudioDownloadError as refused:
         return Delivery.RETRY if refused.retryable else Delivery.REFUSED
+    pinned, pinned_headers, extensions = pinned_request(
+        url, scheme, host, port, address
+    )
     headers = {
-        "Host": host,
+        **pinned_headers,
         "Content-Type": "application/json",
         EVENT_HEADER: event,
         TIMESTAMP_HEADER: timestamp,
@@ -123,10 +121,10 @@ async def post_event(
     }
     try:
         response = await http.post(
-            httpx.URL(url).copy_with(host=address),
+            pinned,
             content=body,
             headers=headers,
-            extensions={"sni_hostname": host},
+            extensions=extensions,
             follow_redirects=False,
             timeout=get_settings().external_call_timeout_seconds,
         )

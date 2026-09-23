@@ -37,6 +37,7 @@ Usage:
     uv run python scripts/mint_demo_token.py
     uv run python scripts/mint_demo_token.py --route direct
     uv run python scripts/mint_demo_token.py --route history
+    uv run python scripts/mint_demo_token.py --route calls   # Unit B push
     uv run python scripts/mint_demo_token.py --route probe --ttl-seconds 60
     uv run python scripts/mint_demo_token.py --env-file .env   # non-demo
 
@@ -53,6 +54,7 @@ import argparse
 import json
 import sys
 import time
+from datetime import UTC, datetime, timedelta
 
 import jwt
 
@@ -105,13 +107,31 @@ _DEMO_REP_ID = 501
 # mint (register item D1), or the deployment's own maximum if that is shorter.
 SERVICE_TTL_SECONDS = 300
 
-_ROUTES = ("fetch", "direct", "history", "brief", "measures", "config", "probe")
+_ROUTES = (
+    "fetch",
+    "direct",
+    "history",
+    "brief",
+    "measures",
+    "config",
+    "probe",
+    "calls",
+)
 
 # The routes behind the service chain; every other route takes a user token.
-SERVICE_ROUTES = frozenset({"direct", "history", "brief", "measures", "config"})
+SERVICE_ROUTES = frozenset(
+    {"direct", "history", "brief", "measures", "config", "calls"}
+)
 
 # The routes that take a JSON body, and so a POST.
-_POST_ROUTES = frozenset({"fetch", "direct", "history"})
+_POST_ROUTES = frozenset({"fetch", "direct", "history", "calls"})
+
+# Unit B's push (--route calls): the recording scripts/call_demo.py serves by
+# default, and an invented call id. The link expires an hour after minting.
+DEMO_AUDIO_URL = "http://127.0.0.1:8765/demo-call.wav"
+_DEMO_CALL_ID = 9001
+_DEMO_CALL_SECONDS = 95
+_LINK_LIFETIME_SECONDS = 3600
 
 
 def _parse_args() -> argparse.Namespace:
@@ -156,6 +176,13 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--lead-id", type=int, default=_DEMO_LEAD_ID)
     parser.add_argument("--note-id", type=int, default=_DEMO_NOTE_ID)
+    parser.add_argument("--call-id", type=int, default=_DEMO_CALL_ID)
+    parser.add_argument(
+        "--audio-url",
+        default=DEMO_AUDIO_URL,
+        help="The recording --route calls pushes; scripts/call_demo.py serves "
+        f"this one (default: {DEMO_AUDIO_URL}).",
+    )
     parser.add_argument(
         "--env-file",
         default=DEFAULT_ENV_STACK[-1],
@@ -229,11 +256,31 @@ def _shell_quote(value: str) -> str:
     return "'" + value.replace("'", "'\\''") + "'"
 
 
+def calls_body(args: argparse.Namespace) -> dict[str, object]:
+    """Unit B's push: an invented call on the demo lead, its link live for an
+    hour from now."""
+    now = datetime.now(UTC).replace(microsecond=0)
+    return {
+        "call_id": args.call_id,
+        "lead_id": args.lead_id,
+        "author_id": 7,
+        "duration_seconds": _DEMO_CALL_SECONDS,
+        "recorded_at": now.isoformat(),
+        "audio_url": args.audio_url,
+        "audio_url_expires_at": (
+            now + timedelta(seconds=_LINK_LIFETIME_SECONDS)
+        ).isoformat(),
+        "language_hint": "mixed",
+    }
+
+
 def _body(args: argparse.Namespace) -> str | None:
     if args.route not in _POST_ROUTES:
         return None
     if args.route == "fetch":
         return json.dumps({"lead_id": args.lead_id, "note_id": args.note_id})
+    if args.route == "calls":
+        return json.dumps(calls_body(args))
     body: dict[str, object] = {
         "lead_id": args.lead_id,
         "note_id": args.note_id,
@@ -256,6 +303,7 @@ _PATHS = {
     # The versions read runs the whole gate chain and needs nothing else; the
     # old /_probe route is no longer served (register item 93).
     "probe": "/api/v1/meta/versions",
+    "calls": "/api/v1/calls/jobs",
 }
 
 
