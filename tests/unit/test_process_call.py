@@ -695,7 +695,12 @@ async def test_a_pause_of_a_job_gone_terminal_queues_nothing(
 # --- the worker process -----------------------------------------------------------
 
 
-async def test_the_worker_settings_carry_one_more_arq_try_than_the_job() -> None:
+async def test_the_worker_settings_carry_one_more_arq_try_than_the_job(
+    monkeypatch,
+) -> None:
+    """The demo flag on, a handed-in transcriber is the worker's."""
+    monkeypatch.setenv("DODEAL_CALL_DEMO_ALLOW_LOCAL_AUDIO", "true")
+    get_settings.cache_clear()
     fake = FakeTranscriber()
     built = calls_worker.worker_settings(NORMAL_QUEUE, transcriber=fake)
     assert [(f.name, f.max_tries) for f in built["functions"]] == [
@@ -713,6 +718,15 @@ async def test_the_worker_settings_carry_one_more_arq_try_than_the_job() -> None
     await built["on_shutdown"](ctx)
     assert ctx["http"].is_closed
     await built["on_shutdown"]({})
+
+
+async def test_the_fake_with_the_demo_flag_off_refuses_to_start() -> None:
+    """No real call is ever answered with the fake's invented words."""
+    built = calls_worker.worker_settings(NORMAL_QUEUE, transcriber=FakeTranscriber())
+    ctx: dict[str, Any] = {}
+    with pytest.raises(ConfigError, match="^fake_transcriber_needs_demo$"):
+        await built["on_startup"](ctx)
+    assert "transcriber" not in ctx
 
 
 async def test_a_worker_with_no_transcriber_refuses_to_start() -> None:

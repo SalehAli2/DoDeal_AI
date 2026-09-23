@@ -17,7 +17,7 @@ whose last attempt crashed.
 
 THE TRANSCRIBER IS BUILT BY THE FACTORY, which refuses while no adapter exists,
 so a worker with nothing to transcribe with does not start. A test or the demo
-passes one in; nothing selects a fake by flag.
+passes one in, and the worker starts with it only under the demo flag.
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ from dodeal_ai.units.call_intelligence.queues import (
 )
 from dodeal_ai.units.call_intelligence.transcriber import (
     Transcriber,
-    build_transcriber,
+    select_transcriber,
 )
 from dodeal_ai.units.call_intelligence.worker import process_call
 from dodeal_ai.workers.runner import redis_settings
@@ -64,7 +64,7 @@ def worker_settings(
     async def startup(ctx: dict[str, Any]) -> None:
         configure_logging()
         warn_if_demo_audio(settings)
-        ctx["transcriber"] = transcriber or build_transcriber(settings)
+        ctx["transcriber"] = select_transcriber(settings, transcriber)
         # No proxies from the environment and no redirects: the download pins
         # the address it checked, and a proxy would bypass that.
         ctx["http"] = httpx.AsyncClient(trust_env=False, follow_redirects=False)

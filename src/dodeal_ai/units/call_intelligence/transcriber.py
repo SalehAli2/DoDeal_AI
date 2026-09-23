@@ -4,7 +4,8 @@ ONE METHOD, like the LLM seam: `transcribe(audio_path, *, language_hint)`. A
 provider adapter is a class that satisfies it; nothing else in the unit knows
 which provider ran. No real adapter exists yet -- `build_transcriber` refuses
 rather than guess, and has no test switch: a test or the demo hands a
-Transcriber in directly (fake_transcriber.py), it is never chosen by a flag.
+Transcriber in directly (fake_transcriber.py), and `select_transcriber`
+refuses one handed in unless CALL_DEMO_ALLOW_LOCAL_AUDIO is on.
 
 THE TRANSCRIPT CHECKS ITSELF. Segments are in order and never overlap, every
 segment names a speaker, and the two judgements made of the whole -- the
@@ -57,6 +58,13 @@ class TranscriberNotConfigured(ConfigError):
 
     def __init__(self) -> None:
         super().__init__("stt_not_configured")
+
+
+class HandedTranscriberRefused(ConfigError):
+    """A transcriber was handed to a worker with the demo flag off."""
+
+    def __init__(self) -> None:
+        super().__init__("fake_transcriber_needs_demo")
 
 
 class Segment(BaseModel):
@@ -173,3 +181,14 @@ def build_transcriber(settings: Settings) -> Transcriber:
     refuses: a worker with no transcriber must not start and drain the queue
     into failures. There is no test switch here and must never be one."""
     raise TranscriberNotConfigured()
+
+
+def select_transcriber(settings: Settings, handed: Transcriber | None) -> Transcriber:
+    """A worker's transcriber: the factory's, or one handed in -- the fake,
+    for the demo -- only while CALL_DEMO_ALLOW_LOCAL_AUDIO is on. Off, the
+    worker refuses to start rather than answer real calls with invented words."""
+    if handed is None:
+        return build_transcriber(settings)
+    if not settings.call_demo_allow_local_audio:
+        raise HandedTranscriberRefused()
+    return handed
