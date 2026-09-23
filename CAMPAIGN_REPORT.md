@@ -7262,3 +7262,13 @@ dashboard or alert that summed the old unlabelled series now double-reads or
 misses series until it aggregates over route.
 Stress test: a history judgement's two lines say history and its series move
 under route="history" (sabotage: route off judgement_completed fails 3).
+
+## CI: register item 113, four more coverage floors at 100
+
+api/routes/admin.py, tools/crm_reads.py, units/structured_intelligence/
+measures.py and units/structured_intelligence/language.py are floored at 100 in
+scripts/check_coverage_floors.py (asked for); each measured 100 when added.
+Production failure modes: (1) a new branch in the admin routes or the measures
+ships with no test and the repo-wide average hides it; (2) a renamed file drops
+its floor silently -- the script fails closed on a pattern that matches nothing.
+Stress test: the check passes all 28 floors (sabotage: language.py at 101 FAILs).

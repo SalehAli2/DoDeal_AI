@@ -38,6 +38,13 @@ decides what a salesperson is told about their own work:
                        call sent twice.
     core/inflight.py  the counter load shedding reads. Wrong -> a count that
                        drifts, shedding traffic the service could serve.
+    api/routes/admin.py  a tenant's rules changed at runtime. Wrong -> a rule
+                       stored or refused on a path nobody ran.
+    tools/crm_reads.py  the CRM reads behind the brief. Wrong -> a page lost.
+    units/structured_intelligence/measures.py  the per-rep measures a manager
+                       is shown. Wrong -> a figure nobody tested.
+    units/structured_intelligence/language.py  the note's script. Wrong -> a
+                       question asked in the wrong language.
 
 A file matched by both a `**` pattern and its own exact pattern is checked
 against both and printed twice; the stricter floor governs. That is deliberate
@@ -132,6 +139,18 @@ _FLOORS: dict[str, float] = {
     # 95 as item 113 sets it; the file measured 100 when the floor was added, so
     # the margin is headroom and not a known uncovered line.
     "src/dodeal_ai/middleware/inflight.py": 95,
+    # Register item 113, four more, asked for at 100; each measured 100 when
+    # added. The admin routes: a gap is a rule change stored or refused untested.
+    "src/dodeal_ai/api/routes/admin.py": 100,
+    # The keyset CRM reads (item 143): a gap is a page or a refusal of the
+    # backend's answer that no test has read.
+    "src/dodeal_ai/tools/crm_reads.py": 100,
+    # The per-rep measures (item 144): pure arithmetic a manager acts on, so a
+    # gap is a figure or a suppression shipped without a test behind it.
+    "src/dodeal_ai/units/structured_intelligence/measures.py": 100,
+    # The note's script (item 34): pure functions over a string; a gap is a
+    # note answered in the wrong language.
+    "src/dodeal_ai/units/structured_intelligence/language.py": 100,
 }
 
 
