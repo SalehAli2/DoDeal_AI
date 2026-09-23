@@ -112,11 +112,22 @@ def _score_answer(**checks: bool):
     return json_response(score_payload(**checks))
 
 
-def _happy_path(note_type: str = "discovery"):
-    """One judgement's three answers, in the order the pipeline issues them:
-    classification first (it chooses the other two prompts), then vague detection
-    and scoring, which are issued together."""
-    return [_classified(note_type), _vague_answer(), _score_answer()]
+def _happy(llm: FakeLLM | None = None, *, times: int = 1) -> FakeLLM:
+    """Queue `times` judgements' three answers on `llm`, each for the template
+    that asks for it (register item 10): vague detection and scoring are
+    gathered, so no answer may depend on which of the two reaches the fake first."""
+    llm = FakeLLM() if llm is None else llm
+    for _ in range(times):
+        _answers(llm, [_classified("discovery")], [_vague_answer()], [_score_answer()])
+    return llm
+
+
+def _answers(llm: FakeLLM, classify, vague=(), score=()) -> FakeLLM:
+    """Append one discovery judgement's answers, per template, to `llm`."""
+    llm.script_for(CLASSIFY_TEMPLATE, *classify)
+    llm.script_for(template_for(NoteType.DISCOVERY), *vague)
+    llm.script_for(SCORE_TEMPLATE, *score)
+    return llm
 
 
 @pytest.fixture
@@ -135,7 +146,7 @@ def llm() -> FakeLLM:
     returning a default, so a path that calls the model more often than the
     pipeline is specified to is loud instead of silently absorbed.
     """
-    return FakeLLM(*(_happy_path() + _happy_path()))
+    return _happy(times=2)
 
 
 @pytest.fixture
@@ -804,7 +815,9 @@ def test_malformed_model_output_is_503_malformed_output(client, llm):
 def test_malformed_output_releases_the_idempotency_key(client, llm, operational):
     # Otherwise the caller is told 409 for the next 24 hours for a judgement
     # that never happened.
-    llm.rescript(response("not json"), response("still not json"), *_happy_path())
+    llm.rescript()
+    llm.script_for(CLASSIFY_TEMPLATE, response("not json"), response("still not json"))
+    _happy(llm)
     assert client.post(JUDGE, json=_body(), headers=_headers()).status_code == 503
     assert operational.store == {}
     assert client.post(JUDGE, json=_body(), headers=_headers()).status_code == 200
@@ -830,11 +843,12 @@ def test_a_reprompt_on_one_pass_does_not_re_issue_the_other(client, llm, json_lo
     # together, and each enters call_model separately -- so a malformed vague
     # answer buys VAGUE a second call and leaves scoring alone. Four calls, not
     # five, and only one of them carries a tail.
-    llm.rescript(
-        _classified("discovery"),
-        response("The note looks a bit thin to me."),
-        _vague_answer(),
-        _score_answer(),
+    llm.rescript()
+    _answers(
+        llm,
+        [_classified("discovery")],
+        [response("The note looks a bit thin to me."), _vague_answer()],
+        [_score_answer()],
     )
     r = client.post(JUDGE, json=_body(), headers=_headers())
 
@@ -862,7 +876,9 @@ def test_a_persistently_malformed_pass_is_503_and_releases_the_key(
 ):
     # Two calls on that pass, then it stops; the key is released so the caller
     # can retry rather than being told 409 for a judgement that never happened.
-    llm.rescript(response("not json"), response("still not json"), *_happy_path())
+    llm.rescript()
+    llm.script_for(CLASSIFY_TEMPLATE, response("not json"), response("still not json"))
+    _happy(llm)
     r = client.post(JUDGE, json=_body(), headers=_headers())
 
     assert r.status_code == 503
@@ -890,12 +906,9 @@ def test_each_pass_sends_its_own_output_ceiling(client, llm):
 def test_a_truncated_answer_is_reprompted_not_accepted(client, llm):
     # MAX_TOKENS is malformed even when the fragment parses. Without this the
     # judgement would be stamped on the beginning of an answer.
-    llm.rescript(
-        truncated(json.dumps({"note_type": "discovery"})),
-        _classified("discovery"),
-        _vague_answer(),
-        _score_answer(),
-    )
+    llm.rescript()
+    llm.script_for(CLASSIFY_TEMPLATE, truncated(json.dumps({"note_type": "discovery"})))
+    _happy(llm)
     r = client.post(JUDGE, json=_body(), headers=_headers())
 
     assert r.status_code == 200
@@ -911,10 +924,11 @@ def test_a_provider_failure_is_503_model_unavailable(client, llm):
 
 
 def test_a_provider_failure_releases_the_key_so_a_retry_works(client, llm, operational):
-    llm.rescript(
-        LLMProviderError(LLMErrorReason.UNAVAILABLE, transient=True),
-        *_happy_path(),
+    llm.rescript()
+    llm.script_for(
+        CLASSIFY_TEMPLATE, LLMProviderError(LLMErrorReason.UNAVAILABLE, transient=True)
     )
+    _happy(llm)
     assert client.post(JUDGE, json=_body(), headers=_headers()).status_code == 503
     assert operational.store == {}
     assert client.post(JUDGE, json=_body(), headers=_headers()).status_code == 200
@@ -940,10 +954,12 @@ def _idem_key(text: str = GOOD_NOTE) -> str:
 def test_scenario_1_a_good_note_is_accepted_silently(client, llm, operational):
     # 63 of 80 -> 79, `good`, at or above accept_threshold. Nothing is asked,
     # because there is nothing wrong with the note -- and so nothing is counted.
-    llm.rescript(
-        _classified("discovery"),
-        _vague_answer(is_vague=False, missing=[], prompt=None),
-        _score_answer(ns_action=True, cl_substance=False),
+    llm.rescript()
+    _answers(
+        llm,
+        [_classified("discovery")],
+        [_vague_answer(is_vague=False, missing=[], prompt=None)],
+        [_score_answer(ns_action=True, cl_substance=False)],
     )
     r = client.post(JUDGE, json=_body(), headers=_headers())
 
@@ -1004,10 +1020,9 @@ def test_scenario_3_a_poor_note_at_the_rate_limit_is_advised_but_not_asked(
     # unchanged -- the note is poor and the CRM is told so -- but we do not add
     # a fourth question to someone's day.
     operational.store[RATE_KEY] = "3"
-    llm.rescript(
-        _classified("discovery"),
-        _vague_answer(),
-        _score_answer(**_POOR),
+    llm.rescript()
+    _answers(
+        llm, [_classified("discovery")], [_vague_answer()], [_score_answer(**_POOR)]
     )
     body = client.post(JUDGE, json=_body(), headers=_headers()).json()
 
@@ -1032,7 +1047,8 @@ def test_a_burst_of_four_sends_three_prompts_and_rate_limits_the_fourth(
     taken and one refused."""
     burst = [11, 12, 13, 14]
     leads.notes[LEAD_ID] = [note(n, f"{GOOD_NOTE} Ref {n}.") for n in burst]
-    llm.rescript(*(_happy_path() * len(burst)))
+    llm.rescript()
+    _happy(llm, times=len(burst))
 
     withheld = []
     for note_id in burst:
@@ -1055,10 +1071,12 @@ def test_an_exhausted_window_outranks_having_nothing_to_ask(client, llm, operati
     """With no question to ask, an exhausted window still reports rate_limited from a
     read alone."""
     operational.store[RATE_KEY] = "3"
-    llm.rescript(
-        _classified("discovery"),
-        _vague_answer(is_vague=False, missing=[], prompt=None),
-        _score_answer(**_POOR),
+    llm.rescript()
+    _answers(
+        llm,
+        [_classified("discovery")],
+        [_vague_answer(is_vague=False, missing=[], prompt=None)],
+        [_score_answer(**_POOR)],
     )
 
     body = client.post(JUDGE, json=_body(), headers=_headers()).json()
@@ -1156,10 +1174,12 @@ def test_a_fair_but_not_vague_note_withholds_because_there_is_nothing_to_ask(
     # 69, so the action is still accept_flag_prompt -- but the vague pass found
     # nothing missing, so there is no question. "Nothing to ask" is a REASON,
     # not an absent field the CRM has to interpret.
-    llm.rescript(
-        _classified("discovery"),
-        _vague_answer(is_vague=False, missing=[], prompt=None),
-        _score_answer(),
+    llm.rescript()
+    _answers(
+        llm,
+        [_classified("discovery")],
+        [_vague_answer(is_vague=False, missing=[], prompt=None)],
+        [_score_answer()],
     )
     body = client.post(JUDGE, json=_body(), headers=_headers()).json()
 
@@ -1193,10 +1213,11 @@ def test_a_model_failure_then_a_retry_of_the_same_note_is_a_full_judgement(
     # The release path, at the route level: a 503 of OURS must not cost the
     # caller a 409 for the next 24 hours. And the failed attempt cost nothing
     # -- one prompt was sent in total, so the attempt counter reads 1, not 2.
-    llm.rescript(
-        LLMProviderError(LLMErrorReason.UNAVAILABLE, transient=True),
-        *_happy_path(),
+    llm.rescript()
+    llm.script_for(
+        CLASSIFY_TEMPLATE, LLMProviderError(LLMErrorReason.UNAVAILABLE, transient=True)
     )
+    _happy(llm)
     assert client.post(JUDGE, json=_body(), headers=_headers()).status_code == 503
     assert operational.store == {}
 
@@ -1251,13 +1272,12 @@ def test_the_stamp_is_the_model_that_scored_not_the_one_that_classified(
     # The marks ARE the judgement, so the stamp is the model that produced
     # them. A provider that rolled a model between the first call and the third
     # would otherwise have the judgement attributed to the wrong one.
-    llm.rescript(
-        _classified("discovery"),
-        _vague_answer(),
-        json_response(
-            score_payload(),
-            model="model-that-scored",
-        ),
+    llm.rescript()
+    _answers(
+        llm,
+        [_classified("discovery")],
+        [_vague_answer()],
+        [json_response(score_payload(), model="model-that-scored")],
     )
     body = client.post(JUDGE, json=_body(), headers=_headers()).json()
 
@@ -1287,11 +1307,13 @@ def test_a_provider_failure_on_the_reprompt_is_model_unavailable_and_releases(
     # THAT call is the one the provider failed. The caller is told the model was
     # unavailable, which is what happened, not malformed_output, which is what
     # the first answer was.
-    llm.rescript(
+    llm.rescript()
+    llm.script_for(
+        CLASSIFY_TEMPLATE,
         response("not json"),
         LLMProviderError(LLMErrorReason.UNAVAILABLE, transient=True),
-        *_happy_path(),
     )
+    _happy(llm)
     r = client.post(JUDGE, json=_body(), headers=_headers())
 
     assert r.status_code == 503

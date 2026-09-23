@@ -140,11 +140,18 @@ def _score_answer(**checks: bool):
     return json_response(score_payload(**checks))
 
 
-def _happy_path(note_type: str = "discovery"):
-    """One judgement's three answers, in the order the pipeline issues them:
-    classification first (it chooses the other two prompts), then vague detection
-    and scoring, which are issued together."""
-    return [_classified(note_type), _vague_answer(), _score_answer()]
+def _happy(
+    llm: FakeLLM | None = None, *, note_type: str = "discovery", times: int = 1
+) -> FakeLLM:
+    """Queue `times` judgements' three answers on `llm`, each for the template
+    that asks for it (register item 10): vague detection and scoring are
+    gathered, so no answer may depend on which of the two reaches the fake first."""
+    llm = FakeLLM() if llm is None else llm
+    for _ in range(times):
+        llm.script_for(CLASSIFY_TEMPLATE, _classified(note_type))
+        llm.script_for(template_for(NoteType(note_type)), _vague_answer())
+        llm.script_for(SCORE_TEMPLATE, _score_answer())
+    return llm
 
 
 def _scope(tenant: str = "tenant-a"):
@@ -188,7 +195,7 @@ def operational(monkeypatch) -> FakeOperationalRedis:
 
 @pytest.fixture
 def llm() -> FakeLLM:
-    return FakeLLM(*(_happy_path() + _happy_path()))
+    return _happy(times=2)
 
 
 @pytest.fixture
@@ -798,7 +805,9 @@ async def test_a_degraded_judgement_503s_on_a_malformed_first_answer(
     get_settings.cache_clear()
     cost.store["tokens:user:tenant-a:42"] = 900
     if malformed_pass == "classify":
-        llm = FakeLLM(response("not json"), *_happy_path())
+        llm = FakeLLM()
+        llm.script_for(CLASSIFY_TEMPLATE, response("not json"))
+        _happy(llm)
     else:
         llm = FakeLLM()
         llm.script_for(CLASSIFY_TEMPLATE, _classified("discovery"))
@@ -822,7 +831,9 @@ async def test_a_judgement_under_the_budget_still_reprompts(
     leads, operational, json_capture
 ):
     """Away from the budget the one reprompt is unchanged."""
-    llm = FakeLLM(response("not json"), *_happy_path())
+    llm = FakeLLM()
+    llm.script_for(CLASSIFY_TEMPLATE, response("not json"))
+    _happy(llm)
     judgement = await judge_note(
         _scope(), _request(), resubmission=False, deps=_deps_with(llm, leads)
     )
@@ -843,7 +854,7 @@ async def test_the_prompts_read_the_redacted_note_and_the_key_the_original(
 ):
     """Every variable half is redacted; the fingerprint and the outcome line are not."""
     leads.notes[LEAD_ID] = [note(NOTE_ID, CONTACT_NOTE)]
-    llm = FakeLLM(*_happy_path())
+    llm = _happy()
 
     await judge_note(
         _scope(), _request(), resubmission=False, deps=_deps_with(llm, leads)
@@ -1065,7 +1076,7 @@ async def test_vague_and_scoring_are_issued_before_either_returns(
     the classifier has returned and the other two are BOTH still open. Three
     sequential calls could never reach that state.
     """
-    llm = FakeLLM(*_happy_path(), hold_after=1)
+    llm = _happy(FakeLLM(hold_after=1))
     deps = JudgementDeps(
         leads=leads,
         llm=llm,
@@ -1101,10 +1112,11 @@ async def test_a_scoring_failure_releases_the_key_exactly_once(
 
     # Classification fine, vague fine, scoring dies. gather propagates the first
     # exception through the one release-on-error path.
-    llm = FakeLLM(
-        _classified("discovery"),
-        _vague_answer(),
-        LLMProviderError(LLMErrorReason.UNAVAILABLE, transient=True),
+    llm = FakeLLM()
+    llm.script_for(CLASSIFY_TEMPLATE, _classified("discovery"))
+    llm.script_for(VAGUE_TEMPLATE, _vague_answer())
+    llm.script_for(
+        SCORE_TEMPLATE, LLMProviderError(LLMErrorReason.UNAVAILABLE, transient=True)
     )
     deps = JudgementDeps(
         leads=leads,
@@ -1121,11 +1133,12 @@ async def test_a_scoring_failure_releases_the_key_exactly_once(
 
 
 async def test_a_vague_failure_also_releases_the_key(leads, operational):
-    llm = FakeLLM(
-        _classified("discovery"),
-        LLMProviderError(LLMErrorReason.UNAVAILABLE, transient=True),
-        _score_answer(),
+    llm = FakeLLM()
+    llm.script_for(CLASSIFY_TEMPLATE, _classified("discovery"))
+    llm.script_for(
+        VAGUE_TEMPLATE, LLMProviderError(LLMErrorReason.UNAVAILABLE, transient=True)
     )
+    llm.script_for(SCORE_TEMPLATE, _score_answer())
     deps = JudgementDeps(
         leads=leads,
         llm=llm,
@@ -1158,11 +1171,13 @@ async def test_a_suppressing_classification_never_issues_the_other_two(
 async def test_a_no_contact_note_is_scored_against_the_narrower_rubric(
     leads, operational, json_capture
 ):
-    llm = FakeLLM(
-        _classified("no_contact"),
+    llm = FakeLLM()
+    llm.script_for(CLASSIFY_TEMPLATE, _classified("no_contact"))
+    llm.script_for(
+        template_for(NoteType.NO_CONTACT),
         _vague_answer(missing=["next_step_with_date"]),
-        json_response(score_payload(NO_CONTACT_CHECKS)),
     )
+    llm.script_for(SCORE_TEMPLATE, json_response(score_payload(NO_CONTACT_CHECKS)))
     deps = JudgementDeps(
         leads=leads,
         llm=llm,
@@ -1649,7 +1664,7 @@ async def test_elapsed_covers_more_than_any_single_pass(
     monkeypatch.setattr(leads, "get_lead", _slow_get_lead)
     deps = JudgementDeps(
         leads=leads,
-        llm=FakeLLM(*_happy_path()),
+        llm=_happy(),
         config=get_tenant_config("tenant-a"),
         settings=get_settings(),
     )
@@ -1863,7 +1878,7 @@ async def test_the_fetch_spends_the_same_deadline(
         await never.wait()
 
     monkeypatch.setattr(leads, "get_lead", _hung_get_lead)
-    llm = FakeLLM(*_happy_path())
+    llm = _happy()
 
     with pytest.raises(JudgementDeadlineExceeded) as caught:
         await asyncio.wait_for(
@@ -1886,7 +1901,7 @@ async def test_a_judgement_inside_its_deadline_is_unaffected(
 ):
     """A deadline that is armed and not reached changes nothing: the same
     judgement, the same outcome line, and no deadline line."""
-    llm = FakeLLM(*_happy_path())
+    llm = _happy()
     if route == "fetch":
         judgement = await judge_note(
             _scope(),
@@ -1938,7 +1953,7 @@ async def test_a_request_cancelled_mid_classify_releases_the_reservation(
     re-delivers on every await. It is what the shield is for: without it, the
     second cancellation kills the DELETE in flight and the key survives.
     """
-    llm = FakeLLM(*_happy_path(), hold_after=0)
+    llm = _happy(FakeLLM(hold_after=0))
     task = asyncio.create_task(
         judge_note(
             _scope(), _request(), resubmission=False, deps=_deps_with(llm, leads)
@@ -1971,7 +1986,7 @@ async def test_a_request_cancelled_mid_classify_releases_the_reservation(
 async def test_the_reservation_is_short_while_the_judgement_runs(leads, operational):
     """Item 82 (d). Taken for four deadlines -- 100 s against a 25 s deadline --
     so a worker killed mid-judgement cannot lock the note for a day."""
-    llm = FakeLLM(*_happy_path(), hold_after=0)
+    llm = _happy(FakeLLM(hold_after=0))
     task = asyncio.create_task(
         judge_note(
             _scope(),
@@ -2000,16 +2015,16 @@ async def test_a_judgement_confirms_the_reservation_for_the_long_ttl(
     """Item 82 (c), items 1 and 2. Once the judgement exists the key holds it for
     the tenant's long TTL -- a classifier suppression exists as much as a score
     does, so it confirms the same way."""
-    script = (
-        _happy_path(classified)
-        if classified == "discovery"
-        else [_classified(classified)]
-    )
+    llm = FakeLLM()
+    if classified == "discovery":
+        _happy(llm)
+    else:
+        llm.script_for(CLASSIFY_TEMPLATE, _classified(classified))
     judgement = await judge_note(
         _scope(),
         _request(),
         resubmission=False,
-        deps=_deps_with(FakeLLM(*script), leads),
+        deps=_deps_with(llm, leads),
     )
     assert (judgement.suppressed is None) is (classified == "discovery")
 
@@ -2062,7 +2077,7 @@ async def test_a_confirm_that_fails_still_returns_the_judgement(
         _scope(),
         _request(),
         resubmission=False,
-        deps=_with_deadline(FakeLLM(*_happy_path()), leads, 25.0),
+        deps=_with_deadline(_happy(), leads, 25.0),
     )
 
     assert judgement.score is not None and judgement.decision is not None

@@ -7192,3 +7192,16 @@ silently breaks the eval script, which only a hand run would show; (2) the live
 guard is shared, so loosening it for one script loosens it for both.
 Stress test: the ast walk of run_eval.py finds no underscore import (sabotage:
 importing _row_for fails it).
+
+## Test: register item 10, the two positional-script modules use script_for
+
+test_judgement_pipeline.py and test_judgement_routes.py queue every answer that
+spans the vague/score gather per template (`_happy`, `_answers`), not by
+position; FakeLLM.rescript now drops the template queues with the positional
+script. Assertions unchanged.
+Production failure modes: (1) a positional script silently re-pins the gather's
+scheduling, so a harmless reorder in gather_or_cancel breaks dozens of tests
+for no product reason; (2) three route tests still assert call order itself.
+Stress test: start the gathered tasks in reverse -- the HEAD versions fail 37,
+the converted ones 3, all three order assertions (sabotage: no queue clear in
+rescript fails 18).

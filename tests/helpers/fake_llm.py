@@ -161,14 +161,16 @@ class FakeLLM:
         self._script.extend(more)
 
     def rescript(self, *script: LLMResponse | BaseException) -> None:
-        """Replace the remaining script, leaving the call record alone.
+        """Replace everything still scripted, leaving the call record alone.
 
         For the test that was handed a fixture-built client already wired into
         app.dependency_overrides and needs a different answer from it. The calls
         already recorded stay recorded -- this changes what happens NEXT, not
-        what happened.
+        what happened. The template queues go too: one left behind would outrank
+        the new script for its template and answer from the old fixture.
         """
         self._script[:] = script
+        self._by_template.clear()
 
     def script_for(
         self, template_name: str, *responses: LLMResponse | BaseException

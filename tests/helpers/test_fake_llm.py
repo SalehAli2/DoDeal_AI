@@ -197,6 +197,19 @@ async def test_positional_still_serves_a_prompt_with_no_template_queue() -> None
     assert "checks" in scored.text
 
 
+async def test_rescript_drops_the_template_queues_too() -> None:
+    """After a rescript the positional script answers a prompt that had a queue."""
+    fake = FakeLLM()
+    fake.script_for(SCORE_TEMPLATE, json_response(SCORE_ANSWER))
+    fake.rescript(response("replaced"))
+
+    answer = await fake.complete(
+        build_score_prompt(NOTE, NOTE_TYPE, CONFIG), profile=PROFILE
+    )
+
+    assert answer.text == "replaced"
+
+
 def test_still_satisfies_llmclient_with_a_template_queue_in_use() -> None:
     fake = FakeLLM()
     fake.script_for(SCORE_TEMPLATE, response("x"))
