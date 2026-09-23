@@ -220,7 +220,7 @@ async def test_the_extract_pass_names_its_profile_ceiling_and_the_masked_copy(
     await _extract(llm)
 
     (sent,) = llm.calls
-    assert (sent.profile, sent.max_output_tokens) == (PROFILE_UNIT_B_EXTRACT, 1500)
+    assert (sent.profile, sent.max_output_tokens) == (PROFILE_UNIT_B_EXTRACT, 2500)
     assert "call me on [PHONE]" in sent.prompt.variable
     assert "123 4567" not in sent.prompt.text
     assert "1,200,000 AED" in sent.prompt.variable
@@ -238,7 +238,7 @@ async def test_the_prose_pass_reads_the_settled_extraction() -> None:
     )
 
     (sent,) = llm.calls
-    assert (sent.profile, sent.max_output_tokens) == (PROFILE_UNIT_B_PROSE, 900)
+    assert (sent.profile, sent.max_output_tokens) == (PROFILE_UNIT_B_PROSE, 1500)
     assert '"budget": {"quote": "my budget is 1,200,000 AED"' in sent.prompt.variable
     assert sent.prompt.variable.index("TRANSCRIPT:") < sent.prompt.variable.index(
         "EXTRACTION:"

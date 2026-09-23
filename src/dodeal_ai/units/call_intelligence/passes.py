@@ -69,8 +69,8 @@ PROSE_LABEL = "llm.unit_b.prose"
 # ARABIC answer: the extraction is six elements, six details with a quote each
 # and the mood; the prose is six sentences and an 80-word note. Register item
 # 116: a reasoning model would spend hidden tokens from these and truncate.
-EXTRACT_MAX_OUTPUT_TOKENS = 1500
-PROSE_MAX_OUTPUT_TOKENS = 900
+EXTRACT_MAX_OUTPUT_TOKENS = 2500
+PROSE_MAX_OUTPUT_TOKENS = 1500
 
 MAX_QUOTE_WORDS = 25
 MAX_CRM_NOTE_WORDS = 80
