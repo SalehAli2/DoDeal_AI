@@ -137,6 +137,13 @@ def test_a_team_is_pooled_and_then_each_member(client) -> None:
     )
 
 
+def test_a_team_is_matched_casefolded(client) -> None:
+    """Register item 180: the path's spelling need not be the directory's."""
+    r = client.get(f"{TEAMS}/NORTH", headers=_headers())
+    assert r.status_code == 200
+    assert r.json()["measures"]["average_band"]["n"] == 16
+
+
 @pytest.mark.parametrize("path", [f"{REPS}/999", f"{TEAMS}/west"])
 def test_an_unknown_author_or_team_is_404(client, path) -> None:
     r = client.get(path, headers=_headers())

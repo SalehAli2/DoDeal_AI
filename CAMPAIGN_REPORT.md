@@ -7146,3 +7146,15 @@ real reps read as unlisted, with no way to tell the two apart; (2) a head of
 sales's own notes are still in no figure, by design, and nobody is told.
 Stress test: a head of sales with two notes and one unknown author with three;
 the line says 3, not 5 (sabotage: counting by team fails both new tests).
+
+## Piece: register item 180, team names match casefolded
+
+One function, user_directory.team_key, is the form every team comparison uses:
+the team brief's members, the head of sales's grouping (shown in the first
+spelling in sorted order), and GET /api/v1/measures/teams/{team}.
+Production failure modes: (1) a directory with "North" and "north" split one
+team's figures in two, each under the evidence floor; (2) two spellings that
+casefold apart (a stray space, a lookalike letter) are still two teams.
+Stress test: a rep in "North" and a leader in "north" give one team of eight
+notes in both briefs and a 200 on /teams/NORTH (sabotage: an identity key fails
+all three).

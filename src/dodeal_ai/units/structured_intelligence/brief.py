@@ -67,7 +67,11 @@ from dodeal_ai.units.structured_intelligence.schemas import (
     EnforcementVerdict,
     NoteType,
 )
-from dodeal_ai.units.structured_intelligence.user_directory import Role, User
+from dodeal_ai.units.structured_intelligence.user_directory import (
+    Role,
+    User,
+    team_key,
+)
 
 # The most note ids any one list in a brief carries, newest first. A list
 # longer than this is not read; the CRM links to the rest.
@@ -409,8 +413,13 @@ def _team_brief(
 
     # The leader is in their own team and appears in the list. They write notes
     # too, and a team figure their own work is inside should say so.
+    key = team_key(subject.team)
     members = sorted(
-        (user for user in users if user.team == subject.team),
+        (
+            user
+            for user in users
+            if user.team is not None and team_key(user.team) == key
+        ),
         key=lambda user: user.name,
     )
     member_ids = {user.user_id for user in members}
@@ -494,8 +503,15 @@ def _org_brief(
     """The head of sales, across teams: every team this week against last week,
     and the people whose notes need coaching. Teams, not people, otherwise:
     naming every rep in the company is a list nobody reads."""
-    team_of = {user.user_id: user.team for user in users if user.team is not None}
-    teams = sorted({team for team in team_of.values()})
+    # Grouped by team_key; each team is shown in its first spelling in sorted
+    # order, so the label never depends on the order the directory lists people.
+    team_of = {
+        user.user_id: team_key(user.team) for user in users if user.team is not None
+    }
+    shown: dict[str, str] = {}
+    for spelling in sorted(user.team for user in users if user.team is not None):
+        shown.setdefault(team_key(spelling), spelling)
+    teams = sorted(shown)
 
     attributed = [row for row in rows if row.author_id in team_of]
     everything = _within(attributed, (since, until))
@@ -509,7 +525,7 @@ def _org_brief(
     total = _line("All teams", everything, config)
     by_team = [
         _line(
-            team,
+            shown[team],
             [row for row in everything if team_of[row.author_id] == team],
             config,
         )
@@ -530,11 +546,11 @@ def _org_brief(
     weekly: list[str] = []
     for team in teams:
         team_rows = [row for row in attributed if team_of[row.author_id] == team]
-        this_week, last_week = _weeks(team, team_rows, days, config)
+        this_week, last_week = _weeks(shown[team], team_rows, days, config)
         if this_week.has_a_figure or last_week.has_a_figure:
             weekly += [
-                _row_line(this_week, config, label=f"{team}, this week"),
-                _row_line(last_week, config, label=f"{team}, last week"),
+                _row_line(this_week, config, label=f"{shown[team]}, this week"),
+                _row_line(last_week, config, label=f"{shown[team]}, last week"),
             ]
             lines += [this_week, last_week]
     if weekly:

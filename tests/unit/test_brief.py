@@ -46,6 +46,8 @@ SOUTH_LEADER = User(
 SANA = User(user_id=503, name="Sana Okafor", role=Role.REP, team="south")
 
 EVERYONE = [HEAD, LEADER, IDRIS, NOOR, SOUTH_LEADER, SANA]
+# The north team, spelled the other way (register item 180).
+RAMI = User(user_id=504, name="Rami Stone", role=Role.REP, team="North")
 
 
 def _row(
@@ -232,6 +234,15 @@ def test_the_leader_is_in_their_own_team_list() -> None:
     assert "Hana Reyes" in text.split("Each person")[1]
 
 
+def test_a_team_brief_matches_the_team_name_casefolded() -> None:
+    """Register item 180: a rep in "North" is in the "north" leader's team."""
+    rows = _rows(501, 4) + _rows(504, 4, first_note=70)
+    text = _brief(Role.TEAM_LEADER, LEADER, rows, users=[*EVERYONE, RAMI])
+    assert text is not None
+    assert "over 8 notes" in text
+    assert "Rami Stone" in text
+
+
 # --- the head-of-sales brief ------------------------------------------------
 
 
@@ -267,6 +278,16 @@ def test_nothing_is_said_when_every_note_is_attributed() -> None:
     text = _brief(Role.HEAD_OF_SALES, HEAD, _rows(501, 4))
     assert text is not None
     assert "does not list" not in text
+
+
+def test_the_org_brief_shows_two_spellings_as_one_team() -> None:
+    """One line per team, in the first spelling in sorted order."""
+    rows = _rows(501, 4) + _rows(504, 4, first_note=70)
+    text = _brief(Role.HEAD_OF_SALES, HEAD, rows, users=[*EVERYONE, RAMI])
+    assert text is not None
+    each_team = text.split("Each team\n")[1].split("\n\n")[0].splitlines()
+    assert [line.split()[0] for line in each_team] == ["North", "south"]
+    assert "over 8 notes" in each_team[0]
 
 
 def test_a_listed_head_of_sales_is_not_counted_as_unlisted() -> None:

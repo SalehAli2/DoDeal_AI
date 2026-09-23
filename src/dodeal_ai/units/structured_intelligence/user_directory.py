@@ -119,6 +119,15 @@ class User(BaseModel):
         return self
 
 
+def team_key(team: str) -> str:
+    """The form two team names are compared in (register item 180).
+
+    Casefolded: a directory that spells one team "North" and "north" has one
+    team, and matching them exactly would split its brief and its figures in two.
+    """
+    return team.casefold()
+
+
 @runtime_checkable
 class UserDirectory(Protocol):
     """The one read a brief needs: this tenant's people.

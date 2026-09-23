@@ -39,6 +39,7 @@ from dodeal_ai.units.structured_intelligence.user_directory import (
     User,
     UserDirectory,
     get_user_directory,
+    team_key,
 )
 
 router = APIRouter(prefix="/api/v1/measures", tags=["unit-a"])
@@ -106,7 +107,7 @@ async def read_team_measures(
                 (
                     user
                     for user in await directory.users(context.tenant)
-                    if user.team == team
+                    if user.team is not None and team_key(user.team) == team_key(team)
                 ),
                 key=lambda user: user.name,
             )
