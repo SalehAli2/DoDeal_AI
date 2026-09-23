@@ -7052,3 +7052,13 @@ drifts to nothing_to_ask for a rep who is in fact capped; (2) the two GETs are
 not atomic, so a take landing between them can split the report by one.
 Stress test: with the daily key at the cap, a fair note with no question reads
 rate_limited and the key is not incremented.
+
+## Piece: register item 94, the drain follows the deadline
+
+Item 94 -- serve.py's graceful shutdown is `ceil(judgement_deadline_seconds +
+5)`, not a fixed 30 s, so raising the deadline cannot leave a draining pod
+cutting off judgements it admitted.
+Production failure modes: (1) the orchestrator's termination grace period is
+set separately and shorter, and the pod is killed before uvicorn's drain ends;
+(2) a brief under the same deadline plus its store read may still run past it.
+Stress test: a 12.3 s deadline gives uvicorn an 18 s drain.

@@ -81,3 +81,18 @@ def test_serve_passes_proxy_headers_the_setting_and_a_30s_shutdown(monkeypatch):
 def test_the_forwarded_allow_list_defaults_to_loopback_only():
     """Unset, only a proxy on the same host is trusted with forwarded headers."""
     assert get_settings().forwarded_allow_ips == "127.0.0.1"
+
+
+def test_the_drain_follows_the_judgement_deadline(monkeypatch):
+    """Register item 94: deadline plus five, rounded up -- 12.3 s drains in 18."""
+    monkeypatch.setenv("DODEAL_JUDGEMENT_DEADLINE_SECONDS", "12.3")
+    get_settings.cache_clear()
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        serve.uvicorn, "run", lambda app, **kwargs: calls.append(kwargs)
+    )
+
+    serve.main()
+
+    assert calls[0]["timeout_graceful_shutdown"] == 18
+    get_settings.cache_clear()
