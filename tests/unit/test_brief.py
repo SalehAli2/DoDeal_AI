@@ -269,6 +269,22 @@ def test_nothing_is_said_when_every_note_is_attributed() -> None:
     assert "does not list" not in text
 
 
+def test_a_listed_head_of_sales_is_not_counted_as_unlisted() -> None:
+    """Register item 179: only authors missing from the directory are counted."""
+    rows = _rows(501, 4) + _rows(401, 2, first_note=60) + _rows(777, 3, first_note=80)
+    text = _brief(Role.HEAD_OF_SALES, HEAD, rows)
+    assert text is not None
+    assert "3 notes are by people the directory does not list." in text
+
+
+def test_a_head_of_sales_own_notes_alone_raise_no_unlisted_line() -> None:
+    """Listed and in no team is not the stale-directory signal."""
+    rows = _rows(501, 4) + _rows(401, 2, first_note=60)
+    text = _brief(Role.HEAD_OF_SALES, HEAD, rows)
+    assert text is not None
+    assert "does not list" not in text
+
+
 # --- the role asked for, not the subject's title ----------------------------
 
 

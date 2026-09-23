@@ -499,7 +499,12 @@ def _org_brief(
 
     attributed = [row for row in rows if row.author_id in team_of]
     everything = _within(attributed, (since, until))
-    unattributed = len(_within(rows, (since, until))) - len(everything)
+    # Missing from the directory, not merely teamless: a head of sales is listed
+    # and in no team, and their own notes are no sign the directory is stale.
+    listed = {user.user_id for user in users}
+    unlisted = sum(
+        1 for row in _within(rows, (since, until)) if row.author_id not in listed
+    )
 
     total = _line("All teams", everything, config)
     by_team = [
@@ -543,13 +548,13 @@ def _org_brief(
     if coaching:
         text += ["", "Coaching", *(f"  {name}" for name in coaching)]
 
-    if unattributed:
+    if unlisted:
         # A real signal and not clutter: notes by an author the directory does
         # not list are work nobody is accountable for, and the usual cause is a
         # directory that has gone stale. One line, and only when it is not zero.
         text += [
             "",
-            f"{unattributed} notes are by people the directory does not list.",
+            f"{unlisted} notes are by people the directory does not list.",
         ]
     return _Parts(text, lines, everything, coaching=coaching)
 

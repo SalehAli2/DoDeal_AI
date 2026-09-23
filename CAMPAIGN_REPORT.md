@@ -7135,3 +7135,14 @@ Production failure modes: (1) a reviewer trusts a stale comment over the code
 and approves a wrong change; (2) a comment's number drifts again when the rubric
 changes, since nothing tests prose.
 Stress test: the full suite unchanged before and after (2223 passed).
+
+## Piece: register item 179, the unlisted-authors line counts only the unlisted
+
+The head of sales's "N notes are by people the directory does not list" line
+counted every row outside a team, so a listed head of sales's own notes read as
+a stale directory. It now counts only author ids missing from the directory.
+Production failure modes: (1) a directory read that returns a partial list makes
+real reps read as unlisted, with no way to tell the two apart; (2) a head of
+sales's own notes are still in no figure, by design, and nobody is told.
+Stress test: a head of sales with two notes and one unknown author with three;
+the line says 3, not 5 (sabotage: counting by team fails both new tests).
