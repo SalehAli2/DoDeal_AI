@@ -15,8 +15,14 @@ WHAT THIS MODULE PROMISES, and what each promise is worth:
     is on every request because Unit A's only use of a reply is `parse_output`,
     and a fenced or prose-wrapped answer fails validation and spends a reprompt
     -- a second paid call -- to ask for what the first call could have been told
-    to produce. It is still not TRUST: the reply is untrusted text until
-    parse_output validates it.
+    to produce. A profile may ask for json_schema instead, which sends the
+    caller's schema when it gave one. It is still not TRUST: the reply is
+    untrusted text until parse_output validates it.
+  - THREE OPTIONAL PROFILE FIELDS (register item 147), each sent only when set,
+    so a profile that sets none sends exactly the body it always did:
+    reasoning_effort (temperature is then left out, and the ceiling goes as
+    max_completion_tokens, which counts the reasoning), json_schema, and seed.
+    Reasoning text a provider returns beside the answer is never read.
   - NO RETRY, ever. A model call is paid and may have completed on the
     provider's side even when we saw a failure. One attempt per complete(); the
     watchdog wraps this with retry=False and a test asserts the transport is
@@ -33,6 +39,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Mapping
 from typing import Any, Final
 
 import httpx
@@ -206,6 +213,7 @@ class OpenAICompatibleClient:
         *,
         profile: str,
         max_output_tokens: int | None = None,
+        response_schema: Mapping[str, object] | None = None,
     ) -> LLMResponse:
         resolved = self._resolve(profile)
         task_ceiling = (
@@ -214,6 +222,11 @@ class OpenAICompatibleClient:
             else max_output_tokens
         )
         payload = self._body(prompt, resolved, task_ceiling)
+        payload["response_format"] = _response_format(
+            profile, resolved, response_schema
+        )
+        if resolved.seed is not None:
+            payload["seed"] = resolved.seed
         response = await self._breaker.call(lambda: self._post(payload))
         return self._parse(response)
 
@@ -337,16 +350,22 @@ class OpenAICompatibleClient:
         system/user pair: the injection boundary is tested in core/prompting.py,
         and moving it here would move it out of the module that guards it.
         """
-        return {
+        body: dict[str, Any] = {
             "model": resolved.model,
             "messages": [{"role": "user", "content": prompt.text}],
-            "temperature": resolved.temperature,
-            # The ceiling rule: a profile may lower the task's number, never
-            # raise it (ResolvedProfile.effective_max_output_tokens).
-            "max_tokens": resolved.effective_max_output_tokens(task_ceiling),
-            # Mandatory, never conditional -- see the module docstring.
-            "response_format": {"type": "json_object"},
         }
+        # The ceiling rule: a profile may lower the task's number, never
+        # raise it (ResolvedProfile.effective_max_output_tokens).
+        ceiling = resolved.effective_max_output_tokens(task_ceiling)
+        if resolved.reasoning_effort is None:
+            body["temperature"] = resolved.temperature
+            body["max_tokens"] = ceiling
+        else:
+            # A reasoning model refuses a temperature, and counts its hidden
+            # reasoning inside max_completion_tokens (register item 147).
+            body["reasoning_effort"] = resolved.reasoning_effort
+            body["max_completion_tokens"] = ceiling
+        return body
 
     # --- response -----------------------------------------------------------
 
@@ -453,6 +472,29 @@ class OpenAICompatibleClient:
             trips_breaker=trips_breaker,
             fallback_eligible=fallback_eligible,
         )
+
+
+# A json_schema answer's name, as the API allows it: the profile's name with
+# anything outside [A-Za-z0-9_-] replaced, at most 64 characters.
+_SCHEMA_NAME_REFUSED: Final = re.compile(r"[^A-Za-z0-9_-]")
+_SCHEMA_NAME_CHARS: Final = 64
+
+
+def _response_format(
+    profile: str,
+    resolved: ResolvedProfile,
+    schema: Mapping[str, object] | None,
+) -> dict[str, object]:
+    """JSON object mode, mandatory -- or the caller's schema, when the profile
+    asks for json_schema and the caller gave one. Not strict: the schema
+    guides the model, and parse_output is still what decides."""
+    if resolved.response_format != "json_schema" or schema is None:
+        return {"type": "json_object"}
+    name = _SCHEMA_NAME_REFUSED.sub("_", profile)[:_SCHEMA_NAME_CHARS]
+    return {
+        "type": "json_schema",
+        "json_schema": {"name": name, "schema": dict(schema), "strict": False},
+    }
 
 
 def _detail(usage: dict[str, Any], section: str, name: str) -> int:

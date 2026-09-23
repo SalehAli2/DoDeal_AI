@@ -61,6 +61,37 @@ def _ok(model: str) -> httpx.Response:
     )
 
 
+async def test_the_callers_schema_reaches_both_providers() -> None:
+    """Register item 147: the fallback hands on what the caller asked for."""
+
+    class _Stub:
+        def __init__(self, fails: bool) -> None:
+            self.fails, self.schemas = fails, []
+
+        async def complete(
+            self, prompt, *, profile, max_output_tokens, response_schema
+        ):
+            self.schemas.append(response_schema)
+            if self.fails:
+                raise OpenAICompatibleError(
+                    LLMErrorReason.UNAVAILABLE,
+                    transient=True,
+                    status=None,
+                    provider="groq",
+                    fallback_eligible=True,
+                )
+            return "answered"
+
+    primary, fallback = _Stub(fails=True), _Stub(fails=False)
+    client = FallbackLLMClient(primary, fallback)  # type: ignore[arg-type]
+    schema = {"type": "object"}
+    answer = await client.complete(
+        PROMPT, profile=PROFILE_UNIT_A_CLASSIFY, response_schema=schema
+    )
+    assert answer == "answered"
+    assert primary.schemas == fallback.schemas == [schema]
+
+
 class Hosts:
     """Answers per host from a queue, and records every request per host."""
 

@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from dodeal_ai.core.llm import FinishReason, LLMResponse
@@ -129,6 +130,7 @@ class RecordedCall:
     prompt: AssembledPrompt
     profile: str
     max_output_tokens: int | None
+    response_schema: Mapping[str, object] | None = None
 
 
 @dataclass(slots=True)
@@ -224,10 +226,14 @@ class FakeLLM:
         *,
         profile: str,
         max_output_tokens: int | None = None,
+        response_schema: Mapping[str, object] | None = None,
     ) -> LLMResponse:
         self.calls.append(
             RecordedCall(
-                prompt=prompt, profile=profile, max_output_tokens=max_output_tokens
+                prompt=prompt,
+                profile=profile,
+                max_output_tokens=max_output_tokens,
+                response_schema=response_schema,
             )
         )
         if self.hold_after is not None and len(self.calls) > self.hold_after:

@@ -10,6 +10,7 @@ response is returned as it came, so model_version names the model that ran.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 
 from dodeal_ai.core.llm.client import LLMResponse
 from dodeal_ai.core.llm.openai_compatible import (
@@ -44,10 +45,14 @@ class FallbackLLMClient:
         *,
         profile: str,
         max_output_tokens: int | None = None,
+        response_schema: Mapping[str, object] | None = None,
     ) -> LLMResponse:
         try:
             return await self._primary.complete(
-                prompt, profile=profile, max_output_tokens=max_output_tokens
+                prompt,
+                profile=profile,
+                max_output_tokens=max_output_tokens,
+                response_schema=response_schema,
             )
         except OpenAICompatibleError as exc:
             if not exc.fallback_eligible:
@@ -61,5 +66,8 @@ class FallbackLLMClient:
                 },
             )
         return await self._fallback.complete(
-            prompt, profile=profile, max_output_tokens=max_output_tokens
+            prompt,
+            profile=profile,
+            max_output_tokens=max_output_tokens,
+            response_schema=response_schema,
         )

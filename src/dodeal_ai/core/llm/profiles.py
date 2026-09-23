@@ -15,6 +15,7 @@ resolution rule plus the names, and both are tested directly.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 from dodeal_ai.core.config import LLMProvider, ModelProfile, Settings
 from dodeal_ai.core.llm.client import LLMConfigurationError
@@ -52,6 +53,15 @@ class ResolvedProfile:
     model: str
     temperature: float
     max_output_tokens: int | None
+    # Register item 147, each sent only when set; the defaults send nothing new.
+    reasoning_effort: Literal["low", "medium", "high"] | None = None
+    response_format: Literal["json_object", "json_schema"] = "json_object"
+    seed: int | None = None
+
+    @property
+    def reasoning(self) -> bool:
+        """Whether the model reasons, spending hidden tokens inside its ceiling."""
+        return self.reasoning_effort is not None
 
     def effective_max_output_tokens(self, task_ceiling: int) -> int:
         """THE CEILING RULE: a profile may LOWER a task's ceiling, never raise
@@ -69,8 +79,9 @@ def resolve_profile(settings: Settings, name: str) -> ResolvedProfile:
 
     THE FALLBACK RULE, in one sentence: a name that is not in llm_profiles
     resolves to the llm_provider/llm_model pair at temperature 0 with no ceiling
-    of its own -- so a deployment that runs one model configures the pair it
-    already had and never writes a profile at all.
+    of its own, no reasoning, JSON object mode and no seed -- so a deployment
+    that runs one model configures the pair it already had and never writes a
+    profile at all.
 
     Unknown name AND no fallback pair is the same failure get_llm_client()
     reports, with the same fixed message (`llm_not_configured`): the seam was
@@ -83,6 +94,9 @@ def resolve_profile(settings: Settings, name: str) -> ResolvedProfile:
             model=profile.model,
             temperature=profile.temperature,
             max_output_tokens=profile.max_output_tokens,
+            reasoning_effort=profile.reasoning_effort,
+            response_format=profile.response_format,
+            seed=profile.seed,
         )
     if settings.llm_provider is None or not settings.llm_model:
         raise LLMConfigurationError()

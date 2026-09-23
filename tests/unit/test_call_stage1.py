@@ -260,6 +260,16 @@ async def test_a_call_is_analysed_and_delivered_with_its_stage1_payload(
     assert await read_work("tenant-a", JOB) == {}
 
 
+async def test_each_pass_hands_the_adapter_its_own_schema(ctx: dict) -> None:
+    """For a json_schema profile, register item 147; unused under json_object."""
+    from dodeal_ai.units.call_intelligence.passes import Extraction, Prose
+
+    await _push()
+    await process_call(ctx, "tenant-a", JOB)
+    schemas = [call.response_schema for call in ctx["llm"].calls]
+    assert schemas == [Extraction.model_json_schema(), Prose.model_json_schema()]
+
+
 async def test_the_model_never_reads_the_agents_number(ctx: dict) -> None:
     await _push()
     await process_call(ctx, "tenant-a", JOB)

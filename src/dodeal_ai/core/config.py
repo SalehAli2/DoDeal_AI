@@ -65,6 +65,18 @@ class ModelProfile(BaseModel):
     model: str = Field(min_length=1)
     temperature: float = Field(default=0.0, ge=0.0, le=1.0)
     max_output_tokens: int | None = None
+    # How hard a reasoning model thinks; None for a model that does not reason.
+    # Set, temperature is not sent (reasoning models refuse it) and a Unit B
+    # pass takes its reasoning ceiling. On a plain model the provider 400s.
+    reasoning_effort: Literal["low", "medium", "high"] | None = None
+    # json_object asks for any JSON object; json_schema also sends the calling
+    # pass's own schema where it has one. Either way the answer is validated in
+    # code, so a provider that ignores it costs a reprompt, never trust.
+    response_format: Literal["json_object", "json_schema"] = "json_object"
+    # A fixed sampling seed for a provider that honours one; None sends none.
+    # Reproducibility only: the same seed can still give a different answer,
+    # and nothing downstream may assume it does not.
+    seed: int | None = None
 
 
 class ModelPrice(BaseModel):

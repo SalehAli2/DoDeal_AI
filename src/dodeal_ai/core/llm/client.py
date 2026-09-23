@@ -25,6 +25,7 @@ one module where it is tested.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Protocol, runtime_checkable
@@ -131,7 +132,10 @@ class LLMClient(Protocol):
         *,
         profile: str,
         max_output_tokens: int | None = None,
+        response_schema: Mapping[str, object] | None = None,
     ) -> LLMResponse:
         """Send the assembled prompt unchanged. `profile` names the calling TASK
         (core/llm/profiles.py) and is the only thing a caller says about the
-        model; None max_output_tokens = Settings.llm_max_output_tokens."""
+        model; None max_output_tokens = Settings.llm_max_output_tokens.
+        `response_schema` is the JSON schema of the answer the task validates
+        against, sent only when the profile asks for json_schema."""

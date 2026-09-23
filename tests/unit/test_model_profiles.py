@@ -203,6 +203,56 @@ def test_an_unknown_provider_in_a_profile_is_a_config_error(
         )
 
 
+def test_the_three_optional_fields_resolve_and_default_to_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Register item 147: reasoning, json_schema and a seed, all off unless set."""
+    settings = _settings(
+        monkeypatch,
+        PROVIDER="anthropic",
+        MODEL=FALLBACK_MODEL,
+        PROFILES=_profiles_json(
+            PROFILE_UNIT_A_VAGUE,
+            model=PROFILE_MODEL,
+            reasoning_effort="medium",
+            response_format="json_schema",
+            seed=11,
+        ),
+    )
+    resolved = resolve_profile(settings, PROFILE_UNIT_A_VAGUE)
+    assert (resolved.reasoning_effort, resolved.response_format, resolved.seed) == (
+        "medium",
+        "json_schema",
+        11,
+    )
+    assert resolved.reasoning
+    plain = resolve_profile(settings, PROFILE_UNIT_A_SCORE)
+    assert (plain.reasoning_effort, plain.response_format, plain.seed) == (
+        None,
+        "json_object",
+        None,
+    )
+    assert not plain.reasoning
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        {"reasoning_effort": "extreme"},
+        {"response_format": "xml"},
+        {"seed": "seven"},
+    ],
+)
+def test_a_bad_optional_field_is_a_config_error(
+    monkeypatch: pytest.MonkeyPatch, field: dict[str, object]
+) -> None:
+    with pytest.raises(ConfigError):
+        _settings(
+            monkeypatch,
+            PROFILES=_profiles_json(PROFILE_UNIT_A_VAGUE, model=PROFILE_MODEL, **field),
+        )
+
+
 def test_no_profiles_configured_is_an_empty_table(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

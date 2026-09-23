@@ -32,7 +32,7 @@ line, both answers of a reprompt included.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -93,10 +93,18 @@ class PassUsage:
 
 
 class _Metered:
-    """An LLMClient that counts every response of one pass into the usage."""
+    """An LLMClient that counts every response of one pass into the usage, and
+    hands the adapter the pass's schema for a json_schema profile."""
 
-    def __init__(self, client: LLMClient, usage: PassUsage, name: str) -> None:
+    def __init__(
+        self,
+        client: LLMClient,
+        usage: PassUsage,
+        name: str,
+        schema: Mapping[str, object],
+    ) -> None:
         self._client, self._usage, self._name = client, usage, name
+        self._schema = schema
 
     async def complete(
         self,
@@ -104,9 +112,13 @@ class _Metered:
         *,
         profile: str,
         max_output_tokens: int | None = None,
+        response_schema: Mapping[str, object] | None = None,
     ) -> LLMResponse:
         response = await self._client.complete(
-            prompt, profile=profile, max_output_tokens=max_output_tokens
+            prompt,
+            profile=profile,
+            max_output_tokens=max_output_tokens,
+            response_schema=response_schema or self._schema,
         )
         self._usage.add(self._name, response)
         return response
@@ -162,7 +174,8 @@ async def _pass[M: BaseModel](
             raise JobGone()
         starts = counted
         try:
-            answer, response = await call(_Metered(run.client, run.usage, name))
+            metered = _Metered(run.client, run.usage, name, schema.model_json_schema())
+            answer, response = await call(metered)
         except ModelUnavailableError:
             if starts >= PASS_TRIES:
                 raise await _failed(run, name, "model_unavailable")

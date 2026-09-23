@@ -46,7 +46,11 @@ from dodeal_ai.core.llm.openai_compatible import (
     OpenAICompatibleError,
     provider_name_for,
 )
-from dodeal_ai.core.llm.profiles import PROFILE_UNIT_A_CLASSIFY, ResolvedProfile
+from dodeal_ai.core.llm.profiles import (
+    PROFILE_UNIT_A_CLASSIFY,
+    PROFILE_UNIT_A_VAGUE,
+    ResolvedProfile,
+)
 from dodeal_ai.core.logging_config import configure_logging
 from dodeal_ai.core.prompting import AssembledPrompt
 
@@ -166,11 +170,112 @@ async def _call(
     *,
     profile: str = PROFILE_UNIT_A_CLASSIFY,
     max_output_tokens: int | None = None,
+    response_schema: dict[str, object] | None = None,
 ) -> object:
     async with httpx.AsyncClient(transport=httpx.MockTransport(recorder)) as http:
         return await _client(settings, base_url, http).complete(
-            PROMPT, profile=profile, max_output_tokens=max_output_tokens
+            PROMPT,
+            profile=profile,
+            max_output_tokens=max_output_tokens,
+            response_schema=response_schema,
         )
+
+
+# --- register item 147: three optional profile fields, sent only when set ----
+
+# Unit A's bodies as the adapter sent them before item 147, byte for byte.
+_CONTENT = (
+    b'"messages":[{"role":"user","content":"STABLE-SYSTEM-TEMPLATE\\n\\n'
+    b"<<<DATA>>>VARIABLE-CALLER-DATA<<<END>>>\\n\\nTAIL-STRICTER-INSTRUCTION"
+    b'"}]'
+)
+_BEFORE_147 = {
+    "fallback": b'{"model":"pinned-model-2026-01-01",'
+    + _CONTENT
+    + b',"temperature":0.0,"max_tokens":512,"response_format":{"type":"json_object"}}',
+    "profile": b'{"model":"profile-chosen-model",'
+    + _CONTENT
+    + b',"temperature":0.7,"max_tokens":256,"response_format":{"type":"json_object"}}',
+}
+
+
+@BOTH_URLS
+async def test_unit_a_request_bodies_are_byte_identical_to_before(
+    monkeypatch: pytest.MonkeyPatch, base_url: str
+) -> None:
+    """The guard: a profile that sets none of the new fields sends what it did."""
+    profiles = json.dumps(
+        {
+            PROFILE_UNIT_A_VAGUE: {
+                "provider": "groq",
+                "model": "profile-chosen-model",
+                "temperature": 0.7,
+                "max_output_tokens": 256,
+            }
+        }
+    )
+    settings = _settings(monkeypatch, PROFILES=profiles)
+    recorder = Recorder(httpx.Response(200, json=_ok_body()))
+    schema = {"type": "object"}
+    await _call(settings, base_url, recorder, max_output_tokens=512)
+    await _call(
+        settings,
+        base_url,
+        recorder,
+        profile=PROFILE_UNIT_A_VAGUE,
+        max_output_tokens=512,
+        response_schema=schema,
+    )
+    sent = [request.content for request in recorder.requests]
+    assert sent == [_BEFORE_147["fallback"], _BEFORE_147["profile"]]
+
+
+def _profile(**fields: object) -> str:
+    return json.dumps(
+        {PROFILE_UNIT_A_CLASSIFY: {"provider": "groq", "model": "m", **fields}}
+    )
+
+
+@BOTH_URLS
+async def test_a_reasoning_profile_sends_its_effort_and_no_temperature(
+    monkeypatch: pytest.MonkeyPatch, base_url: str
+) -> None:
+    """Reasoning tokens count inside max_completion_tokens; no temperature."""
+    settings = _settings(monkeypatch, PROFILES=_profile(reasoning_effort="high"))
+    recorder = Recorder(httpx.Response(200, json=_ok_body()))
+    await _call(settings, base_url, recorder, max_output_tokens=6000)
+    body = recorder.body
+    assert (body["reasoning_effort"], body["max_completion_tokens"]) == ("high", 6000)
+    assert "temperature" not in body and "max_tokens" not in body
+
+
+@BOTH_URLS
+async def test_json_schema_sends_the_callers_schema_and_a_seed_when_set(
+    monkeypatch: pytest.MonkeyPatch, base_url: str
+) -> None:
+    settings = _settings(
+        monkeypatch, PROFILES=_profile(response_format="json_schema", seed=7)
+    )
+    recorder = Recorder(httpx.Response(200, json=_ok_body()))
+    schema: dict[str, object] = {"type": "object", "properties": {}}
+    await _call(settings, base_url, recorder, response_schema=schema)
+    assert recorder.body["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {"name": "unit_a_classify", "schema": schema, "strict": False},
+    }
+    assert recorder.body["seed"] == 7
+    assert recorder.body["temperature"] == 0.0
+
+
+@BOTH_URLS
+async def test_json_schema_with_no_schema_given_stays_json_object(
+    monkeypatch: pytest.MonkeyPatch, base_url: str
+) -> None:
+    settings = _settings(monkeypatch, PROFILES=_profile(response_format="json_schema"))
+    recorder = Recorder(httpx.Response(200, json=_ok_body()))
+    await _call(settings, base_url, recorder)
+    assert recorder.body["response_format"] == {"type": "json_object"}
+    assert "seed" not in recorder.body
 
 
 # --- the request body -------------------------------------------------------
