@@ -8,14 +8,24 @@
       "PowerShell(git status *)",
       "PowerShell(git diff *)",
       "PowerShell(git log *)",
+      "PowerShell(git show *)",
       "PowerShell(git ls-files *)",
+      "PowerShell(git merge-base *)",
+      "PowerShell(git rev-parse *)",
+      "PowerShell(git branch --show-current *)",
+      "PowerShell(git restore *)",
       "PowerShell(git add *)",
       "PowerShell(git mv *)",
       "PowerShell(git rm *)",
       "PowerShell(git commit *)",
+      "PowerShell(docker compose *)",
+      "PowerShell(docker ps *)",
       "PowerShell(New-Item *)",
       "PowerShell(Get-Item *)",
       "PowerShell(Get-ChildItem *)",
+      "PowerShell(Get-FileHash *)",
+      "PowerShell(Copy-Item *)",
+      "PowerShell(Test-Path *)",
       "PowerShell(Select-String *)"
     ],
     "ask": [
@@ -28,7 +38,19 @@
       "PowerShell(git commit --amend *)",
       "PowerShell(Remove-Item -Recurse *)",
       "Read(./.env)",
-      "Read(./.env.*)"
+      "Read(./.env.local)",
+      "Read(./.env.*.local)",
+      "Read(./.env.production)",
+      "Read(./.env.staging)",
+      "Edit(./.env)",
+      "Edit(./.env.local)",
+      "Edit(./.env.*.local)",
+      "Edit(./.env.production)",
+      "Edit(./.env.staging)"
     ]
+  },
+  "env": {
+    "DODEAL_REDIS_REAL_URL": "redis://localhost:6379/9",
+    "DODEAL_REDIS_REAL_REQUIRED": "1"
   }
 }

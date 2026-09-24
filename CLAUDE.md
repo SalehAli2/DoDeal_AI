@@ -7,139 +7,144 @@ names the rule.
 
 The master document (held by the lead, outside this repo) is the position.
 The code is the fact: where the two disagree, the code wins and the
-document gets a defect to record. Register item numbers come from the
-master and from `docs/register.md`, which lags the master; if a prompt
-names an item you cannot find in either, say so in the report and carry on.
+document gets a defect to record. If a prompt names a register item you
+cannot find, say so in the report and carry on.
+
+## Lean by default
+
+Full discipline only where a mistake costs money, leaks data or judges a
+person. These are the RISK AREAS:
+
+- authentication, tokens and tenant isolation;
+- paid calls, budgets, retries and idempotency;
+- model-output validation, including the quote check;
+- scoring, and anything that judges a person;
+- personal data: masking, logging, retention.
+
+Everything else (docs, scripts, demo tools, config plumbing, floors,
+refactors) is low risk: build it, test its behaviour, move on.
+
 ## Phase 0, before any code
 
-1. `git status`; `git log --oneline -5`. The prompt names the expected head
-   sha. If the head differs, stop and report.
-2. Read the files the prompt names, `src/` first, then docs.
-3. Write a ten-line state-back: what each named file does today and the one
-   thing the piece changes in it. Then build.
-## The stopping chain
+1. `git status`; `git log --oneline -5`. If the head is not the one the
+   prompt names (or a descendant it allows), stop and report.
+2. Read this file. Then read JUST IN TIME: only the files the current item
+   touches, when you reach it. Search first (`Select-String`, grep), then
+   read only the part you need. Never re-read a file already read.
+3. State-back in at most five lines, then build.
 
-Green before every commit, no exceptions:
+## The checks
+
+Per commit:
 
 ```
-uv run pytest
+uv run pytest -q --no-header <tests for the touched modules> <guard tests>
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy
 ```
 
-
+- The guard tests always run: hermetic fakes, `.env.example` pinning, the
+  prompt-set digests, the assumption markers.
 - Run `uv run ruff format .` right after writing code.
-- `uv run python scripts/check_coverage_floors.py` must pass. Floors are
-  never changed unasked; a change is a policy decision for the lead.
-- The default run is hermetic with or without a local Redis. Red only when
-  Redis is up is a suite defect to report, never a reason to stop Redis.
-- No test has a re-run exemption. Anything red in an unattended run: stop,
-  leave the tree, record BLOCKED with what failed. Never fix forward.
-- `redis_real` lane: `uv run pytest -m redis_real --no-cov` with
-  `DODEAL_REDIS_REAL_URL` on a database the service does not use (db 9).
-  A hand run; it skips, never fails, without a server. Run it when the
-  piece touches Redis or Lua. `integration` lane: `-m integration --no-cov`.
+- Once at the end of the session, before the last commit: the full
+  `uv run pytest -q --no-header` and
+  `uv run python scripts/check_coverage_floors.py`.
+- If that final run is red because of an earlier commit in this session,
+  fix it in one extra commit and report it. If the cause is unclear, stop,
+  leave the tree, and report. Never hide a red.
+- The default run is hermetic with or without a local Redis.
+- `redis_real` lane (`uv run pytest -m redis_real --no-cov`, db 9): only
+  when the session changed Redis or Lua code, once at the end. `load`
+  lane: only for capacity work. `integration` lane: only when HTTP
+  transport code changed. A lane repeats three times only for a new
+  concurrency test.
 
 ## Commits
 
-- AI pieces carry one register item per session (prompts, classify, vague,
-  score, rubric, decide, the provider adapter, redaction, evaluation,
-  brief narration). Foundation pieces carry up to five (Redis, middleware,
-  logging, config, CI, test infrastructure, deployment, docs). One code
-  commit per item. Unclear which kind: treat it as AI, stop after one.
+- One commit per risk-area item. Low-risk items may share one commit.
 - Stage by explicit path. Never `git add .` or `git add -A`.
-- Never amend, never force-push, never `reset --hard`. Do not push unless
-  the prompt says to. No `Co-Authored-By` trailer, whatever else is said.
-- Message: `type(item): one line`. Types: `core`, `unit-a`, `tools`,
-  `test`, `docs`, `ci`.
+- Never amend, never force-push, never `reset --hard`. Push only when the
+  prompt says so. No `Co-Authored-By` trailer.
+- Message: `type(item): one line`. Types: `core`, `unit-a`, `unit-b`,
+  `tools`, `test`, `docs`, `ci`.
 
 ## Code rules
 
 - Comments say what and why in at most three lines. Every setting has a
   three-line comment: what it is, why this default, what a wrong value
-  does. Test docstrings are one sentence. Longer reasoning goes to the
-  report or `ASSUMPTIONS.md`.
+  does.
 - Fail-open or fail-closed is decided per dependency by what its failure
-  risks. Never unified. Auth and tenancy fail closed; the cost gate fails
-  open; the idempotency reservation fails closed; the confirm, rate limit
-  and attempt counters fail open.
+  risks. Never unified.
 - Every Redis call runs inside its connection's breaker and catches
-  `RedisError`, never a subclass.
-- `core/redis.py` carries no numeric literal (tested). Timeouts and sizes
-  come from `Settings`.
-- Model output is untrusted text until `llm_call.parse_output` validates
-  it. The total, the band and the decision are computed in code.
-- A hardening claim is verified by sabotage: revert the one line, watch the
-  named tests fail, restore byte for byte, and say which tests failed.
-- Where the prompt does not decide something, take the conservative option,
-  do it, and record it under "For the lead".
-- Never make a test agree with the code when the code is wrong. If a test
-  fails because the behaviour changed in a way nobody asked for, stop,
-  report it under "For the lead", and leave the test red. Changing an
-  assertion to match new behaviour is only correct when the prompt asked
-  for that behaviour.
+  `RedisError`. `core/redis.py` carries no numeric literal.
+- Model output is untrusted until validated. Scores, bands, decisions and
+  verdicts are computed in code, never taken from a model.
+- SABOTAGE only for guards in a risk area: revert the one line, watch the
+  named tests fail, restore byte for byte, say which failed. None for
+  low-risk items.
+- Where the prompt does not decide something, take the conservative
+  option, do it, and record it under "For the lead".
+- Never make a test agree with wrong code. If behaviour changed in a way
+  nobody asked for, stop and report. When the prompt asked for the change,
+  update the EXACT expected values; never loosen an exact assertion into a
+  partial one.
 
 ## Never
 
-- Invent a backend endpoint or field. The CRM surface is exactly
-  `GET /leads`, `GET /leads/{id}`, `GET /leads/{id}/notes` under
-  `/api/service`, with `DD-API-KEY`. Treat no backend behaviour as proven.
-- Accept note text in a request body on the primary route. The direct route
-  is the one recorded exception.
-- Accept a band or a total from any input. Loosen `LeadNote`. Re-enable
-  PyJWT's `sub` check.
-- Raise the global external timeout to fit a model call. Retry a paid call.
-  Feed a rejected model answer back into a prompt (`with_tail` takes a
-  template name, never a string).
-- Log note text, model output, the clarification prompt, a Redis key
-  containing a fingerprint, a rejected input value, or a foreign
-  exception's message. Frames and types only.
-- Put a real tenant name, a real note, or anything from the real export in
-  a fixture, a prompt or a test.
-- Store anything under the idempotency key but the validated judgement.
-- Apply a register item outside its carrying step. If the scope is wrong,
-  say so; do not widen it.
-- Patch `get_cost_client` or `get_operational_client` with anything but the
-  shared fakes in `tests/helpers/`.
-- Use a sync HTTP or Redis client, `time.sleep`, or `urllib.request` under
-  `src/` (tested).
+- Invent a backend endpoint or field. The CRM surface is `GET /leads`,
+  `GET /leads/{id}`, `GET /leads/{id}/notes` under `/api/service` with
+  `DD-API-KEY`, plus the two PROPOSED reads in
+  `docs/contracts/crm_service_reads.yaml`. Treat no backend behaviour as
+  proven.
+- Accept a band, a total, a mark, a verdict or a version stamp from any
+  input.
+- Retry a paid call, with ONE recorded exception by the lead: a
+  transcription or model pass whose response never arrived may be retried
+  once. A response we received is never paid for again. No library may
+  retry a paid call on its own; switch library retries off.
+- Feed a rejected model answer back into a prompt.
+- Log note text, transcripts, model output, summaries, prompts, audio
+  URLs, signed links, signatures, secrets, phone hashes, voiceprints, a
+  key containing a fingerprint, a rejected input value, or a foreign
+  exception's message. Ids, counts, fixed codes, types and frames only.
+- Put a real tenant, note, call or anything from a real export in a
+  fixture, prompt or test.
+- Read or edit `.env` or any file holding real values. Sessions may write
+  `.env.example` and `.env.demo`, placeholders only.
+- Edit a released prompt file (`*_v1.txt` and the like). A prompt change
+  is a new file under a new stamp, with the digest re-pinned.
+- Use a sync HTTP or Redis client, `time.sleep`, or `urllib.request`
+  under `src/`.
 
-## Tests and docs the piece owes
+## Tests and docs
 
-- Floors kept, none added unasked. A new module that needs one goes under
-  "For the lead".
-- Docs only when the prompt says docs. By default the lead writes them at
-  the end of the day.
-- Test files are named in the report and run by the chain. They are never
-  on the "where to review" list.
-- Every piece appends a block to `CAMPAIGN_REPORT.md` in its code commit:
-  the item number and name, the two production failure modes, and the one
-  stress test from the explainer. Three or four lines. This is the only doc
-  a piece writes by default, because the explainer is terminal output and
-  is lost when the session ends.
-## Redis, when a piece needs it
+- Write tests for behaviour, not for coverage. The overall gate (92 %)
+  covers low-risk code.
+- Coverage floors of 100 only for risk-area modules, added when the prompt
+  says. Floors are never lowered unasked.
+- Test files are named in the report, never on the "where to review" list.
+- Docs only when the prompt asks.
+- One `CAMPAIGN_REPORT.md` block per session, at most ten lines: the items,
+  each risk-area item's two failure modes, and one stress test.
 
-The lead does not operate Redis. Check `docker compose ps`, start it if
-needed, wait for PONG. If Docker is not running, stop and say "Open Docker
-Desktop, then rerun." Set `DODEAL_REDIS_REAL_URL=redis://localhost:6379/9`
-and `DODEAL_REDIS_REAL_REQUIRED=1` inside every lane command. Leave Redis
-running. Repeat a lane run three times only for a new concurrency test.
+## Redis, when needed
 
-## Final message, at most 30 lines, in this order
+The lead does not operate Redis. Check `docker compose ps`; start it with
+`docker compose up -d redis` if needed and wait for PONG. If Docker is not
+running, stop and say "Open Docker Desktop, then rerun." The real-lane
+variables are set in the session environment. Leave Redis running.
+
+## Final message, at most 20 lines, in this order
 
 1. The sha per commit, one line each.
 2. One suite line: passed, skipped, deselected, coverage, floors.
 3. One lane line, if a lane ran.
-4. One sabotage line per item: what was changed, which tests failed,
-   restored.
-5. Disagreements between the prompt and the tree, and how each was
-   resolved.
-6. For the lead: conservative choices; `.env.example` rows as exact text;
-   anything owed by a person; anything the prompt asked for that is not
-   there.
-7. Where to review: `src/` files and functions only, one line each on what
-   to verify that the diff cannot show. Never a test file.
+4. One sabotage line per risk-area item.
+5. Where the tree differed from the prompt, and how it was resolved.
+6. For the lead: conservative choices; anything owed by a person;
+   anything asked for that is not there.
+7. Where to review: `src/` files and functions only, one line each.
 8. The push command, not run.
 
 Then the explainer block below, at most 12 lines.
