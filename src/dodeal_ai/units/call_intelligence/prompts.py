@@ -33,6 +33,7 @@ from collections.abc import Sequence
 from dodeal_ai.core.prompting import AssembledPrompt, build_prompt
 from dodeal_ai.units.call_intelligence.transcriber import Segment
 
+ROLES_TEMPLATE = "call_intelligence/roles_v1.txt"
 EXTRACT_TEMPLATE = "call_intelligence/extract_v2.txt"
 PROSE_TEMPLATE = "call_intelligence/prose_v1.txt"
 OBJECTIONS_TEMPLATE = "call_intelligence/objections_v1.txt"
@@ -51,11 +52,12 @@ RETIRED_TEMPLATES: tuple[str, ...] = (
 
 # The stamp stage 1 carries under versions.prompt. Move it with the digest
 # in the stamp test whenever one of UNIT_B_TEMPLATES changes.
-PROMPT_SET_VERSION = "unit_b_prompts_v3"
+PROMPT_SET_VERSION = "unit_b_prompts_v4"
 
 # Every template Unit B can send, in pass order, then the retired ones; the
 # worker preloads them all.
 UNIT_B_TEMPLATES: tuple[str, ...] = (
+    ROLES_TEMPLATE,
     EXTRACT_TEMPLATE,
     PROSE_TEMPLATE,
     OBJECTIONS_TEMPLATE,

@@ -253,7 +253,7 @@ async def test_a_call_is_analysed_and_delivered_with_its_stage1_payload(
         ("alarm_phrase", "s3"),
     ]
     assert result["versions"] == {
-        "prompt": "unit_b_prompts_v3",
+        "prompt": "unit_b_prompts_v4",
         "signals": "call_signals_v1",
         "model": "fake-model-pinned",
         "transcriber": "fake/fake-stt-1",

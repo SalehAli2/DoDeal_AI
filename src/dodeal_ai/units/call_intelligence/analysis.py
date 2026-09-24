@@ -12,6 +12,10 @@ an uncertain one too, with every field marked uncertain (passes.settled).
 NOTHING RECEIVED IS PAID FOR TWICE: each pass is kept, counted and started at
 most twice (paid.py).
 
+ROLES FIRST: a transcript the engine labelled (speaker_N) goes through the
+roles pass before anything reads agent or client (roles.py); everything after
+it, stage 1's transcript included, reads the transcript it returns.
+
 A PASS THAT FAILS still lets stage 1 go: analysis is null and analysis_reason
 says which pass and why (`extract_model_unavailable`, `prose_malformed_output`,
 `extract_pass_interrupted`, or `llm_not_configured` for a run with no client).
@@ -48,9 +52,17 @@ from dodeal_ai.units.call_intelligence.passes import (
     write_prose,
 )
 from dodeal_ai.units.call_intelligence.prompts import PROMPT_SET_VERSION
+from dodeal_ai.units.call_intelligence.roles import (
+    Roles,
+    apply_roles,
+    ask_roles,
+    needs_roles,
+    opening,
+)
 from dodeal_ai.units.call_intelligence.signals import SIGNALS_VERSION, call_signals
 from dodeal_ai.units.call_intelligence.transcriber import Transcript
 
+ROLES = "roles"
 EXTRACT = "extract"
 PROSE = "prose"
 NO_CLIENT = "llm_not_configured"
@@ -59,12 +71,15 @@ NO_CLIENT = "llm_not_configured"
 @dataclass(frozen=True, slots=True)
 class Wave1:
     """Stage 1's analysis, or null with the reason; the signals block found in
-    code, never null; and the versions both ran on."""
+    code, never null; the versions both ran on; the transcript as the roles
+    left it, and the roles block (None when no voice needed one)."""
 
     analysis: dict[str, object] | None
     reason: str | None
     versions: dict[str, object]
     signals: dict[str, object]
+    transcript: Transcript
+    roles: dict[str, object] | None
 
 
 def _analysis(
@@ -151,9 +166,15 @@ async def wave1(
     usage: PassUsage,
 ) -> Wave1:
     """Wave 1 for one transcript. JobGone when the job stopped under it."""
+    stamps: dict[str, Stamp] = {}
+    run = (
+        None
+        if client is None
+        else PassRun(job, work, config.result_ttl_seconds, client, usage, start_pass)
+    )
+    transcript, roles = await _roles(run, transcript, config, scope, settings, stamps)
     call = CallText.of(transcript, country_code=config.phone_country_code)
     code, digest = _found_in_code(transcript, config, job)
-    stamps: dict[str, Stamp] = {}
     versions: dict[str, object] = {
         "prompt": PROMPT_SET_VERSION,
         "signals": SIGNALS_VERSION,
@@ -162,9 +183,8 @@ async def wave1(
         "alarm_list_digest": digest,
         "passes": {},
     }
-    if client is None:
-        return Wave1(None, NO_CLIENT, versions, code)
-    run = PassRun(job, work, config.result_ttl_seconds, client, usage, start_pass)
+    if run is None:
+        return Wave1(None, NO_CLIENT, versions, code, transcript, roles)
     try:
         extraction, stamps[EXTRACT] = await run_pass(
             run,
@@ -183,9 +203,39 @@ async def wave1(
         )
     except PassFailed as failed:
         _stamp(versions, stamps)
-        return Wave1(None, str(failed), versions, code)
+        return Wave1(None, str(failed), versions, code, transcript, roles)
     _stamp(versions, stamps)
-    return Wave1(_analysis(call, extraction, prose), None, versions, code)
+    analysis = _analysis(call, extraction, prose)
+    return Wave1(analysis, None, versions, code, transcript, roles)
+
+
+async def _roles(
+    run: PassRun | None,
+    transcript: Transcript,
+    config: CallsConfig,
+    scope: TenantScope,
+    settings: Settings,
+    stamps: dict[str, Stamp],
+) -> tuple[Transcript, dict[str, object] | None]:
+    """The transcript with its voices' roles, and the roles block; as it
+    came, and None, when no voice carries the engine's label."""
+    if not needs_roles(transcript):
+        return transcript, None
+    answer: Roles | None = None
+    if run is not None:
+        head = opening(transcript, country_code=config.phone_country_code)
+        try:
+            answer, stamps[ROLES] = await run_pass(
+                run,
+                ROLES,
+                Roles,
+                lambda metered: ask_roles(
+                    metered, head, scope=scope, settings=settings
+                ),
+            )
+        except PassFailed:
+            answer = None
+    return apply_roles(transcript, answer)
 
 
 def _stamp(versions: dict[str, object], stamps: dict[str, Stamp]) -> None:

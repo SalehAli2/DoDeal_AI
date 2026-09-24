@@ -31,7 +31,9 @@ PROFILE_UNIT_A_VAGUE = "unit_a.vague"
 PROFILE_UNIT_A_SCORE = "unit_a.score"
 
 # Unit B's two call passes (units/call_intelligence/passes.py). Their ceilings
-# assume a NON-REASONING model too (register item 116).
+# assume a NON-REASONING model too (register item 116). The roles pass
+# (roles.py) runs before them and takes the larger ceiling when it reasons.
+PROFILE_UNIT_B_ROLES = "unit_b.roles"
 PROFILE_UNIT_B_EXTRACT = "unit_b.extract"
 PROFILE_UNIT_B_PROSE = "unit_b.prose"
 
@@ -48,6 +50,7 @@ KNOWN_PROFILES: tuple[str, ...] = (
     PROFILE_UNIT_A_CLASSIFY,
     PROFILE_UNIT_A_VAGUE,
     PROFILE_UNIT_A_SCORE,
+    PROFILE_UNIT_B_ROLES,
     PROFILE_UNIT_B_EXTRACT,
     PROFILE_UNIT_B_PROSE,
     PROFILE_UNIT_B_OBJECTIONS,

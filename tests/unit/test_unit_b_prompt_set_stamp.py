@@ -20,8 +20,8 @@ from dodeal_ai.units.call_intelligence.prompts import (
     UNIT_B_TEMPLATES,
 )
 
-PROMPT_SET = "unit_b_prompts_v3"
-PROMPT_SET_DIGEST = "f0ba9a0667fa835ca3166affa37bccff6e73f0101b4611adb259de2364ff155a"
+PROMPT_SET = "unit_b_prompts_v4"
+PROMPT_SET_DIGEST = "6ae99a86c73f5ded2453d91171b46a8b0277331295c0b2df6e09e03a50497ff0"
 
 _HOW_TO_UPDATE = (
     "A Unit B prompt template changed. Bump PROMPT_SET_VERSION in "
@@ -51,6 +51,9 @@ def test_the_unit_b_prompt_set_digest_matches_its_stamp() -> None:
 
 # Each shipped template's sha256, over its stripped text.
 TEMPLATE_DIGESTS = {
+    "call_intelligence/roles_v1.txt": (
+        "eee1172cb8ff1130a9c6cc9ea646bc3a09e72b4479f4a24079a4ae1977701676"
+    ),
     "call_intelligence/extract_v2.txt": (
         "1d7fa2d4cd37248cbfe7f76b6f28932ae665a9ce23bf6154e77c85ebd1273190"
     ),

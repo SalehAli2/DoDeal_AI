@@ -239,7 +239,12 @@ async def test_a_near_silent_recording_is_uncertain_whatever_the_engine_says(
     assert result is not None
     transcript = result["transcript"]
     assert transcript["uncertain"] is True
-    assert transcript["uncertain_reasons"] == ["low_speech_ratio", "low_volume"]
+    # The engine's label with no roles answer adds its own doubt (roles.py).
+    assert transcript["uncertain_reasons"] == [
+        "low_speech_ratio",
+        "low_volume",
+        "roles_failed",
+    ]
     assert result["eligible_for_full_analysis"] is False
     assert result["audio"]["speech_ratio"] == 0.2
     assert result["audio"]["mean_volume_db"] == -55.8

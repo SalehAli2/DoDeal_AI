@@ -246,6 +246,7 @@ def stage1_result(
         if transcript is None
         else transcript.model_dump(mode="json"),
         "audio": None if audio is None else audio.to_dict(),
+        "roles": None if wave is None else wave.roles,
         "signals": None if wave is None else wave.signals,
         "analysis": None if wave is None else wave.analysis,
         "analysis_reason": NO_TRANSCRIPT if wave is None else wave.reason,
@@ -492,10 +493,11 @@ async def _stage1(
     finally:
         run.analyse_ms = _ms_since(started)
     run.analysis_reason = wave.reason
+    run.transcript = wave.transcript
     result = stage1_result(
         job,
         config,
-        transcript=transcript,
+        transcript=wave.transcript,
         outcome_label=None,
         wave=wave,
         audio=run.audio,
