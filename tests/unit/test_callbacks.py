@@ -28,13 +28,22 @@ from dodeal_ai.core.callbacks import (
     post_event,
 )
 from dodeal_ai.core.config import get_settings
-from dodeal_ai.core.jobs import DeliveryState, JobStatus, create_job, read_job
+from dodeal_ai.core.jobs import (
+    DeliveryState,
+    JobStatus,
+    Stage2State,
+    create_job,
+    read_job,
+    settle_stage2,
+)
 from dodeal_ai.core.tenant_config import set_override
+from dodeal_ai.units.call_intelligence import sweep
 from dodeal_ai.units.call_intelligence.admission import job_metadata
 from dodeal_ai.units.call_intelligence.config import (
     UNIT_B_SECTION,
     new_config_version,
     parse_unit_b_section,
+    resolve_calls_config,
 )
 from dodeal_ai.units.call_intelligence.delivery import deliver_callback, deliver_event
 from dodeal_ai.units.call_intelligence.fake_transcriber import FakeTranscriber
@@ -282,6 +291,75 @@ async def test_a_retry_that_lands_marks_the_delivery_delivered(
     assert (job.status, job.delivery) == (JobStatus.DONE, DeliveryState.DELIVERED)
     await deliver_callback(ctx, *queued.args)
     assert len(world.posts) == 2
+
+
+async def test_a_lost_stage2_sends_call_failed_for_stage2_on_its_own_delivery(
+    ctx: dict, world: _World, redis_fakes: RedisFakes
+) -> None:
+    """Signed, retried on stage 2's delivery; the job stays done, stage 1's
+    delivery untouched."""
+    await _setup()
+    await process_call(ctx, "tenant-a", JOB)
+    assert (await _job()).stage2 is Stage2State.PENDING
+    later = datetime.now(UTC) + timedelta(hours=2.1)
+    await redis_fakes.queue.delete(f"arq:job:tenant-a:{JOB}:stage2")
+    assert await sweep.sweep(now=later, deliver=ctx["deliver"]) == 1
+    await redis_fakes.queue.delete(f"arq:job:tenant-a:{JOB}:stage2:sweep")
+    world.crm_status = [503]
+    lost = later + timedelta(hours=2.1)
+    assert await sweep.sweep(now=lost, deliver=ctx["deliver"]) == 1
+
+    job = await _job()
+    assert (job.status, job.delivery, job.stage2_delivery) == (
+        JobStatus.DONE,
+        DeliveryState.DELIVERED,
+        DeliveryState.PENDING,
+    )
+    (queued,) = await redis_fakes.queue.queued_jobs(queue_name=NORMAL_QUEUE)
+    assert queued.args == ("tenant-a", JOB, CALL_FAILED, 1)
+    await deliver_callback(ctx, *queued.args)
+    job = await _job()
+    assert (job.delivery, job.stage2_delivery) == (
+        DeliveryState.DELIVERED,
+        DeliveryState.DELIVERED,
+    )
+    stage1, failed, retried = world.posts
+    assert stage1.headers["x-dodeal-event"] == CALL_STAGE1
+    assert failed.headers["x-dodeal-event"] == CALL_FAILED
+    assert _signed(failed) and _signed(retried)
+    body = json.loads(retried.content)
+    assert "result" not in body
+    assert {name: body[name] for name in ("stage", "status", "stage2", "reason")} == {
+        "stage": 2,
+        "status": "done",
+        "stage2": "failed",
+        "reason": "stage2_lost",
+    }
+    await deliver_callback(ctx, *queued.args)
+    assert len(world.posts) == 3
+
+
+async def test_a_stage2_call_failed_refused_fails_its_own_delivery_only(
+    ctx: dict, world: _World, redis_fakes: RedisFakes, monkeypatch
+) -> None:
+    await _setup()
+    await process_call(ctx, "tenant-a", JOB)
+    await settle_stage2(
+        await _job(),
+        Stage2State.FAILED,
+        now=datetime.now(UTC),
+        reason="stage2_lost",
+        delivery=DeliveryState.PENDING,
+    )
+    monkeypatch.delenv("DODEAL_CALL_CALLBACK_SECRETS")
+    get_settings.cache_clear()
+    config = await resolve_calls_config("tenant-a")
+    assert not await deliver_event(ctx, await _job(), CALL_FAILED, config)
+    job = await _job()
+    assert (job.delivery, job.stage2_delivery) == (
+        DeliveryState.DELIVERED,
+        DeliveryState.DELIVERY_FAILED,
+    )
 
 
 async def test_a_voicemail_retried_to_done_keeps_its_label(

@@ -17,6 +17,9 @@ another tenant's job, and one index of every running job across tenants:
                                       its last transition's unix time -- a
                                       paused job by its wake-up time, once
                                       noted
+  call_stage2_pending                 a sorted set: every done job whose
+                                      stage 2 is pending, scored when it
+                                      became pending or the sweep re-queued it
 
 ONE JOB PER CALL is one Lua script: the index is read and, only if absent, the
 index and the job are written together. Two concurrent pushes of one call
@@ -43,7 +46,10 @@ pending. No callback URL, no delivery: the field stays empty.
 STAGE 2 IS APART FROM STATUS TOO. A `done` job stays done while wave 2 runs;
 `stage2` says where that is: not_eligible, or pending until the stage-2 task
 settles it done or failed, with the reason in `stage2_reason`. It is set with
-the move to done, in the same script, and moves only out of pending.
+the move to done, in the same script, and moves only out of pending. A
+pending stage 2 sits in call_stage2_pending until it settles, so the sweep
+can find one whose run was lost; its callback, call.stage2 or call.failed for
+stage 2, has a delivery field of its own, `stage2_delivery`.
 
 FAILS CLOSED. The job store is the job: a store that cannot be read or written
 raises JobStoreUnavailable (a 503 at the route, a retry in the worker), never a
@@ -142,6 +148,10 @@ class Job:
     updated_at: str
     finished_at: str | None
     metadata: dict[str, object] = field(repr=False)
+    # Re-queues of a lost stage 2 by the sweep: one, then stage 2 has failed.
+    stage2_sweeps: int = 0
+    # Stage 2's own callback; None while none is owed.
+    stage2_delivery: DeliveryState | None = None
 
     @property
     def terminal(self) -> bool:
@@ -170,6 +180,9 @@ _PASS_FIELD = "pass:"
 
 # Every job not yet terminal, across tenants, scored by its last transition.
 ACTIVE_JOBS_KEY = "call_jobs_active"
+
+# Every done job whose stage 2 is pending, scored when it became pending.
+STAGE2_PENDING_KEY = "call_stage2_pending"
 
 
 def active_member(tenant: str, job_id: str) -> str:
@@ -210,12 +223,13 @@ return {1, ARGV[1]}
 """
 )
 
-# KEYS: the job, the call index, the active set. ARGV: status, now, reason, the
-# result TTL, "1" when the status is terminal, the delivery state or "" to leave
-# it, the stage-2 state or "" to leave it, the record TTL, now's score, the
-# member, then every terminal status. 0 missing, -1 already terminal, 1 moved.
-# A terminal move sets finished_at and the result TTL on both keys and leaves
-# the active set; any other is touched.
+# KEYS: the job, the call index, the active set, the stage-2 pending set.
+# ARGV: status, now, reason, the result TTL, "1" when the status is terminal,
+# the delivery state or "" to leave it, the stage-2 state or "" to leave it,
+# the record TTL, now's score, the member, then every terminal status. 0
+# missing, -1 already terminal, 1 moved. A terminal move sets finished_at and
+# the result TTL on both keys and leaves the active set; any other is touched.
+# A stage 2 made pending joins the pending set at now's score.
 _TRANSITION_SCRIPT = (
     _TOUCH
     + """
@@ -234,6 +248,9 @@ if ARGV[6] ~= '' then
 end
 if ARGV[7] ~= '' then
   redis.call('HSET', KEYS[1], 'stage2', ARGV[7])
+  if ARGV[7] == 'pending' then
+    redis.call('ZADD', KEYS[4], ARGV[9], ARGV[10])
+  end
 end
 if ARGV[5] == '1' then
   redis.call('HSET', KEYS[1], 'finished_at', ARGV[2])
@@ -326,23 +343,26 @@ return redis.call('HINCRBY', KEYS[1], 'transcriptions', 1)
 """
 )
 
-# KEYS: the job. ARGV: the settled state, now. 0 missing, -1 not pending
-# (settled already, or never owed), 1 settled. The status is never touched.
+# KEYS: the job. ARGV: the settled state, now, the delivery's field. 0
+# missing, -1 not pending (settled already, or never owed), 1 settled. The
+# status is never touched.
 _SETTLE_SCRIPT = """
 if redis.call('EXISTS', KEYS[1]) == 0 then
   return 0
 end
-if redis.call('HGET', KEYS[1], 'delivery') ~= 'pending' then
+if redis.call('HGET', KEYS[1], ARGV[3]) ~= 'pending' then
   return -1
 end
-redis.call('HSET', KEYS[1], 'delivery', ARGV[1], 'updated_at', ARGV[2])
+redis.call('HSET', KEYS[1], ARGV[3], ARGV[1], 'updated_at', ARGV[2])
 return 1
 """
 
-# KEYS: the job. ARGV: the settled stage-2 state, its reason or "", now. 0
-# missing, -1 not pending (settled already, or never owed), 1 settled. The
-# status is never touched.
+# KEYS: the job, the stage-2 pending set. ARGV: the settled stage-2 state, its
+# reason or "", now, the member, stage 2's delivery state or "" for none owed.
+# 0 missing, -1 not pending (settled already, or never owed), 1 settled. The
+# status is never touched, and the job leaves the pending set either way.
 _STAGE2_SCRIPT = """
+redis.call('ZREM', KEYS[2], ARGV[4])
 if redis.call('EXISTS', KEYS[1]) == 0 then
   return 0
 end
@@ -350,7 +370,37 @@ if redis.call('HGET', KEYS[1], 'stage2') ~= 'pending' then
   return -1
 end
 redis.call('HSET', KEYS[1], 'stage2', ARGV[1], 'stage2_reason', ARGV[2], 'updated_at', ARGV[3])
+if ARGV[5] ~= '' then
+  redis.call('HSET', KEYS[1], 'stage2_delivery', ARGV[5])
+end
 return 1
+"""
+
+# KEYS: the job, the stage-2 pending set. ARGV: the member, now's score, the
+# seconds a pending stage 2 may wait. A job gone or no longer pending leaves
+# the set. -1 for that, or for one not yet past its wait; else how often the
+# sweep has re-queued it.
+_STAGE2_STUCK_SCRIPT = """
+if redis.call('HGET', KEYS[1], 'stage2') ~= 'pending' then
+  redis.call('ZREM', KEYS[2], ARGV[1])
+  return -1
+end
+local score = redis.call('ZSCORE', KEYS[2], ARGV[1])
+if not score or tonumber(score) > tonumber(ARGV[2]) - tonumber(ARGV[3]) then
+  return -1
+end
+return tonumber(redis.call('HGET', KEYS[1], 'stage2_sweeps') or '0')
+"""
+
+# KEYS: the job, the stage-2 pending set. ARGV: the member, now's score. A
+# pending stage 2 the sweep re-queued: counted, and its wait counted from now.
+# 0 when it is gone or no longer pending, else its re-queues after this one.
+_STAGE2_REQUEUED_SCRIPT = """
+if redis.call('HGET', KEYS[1], 'stage2') ~= 'pending' then
+  return 0
+end
+redis.call('ZADD', KEYS[2], 'XX', ARGV[2], ARGV[1])
+return redis.call('HINCRBY', KEYS[1], 'stage2_sweeps', 1)
 """
 
 # KEYS: the job, the call index, the active set. ARGV: now, the pass's field,
@@ -559,6 +609,12 @@ async def read_job(tenant: str, job_id: str) -> Job | None:
         delivery=DeliveryState(raw["delivery"]) if raw.get("delivery") else None,
         stage2=Stage2State(raw["stage2"]) if raw.get("stage2") else None,
         stage2_reason=raw.get("stage2_reason") or None,
+        stage2_sweeps=int(raw.get("stage2_sweeps", "0")),
+        stage2_delivery=(
+            DeliveryState(raw["stage2_delivery"])
+            if raw.get("stage2_delivery")
+            else None
+        ),
         queue=raw["queue"],
         created_at=raw["created_at"],
         updated_at=raw["updated_at"],
@@ -585,8 +641,9 @@ async def transition(
     moved = await _call(
         lambda: client.eval(
             _TRANSITION_SCRIPT,
-            3,
+            4,
             *_keys(job),
+            STAGE2_PENDING_KEY,
             status.value,
             now.isoformat(),
             reason or "",
@@ -602,27 +659,44 @@ async def transition(
 
 
 async def settle_stage2(
-    job: Job, state: Stage2State, *, now: datetime, reason: str | None = None
+    job: Job,
+    state: Stage2State,
+    *,
+    now: datetime,
+    reason: str | None = None,
+    delivery: DeliveryState | None = None,
 ) -> bool:
-    """A pending stage 2 becomes `state`, with its reason, whatever the job's
-    status. False when it was not pending or the job is gone."""
+    """A pending stage 2 becomes `state`, with its reason and, when given, its
+    own delivery owed, whatever the job's status. False when it was not
+    pending or the job is gone."""
     client = get_jobs_client()
     settled = await _call(
         lambda: client.eval(
             _STAGE2_SCRIPT,
-            1,
+            2,
             job_key(job.tenant, job.job_id),
+            STAGE2_PENDING_KEY,
             state.value,
             reason or "",
             now.isoformat(),
+            active_member(job.tenant, job.job_id),
+            "" if delivery is None else delivery.value,
         )
     )
     return int(settled) == 1
 
 
-async def settle_delivery(job: Job, state: DeliveryState, *, now: datetime) -> bool:
-    """A pending delivery becomes `state`, whatever the job's status. False
-    when it was not pending -- settled already, or never owed -- or is gone."""
+# The field each delivery lives in: stage 1's (or a failed job's), stage 2's.
+DELIVERY_FIELD = "delivery"
+STAGE2_DELIVERY_FIELD = "stage2_delivery"
+
+
+async def settle_delivery(
+    job: Job, state: DeliveryState, *, now: datetime, stage2: bool = False
+) -> bool:
+    """A pending delivery -- stage 2's own when `stage2` -- becomes `state`,
+    whatever the job's status. False when it was not pending -- settled
+    already, or never owed -- or is gone."""
     client = get_jobs_client()
     settled = await _call(
         lambda: client.eval(
@@ -631,6 +705,7 @@ async def settle_delivery(job: Job, state: DeliveryState, *, now: datetime) -> b
             job_key(job.tenant, job.job_id),
             state.value,
             now.isoformat(),
+            STAGE2_DELIVERY_FIELD if stage2 else DELIVERY_FIELD,
         )
     )
     return int(settled) == 1
@@ -764,10 +839,21 @@ async def read_result(tenant: str, job_id: str) -> dict[str, object] | None:
 async def stale_jobs(before: datetime, *, limit: int) -> list[tuple[str, str]]:
     """Up to `limit` (tenant, job_id) pairs whose last move was before
     `before`, oldest first."""
+    return await _stale(ACTIVE_JOBS_KEY, before, limit)
+
+
+async def stale_stage2(before: datetime, *, limit: int) -> list[tuple[str, str]]:
+    """Up to `limit` (tenant, job_id) pairs whose stage 2 has been pending
+    since before `before`, oldest first."""
+    return await _stale(STAGE2_PENDING_KEY, before, limit)
+
+
+async def _stale(key: str, before: datetime, limit: int) -> list[tuple[str, str]]:
+    """Up to `limit` members of the sorted set `key` scored before `before`."""
     client = get_jobs_client()
     members = await _call(
         lambda: client.zrangebyscore(
-            ACTIVE_JOBS_KEY, "-inf", before.timestamp(), start=0, num=limit
+            key, "-inf", before.timestamp(), start=0, num=limit
         )
     )
     # Plain members: no scores were asked for.
@@ -831,6 +917,43 @@ async def unmark_swept(tenant: str, job_id: str, *, uncount: bool = False) -> No
     await _call(
         lambda: client.eval(
             _UNMARK_SCRIPT, 1, job_key(tenant, job_id), "1" if uncount else "0"
+        )
+    )
+
+
+async def stage2_stuck(
+    tenant: str, job_id: str, *, now: datetime, wait_seconds: int
+) -> int | None:
+    """How often the sweep has re-queued this job's stage 2, once it has been
+    pending `wait_seconds` past its score at `now`; None when it has not, or is
+    no longer pending (it then leaves the pending set)."""
+    client = get_jobs_client()
+    sweeps = await _call(
+        lambda: client.eval(
+            _STAGE2_STUCK_SCRIPT,
+            2,
+            job_key(tenant, job_id),
+            STAGE2_PENDING_KEY,
+            active_member(tenant, job_id),
+            now.timestamp(),
+            wait_seconds,
+        )
+    )
+    return None if int(sweeps) < 0 else int(sweeps)
+
+
+async def mark_stage2_requeued(tenant: str, job_id: str, *, now: datetime) -> None:
+    """Count a re-queue of a pending stage 2, and count its wait from `now`.
+    A stage 2 no longer pending is left as it is."""
+    client = get_jobs_client()
+    await _call(
+        lambda: client.eval(
+            _STAGE2_REQUEUED_SCRIPT,
+            2,
+            job_key(tenant, job_id),
+            STAGE2_PENDING_KEY,
+            active_member(tenant, job_id),
+            now.timestamp(),
         )
     )
 

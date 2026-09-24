@@ -13,18 +13,22 @@ import httpx
 import pytest
 from arq import Retry
 
+from dodeal_ai.core.callbacks import CALL_FAILED
 from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.errors import QueueUnavailable
 from dodeal_ai.core.jobs import (
+    STAGE2_PENDING_KEY,
     JobStatus,
     JobStoreUnavailable,
     Stage2State,
     create_job,
+    job_key,
     read_job,
     result_key,
+    settle_stage2,
 )
 from dodeal_ai.core.tenant_config import set_override
-from dodeal_ai.units.call_intelligence import stage2, worker
+from dodeal_ai.units.call_intelligence import queues, stage2, sweep, worker
 from dodeal_ai.units.call_intelligence.admission import job_metadata
 from dodeal_ai.units.call_intelligence.config import (
     UNIT_B_SECTION,
@@ -443,6 +447,127 @@ async def test_a_dead_job_store_is_retried_by_arq(monkeypatch) -> None:
     monkeypatch.setattr(stage2, "read_job", down)
     with pytest.raises(Retry):
         await analyse_stage2({}, "tenant-a", JOB)
+
+
+# --- a lost stage 2: the sweep ---------------------------------------------------------
+
+
+def _hours_on(hours: float) -> datetime:
+    return datetime.now(UTC) + timedelta(hours=hours)
+
+
+async def _drop(redis_fakes: RedisFakes, suffix: str) -> None:
+    """arq loses the stage-2 entry under `suffix`."""
+    assert await redis_fakes.queue.delete(f"arq:job:tenant-a:{JOB}:{suffix}") == 1
+    await redis_fakes.queue.zrem(STAGE2_QUEUE, f"tenant-a:{JOB}:{suffix}")
+
+
+async def _pending_members(redis_fakes: RedisFakes) -> list[bytes]:
+    return await redis_fakes.jobs.zrange(STAGE2_PENDING_KEY, 0, -1)
+
+
+async def test_a_lost_stage2_is_requeued_once_then_failed_never_pending_forever(
+    ctx: dict, redis_fakes: RedisFakes, caplog: pytest.LogCaptureFixture
+) -> None:
+    await _done_and_pending(ctx)
+    assert await sweep.sweep(now=_hours_on(1.9), deliver=ctx["deliver"]) == 0
+    assert await sweep.sweep(now=_hours_on(2.1), deliver=ctx["deliver"]) == 0
+
+    await _drop(redis_fakes, "stage2")
+    assert await sweep.sweep(now=_hours_on(2.1), deliver=ctx["deliver"]) == 1
+    (requeued,) = await _stage2_jobs(redis_fakes)
+    assert (requeued.function, requeued.args) == ("analyse_stage2", ("tenant-a", JOB))
+    assert (await _job()).stage2_sweeps == 1
+    assert await sweep.sweep(now=_hours_on(2.1), deliver=ctx["deliver"]) == 0
+    assert await sweep.sweep(now=_hours_on(4.2), deliver=ctx["deliver"]) == 0
+
+    await _drop(redis_fakes, "stage2:sweep")
+    with caplog.at_level(logging.WARNING, logger="dodeal_ai.unit_b"):
+        assert await sweep.sweep(now=_hours_on(4.2), deliver=ctx["deliver"]) == 1
+    job = await _job()
+    assert (job.status, job.stage2, job.stage2_reason) == (
+        JobStatus.DONE,
+        Stage2State.FAILED,
+        "stage2_lost",
+    )
+    assert ctx["deliver"].seen == [STAGE1, CALL_FAILED]
+    assert await _pending_members(redis_fakes) == []
+    assert await sweep.sweep(now=_hours_on(9), deliver=ctx["deliver"]) == 0
+    (line,) = [r for r in caplog.records if r.getMessage() == "call_stage2_lost"]
+    assert (line.job_id, line.reason_code) == (JOB, "stage2_lost")
+
+
+async def test_a_requeued_stage2_that_runs_settles_and_leaves_the_sweep(
+    ctx: dict, redis_fakes: RedisFakes
+) -> None:
+    await _done_and_pending(ctx)
+    await _drop(redis_fakes, "stage2")
+    assert await sweep.sweep(now=_hours_on(2.1)) == 1
+    await analyse_stage2(_stage2_ctx(), "tenant-a", JOB)
+    assert (await _job()).stage2 is Stage2State.DONE
+    assert await _pending_members(redis_fakes) == []
+    await _drop(redis_fakes, "stage2:sweep")
+    assert await sweep.sweep(now=_hours_on(9)) == 0
+
+
+async def test_a_stage2_whose_job_expired_leaves_the_pending_set(
+    ctx: dict, redis_fakes: RedisFakes
+) -> None:
+    await _done_and_pending(ctx)
+    await redis_fakes.jobs.delete(job_key("tenant-a", JOB))
+    assert await sweep.sweep(now=_hours_on(9)) == 0
+    assert await _pending_members(redis_fakes) == []
+
+
+async def test_a_stage2_settled_under_the_sweep_is_not_failed_again(
+    ctx: dict, redis_fakes: RedisFakes, monkeypatch
+) -> None:
+    """Settled between the sweep's look and its failing it: nothing is sent."""
+    await _done_and_pending(ctx)
+    await _drop(redis_fakes, "stage2")
+    assert await sweep.sweep(now=_hours_on(2.1)) == 1
+    await _drop(redis_fakes, "stage2:sweep")
+    real = sweep.read_job
+
+    async def settled_meanwhile(tenant: str, job_id: str):
+        job = await real(tenant, job_id)
+        await settle_stage2(job, Stage2State.DONE, now=datetime.now(UTC))
+        return job
+
+    monkeypatch.setattr(sweep, "read_job", settled_meanwhile)
+    assert await sweep.sweep(now=_hours_on(4.2), deliver=ctx["deliver"]) == 0
+    assert (await _job()).stage2 is Stage2State.DONE
+    assert ctx["deliver"].seen == [STAGE1]
+
+    async def gone(tenant: str, job_id: str) -> None:
+        return None
+
+    await redis_fakes.jobs.zadd(STAGE2_PENDING_KEY, {f"tenant-a:{JOB}": 0})
+    await redis_fakes.jobs.hset(job_key("tenant-a", JOB), "stage2", "pending")
+    monkeypatch.setattr(sweep, "read_job", gone)
+    assert await sweep.sweep(now=_hours_on(4.2), deliver=ctx["deliver"]) == 0
+
+
+async def test_a_sweep_that_cannot_ask_arq_about_stage2_stops(
+    ctx: dict, redis_fakes: RedisFakes, monkeypatch
+) -> None:
+    await _done_and_pending(ctx)
+
+    async def no_queue(*args: object, **kwargs: object) -> bool:
+        raise QueueUnavailable()
+
+    monkeypatch.setattr(sweep, "stage2_on_the_queue", no_queue)
+    assert await sweep.sweep(now=_hours_on(2.1)) == 0
+    assert (await _job()).stage2_sweeps == 0
+
+
+async def test_arq_is_asked_under_both_stage2_ids(redis_fakes: RedisFakes) -> None:
+    assert not await queues.stage2_on_the_queue("tenant-a", JOB)
+    await queues.enqueue_stage2("tenant-a", JOB, sweep=True)
+    assert await queues.stage2_on_the_queue("tenant-a", JOB)
+    await _drop(redis_fakes, "stage2:sweep")
+    await redis_fakes.queue.set(f"arq:in-progress:tenant-a:{JOB}:stage2", b"1")
+    assert await queues.stage2_on_the_queue("tenant-a", JOB)
 
 
 # --- the worker ----------------------------------------------------------------------

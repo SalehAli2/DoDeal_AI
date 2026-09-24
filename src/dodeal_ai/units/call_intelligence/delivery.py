@@ -12,6 +12,11 @@ pending -> delivered or delivery_failed; the status is never touched here, so
 a job with a result stays `done` and its result is held for GET either way.
 A retry for a delivery no longer pending sends nothing.
 
+STAGE 2 HAS A DELIVERY OF ITS OWN, `stage2_delivery`, on the same schedule:
+call.stage2, or call.failed for stage 2 only -- a done job whose stage 2
+failed. A done job sends no other call.failed, so the event and the job's
+stage-2 state together say which delivery an attempt settles.
+
 A tenant with no callback_url has nothing to deliver and no delivery field;
 the CRM reads the result by GET. One whose URL was removed while a retry was
 pending gets delivery_failed: there is nowhere left to send it.
@@ -31,7 +36,9 @@ from typing import Any
 from dodeal_ai.core import metrics
 from dodeal_ai.core.audio_download import resolve_host
 from dodeal_ai.core.callbacks import (
+    CALL_FAILED,
     CALL_STAGE1,
+    CALL_STAGE2,
     DELIVERY_DELAYS_SECONDS,
     Delivery,
     event_id,
@@ -41,6 +48,7 @@ from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.jobs import (
     DeliveryState,
     Job,
+    Stage2State,
     read_job,
     read_result,
     settle_delivery,
@@ -50,6 +58,19 @@ from dodeal_ai.units.call_intelligence.config import CallsConfig, resolve_calls_
 from dodeal_ai.units.call_intelligence.queues import enqueue_delivery
 
 _logger = logging.getLogger("dodeal_ai.unit_b")
+
+
+def stage2_event(job: Job, event: str) -> bool:
+    """Whether `event` is stage 2's own: call.stage2, or call.failed for a done
+    job whose stage 2 failed."""
+    return event == CALL_STAGE2 or (
+        event == CALL_FAILED and job.stage2 is Stage2State.FAILED
+    )
+
+
+def _owed(job: Job, event: str) -> DeliveryState | None:
+    """The delivery `event` settles: stage 2's own, or the job's."""
+    return job.stage2_delivery if stage2_event(job, event) else job.delivery
 
 
 async def event_body(job: Job, event: str) -> bytes:
@@ -64,6 +85,12 @@ async def event_body(job: Job, event: str) -> bytes:
     }
     if event == CALL_STAGE1:
         body["result"] = await read_result(job.tenant, job.job_id)
+    elif stage2_event(job, event):
+        # call.failed for stage 2 only: the job stays done, stage 1 stands.
+        body["stage"] = 2
+        body["status"] = job.status.value
+        body["stage2"] = Stage2State.FAILED.value
+        body["reason"] = job.stage2_reason
     else:
         body["status"] = job.status.value
         body["reason"] = job.reason
@@ -72,12 +99,13 @@ async def event_body(job: Job, event: str) -> bytes:
 
 async def _attempt(
     ctx: dict[str, Any], job: Job, event: str, config: CallsConfig
-) -> Delivery | None:
-    """One signed POST of `event`, or None when the tenant has no callback."""
+) -> tuple[Delivery | None, Job]:
+    """One signed POST of `event`, or None when the tenant has no callback;
+    and the job as the attempt read it."""
     if config.callback_url is None:
-        return None
+        return None, job
     current = await read_job(job.tenant, job.job_id) or job
-    return await post_event(
+    outcome = await post_event(
         config.callback_url,
         tenant=job.tenant,
         event=event,
@@ -88,6 +116,17 @@ async def _attempt(
         resolve=ctx.get("resolve", resolve_host),
         allow_local=get_settings().call_demo_allow_local_audio,
     )
+    return outcome, current
+
+
+async def _delivered(job: Job, event: str) -> None:
+    """The event's delivery is delivered."""
+    await settle_delivery(
+        job,
+        DeliveryState.DELIVERED,
+        now=datetime.now(UTC),
+        stage2=stage2_event(job, event),
+    )
 
 
 async def deliver_event(
@@ -95,12 +134,12 @@ async def deliver_event(
 ) -> bool:
     """process_call's deliverer: True once the CRM has the event or there is
     no callback to send; False when it is left to the schedule or has failed."""
-    outcome = await _attempt(ctx, job, event, config)
+    outcome, job = await _attempt(ctx, job, event, config)
     _log(job, event, outcome, attempt=0)
     if outcome is None:
         return True
     if outcome is Delivery.DELIVERED:
-        await settle_delivery(job, DeliveryState.DELIVERED, now=datetime.now(UTC))
+        await _delivered(job, event)
         return True
     if outcome is Delivery.RETRY:
         await _schedule(job, event, attempt=1)
@@ -130,13 +169,13 @@ async def _retry(
     if job is None:
         return
     fields["request_id"] = job.request_id
-    if job.delivery is not DeliveryState.PENDING:
+    if _owed(job, event) is not DeliveryState.PENDING:
         return
     config = await resolve_calls_config(tenant)
-    outcome = await _attempt(ctx, job, event, config)
+    outcome, job = await _attempt(ctx, job, event, config)
     _log(job, event, outcome, attempt=attempt)
     if outcome is Delivery.DELIVERED:
-        await settle_delivery(job, DeliveryState.DELIVERED, now=datetime.now(UTC))
+        await _delivered(job, event)
         return
     if outcome is Delivery.RETRY and attempt < len(DELIVERY_DELAYS_SECONDS):
         await _schedule(job, event, attempt=attempt + 1)
@@ -166,7 +205,12 @@ async def _delivery_failed(job: Job, event: str) -> None:
             "event": event,
         },
     )
-    await settle_delivery(job, DeliveryState.DELIVERY_FAILED, now=datetime.now(UTC))
+    await settle_delivery(
+        job,
+        DeliveryState.DELIVERY_FAILED,
+        now=datetime.now(UTC),
+        stage2=stage2_event(job, event),
+    )
 
 
 def _log(job: Job, event: str, outcome: Delivery | None, *, attempt: int) -> None:

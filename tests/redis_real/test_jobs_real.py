@@ -13,10 +13,14 @@ from redis import asyncio as redis_async
 from dodeal_ai.core.jobs import (
     _CLAIM_SCRIPT,
     _CREATE_SCRIPT,
+    _STAGE2_REQUEUED_SCRIPT,
+    _STAGE2_SCRIPT,
+    _STAGE2_STUCK_SCRIPT,
     _SWEEP_SCRIPT,
     _TERMINAL_ARGS,
     _TRANSITION_SCRIPT,
     ACTIVE_JOBS_KEY,
+    STAGE2_PENDING_KEY,
     active_member,
     call_index_key,
     job_key,
@@ -142,3 +146,56 @@ async def test_a_running_job_expires_and_is_swept_once_per_stall(
     first, second = await _sweep(), await _sweep()
     assert first == [1, 1, "arq:calls:normal", "queued", "0"]
     assert second == [-1]
+
+
+async def test_a_pending_stage2_is_indexed_requeued_once_and_leaves_on_settle(
+    real_redis: redis_async.Redis, key_prefix: str
+) -> None:
+    await _create(real_redis, key_prefix, "job-1")
+    job, index, active = _keys(key_prefix, "job-1")
+    pending = key_prefix + STAGE2_PENDING_KEY
+    member = active_member(_TENANT, "job-1")
+    done = await real_redis.eval(
+        _TRANSITION_SCRIPT,
+        4,
+        job,
+        index,
+        active,
+        pending,
+        "done",
+        "t",
+        "",
+        _TTL,
+        "1",
+        "",
+        "pending",
+        *_touch("job-1"),
+        *_TERMINAL_ARGS,
+    )
+    assert int(done) == 1
+    assert await real_redis.zscore(pending, member) == _SCORE
+
+    async def _stuck(now: float) -> int:
+        return int(
+            await real_redis.eval(
+                _STAGE2_STUCK_SCRIPT, 2, job, pending, member, now, 60
+            )
+        )
+
+    assert (await _stuck(_SCORE), await _stuck(_SCORE + 61)) == (-1, 0)
+    requeued = await real_redis.eval(
+        _STAGE2_REQUEUED_SCRIPT, 2, job, pending, member, _SCORE + 61
+    )
+    assert int(requeued) == 1
+    assert (await _stuck(_SCORE + 61), await _stuck(_SCORE + 122)) == (-1, 1)
+
+    settled = await real_redis.eval(
+        _STAGE2_SCRIPT, 2, job, pending, "failed", "stage2_lost", "t", member, "pending"
+    )
+    assert int(settled) == 1
+    assert await real_redis.hmget(job, "stage2", "stage2_delivery") == [
+        "failed",
+        "pending",
+    ]
+    assert await real_redis.zscore(pending, member) is None
+    assert await _stuck(_SCORE + 999) == -1

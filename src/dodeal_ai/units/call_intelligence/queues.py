@@ -16,8 +16,9 @@ the voiceprint stay in db3 with the job, so nothing sensitive sits in db0.
 The arq job id is `<tenant>:<job_id>`, so pushing the same job twice puts it on
 its queue once. A pause (core(105)) re-queues under `...:resume:<n>`, the
 stuck-job sweep (sweep.py) under `...:sweep:<n>`, and stage 2 goes once
-under `...:stage2`. `on_the_queue` asks arq
-whether any of those ids is still queued, deferred or running.
+under `...:stage2` and, when the sweep finds it lost, once more under
+`...:stage2:sweep`. `on_the_queue` and `stage2_on_the_queue` ask arq whether
+any of a job's ids is still queued, deferred or running.
 """
 
 from __future__ import annotations
@@ -89,6 +90,25 @@ async def on_the_queue(tenant: str, job_id: str, *, pauses: int, sweeps: int) ->
         *(arq_job_id(tenant, job_id, resume=n) for n in range(1, pauses + 1)),
         *(arq_job_id(tenant, job_id, sweep=n) for n in range(1, sweeps + 1)),
     ]
+    return await _held(ids)
+
+
+def stage2_arq_id(tenant: str, job_id: str, *, sweep: bool = False) -> str:
+    """The arq id of a job's stage 2: the one push, and the sweep's one re-queue."""
+    base = f"{tenant}:{job_id}:stage2"
+    return f"{base}:sweep" if sweep else base
+
+
+async def stage2_on_the_queue(tenant: str, job_id: str) -> bool:
+    """Whether arq holds this job's stage 2 under either of its ids, queued,
+    deferred or running."""
+    return await _held(
+        [stage2_arq_id(tenant, job_id), stage2_arq_id(tenant, job_id, sweep=True)]
+    )
+
+
+async def _held(ids: list[str]) -> bool:
+    """Whether arq holds any of `ids`; QueueUnavailable when it cannot say."""
     keys = [f"{prefix}{arq_id}" for arq_id in ids for prefix in _ARQ_PREFIXES]
     client = get_queue_client()
     try:
@@ -130,9 +150,10 @@ async def enqueue_delivery(
         raise QueueUnavailable() from None
 
 
-async def enqueue_stage2(tenant: str, job_id: str) -> None:
-    """Put `analyse_stage2(tenant, job_id)` on the stage-2 queue, once. A queue
-    that cannot be reached is QueueUnavailable."""
+async def enqueue_stage2(tenant: str, job_id: str, *, sweep: bool = False) -> None:
+    """Put `analyse_stage2(tenant, job_id)` on the stage-2 queue, once -- once
+    more under its own id for the sweep. A queue that cannot be reached is
+    QueueUnavailable."""
     client = get_queue_client()
     try:
         await queue_breaker().call(
@@ -140,7 +161,7 @@ async def enqueue_stage2(tenant: str, job_id: str) -> None:
                 ANALYSE_STAGE2,
                 tenant,
                 job_id,
-                _job_id=f"{tenant}:{job_id}:stage2",
+                _job_id=stage2_arq_id(tenant, job_id, sweep=sweep),
                 _queue_name=STAGE2_QUEUE,
             )
         )

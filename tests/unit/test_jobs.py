@@ -14,6 +14,7 @@ from dodeal_ai.core import jobs
 from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.jobs import (
     ACTIVE_JOBS_KEY,
+    STAGE2_PENDING_KEY,
     DeliveryState,
     JobStatus,
     JobStoreUnavailable,
@@ -24,6 +25,7 @@ from dodeal_ai.core.jobs import (
     clear_work,
     create_job,
     job_key,
+    mark_stage2_requeued,
     mark_swept,
     note_wake,
     pause,
@@ -33,7 +35,9 @@ from dodeal_ai.core.jobs import (
     result_key,
     settle_delivery,
     settle_stage2,
+    stage2_stuck,
     stale_jobs,
+    stale_stage2,
     start_pass,
     start_stage2_pass,
     start_transcription,
@@ -399,6 +403,9 @@ async def test_every_operation_fails_closed_on_a_dead_store(dead_store) -> None:
         note_wake(job, wake_at=NOW),
         settle_stage2(job, Stage2State.DONE, now=NOW),
         start_stage2_pass(job, "objections", now=NOW),
+        stale_stage2(NOW, limit=10),
+        stage2_stuck("tenant-a", "job-1", now=NOW, wait_seconds=0),
+        mark_stage2_requeued("tenant-a", "job-1", now=NOW),
     ]
     for operation in operations:
         with pytest.raises(JobStoreUnavailable) as caught:
@@ -551,6 +558,68 @@ async def test_a_stage2_pass_is_counted_on_a_done_job_only_while_pending(
     assert await start_stage2_pass(job, "objections", now=NOW) is None
     await jobs.get_jobs_client().delete(job_key("tenant-a", "job-1"))
     assert await start_stage2_pass(job, "objections", now=NOW) is None
+
+
+async def test_a_pending_stage2_is_indexed_until_it_settles(
+    redis_fakes: RedisFakes,
+) -> None:
+    await _create()
+    job = await _job()
+    await transition(
+        job, JobStatus.DONE, now=NOW, ttl_seconds=TTL, stage2=Stage2State.PENDING
+    )
+    assert await stale_stage2(LATER, limit=10) == [("tenant-a", "job-1")]
+    assert await stale_stage2(NOW - timedelta(seconds=1), limit=10) == []
+    wait = int((LATER - NOW).total_seconds())
+    assert await stage2_stuck("tenant-a", "job-1", now=LATER, wait_seconds=wait) == 0
+    assert await stage2_stuck("tenant-a", "job-1", now=NOW, wait_seconds=wait) is None
+
+    await mark_stage2_requeued("tenant-a", "job-1", now=LATER)
+    assert (await _job()).stage2_sweeps == 1
+    assert await stage2_stuck("tenant-a", "job-1", now=LATER, wait_seconds=wait) is None
+    later = LATER + (LATER - NOW)
+    assert await stage2_stuck("tenant-a", "job-1", now=later, wait_seconds=wait) == 1
+
+    assert await settle_stage2(
+        job, Stage2State.DONE, now=LATER, delivery=DeliveryState.PENDING
+    )
+    assert (await _job()).stage2_delivery is DeliveryState.PENDING
+    assert await stale_stage2(later, limit=10) == []
+    await mark_stage2_requeued("tenant-a", "job-1", now=later)
+    assert (await _job()).stage2_sweeps == 1
+
+
+async def test_a_stage2_no_longer_pending_leaves_the_index_when_looked_at(
+    redis_fakes: RedisFakes,
+) -> None:
+    await redis_fakes.jobs.zadd(STAGE2_PENDING_KEY, {"tenant-a:job-gone": 0})
+    assert await stage2_stuck("tenant-a", "job-gone", now=NOW, wait_seconds=0) is None
+    assert await stale_stage2(LATER, limit=10) == []
+
+
+async def test_stage2s_own_delivery_settles_apart_from_stage1s() -> None:
+    await _create()
+    job = await _job()
+    await transition(
+        job,
+        JobStatus.DONE,
+        now=NOW,
+        ttl_seconds=TTL,
+        delivery=DeliveryState.PENDING,
+        stage2=Stage2State.PENDING,
+    )
+    await settle_stage2(
+        job, Stage2State.FAILED, now=NOW, delivery=DeliveryState.PENDING
+    )
+    assert await settle_delivery(job, DeliveryState.DELIVERED, now=LATER, stage2=True)
+    settled = await _job()
+    assert (settled.delivery, settled.stage2_delivery) == (
+        DeliveryState.PENDING,
+        DeliveryState.DELIVERED,
+    )
+    assert not await settle_delivery(
+        job, DeliveryState.DELIVERED, now=LATER, stage2=True
+    )
 
 
 async def test_a_move_without_a_stage2_state_leaves_it_alone() -> None:
