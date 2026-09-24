@@ -283,7 +283,9 @@ def test_a_long_digit_run_is_masked_but_a_price_is_not() -> None:
         ("ref 123.456.789", "ref [PHONE]"),
         ("ref 123-456-789", "ref [PHONE]"),
         ("id 123456789012345", "id [PHONE]"),
-        ("id 1234567890123456", "id 1234567890123456"),
+        ("card 4111 1111 1111 1111", "card [PHONE]"),
+        ("id 1234567890123456789", "id [PHONE]"),
+        ("id 12345678901234567890", "id 12345678901234567890"),
         ("٩٦٦ ٥٠ ١٢٣ ٤٥٦٧", "[PHONE]"),
         ("1,250,500 123 456", "1,250,500 123 456"),
         ("1,250,000,000.50 in all", "1,250,000,000.50 in all"),
@@ -297,7 +299,9 @@ def test_a_long_digit_run_is_masked_but_a_price_is_not() -> None:
         "nine-dots",
         "nine-hyphens",
         "fifteen",
-        "sixteen-kept",
+        "sixteen-card",
+        "nineteen",
+        "twenty-kept",
         "arabic-indic",
         "price-beside-digits",
         "price-decimals",
@@ -306,7 +310,7 @@ def test_a_long_digit_run_is_masked_but_a_price_is_not() -> None:
         "commas-break-runs",
     ],
 )
-def test_the_prompt_copy_masks_every_run_of_nine_to_fifteen_digits(
+def test_the_prompt_copy_masks_every_run_of_nine_to_nineteen_digits(
     said: str, shown: str
 ) -> None:
     assert prompt_copy(said) == shown

@@ -197,6 +197,15 @@ _FLOORS: dict[str, float] = {
     "src/dodeal_ai/units/call_intelligence/extras.py": 100,
     # analyse_stage2: 95, as for process_call, for a defensive branch or two.
     "src/dodeal_ai/units/call_intelligence/stage2.py": 95,
+    # Register item 113, Unit B batch 4. The model router: a gap is a pass sent
+    # to a provider no test chose. The three STT adapters: a gap is a request
+    # paid twice or a failure misread. The keyword matcher and the roles pass:
+    # a gap is a name found where none was said, or a voice mislabelled.
+    "src/dodeal_ai/core/llm/routing.py": 100,
+    "src/dodeal_ai/units/call_intelligence/gemini.py": 100,
+    "src/dodeal_ai/units/call_intelligence/http_stt.py": 100,
+    "src/dodeal_ai/units/call_intelligence/keywords.py": 100,
+    "src/dodeal_ai/units/call_intelligence/roles.py": 100,
 }
 
 

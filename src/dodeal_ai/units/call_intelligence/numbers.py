@@ -34,9 +34,9 @@ with nothing to compare against, nothing escalates.
 
 THE PROMPT COPY masks every phone number as [PHONE] and every email address as
 [EMAIL]; the stored transcript keeps what was said. It masks wider than the
-phone rule finds: any run of 9 to 15 digits, joined only by spaces, full stops
+phone rule finds: any run of 9 to 19 digits, joined only by spaces, full stops
 or hyphens, is [PHONE] too, whatever it starts with -- another country's
-number said without its +, an ID, an account -- unless it is a price grouped
+number said without its +, an ID, an account, a card -- unless it is a price grouped
 in thousands with commas ("1,200,000"), which the extraction needs. The finds
 are the phone rule's alone: a run masked this way is not a find.
 """
@@ -89,8 +89,9 @@ _EMAIL = re.compile(
 
 # The prompt copy's wider mask (module docstring): a run of this many digits is
 # masked whatever it starts with. Nine is the shortest national number worth
-# hiding; fifteen is E.164's longest. A comma-less price this long is masked.
-_MASKED_RUN = range(9, 16)
+# hiding; nineteen is a payment card's longest. A comma-less price this long
+# is masked; a run longer than that is not a number anyone reads out.
+_MASKED_RUN = range(9, 20)
 _DIGIT = "0-9٠-٩۰-۹"
 # Digits joined only by spaces, full stops and hyphens.
 _RUN = re.compile(rf"[{_DIGIT}]+(?:[\s.\-]+[{_DIGIT}]+)*")

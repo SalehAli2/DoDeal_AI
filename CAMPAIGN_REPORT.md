@@ -7434,3 +7434,12 @@ failure modes, then one stress test (sabotage in brackets).
   Test: the demo's workers include stage 2 (stage-2 worker off fails 1).
 - prompts, floors, owasp, unit-b docs: no sabotage owed; the digest and the
   per-template pins, 46 floors met, and every cited test exists.
+
+## Unit B batch 4 (routing, STT, roles, re-analysis, translation)
+
+- routing, 158, audio: a pass sent to a provider no route chose; a Redis URL in a startup error. Tests: bodies byte-identical with no new config, `repr(settings)` shows no URL.
+- gemini-stt: the SDK retries a 503 or 429 on its own and bills twice; an upload is left with Google. Test: one request per 503/429 on both layers (retry switch off fails 2); the upload is deleted on a 400 (delete off fails 2).
+- keywords: a name found where none was said; an unlisted canonical believed. Test: "beachfront" yields the listed term (plain match fails 1); the canonical check (off fails 1).
+- roles: a client labelled agent; an invented quote believed. Test: "this is Nada from the company" maps to agent, and an invented quote fails (quote check off fails 1; the clear-mapping rule off fails 1).
+- reanalysis: the audio transcribed and paid again; a push collides with the call's first job. Test: never calls the transcriber; the same versions twice give one job (index off fails 1; no-transcript guard off fails 1).
+- stt-eval, stt-compare, translation, docs, floors: no sabotage owed. There are 51 floors, all met, and a 16-digit card number is masked.

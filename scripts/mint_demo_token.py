@@ -130,7 +130,7 @@ _POST_ROUTES = frozenset({"fetch", "direct", "history", "calls"})
 # default, and an invented call id. The link expires an hour after minting.
 DEMO_AUDIO_URL = "http://127.0.0.1:8765/demo-call.wav"
 _DEMO_CALL_ID = 9001
-_DEMO_CALL_SECONDS = 95
+_DEMO_CALL_SECONDS = 150
 _LINK_LIFETIME_SECONDS = 3600
 
 

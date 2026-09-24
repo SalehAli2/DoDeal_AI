@@ -131,7 +131,16 @@ python -m dodeal_ai.workers.calls overnight  # worker-overnight
 python -m dodeal_ai.workers.calls stage2     # worker-stage2
 ```
 
-The first three run stage 1 (`process_call`) and retry callbacks. The normal queue's worker also runs the stuck-job sweep every 300 s. `worker-stage2` runs wave 2 (`analyse_stage2`) once call.stage1 has gone, and transcribes nothing. Outside Docker, run the same line with `uv run` in front, one terminal per queue. Every worker refuses to start without a model client (`DODEAL_LLM_*`). Until a speech-to-text adapter exists, the three stage-1 workers also refuse with `stt_not_configured`, so a worker that is down in `docker compose ps` is expected. The FakeTranscriber can only be handed in by `scripts/call_demo.py --worker`, and only with `DODEAL_CALL_DEMO_ALLOW_LOCAL_AUDIO=true`; that runs the normal and stage-2 workers together. The events the workers send, and the phone rule the CRM hashes with, are in `docs/contracts/call_events.md`.
+- **The four queues.** `priority`, `normal` and `overnight` run stage 1 (`process_call`) and callback retries; `normal` also runs the stuck-job sweep every 300 s; re-analyses go on `overnight`. `stage2` runs wave 2 (`analyse_stage2`) and translations (`translate_call`), and transcribes nothing.
+- **ffmpeg.** In the image. A stage-1 worker checks it at start and refuses without it (`ffmpeg_not_found`), except under the demo flag.
+- **Model routing.** `DODEAL_LLM_*` is the `default` route. `DODEAL_LLM_PROVIDERS` adds providers (key from the variable each names), `DODEAL_LLM_PROFILES` points a pass at one, `DODEAL_MODEL_ROUTES` names routes (pass → profile). A company picks one with `unit_a.model_route` / `unit_b.model_route`.
+- **Speech-to-text.** `DODEAL_CALL_STT_PROVIDER` / `_MODEL` / `_API_KEY` / `_BASE_URL` are the `default` STT profile (Gemini's `gemini-3.5-transcribe`). `DODEAL_CALL_STT_PROFILES` adds named ones (`gemini`, `openai_compatible`, `diarized_http`). A company picks one with `unit_b.stt_profile`. A profile that cannot be built stops the worker. The fake is handed in only by `scripts/call_demo.py --worker` under `DODEAL_CALL_DEMO_ALLOW_LOCAL_AUDIO=true`.
+- **Keyword vocabulary.** `unit_b.keyword_vocabulary` (up to 100 names) is used after transcription only: spotted in code into stage 1 `signals.keywords`, and mapped by the extras pass to `canonical`. It is never sent to the STT engine.
+- **Switching a company between an API and the owner's server.**
+  1. Add the owner's profiles: `DODEAL_LLM_PROVIDERS={"owner":{"kind":"openai_compatible","base_url":"http://10.0.0.5:8000/v1","api_key_env":"OWNER_LLM_KEY","timeout_seconds":60}}`, profiles naming `"provider":"owner"`, and a route in `DODEAL_MODEL_ROUTES`. For speech, a `diarized_http` profile in `DODEAL_CALL_STT_PROFILES` (contract: `docs/contracts/audio_service.md`).
+  2. Set the keys the profiles name, then restart the API and the workers.
+  3. Use the admin `PUT` to set `unit_b.model_route` and `unit_b.stt_profile` (and `unit_a.model_route`). Only `policy_version` moves. To switch back, set `"default"` again.
+- **Outside Docker**, run each line with `uv run` in front, one terminal per queue. Every worker refuses to start without a model client (`DODEAL_LLM_*`). The events the workers send, and the phone rule, are in `docs/contracts/call_events.md`.
 
 #### The demo
 
@@ -380,7 +389,7 @@ Root contracts owned by the backend, kept inside the package for the same reason
 
 | File | Purpose |
 | --- | --- |
-| `calls.py` | The only worker entry point (Decision 2): one arq worker per call queue, `python -m dodeal_ai.workers.calls priority\|normal\|overnight\|stage2`. The first three run `process_call` and `deliver_callback`, and the stage-2 queue's worker runs `analyse_stage2`. Redis is derived from `redis_queue_url`, and each run is cut off at `DODEAL_CALL_JOB_TIMEOUT_SECONDS`. Importing it opens no connection. |
+| `calls.py` | The only worker entry point (Decision 2): one arq worker per call queue, `python -m dodeal_ai.workers.calls priority\|normal\|overnight\|stage2`. The first three run `process_call` and `deliver_callback`, and the stage-2 queue's worker runs `analyse_stage2` and `translate_call`. It builds each STT profile's transcriber and the model router once, at start. Redis is derived from `redis_queue_url`, and each run is cut off at `DODEAL_CALL_JOB_TIMEOUT_SECONDS`. Importing it opens no connection. |
 
 ### `tests/` (repo-wide guards)
 

@@ -100,7 +100,7 @@ output) are omitted.
     │   │   └── sales_automation/          # Unit C2 (deferred, post-pilot)
     │   │
     │   ├── workers/              # arq: transcription (B), lead engagement (C2)
-    │   │   └── runner.py         # WorkerSettings only — no task until step 14
+    │   │   └── calls.py          # one arq worker per call queue (Unit B)
     │   │
     │   └── api/routes/           # one router per unit
     │       └── _probe.py         # gate-chain probe route (tests only)

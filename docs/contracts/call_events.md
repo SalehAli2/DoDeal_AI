@@ -31,7 +31,7 @@ Every body has these fields:
 | `lead_id` | integer | from the push |
 | `author_id` | integer | the agent, from the push |
 
-Each event then adds its own fields (sections 3 to 5). No body ever carries the audio link, a phone hash, a voiceprint, a phone number or its hash, or model reasoning.
+Each event then adds its own fields (sections 3 to 5 and 7). A re-analysis job's events also carry `"reanalysis": true` (section 7). No body ever carries the audio link, a phone hash, a voiceprint, a phone number or its hash, or model reasoning.
 
 ## 3. `call.stage1`
 
@@ -141,7 +141,16 @@ Each event then adds its own fields (sections 3 to 5). No body ever carries the 
 
 A **segment id** is `s<n>`, 1-based in `transcript.segments` order: `s3` is the third segment.
 
-**Masking.** A model reads a masked copy of each segment. Every phone number, email address and any other run of 9 to 15 digits is masked; a price grouped in thousands with commas is kept. So a quote may contain `[PHONE]` or `[EMAIL]` where the transcript has the number. The transcript itself is as said.
+**Added in batch 4, in `result`:**
+
+- `transcript.segments[].speaker`: a diarized call's labels are mapped by the roles pass to `agent` or `client`. A stereo call's labels come from its channels. `confidence` may be `null` when the engine reports none (Gemini).
+- `transcript.uncertain_reasons`: fixed codes that make the transcript uncertain whatever its confidence. They are `low_speech_ratio`, `low_volume`, `roles_failed`, `roles_unclear`, `speakers_over_two` and `stt_no_speakers`.
+- `audio`: `{duration_seconds, channels, speech_ratio, mean_volume_db}`, measured by ffmpeg before any paid call. It is `null` when the recording was not inspected. Under 0.30 speech or -40 dB, the transcript is uncertain.
+- `roles`: `null` when no voice needed mapping. Otherwise `{speakers: [{speaker, role, quote, segment}], applied, reasons}`, where `role` is `agent`, `client` or `unclear` and `applied` is false unless exactly one voice is the agent and none is unclear.
+- `signals.keywords[]`: the company's `keyword_vocabulary` spotted in code after transcription, `{term, segment, start_s}`, with the term as listed. `null` when the list is empty. The vocabulary is never sent to the speech-to-text engine.
+- `versions.passes`: `{<pass>: {provider, model}}` for each pass that answered, including `roles`. `versions.transcriber` is the transcriber's `provider/model`.
+
+**Masking.** A model reads a masked copy of each segment. Every phone number, email address and any other run of 9 to 19 digits is masked; a price grouped in thousands with commas is kept. So a quote may contain `[PHONE]` or `[EMAIL]` where the transcript has the number. The transcript itself is as said.
 
 ## 4. `call.stage2`
 
@@ -271,7 +280,8 @@ A **segment id** is `s<n>`, 1-based in `transcript.segments` order: `s3` is the 
 | `escalations` | `items[]` in time order: stage 1's `off_channel_contact` items merged with the model's flags. A model flag has `type`, `issue`, `source: model`, `speaker`, `start_s`, `segment` and `quote`. `issue` is one of `over_promise_or_guarantee`, `wrong_price_or_terms`, `rudeness_or_pressure`, `unprofessional_competitor_talk` or `qualified_no_next_step`; `type` equals `issue`, except that **`wrong_price_or_terms` goes out as `type: claim_to_verify`**, a claim to check and not a finding. |
 | `coaching` | in the summary `language`. 2 or 3 `observations` (at least one `strength` and one `improvement`; an improvement has `say_it_like_this`). Up to 4 `moments`, each with `timestamp` (`mm:ss`) and `start_s` read from its segment in code. A 3-action `plan`. The seven `stages`, each `done` with a quote when yes. |
 | `extras` | `keywords[]`: `kind` (`project`, `community`, `developer` or `topic`), `said` as spoken and checked in its `segment`, and `english` or `null`. `tags`: `outcome` (`moved_forward`, `stalled`, `needs_follow_up`, `dead`), `stage` (`first_contact`, `follow_up`, `viewing`, `negotiation`, `closing`) and `client_type` (`end_user`, `investor`, `broker`, `unknown`). `whatsapp_suggestion`: at most 60 words in `language`. **This service never sends it**; show it to the agent to send or not. `seriousness`: five checks, each with a `reason` and a quote for a yes. The `band` is computed in code from the `yes` count: `A` for 4 or 5, `B` for 2 or 3, `C` for 0 or 1. **`manager_only: true`**: show it to the agent's manager, never to the agent. |
-| `versions` | the prompt set, the objection list, the rubric, the tone list, and the model each pass's answer came from (a pass that did not answer is absent) |
+| `versions` | the prompt set, the objection list, the rubric, the tone list, the model each pass's answer came from, and `passes`, `{<pass>: {provider, model}}` (a pass that did not answer is absent from both) |
+| `extras.keywords[].canonical` | the company's `keyword_vocabulary` name this keyword is, copied exactly as listed; `null` when it is none, and the keyword is kept as found |
 
 Every quote in every part is at most 25 words and has been checked to appear word for word in the segment it cites, from the right speaker where it matters. Quotes read the masked copy, so they may contain `[PHONE]` or `[EMAIL]`.
 
@@ -334,3 +344,18 @@ The push's `lead_phone_hash` and `agent_phone_hash` are compared with the number
 5. The hash is the lowercase hex SHA-256 of those ASCII digits. Case does not matter when the hashes are compared.
 
 So `+971 50 123 4567`, `00971-50-123-4567`, `050.123.4567` and `(050) 1234567` all hash as `971501234567`. A number with another country's code and no `+` or `00` is not found. A price, a year or a unit number is never a phone number.
+
+## 7. Re-analysis and `call.translation`
+
+**Re-analysis** (`POST /api/v1/calls/reanalysis`, service token, counted on `cost:reanalysis:tenant`):
+
+- The body is `call_id`, `lead_id`, `author_id`, `duration_seconds`, `recorded_at`, `transcript` (the stage-1 `transcript` as delivered), `reason` (`objection_list_changed`, `checklist_changed` or `prompt_changed`) and `stages` (`[1]`, `[2]` or `[1, 2]`). Any other field is a 422.
+- The answer is `202 {job_id, status}`. The job is a new one, on the overnight queue. The same call, stages and versions give the same job. The call's first job and its results are never touched.
+- The audio is never fetched and the transcript is never made again. The passes run on the current prompt set, lists and rubric, through the company's model route.
+- Its `call.stage1` (for stage 1) and `call.stage2` (for stage 2) carry `"reanalysis": true`. With `stages: [2]`, no `call.stage1` is sent, and the stored stage 1 has `analysis_reason: "stage1_not_requested"`.
+
+**`call.translation`** (asked for with `POST /api/v1/calls/jobs/{job_id}/translation {"target": "ar"|"en"}`, counted on the reads counter):
+
+- The answer is `202 {job_id, target, status: "queued"}`. The response is `409 result_expired` once the stage-1 result is gone, and `409 already_in_language` when the call is mostly in the target language already.
+- The event is sent once, signed like every other, and not retried. `GET /api/v1/calls/jobs/{job_id}` shows it under `translations.<target>` while it is held.
+- `result` is `{target, segments, reason, versions}`. Each segment is `{segment, start_s, end_s, speaker, text}`; the id, the times and the speaker are the transcript's, and only the text is translated. Numbers stay masked as `[PHONE]`. `segments` is `null` with `reason` `translate_model_unavailable` or `translate_malformed_output` when the pass failed.
