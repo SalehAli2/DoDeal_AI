@@ -7410,3 +7410,27 @@ modes, then one stress test (sabotage in brackets).
   shown as proven wrong. Test: invented flag rejected (flag check off fails 3).
 - coaching: coaching with no strength ships; a harsh phrase reaches an agent.
   Test: no strength or improvement is malformed (kinds check off fails 2).
+
+## Batch: Unit B batch 3, the rest (branch call-intelligence)
+
+One block for the batch, by the lead's instruction. Per item: two production
+failure modes, then one stress test (sabotage in brackets).
+
+- tighten: an extra paid pass slips in unseen; a reason goes missing. Test:
+  exact passes, reasons and profiles (an extra pass fails 12).
+- stuck (stage 2): a lost stage 2 stays pending forever; one re-queued twice
+  pays twice. Test: re-queued once, then stage2_lost (index ZADD off fails 5).
+- stuck (order): a queued backlog hides a dead run; a swept run refills every
+  batch. Test: 500 queued, one transcribing swept (running read off fails 2).
+- numbers: a Saudi number said without + reaches the model; a price is masked.
+  Test: "966 50 123 4567" masked, "1,200,000" kept (wider mask off fails 7).
+- extras: a band given by the model; a 61-word WhatsApp. Test: band table and
+  the 60-word cap (A floor 3 and cap +1 fail 3).
+- ceilings: a reasoning model truncates at 2500; reasoning text is stored.
+  Test: a reasoning profile gets the larger ceiling (plain-only rule fails 6).
+- stage2-deliver: one failed pass loses the whole stage; call.stage2 never
+  sent. Test: one failed pass still delivers the rest (send off fails 4).
+- demo: a demo call never reaches stage 2; it is too short to be eligible.
+  Test: the demo's workers include stage 2 (stage-2 worker off fails 1).
+- prompts, floors, owasp, unit-b docs: no sabotage owed; the digest and the
+  per-template pins, 46 floors met, and every cited test exists.

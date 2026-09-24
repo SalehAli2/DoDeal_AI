@@ -122,15 +122,16 @@ docker compose up --build
 
 The API reads `.env` (copy `.env.example` first) and talks to the `redis` service's queue and cost databases automatically.
 
-The same `up` starts the three call workers (Unit B), one container per queue, each running:
+The same `up` starts the four call worker services (Unit B), one container per queue, each running:
 
 ```bash
 python -m dodeal_ai.workers.calls priority   # worker-priority
 python -m dodeal_ai.workers.calls normal     # worker-normal
 python -m dodeal_ai.workers.calls overnight  # worker-overnight
+python -m dodeal_ai.workers.calls stage2     # worker-stage2
 ```
 
-Outside Docker, run the same line with `uv run` in front, one terminal per queue. Until a speech-to-text adapter exists, each worker refuses to start with `stt_not_configured`, so a worker that is down in `docker compose ps` is expected. The FakeTranscriber can only be handed in by `scripts/call_demo.py --worker`, and only with `DODEAL_CALL_DEMO_ALLOW_LOCAL_AUDIO=true`.
+The first three run stage 1 (`process_call`) and retry callbacks. The normal queue's worker also runs the stuck-job sweep every 300 s. `worker-stage2` runs wave 2 (`analyse_stage2`) once call.stage1 has gone, and transcribes nothing. Outside Docker, run the same line with `uv run` in front, one terminal per queue. Every worker refuses to start without a model client (`DODEAL_LLM_*`). Until a speech-to-text adapter exists, the three stage-1 workers also refuse with `stt_not_configured`, so a worker that is down in `docker compose ps` is expected. The FakeTranscriber can only be handed in by `scripts/call_demo.py --worker`, and only with `DODEAL_CALL_DEMO_ALLOW_LOCAL_AUDIO=true`; that runs the normal and stage-2 workers together. The events the workers send, and the phone rule the CRM hashes with, are in `docs/contracts/call_events.md`.
 
 #### The demo
 
@@ -232,7 +233,7 @@ dodeal-ai/
 | `.dockerignore` | Keeps the build context small and secrets out of it: the virtual environment, `.git`, `.env*`, tests, docs, build artifacts, caches, and `study.py`. |
 | `Dockerfile` | Multi-stage build. Installs the locked dependencies and the project **non-editable** into a venv, then copies only that venv into a slim runtime image — no source tree in the final image, so this is the same installed-wheel shape `scripts/verify_wheel.py` checks in CI. |
 | `.pre-commit-config.yaml` | Local git hooks: ruff lint, ruff format check, and mypy, all run through `uv run` so they use the exact versions locked in `uv.lock`. |
-| `docker-compose.yml` | `api` (built from the `Dockerfile`), the three call workers `worker-priority`, `worker-normal` and `worker-overnight` (each `extends: api` minus its port and HEALTHCHECK), plus a local Redis 7 container for the cost and queue gates. Its `.env` is `required: false`, so a clean checkout comes up and fails closed in `Settings` with a reason rather than in Compose without one. |
+| `docker-compose.yml` | `api` (built from the `Dockerfile`), the four call workers `worker-priority`, `worker-normal`, `worker-overnight` and `worker-stage2` (each `extends: api` minus its port and HEALTHCHECK), plus a local Redis 7 container for the cost and queue gates. Its `.env` is `required: false`, so a clean checkout comes up and fails closed in `Settings` with a reason rather than in Compose without one. |
 | `ASSUMPTIONS.md` | The single seam ledger for the service. Every provisional decision, organized by status (confirmed, built, parked, pending, deferred), the seam it lives behind, and how to correct it when the real answer lands. |
 | `CONTRIBUTING.md` | The contributor guide: local setup, shared vs personal Claude Code permissions, architectural rules that tooling cannot enforce, deliberate decisions not to reverse, branch-protection requirements, the OWASP LLM Top 10 checkpoint habit, and commit style. |
 | `.gitattributes` | `* text=auto eol=lf` plus explicit `binary` for `*.png` and `*.pdf`. Line endings are decided here rather than by each developer's `core.autocrlf`. |
@@ -379,7 +380,7 @@ Root contracts owned by the backend, kept inside the package for the same reason
 
 | File | Purpose |
 | --- | --- |
-| `calls.py` | The only worker entry point (Decision 2): one arq worker per call queue, `python -m dodeal_ai.workers.calls priority\|normal\|overnight`, running `process_call` and `deliver_callback` with Redis derived from `redis_queue_url` and each run cut off at `DODEAL_CALL_JOB_TIMEOUT_SECONDS`. Importing it opens no connection. |
+| `calls.py` | The only worker entry point (Decision 2): one arq worker per call queue, `python -m dodeal_ai.workers.calls priority\|normal\|overnight\|stage2`. The first three run `process_call` and `deliver_callback`, and the stage-2 queue's worker runs `analyse_stage2`. Redis is derived from `redis_queue_url`, and each run is cut off at `DODEAL_CALL_JOB_TIMEOUT_SECONDS`. Importing it opens no connection. |
 
 ### `tests/` (repo-wide guards)
 

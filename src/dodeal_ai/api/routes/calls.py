@@ -9,9 +9,10 @@ call's author as an asserted subject (`author:<author_id>`).
                              same job_id; 403 calls_not_enabled while the
                              tenant's `unit_b.calls_enabled` is off
   GET  /api/v1/calls/jobs/{job_id}
-                             {job_id, status, reason, result}, the result
-                             while held; another tenant's job is 404. Counted
-                             on the READS counter, and every read is audited.
+                             {job_id, status, reason, delivery, stage2,
+                             result, stage2_result}, each result while held;
+                             another tenant's job is 404. Counted on the
+                             READS counter, and every read is audited.
 """
 
 from __future__ import annotations
