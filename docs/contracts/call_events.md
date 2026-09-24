@@ -73,6 +73,8 @@ Each event then adds its own fields (sections 3 to 5 and 7). A re-analysis job's
       "version": "call_signals_v1",
       "agent": {"talk_share": 0.5, "words_per_minute": 126.0, "interruptions": 0},
       "client": {"talk_share": 0.5, "words_per_minute": 114.0, "interruptions": 0},
+      "talk_balance": "balanced",
+      "talk_reason": null,
       "numbers": [
         {"speaker": "agent", "start_s": 10.0, "segment": "s3", "last4": "4321", "match": "agent_personal"}
       ],
@@ -144,11 +146,23 @@ A **segment id** is `s<n>`, 1-based in `transcript.segments` order: `s3` is the 
 **Added in batch 4, in `result`:**
 
 - `transcript.segments[].speaker`: a diarized call's labels are mapped by the roles pass to `agent` or `client`. A stereo call's labels come from its channels. `confidence` may be `null` when the engine reports none (Gemini).
-- `transcript.uncertain_reasons`: fixed codes that make the transcript uncertain whatever its confidence. They are `low_speech_ratio`, `low_volume`, `roles_failed`, `roles_unclear`, `speakers_over_two` and `stt_no_speakers`.
+- `transcript.uncertain_reasons`: fixed codes that make the transcript uncertain whatever its confidence. They are `low_speech_ratio`, `low_volume`, `roles_failed`, `roles_unclear`, `speakers_over_two`, `stt_no_speakers`, `single_voice`, `long_call_no_diarization` and `no_speech`.
 - `audio`: `{duration_seconds, channels, speech_ratio, mean_volume_db}`, measured by ffmpeg before any paid call. It is `null` when the recording was not inspected. Under 0.30 speech or -40 dB, the transcript is uncertain.
 - `roles`: `null` when no voice needed mapping. Otherwise `{speakers: [{speaker, role, quote, segment}], applied, reasons}`, where `role` is `agent`, `client` or `unclear` and `applied` is false unless exactly one voice is the agent and none is unclear.
 - `signals.keywords[]`: the company's `keyword_vocabulary` spotted in code after transcription, `{term, segment, start_s}`, with the term as listed. `null` when the list is empty. The vocabulary is never sent to the speech-to-text engine.
 - `versions.passes`: `{<pass>: {provider, model}}` for each pass that answered, including `roles`. `versions.transcriber` is the transcriber's `provider/model`.
+
+**Speakers, signals and escalations, in `result`:**
+
+- **Speaker unknown.** While the roles are not applied (the roles pass failed or was unclear, or the engine named no speaker), a segment's speaker is `unknown` in `signals.numbers[]` and `signals.alarms[]`, never `agent` or `client`.
+- **`unattributed_number`.** A number said by an unknown speaker that matches neither hash. A number matching the lead's is still `lead`, and the company's `agent_company`.
+- **`off_channel_contact_review`.** An escalation for a person to listen to. A number raises it only when it is `unattributed_number`; the lead's and the company's raise nothing. An alarm phrase from an unknown speaker raises it too.
+- **`roles_not_applied`.** While the roles are not applied, `agent` and `client` carry `talk_share`, `words_per_minute` and `interruptions` as `null`, `talk_balance` is `null`, and `signals.talk_reason` is `roles_not_applied`. Otherwise `talk_reason` is `null`.
+- **`talk_balance`.** Beside the numbers, from the agent's `talk_share`: `client_led` below 0.35, `balanced` from 0.35 to 0.65, `agent_heavy` above 0.65. `null` when there is no share.
+- **`single_voice`.** In `transcript.uncertain_reasons`: one voice on a call of 30 s or more. The transcript is uncertain.
+- **`long_call_no_diarization`.** In `transcript.uncertain_reasons`: a Gemini call over 1800 s is sent without diarization, so every speaker is `unknown` and the transcript is uncertain.
+- **`no_speech`.** A transcript with no segments. It is uncertain, no model is called, and `roles`, `signals`, `analysis` and `versions` are `null`, with `analysis_reason` `no_speech`.
+- **Audio format.** `ffprobe` must decode the start of the file, or the job fails with `audio_format_unknown` before any paid call. Every engine is then sent 16 kHz mono FLAC, converted by `ffmpeg`; a stereo call goes as two, one per side. A file `ffmpeg` cannot convert fails with `audio_unreadable`.
 
 **Masking.** A model reads a masked copy of each segment. Every phone number, email address and any other run of 9 to 19 digits is masked; a price grouped in thousands with commas is kept. So a quote may contain `[PHONE]` or `[EMAIL]` where the transcript has the number. The transcript itself is as said.
 
@@ -357,5 +371,6 @@ So `+971 50 123 4567`, `00971-50-123-4567`, `050.123.4567` and `(050) 1234567` a
 **`call.translation`** (asked for with `POST /api/v1/calls/jobs/{job_id}/translation {"target": "ar"|"en"}`, counted on the reads counter):
 
 - The answer is `202 {job_id, target, status: "queued"}`. The response is `409 result_expired` once the stage-1 result is gone, and `409 already_in_language` when the call is mostly in the target language already.
-- The event is sent once, signed like every other, and not retried. `GET /api/v1/calls/jobs/{job_id}` shows it under `translations.<target>` while it is held.
+- The event is signed like every other and retried on the same schedule: one attempt, then after 60, 300, 1800 and 7200 seconds, with a delivery state of its own per target. A retry sends the held translation; the model is never asked again. `GET /api/v1/calls/jobs/{job_id}` shows it under `translations.<target>` while it is held.
+- The pass asks a chunk the model never answered once more. A malformed answer gets one reprompt, then the translation fails. The task itself is never re-run.
 - `result` is `{target, segments, reason, versions}`. Each segment is `{segment, start_s, end_s, speaker, text}`; the id, the times and the speaker are the transcript's, and only the text is translated. Numbers stay masked as `[PHONE]`. `segments` is `null` with `reason` `translate_model_unavailable` or `translate_malformed_output` when the pass failed.

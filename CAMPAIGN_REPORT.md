@@ -7454,3 +7454,8 @@ failure modes, then one stress test (sabotage in brackets).
 - F-7 stt: one hung STT request uses up the job's whole deadline; its timeout lands too late to record. Test: every adapter gets 600 (job timeout put back fails 3).
 - F-8 tenant_config: a unit_b PUT moves config_version and splits its groupings; the re-analysis identity churns. Test: a PUT that changes rules keeps config_version (keeper off fails 4).
 - 9 safety: production starts with the demo flag or an http backend; a fake STT makes up words in production. Test: each refusal alone stops the start (gate off fails 8).
+
+## Unit B signals fixes and docs
+- signals (items 1, 2, 5): an unknown speaker saying the company's number sends a false review to a person; unapplied roles report a speaker_N voice's talk as the client's. Test: an unknown speaker saying the company number raises no review; speaker_1/speaker_2 give null talk signals and talk_reason roles_not_applied (old review rule put back fails 4; roles check off fails 3; balance band moved fails 3).
+- docs: call_events.md and README bullets for the speaker, number, uncertainty and talk codes, call.translation retries and ffprobe/FLAC; the stale "not retried" line corrected. No sabotage owed.
+- Stress test: roles failed, an unknown speaker says the lead's, the company's and a third number: exactly one off_channel_contact_review (the third), and every talk signal null.
