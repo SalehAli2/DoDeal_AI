@@ -37,6 +37,7 @@ from dodeal_ai.units.call_intelligence.objections import (
 )
 from dodeal_ai.units.call_intelligence.paid import JobGone, PassUsage
 from dodeal_ai.units.call_intelligence.prompts import (
+    COACHING_TEMPLATE,
     ESCALATIONS_TEMPLATE,
     OBJECTIONS_TEMPLATE,
     REPROMPT_TAIL_TEMPLATE,
@@ -44,6 +45,7 @@ from dodeal_ai.units.call_intelligence.prompts import (
 from dodeal_ai.units.call_intelligence.transcriber import Segment, Transcript
 from dodeal_ai.units.call_intelligence.wave2 import OBJECTIONS, wave2
 from tests.helpers.fake_llm import FakeLLM, json_response
+from tests.helpers.wave2_answers import coaching_answer
 
 SCOPE = RequestContext.for_admitted_job(
     "tenant-a", request_id="req-1"
@@ -247,6 +249,7 @@ async def _done_job():
 
 async def _wave2(llm: FakeLLM, job, work: dict | None = None, usage=None):
     llm.script_for(ESCALATIONS_TEMPLATE, json_response({"escalations": []}))
+    llm.script_for(COACHING_TEMPLATE, json_response(coaching_answer(SEGMENTS[0].text)))
     return await wave2(
         llm,
         job,
@@ -264,27 +267,36 @@ async def _wave2(llm: FakeLLM, job, work: dict | None = None, usage=None):
 async def test_wave2_runs_the_objections_pass_and_keeps_its_answer() -> None:
     job = await _done_job()
     usage = PassUsage()
-    wave = await _wave2(FakeLLM(json_response(ANSWER)), job, usage=usage)
+    llm = FakeLLM(json_response(ANSWER))
+    wave = await _wave2(llm, job, usage=usage)
 
     assert wave.parts[OBJECTIONS] is not None
     assert wave.parts[OBJECTIONS]["raised"] == 2
-    assert OBJECTIONS not in wave.reasons
-    assert wave.reasons["score"] == "scoring_off"
+    assert wave.reasons == {"score": "scoring_off"}
+    assert llm.profiles == [
+        "unit_b.objections",
+        "unit_b.escalations",
+        "unit_b.coaching",
+    ]
     assert wave.models[OBJECTIONS] == "fake-model-pinned"
     assert usage.tokens[OBJECTIONS]["calls"] == 1
     kept = await read_work("tenant-a", "job-1")
     assert kept[OBJECTIONS]["answer"] == ANSWER
-    passes = (await read_job("tenant-a", "job-1")).passes
-    assert (passes[OBJECTIONS], passes["escalations"]) == (1, 1)
+    assert (await read_job("tenant-a", "job-1")).passes == {
+        OBJECTIONS: 1,
+        "escalations": 1,
+        "coaching": 1,
+    }
 
 
 async def test_a_failed_pass_leaves_its_part_null_with_its_reason() -> None:
     job = await _done_job()
     wave = await _wave2(FakeLLM(json_response({}), json_response({})), job)
-    assert (wave.parts[OBJECTIONS], wave.reasons[OBJECTIONS]) == (
-        None,
-        "objections_malformed_output",
-    )
+    assert wave.parts[OBJECTIONS] is None
+    assert wave.reasons == {
+        OBJECTIONS: "objections_malformed_output",
+        "score": "scoring_off",
+    }
 
 
 async def test_a_kept_answer_is_never_paid_for_again() -> None:
@@ -292,7 +304,7 @@ async def test_a_kept_answer_is_never_paid_for_again() -> None:
     work = {OBJECTIONS: {"answer": ANSWER, "model": "kept-model"}}
     llm = FakeLLM()
     wave = await _wave2(llm, job, work)
-    assert "unit_b.objections" not in [call.profile for call in llm.calls]
+    assert llm.profiles == ["unit_b.escalations", "unit_b.coaching"]
     assert wave.models[OBJECTIONS] == "kept-model"
 
 

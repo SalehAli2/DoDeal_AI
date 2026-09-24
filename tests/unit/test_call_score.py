@@ -18,7 +18,10 @@ from dodeal_ai.core.validation import OutputValidationError
 from dodeal_ai.units.call_intelligence.config import CallsConfig
 from dodeal_ai.units.call_intelligence.evidence import CallText
 from dodeal_ai.units.call_intelligence.paid import PassUsage
-from dodeal_ai.units.call_intelligence.prompts import ESCALATIONS_TEMPLATE
+from dodeal_ai.units.call_intelligence.prompts import (
+    COACHING_TEMPLATE,
+    ESCALATIONS_TEMPLATE,
+)
 from dodeal_ai.units.call_intelligence.score import (
     CHECK_NAMES,
     RUBRIC,
@@ -33,6 +36,7 @@ from dodeal_ai.units.call_intelligence.score import (
 from dodeal_ai.units.call_intelligence.transcriber import Segment, Transcript
 from dodeal_ai.units.call_intelligence.wave2 import OBJECTIONS, SCORE, wave2
 from tests.helpers.fake_llm import FakeLLM, json_response
+from tests.helpers.wave2_answers import coaching_answer
 
 SCOPE = RequestContext.for_admitted_job(
     "tenant-a", request_id="req-1"
@@ -393,6 +397,7 @@ async def _wave2(
     llm: FakeLLM, *, scoring: bool = True, eligible: bool = True, segments=SEGMENTS
 ):
     llm.script_for(ESCALATIONS_TEMPLATE, json_response({"escalations": []}))
+    llm.script_for(COACHING_TEMPLATE, json_response(coaching_answer(segments[0].text)))
     return await wave2(
         llm,
         await _done_job(),
@@ -412,10 +417,15 @@ async def test_a_scored_call_runs_the_pass_on_its_own_profile() -> None:
     wave = await _wave2(llm)
 
     scored = wave.parts[SCORE]
-    assert scored is not None and SCORE not in wave.reasons
+    assert scored is not None and wave.reasons == {}
     assert (scored["raw"], scored["applicable_weight"]) == (30, 60)
     assert (scored["total"], scored["band"]) == (50, "needs_work")
-    assert [c.profile for c in llm.calls][1] == PROFILE_UNIT_B_SCORE
+    assert llm.profiles == [
+        "unit_b.objections",
+        PROFILE_UNIT_B_SCORE,
+        "unit_b.escalations",
+        "unit_b.coaching",
+    ]
     assert llm.calls[1].max_output_tokens == 2500
 
 
@@ -445,12 +455,23 @@ async def test_a_call_with_no_score_never_runs_the_pass(
     answers = [json_response(objections)] * (1 if objections else 2)
     llm = FakeLLM(*answers)
     wave = await _wave2(llm, scoring=scoring, eligible=eligible, segments=segments)
-    assert (wave.parts[SCORE], wave.reasons[SCORE]) == (None, reason)
-    assert all(call.profile != PROFILE_UNIT_B_SCORE for call in llm.calls)
+    assert wave.parts[SCORE] is None
+    failed = {} if objections else {OBJECTIONS: "objections_malformed_output"}
+    assert wave.reasons == {**failed, SCORE: reason}
+    asked = ["unit_b.objections"] * (1 if objections else 2)
+    assert llm.profiles == [*asked, "unit_b.escalations", "unit_b.coaching"]
     assert OBJECTIONS in wave.parts
 
 
 async def test_a_failed_score_pass_is_null_with_its_reason() -> None:
     llm = FakeLLM(json_response(NO_OBJECTIONS), json_response({}), json_response({}))
     wave = await _wave2(llm)
-    assert (wave.parts[SCORE], wave.reasons[SCORE]) == (None, "score_malformed_output")
+    assert wave.parts[SCORE] is None
+    assert wave.reasons == {SCORE: "score_malformed_output"}
+    assert llm.profiles == [
+        "unit_b.objections",
+        PROFILE_UNIT_B_SCORE,
+        PROFILE_UNIT_B_SCORE,
+        "unit_b.escalations",
+        "unit_b.coaching",
+    ]

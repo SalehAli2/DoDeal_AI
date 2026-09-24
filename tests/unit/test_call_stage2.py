@@ -32,7 +32,10 @@ from dodeal_ai.units.call_intelligence.config import (
     parse_unit_b_section,
 )
 from dodeal_ai.units.call_intelligence.fake_transcriber import FakeTranscriber
-from dodeal_ai.units.call_intelligence.prompts import ESCALATIONS_TEMPLATE
+from dodeal_ai.units.call_intelligence.prompts import (
+    COACHING_TEMPLATE,
+    ESCALATIONS_TEMPLATE,
+)
 from dodeal_ai.units.call_intelligence.queues import NORMAL_QUEUE, STAGE2_QUEUE
 from dodeal_ai.units.call_intelligence.schemas import CallJobRequest
 from dodeal_ai.units.call_intelligence.stage2 import RESULT_GONE, analyse_stage2
@@ -41,6 +44,7 @@ from dodeal_ai.units.call_intelligence.worker import STAGE1, process_call
 from dodeal_ai.workers import calls as calls_worker
 from tests.conftest import RedisFakes
 from tests.helpers.fake_llm import FakeLLM, json_response
+from tests.helpers.wave2_answers import coaching_answer
 
 HOST = "audio.tenant-a.example"
 JOB = "job-1"
@@ -237,6 +241,7 @@ NONE_RAISED = {"objections": []}
 def _stage2_ctx(*answers: object, job_try: int = 1) -> dict[str, Any]:
     llm = FakeLLM(*(json_response(a) for a in answers or (NONE_RAISED,)))
     llm.script_for(ESCALATIONS_TEMPLATE, json_response({"escalations": []}))
+    llm.script_for(COACHING_TEMPLATE, json_response(coaching_answer(SEGMENTS[0].text)))
     return {"llm": llm, "job_try": job_try}
 
 
@@ -253,8 +258,11 @@ async def test_stage2_settles_done_on_the_stage1_transcript(
     stage2_ctx = _stage2_ctx()
     with caplog.at_level(logging.INFO, logger="dodeal_ai.unit_b"):
         await analyse_stage2(stage2_ctx, "tenant-a", JOB)
-    profiles = [c.profile for c in stage2_ctx["llm"].calls]
-    assert profiles[:2] == ["unit_b.objections", "unit_b.escalations"]
+    assert stage2_ctx["llm"].profiles == [
+        "unit_b.objections",
+        "unit_b.escalations",
+        "unit_b.coaching",
+    ]
 
     job = await _job()
     assert (job.status, job.stage2, job.stage2_reason) == (
@@ -307,8 +315,10 @@ async def test_a_failed_pass_still_settles_stage2_done(
         await analyse_stage2(_stage2_ctx({}, {}), "tenant-a", JOB)
     assert (await _job()).stage2 is Stage2State.DONE
     (line,) = [r for r in caplog.records if r.getMessage() == "call_stage2_outcome"]
-    assert line.part_reasons["objections"] == "objections_malformed_output"
-    assert line.part_reasons["score"] == "scoring_off"
+    assert line.part_reasons == {
+        "objections": "objections_malformed_output",
+        "score": "scoring_off",
+    }
 
 
 @pytest.mark.parametrize(
@@ -365,7 +375,10 @@ async def test_a_run_cut_off_by_its_deadline_runs_again_and_resumes(
     resumed = _stage2_ctx(job_try=2)
     await analyse_stage2(resumed, "tenant-a", JOB)
     job = await _job()
-    assert (job.stage2, job.passes["objections"]) == (Stage2State.DONE, 2)
+    assert (job.stage2, job.passes) == (
+        Stage2State.DONE,
+        {"objections": 2, "escalations": 1, "coaching": 1},
+    )
 
 
 async def test_a_deadline_on_the_last_run_fails_stage2(ctx: dict, monkeypatch) -> None:
