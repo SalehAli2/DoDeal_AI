@@ -33,7 +33,12 @@ off_channel_contact escalation -- and `agent_unverified` when it did not:
 with nothing to compare against, nothing escalates.
 
 THE PROMPT COPY masks every phone number as [PHONE] and every email address as
-[EMAIL]; the stored transcript keeps what was said.
+[EMAIL]; the stored transcript keeps what was said. It masks wider than the
+phone rule finds: any run of 9 to 15 digits, joined only by spaces, full stops
+or hyphens, is [PHONE] too, whatever it starts with -- another country's
+number said without its +, an ID, an account -- unless it is a price grouped
+in thousands with commas ("1,200,000"), which the extraction needs. The finds
+are the phone rule's alone: a run masked this way is not a find.
 """
 
 from __future__ import annotations
@@ -80,6 +85,20 @@ _ARABIC_INDIC = str.maketrans(
 )
 _EMAIL = re.compile(
     r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}"
+)
+
+# The prompt copy's wider mask (module docstring): a run of this many digits is
+# masked whatever it starts with. Nine is the shortest national number worth
+# hiding; fifteen is E.164's longest. A comma-less price this long is masked.
+_MASKED_RUN = range(9, 16)
+_DIGIT = "0-9٠-٩۰-۹"
+# Digits joined only by spaces, full stops and hyphens.
+_RUN = re.compile(rf"[{_DIGIT}]+(?:[\s.\-]+[{_DIGIT}]+)*")
+# A price grouped in thousands with commas (the Arabic thousands separator too),
+# its decimals allowed, standing alone: never part of a run.
+_PRICE = re.compile(
+    rf"(?<![{_DIGIT},٬])[{_DIGIT}]{{1,3}}(?:[,٬][{_DIGIT}]{{3}})+"
+    rf"(?:\.[{_DIGIT}]+)?(?![{_DIGIT},٬])"
 )
 
 # Every spelling of a digit a call may carry: English, then Arabic in its
@@ -245,12 +264,28 @@ def _longest_phone(
 
 
 def prompt_copy(text: str, *, country_code: str = DEFAULT_COUNTRY_CODE) -> str:
-    """`text` as a model may read it: emails and phone numbers masked,
-    everything else -- prices among it -- as said."""
+    """`text` as a model may read it: emails, phone numbers and long digit runs
+    masked, everything else -- prices among it -- as said."""
     masked = _EMAIL.sub(EMAIL_MASK, text)
     for span in reversed(phone_spans(masked, country_code=country_code)):
         masked = f"{masked[: span.start]}{PHONE_MASK}{masked[span.end :]}"
-    return masked
+    return _mask_long_runs(masked)
+
+
+def _mask_long_runs(text: str) -> str:
+    """Every run of 9 to 15 digits as [PHONE], each price left whole and
+    never joined to the digits beside it."""
+    kept: list[str] = []
+    at = 0
+    for price in _PRICE.finditer(text):
+        kept += [_RUN.sub(_masked_run, text[at : price.start()]), price.group()]
+        at = price.end()
+    return "".join([*kept, _RUN.sub(_masked_run, text[at:])])
+
+
+def _masked_run(run: re.Match[str]) -> str:
+    digits = sum(1 for char in run.group() if char.isdigit())
+    return PHONE_MASK if digits in _MASKED_RUN else run.group()
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,6 +1,7 @@
 """Number detection (units/call_intelligence/numbers.py): written and spoken
 digits in both languages, the phone rule, the two hashes, the escalation, and
-a prompt copy that masks phones and emails and leaves prices alone."""
+a prompt copy that masks phones, emails and long digit runs and leaves prices
+alone."""
 
 from __future__ import annotations
 
@@ -265,6 +266,55 @@ def test_the_prompt_copy_masks_phones_and_emails_only() -> None:
     assert prompt_copy(text) == (
         "mail [EMAIL] or call [PHONE] about the 2,500,000 unit"
     )
+
+
+def test_a_long_digit_run_is_masked_but_a_price_is_not() -> None:
+    """The guard: another country's number said without its + is masked in
+    the prompt copy; a price grouped in thousands is kept."""
+    assert prompt_copy("call 966 50 123 4567 today") == "call [PHONE] today"
+    assert prompt_copy("it is 1,200,000 AED") == "it is 1,200,000 AED"
+
+
+@pytest.mark.parametrize(
+    ("said", "shown"),
+    [
+        ("ref 1234 5678", "ref 1234 5678"),
+        ("ref 123 456 789", "ref [PHONE]"),
+        ("ref 123.456.789", "ref [PHONE]"),
+        ("ref 123-456-789", "ref [PHONE]"),
+        ("id 123456789012345", "id [PHONE]"),
+        ("id 1234567890123456", "id 1234567890123456"),
+        ("٩٦٦ ٥٠ ١٢٣ ٤٥٦٧", "[PHONE]"),
+        ("1,250,500 123 456", "1,250,500 123 456"),
+        ("1,250,000,000.50 in all", "1,250,000,000.50 in all"),
+        ("1٬200٬000 درهم", "1٬200٬000 درهم"),
+        ("1,200,000 and 966 50 123 4567", "1,200,000 and [PHONE]"),
+        ("50,123,456,78", "50,123,456,78"),
+    ],
+    ids=[
+        "eight-kept",
+        "nine-spaces",
+        "nine-dots",
+        "nine-hyphens",
+        "fifteen",
+        "sixteen-kept",
+        "arabic-indic",
+        "price-beside-digits",
+        "price-decimals",
+        "arabic-separator",
+        "price-then-run",
+        "commas-break-runs",
+    ],
+)
+def test_the_prompt_copy_masks_every_run_of_nine_to_fifteen_digits(
+    said: str, shown: str
+) -> None:
+    assert prompt_copy(said) == shown
+
+
+def test_a_masked_run_is_not_a_find() -> None:
+    """The finds stay the phone rule's."""
+    assert _detect(_say("lead", "my Saudi number is 966 50 123 4567")).finds == []
 
 
 def test_digits_inside_an_email_are_not_a_phone_number() -> None:
