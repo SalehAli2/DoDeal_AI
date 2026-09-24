@@ -185,6 +185,24 @@ async def test_a_diarized_answer_missing_a_speaker_is_malformed(audio: Path) -> 
     assert len(google.requests) == 1
 
 
+@pytest.mark.parametrize("seconds", [150, 2400])
+async def test_a_word_whose_times_cannot_be_read_is_malformed(
+    audio: Path, seconds: int
+) -> None:
+    """Diarized or not, a word's offsets must be Gemini's "<n>s": anything
+    else is an answer that cannot be read, never asked again."""
+    answer = json.loads(json.dumps(RECORDED))
+    (part,) = answer["steps"][-1]["content"]
+    part["annotations"][0]["start_offset"] = "0.1"
+    google = Google(answer if seconds <= 1800 else _undiarized(answer))
+    with pytest.raises(TranscriptionError, match=f"^{MALFORMED}$") as caught:
+        await transcriber(google).transcribe(
+            audio, language_hint=None, duration_seconds=seconds
+        )
+    assert caught.value.retryable is False
+    assert len(google.requests) == 1
+
+
 async def test_a_pause_ends_an_undiarized_segment(audio: Path) -> None:
     """With no sentence's end between them, a pause of 1 s still cuts."""
     answer = _undiarized(RECORDED)
