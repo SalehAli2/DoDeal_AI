@@ -72,6 +72,9 @@ class LLMResponse:
     provider_request_id: str | None = None
     cached_input_tokens: int = 0
     reasoning_tokens: int = 0
+    # The safe name of the provider that answered (a registry name, or the
+    # adapter's label for the DODEAL_LLM_* pair); None when a fake answered.
+    provider: str | None = None
 
     @property
     def total_tokens(self) -> int:
@@ -90,6 +93,9 @@ class LLMErrorReason(str, Enum):
     # This provider's circuit breaker is open: refused with no socket opened
     # (register item 20).
     BREAKER_OPEN = "breaker_open"
+    # The tenant's model route is not configured here: nothing was sent
+    # (core/llm/routing.py). Fails closed, never onto another route.
+    ROUTE_NOT_CONFIGURED = "route_not_configured"
 
 
 class LLMProviderError(Exception):

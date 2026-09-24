@@ -197,6 +197,7 @@ async def ask_checks(
             PROFILE_UNIT_B_SCORE,
             plain=SCORE_MAX_OUTPUT_TOKENS,
             reasoning=SCORE_REASONING_MAX_OUTPUT_TOKENS,
+            client=client,
         ),
         check=check_score(call),
         reprompt_tail=REPROMPT_TAIL_TEMPLATE,

@@ -157,6 +157,7 @@ async def find_objections(
             PROFILE_UNIT_B_OBJECTIONS,
             plain=OBJECTIONS_MAX_OUTPUT_TOKENS,
             reasoning=OBJECTIONS_REASONING_MAX_OUTPUT_TOKENS,
+            client=client,
         ),
         check=check_objections(call),
         reprompt_tail=REPROMPT_TAIL_TEMPLATE,

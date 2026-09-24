@@ -62,6 +62,7 @@ from dodeal_ai.units.call_intelligence.paid import (
     PassFailed,
     PassRun,
     PassUsage,
+    Stamp,
     run_pass,
 )
 from dodeal_ai.units.call_intelligence.prompts import (
@@ -94,6 +95,7 @@ class Wave2:
     parts: dict[str, dict[str, object] | None] = field(default_factory=dict)
     reasons: dict[str, str] = field(default_factory=dict)
     models: dict[str, str] = field(default_factory=dict)
+    stamps: dict[str, Stamp] = field(default_factory=dict)
 
 
 def stage2_result(job: Job, wave: Wave2) -> dict[str, object]:
@@ -110,6 +112,7 @@ def stage2_result(job: Job, wave: Wave2) -> dict[str, object]:
             "rubric": RUBRIC_VERSION,
             "tone_list": TONE_LIST_VERSION,
             "model": dict(wave.models),
+            "passes": {name: stamp.to_dict() for name, stamp in wave.stamps.items()},
         },
     }
 
@@ -183,12 +186,13 @@ async def _part[M: BaseModel](
     """One pass's answer, its model noted; None, the part null with why, when
     it has failed."""
     try:
-        answer, model = await run_pass(run, name, schema, call)
+        answer, stamp = await run_pass(run, name, schema, call)
     except PassFailed as failed:
         wave.parts[name] = None
         wave.reasons[name] = str(failed)
         return None
-    wave.models[name] = model
+    wave.models[name] = stamp.model
+    wave.stamps[name] = stamp
     return answer
 
 

@@ -53,13 +53,39 @@ class LLMProvider(str, Enum):
     GEMINI = "gemini"
 
 
+# A registry provider's name (core/llm/routing.py): lower case, short, and never
+# one of LLMProvider's values or "default", so a profile's provider is never
+# ambiguous between the registry and the DODEAL_LLM_* pair.
+PROVIDER_NAME_PATTERN = r"^[a-z][a-z0-9_-]{0,31}$"
+RESERVED_PROVIDER_NAMES = frozenset({*(p.value for p in LLMProvider), "default"})
+
+
+class ProviderSpec(BaseModel):
+    """One registry provider: how to reach it and where its key is. The key
+    itself is never here -- only the NAME of the variable that holds it."""
+
+    model_config = {"frozen": True, "extra": "forbid"}
+
+    kind: Literal["openai_compatible"]
+    base_url: str = Field(min_length=1, pattern=r"^https?://")
+    # An environment variable name, read in one place (routing._provider_key).
+    api_key_env: str = Field(pattern=r"^[A-Z_][A-Z0-9_]{0,127}$")
+    # The provider's own call timeout; at most llm_timeout_seconds (routing).
+    timeout_seconds: float = Field(gt=0)
+
+
 class ModelProfile(BaseModel):
     """One named task's model choice. Validated HERE, so a bad profile fails at
     settings construction rather than at the first model call (report R17)."""
 
     model_config = {"frozen": True}
 
-    provider: LLMProvider
+    # An LLMProvider value names the DODEAL_LLM_* pair's provider, as before;
+    # any other name is a registry provider (DODEAL_LLM_PROVIDERS).
+    provider: Annotated[
+        LLMProvider | Annotated[str, Field(pattern=PROVIDER_NAME_PATTERN)],
+        Field(union_mode="left_to_right"),
+    ]
     # No default: a profile that names no model is a config error, not a
     # silent fall-through to llm_model.
     model: str = Field(min_length=1)
@@ -77,6 +103,10 @@ class ModelProfile(BaseModel):
     # Reproducibility only: the same seed can still give a different answer,
     # and nothing downstream may assume it does not.
     seed: int | None = None
+    # The profile tried ONCE when this one's call got no response body (a
+    # connect error, 429, 503, an open breaker); None tries nothing. Followed
+    # one hop only, so a chain can never become a retry loop.
+    fallback_profile: str | None = Field(default=None, min_length=1)
 
 
 class ModelPrice(BaseModel):
@@ -278,6 +308,20 @@ class Settings(BaseSettings):
     # never logged and never carried on an exception, as for the primary.
     llm_fallback_base_url: str | None = None
 
+    # --- Provider registry and model routes (core/llm/routing.py) -----------
+    # Every provider besides the DODEAL_LLM_* pair, JSON {"<name>": {"kind":
+    # "openai_compatible","base_url":..,"api_key_env":"<VAR>","timeout_seconds":
+    # ..}}. {} = the pair only; a key variable left empty refuses startup.
+    llm_providers: dict[
+        Annotated[str, Field(pattern=PROVIDER_NAME_PATTERN)], ProviderSpec
+    ] = {}
+    # Routes a tenant may choose, JSON {"<route>": {"<pass>": "<profile>"}}. The
+    # route "default" is built from DODEAL_LLM_* and cannot be set here; a pass
+    # a route leaves out is served as on "default". A wrong name refuses startup.
+    model_routes: dict[
+        Annotated[str, Field(pattern=PROVIDER_NAME_PATTERN)], dict[str, str]
+    ] = {}
+
     # Redis connections. Two named connections so code never guesses which
     # instance it is using: a queue connection and a cost/quota connection.
     # Local Redis by default; real hosts come from DevOps later. Different
@@ -434,6 +478,38 @@ class Settings(BaseSettings):
             self.service_jwt_previous_signing_key,
         ):
             raise ValueError("service_jwt_signing_key")
+        return self
+
+    @model_validator(mode="after")
+    def _routing_names_resolve(self) -> Settings:
+        """Every registry, profile and route name resolves (core/llm/routing.py):
+        a profile naming an unknown provider refuses to start. Fixed messages,
+        never a name or a value; routing.py checks the pass names."""
+        if set(self.llm_providers) & RESERVED_PROVIDER_NAMES:
+            raise ValueError("llm_provider_name_reserved")
+        if any(
+            spec.timeout_seconds > self.llm_timeout_seconds
+            for spec in self.llm_providers.values()
+        ):
+            # Its HTTP timer must fire inside the watchdog's, or a timeout
+            # loses the provider's name (openai_compatible._HTTP_TIMEOUT_SHARE).
+            raise ValueError("llm_provider_timeout_too_long")
+        for name, profile in self.llm_profiles.items():
+            if (
+                not isinstance(profile.provider, LLMProvider)
+                and profile.provider not in self.llm_providers
+            ):
+                raise ValueError("llm_profile_unknown_provider")
+            fallback = profile.fallback_profile
+            if fallback is not None and (
+                fallback == name or fallback not in self.llm_profiles
+            ):
+                raise ValueError("llm_fallback_profile_unknown")
+        if "default" in self.model_routes:
+            raise ValueError("model_route_reserved")
+        for passes in self.model_routes.values():
+            if not set(passes.values()) <= set(self.llm_profiles):
+                raise ValueError("model_route_unknown_profile")
         return self
 
     @property

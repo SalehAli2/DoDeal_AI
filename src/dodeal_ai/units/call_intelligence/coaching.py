@@ -234,6 +234,7 @@ async def coach(
             PROFILE_UNIT_B_COACHING,
             plain=COACHING_MAX_OUTPUT_TOKENS,
             reasoning=COACHING_REASONING_MAX_OUTPUT_TOKENS,
+            client=client,
         ),
         check=check_coaching(call),
         reprompt_tail=REPROMPT_TAIL_TEMPLATE,

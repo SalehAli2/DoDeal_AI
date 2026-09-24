@@ -15,6 +15,10 @@ a pass is counted in db3 before the paid call:
 The tokens each pass spent in a run are counted per pass for its outcome line,
 both answers of a reprompt included, and apart from them the reasoning tokens
 the provider reported: a count only, never the reasoning itself.
+
+EACH PASS IS STAMPED with the provider and the model that answered it (a
+route may send passes to different providers): kept with its answer, so a
+later run reports the same stamp without calling again.
 """
 
 from __future__ import annotations
@@ -25,9 +29,11 @@ from datetime import UTC, datetime
 
 from pydantic import BaseModel
 
+from dodeal_ai.core.config import ModelProfile
 from dodeal_ai.core.errors import MalformedOutputError, ModelUnavailableError
 from dodeal_ai.core.jobs import Job, store_work
 from dodeal_ai.core.llm import LLMClient, LLMResponse
+from dodeal_ai.core.llm.profiles import ProfileSource
 from dodeal_ai.core.prompting import AssembledPrompt
 
 # Starts a pass may make, each paid: the first and ONE more when the first
@@ -42,6 +48,18 @@ type Starter = Callable[..., Awaitable[int | None]]
 
 class PassFailed(Exception):
     """A pass that has failed for good; str() is the reason code."""
+
+
+@dataclass(frozen=True, slots=True)
+class Stamp:
+    """Who answered a pass: the provider's safe name (None for a fake or an
+    answer kept before stamps existed) and the model it reported."""
+
+    provider: str | None
+    model: str
+
+    def to_dict(self) -> dict[str, str | None]:
+        return {"provider": self.provider, "model": self.model}
 
 
 class JobGone(Exception):
@@ -77,6 +95,12 @@ class _Metered:
     ) -> None:
         self._client, self._usage, self._name = client, usage, name
         self._schema = schema
+
+    def profile_for(self, name: str) -> ModelProfile | None:
+        """The routed client's profile for `name`, so a ceiling follows it."""
+        if isinstance(self._client, ProfileSource):
+            return self._client.profile_for(name)
+        return None
 
     async def complete(
         self,
@@ -119,14 +143,17 @@ async def run_pass[M: BaseModel](
     name: str,
     schema: type[M],
     call: Callable[[LLMClient], Awaitable[tuple[M, LLMResponse]]],
-) -> tuple[M, str]:
-    """The pass's answer and the model it came from: kept from an earlier run,
-    or paid for now under the retry-once rule. PassFailed when it has failed."""
+) -> tuple[M, Stamp]:
+    """The pass's answer and who answered it: kept from an earlier run, or
+    paid for now under the retry-once rule. PassFailed when it has failed."""
     kept = run.work.get(name)
     if kept is not None:
         if "failed" in kept:
             raise PassFailed(f"{name}_{kept['failed']}")
-        return schema.model_validate(kept["answer"]), str(kept["model"])
+        provider = kept.get("provider")
+        return schema.model_validate(kept["answer"]), Stamp(
+            None if provider is None else str(provider), str(kept["model"])
+        )
     starts = run.job.passes.get(name, 0)
     while True:
         if starts >= PASS_TRIES:
@@ -144,9 +171,10 @@ async def run_pass[M: BaseModel](
             continue
         except MalformedOutputError:
             raise await _failed(run, name, "malformed_output")
-        kept = {"answer": answer.model_dump(mode="json"), "model": response.model}
+        stamp = Stamp(response.provider, response.model)
+        kept = {"answer": answer.model_dump(mode="json"), **stamp.to_dict()}
         await _keep(run, name, kept)
-        return answer, response.model
+        return answer, stamp
 
 
 async def _failed(run: PassRun, name: str, reason: str) -> PassFailed:

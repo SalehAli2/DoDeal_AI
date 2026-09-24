@@ -187,6 +187,7 @@ async def find_extras(
             PROFILE_UNIT_B_EXTRAS,
             plain=EXTRAS_MAX_OUTPUT_TOKENS,
             reasoning=EXTRAS_REASONING_MAX_OUTPUT_TOKENS,
+            client=client,
         ),
         check=check_extras(call),
         reprompt_tail=REPROMPT_TAIL_TEMPLATE,

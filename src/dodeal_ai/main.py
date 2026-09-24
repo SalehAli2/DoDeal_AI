@@ -15,7 +15,7 @@ from dodeal_ai.core.config import (
     get_settings,
 )
 from dodeal_ai.core.errors import register_error_handlers
-from dodeal_ai.core.llm import build_llm_client
+from dodeal_ai.core.llm import aclose_llm, build_llm_client, build_router
 from dodeal_ai.core.logging_config import configure_logging, warn_if_demo_audio
 from dodeal_ai.core.prompting import clear_templates, preload_templates
 from dodeal_ai.core.redis import (
@@ -231,7 +231,13 @@ async def lifespan(app: FastAPI):
         # and refuses to start. Somebody meant to configure this and got it
         # wrong; that is not a state to serve traffic in (item 84).
         try:
-            app.state.llm = build_llm_client(settings, app.state.http)
+            # One pooled client per provider (core/llm/routing.py); with no
+            # route configured this is exactly the single client it was.
+            app.state.llm = await build_router(
+                settings,
+                build_llm_client(settings, app.state.http),
+                limits=_llm_limits(settings),
+            )
         except BaseException:
             # A refused startup never reaches the cleanup after `yield`, so the
             # preloaded templates and the pool are released here, in shutdown's
@@ -248,8 +254,9 @@ async def lifespan(app: FastAPI):
     # outlived its app would serve this deployment's templates to the next one.
     clear_templates()
     clear_tenant_configs()
-    # The model pool first, before the Redis pools: it is the one holding
-    # sockets to a third party, and a client left unclosed leaks them.
+    # The model pools first, before the Redis pools: they hold sockets to a
+    # third party, and a client left unclosed leaks them.
+    await aclose_llm(getattr(app.state, "llm", None))
     await app.state.http.aclose()
     await app.state.crm_http.aclose()
     # Release the connection pools on shutdown. Building a client opens no

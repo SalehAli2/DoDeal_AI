@@ -27,8 +27,9 @@ passes one in, and the worker starts with it only under the demo flag. The
 stage-2 worker transcribes nothing and builds none.
 
 THE MODEL CLIENT IS BUILT AS THE SERVICE BUILDS IT: core/llm's
-build_llm_client, from the same DODEAL_LLM_* settings, with the same startup
-sweep of every configured profile. There is no second configuration. Unlike the
+build_llm_client and build_router, from the same DODEAL_LLM_* settings, registry and routes,
+with the same startup sweep of every configured profile and one pooled client
+per provider. There is no second configuration. Unlike the
 service, which starts without a provider so /ready can say so, a call worker
 with no model client refuses to start: it would pay for transcripts and deliver
 every one with analysis null. Wave 1's templates are read once here too, so a
@@ -46,7 +47,7 @@ from arq.connections import RedisSettings
 from arq.worker import run_worker
 
 from dodeal_ai.core.config import get_settings
-from dodeal_ai.core.llm import build_llm_client
+from dodeal_ai.core.llm import aclose_llm, build_llm_client, build_router
 from dodeal_ai.core.logging_config import configure_logging, warn_if_demo_audio
 from dodeal_ai.core.prompting import clear_templates, preload_templates
 from dodeal_ai.units.call_intelligence.delivery import (
@@ -100,7 +101,9 @@ def worker_settings(
         # The model's own pool, apart from the download's pinned client.
         llm_http = httpx.AsyncClient()
         try:
-            ctx["llm"] = build_llm_client(settings, llm_http)
+            ctx["llm"] = await build_router(
+                settings, build_llm_client(settings, llm_http)
+            )
         except BaseException:
             await llm_http.aclose()
             clear_templates()
@@ -115,6 +118,7 @@ def worker_settings(
         )
 
     async def shutdown(ctx: dict[str, Any]) -> None:
+        await aclose_llm(ctx.get("llm"))
         for name in ("http", "llm_http"):
             client = ctx.get(name)
             if client is not None:

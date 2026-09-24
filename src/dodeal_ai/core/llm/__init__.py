@@ -22,8 +22,16 @@ from dodeal_ai.core.llm.openai_compatible import (
     OpenAICompatibleClient,
     OpenAICompatibleError,
 )
+from dodeal_ai.core.llm.routing import (
+    DEFAULT_ROUTE,
+    ModelRouter,
+    build_router,
+    route_names,
+    routed,
+)
 
 __all__ = [
+    "DEFAULT_ROUTE",
     "FallbackLLMClient",
     "FinishReason",
     "LLMClient",
@@ -32,10 +40,15 @@ __all__ = [
     "LLMProvider",
     "LLMProviderError",
     "LLMResponse",
+    "ModelRouter",
     "OpenAICompatibleClient",
     "OpenAICompatibleError",
+    "aclose_llm",
     "build_llm_client",
+    "build_router",
     "get_llm_client",
+    "route_names",
+    "routed",
 ]
 
 
@@ -69,6 +82,12 @@ def build_llm_client(settings: Settings, http: httpx.AsyncClient) -> LLMClient:
     )
 
 
+async def aclose_llm(client: LLMClient | None) -> None:
+    """Close the pools a router owns; the pair's pool is its builder's."""
+    if isinstance(client, ModelRouter):
+        await client.aclose()
+
+
 def _build_one(
     settings: Settings, http: httpx.AsyncClient, *, prefix: str
 ) -> OpenAICompatibleClient:
@@ -95,9 +114,11 @@ def _build_one(
     # bad temperature or a profile naming another vendor refuses to start --
     # instead of 503ing the first judgement that names it, which could be days
     # later and on one task only. Resolution is where both guards live, so this
-    # cannot disagree with what a real call would do.
-    for name in settings.llm_profiles:
-        client.validate_profile(name)
+    # cannot disagree with what a real call would do. A profile naming a
+    # registry provider is that provider's to sweep (core/llm/routing.py).
+    for name, profile in settings.llm_profiles.items():
+        if isinstance(profile.provider, LLMProvider):
+            client.validate_profile(name)
     return client
 
 

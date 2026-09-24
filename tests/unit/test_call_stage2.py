@@ -359,6 +359,10 @@ async def test_stage2_is_held_and_delivered_as_call_stage2(
         "model": dict.fromkeys(
             ("objections", "escalations", "coaching", "extras"), "fake-model-pinned"
         ),
+        "passes": {
+            name: {"provider": None, "model": "fake-model-pinned"}
+            for name in ("objections", "escalations", "coaching", "extras")
+        },
     }
     ttl = await redis_fakes.jobs.ttl(stage2_result_key("tenant-a", JOB))
     assert 0 < ttl <= 259_200

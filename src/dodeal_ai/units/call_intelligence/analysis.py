@@ -33,6 +33,7 @@ from dodeal_ai.units.call_intelligence.paid import (
     PassFailed,
     PassRun,
     PassUsage,
+    Stamp,
     run_pass,
 )
 from dodeal_ai.units.call_intelligence.passes import (
@@ -145,27 +146,27 @@ async def wave1(
     """Wave 1 for one transcript. JobGone when the job stopped under it."""
     call = CallText.of(transcript, country_code=config.phone_country_code)
     code, digest = _found_in_code(transcript, config, job)
-    models: list[str] = []
+    stamps: dict[str, Stamp] = {}
     versions: dict[str, object] = {
         "prompt": PROMPT_SET_VERSION,
         "signals": SIGNALS_VERSION,
         "model": None,
         "transcriber": f"{transcript.provider}/{transcript.model}",
         "alarm_list_digest": digest,
+        "passes": {},
     }
     if client is None:
         return Wave1(None, NO_CLIENT, versions, code)
     run = PassRun(job, work, config.result_ttl_seconds, client, usage, start_pass)
     try:
-        extraction, model = await run_pass(
+        extraction, stamps[EXTRACT] = await run_pass(
             run,
             EXTRACT,
             Extraction,
             lambda metered: extract(metered, call, scope=scope, settings=settings),
         )
-        models.append(model)
         doubted = settled(extraction, call)
-        prose, model = await run_pass(
+        prose, stamps[PROSE] = await run_pass(
             run,
             PROSE,
             Prose,
@@ -173,9 +174,15 @@ async def wave1(
                 metered, call, doubted, scope=scope, settings=settings
             ),
         )
-        models.append(model)
     except PassFailed as failed:
-        versions["model"] = ",".join(sorted(set(models))) or None
+        _stamp(versions, stamps)
         return Wave1(None, str(failed), versions, code)
-    versions["model"] = ",".join(sorted(set(models)))
+    _stamp(versions, stamps)
     return Wave1(_analysis(call, extraction, prose), None, versions, code)
+
+
+def _stamp(versions: dict[str, object], stamps: dict[str, Stamp]) -> None:
+    """The models wave 1 ran on, joined, and each pass's provider and model."""
+    models = sorted({stamp.model for stamp in stamps.values()})
+    versions["model"] = ",".join(models) or None
+    versions["passes"] = {name: stamp.to_dict() for name, stamp in stamps.items()}

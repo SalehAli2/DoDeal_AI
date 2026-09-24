@@ -15,7 +15,7 @@ resolution rule plus the names, and both are tested directly.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Protocol, runtime_checkable
 
 from dodeal_ai.core.config import LLMProvider, ModelProfile, Settings
 from dodeal_ai.core.llm.client import LLMConfigurationError
@@ -63,7 +63,8 @@ class ResolvedProfile:
     """What one profile name resolved to: everything an adapter needs to place a
     call, and nothing a caller needs to know."""
 
-    provider: LLMProvider
+    # An LLMProvider for the DODEAL_LLM_* pair, else a registry name.
+    provider: LLMProvider | str
     model: str
     temperature: float
     max_output_tokens: int | None
@@ -88,11 +89,29 @@ class ResolvedProfile:
         return min(task_ceiling, self.max_output_tokens)
 
 
-def task_ceiling(settings: Settings, name: str, *, plain: int, reasoning: int) -> int:
+@runtime_checkable
+class ProfileSource(Protocol):
+    """A client that knows which profile a pass name reaches on it: a routed
+    client (core/llm/routing.py), whose route may send a pass elsewhere."""
+
+    def profile_for(self, name: str) -> ModelProfile | None:
+        """The profile `name` is sent under, or None for the DODEAL_LLM_* pair."""
+
+
+def task_ceiling(
+    settings: Settings,
+    name: str,
+    *,
+    plain: int,
+    reasoning: int,
+    client: object | None = None,
+) -> int:
     """`reasoning` when the profile sets a reasoning_effort, else `plain`: the
-    fallback pair never reasons. The profile's max_output_tokens may still
-    lower either; never raises, leaving an unconfigured seam to the call."""
-    profile: ModelProfile | None = settings.llm_profiles.get(name)
+    fallback pair never reasons. The profile is the one `client` routes `name`
+    to when it names one, else `name`'s own. Never raises."""
+    profile = client.profile_for(name) if isinstance(client, ProfileSource) else None
+    if profile is None:
+        profile = settings.llm_profiles.get(name)
     reasons = profile is not None and profile.reasoning_effort is not None
     return reasoning if reasons else plain
 

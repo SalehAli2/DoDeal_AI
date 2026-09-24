@@ -174,6 +174,11 @@ class OpenAICompatibleClient:
     `model` is the pinned default the factory read from Settings. The profile
     table decides the model per task and is authoritative (R17); on the fallback
     path resolve_profile returns this same value, so the two agree.
+
+    A REGISTRY PROVIDER (core/llm/routing.py) passes `serves`, its registry
+    name, which is then also its label and the provider a profile must name,
+    and its own `timeout_seconds`. Left out, the client serves the
+    DODEAL_LLM_* pair exactly as before.
     """
 
     def __init__(
@@ -184,13 +189,21 @@ class OpenAICompatibleClient:
         http: httpx.AsyncClient,
         *,
         settings: Settings,
+        serves: str | None = None,
+        timeout_seconds: float | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._api_key = api_key
         self._http = http
         self._settings = settings
-        self._provider = provider_name_for(base_url)
+        self._serves: LLMProvider | str | None = (
+            settings.llm_provider if serves is None else serves
+        )
+        self._timeout_seconds = (
+            settings.llm_timeout_seconds if timeout_seconds is None else timeout_seconds
+        )
+        self._provider = provider_name_for(base_url) if serves is None else serves
         self._breaker = CircuitBreaker(
             f"llm.{self._provider}",
             failure_threshold=settings.breaker_failure_threshold,
@@ -204,6 +217,11 @@ class OpenAICompatibleClient:
     def breaker(self) -> CircuitBreaker:
         """This client's breaker, for readiness and metrics to read."""
         return self._breaker
+
+    @property
+    def provider(self) -> str:
+        """The safe label every error, log line and response carries."""
+        return self._provider
 
     # --- the one method on the seam ----------------------------------------
 
@@ -298,9 +316,10 @@ class OpenAICompatibleClient:
 
         `llm_timeout_seconds` stays the true outer bound -- the watchdog still
         enforces it -- and the HTTP call is given a strict fraction of it so it
-        gives up first and we learn WHICH provider was slow.
+        gives up first and we learn WHICH provider was slow. A registry
+        provider's own timeout is never above it (routing.py).
         """
-        return self._settings.llm_timeout_seconds * _HTTP_TIMEOUT_SHARE
+        return self._timeout_seconds * _HTTP_TIMEOUT_SHARE
 
     # --- resolution ---------------------------------------------------------
 
@@ -323,7 +342,7 @@ class OpenAICompatibleClient:
         profile costs nothing.
         """
         resolved = resolve_profile(self._settings, profile)
-        if resolved.provider is not self._settings.llm_provider:
+        if resolved.provider != self._serves:
             # A profile naming another vendor -- anthropic, or even groq on an
             # openai client (register item 77) -- would post that vendor's model
             # id to this vendor's URL. Routing per profile is the gateway's job
@@ -403,6 +422,7 @@ class OpenAICompatibleClient:
                 reasoning_tokens=_detail(
                     usage, "completion_tokens_details", "reasoning_tokens"
                 ),
+                provider=self._provider,
             )
         except (KeyError, IndexError, TypeError, ValueError):
             # ValueError covers json.JSONDecodeError (non-JSON) and a token count

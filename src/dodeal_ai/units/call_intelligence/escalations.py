@@ -128,6 +128,7 @@ async def find_flags(
             PROFILE_UNIT_B_ESCALATIONS,
             plain=ESCALATIONS_MAX_OUTPUT_TOKENS,
             reasoning=ESCALATIONS_REASONING_MAX_OUTPUT_TOKENS,
+            client=client,
         ),
         check=check_flags(call),
         reprompt_tail=REPROMPT_TAIL_TEMPLATE,

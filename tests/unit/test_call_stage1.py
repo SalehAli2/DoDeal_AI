@@ -256,6 +256,10 @@ async def test_a_call_is_analysed_and_delivered_with_its_stage1_payload(
         "model": "fake-model-pinned",
         "transcriber": "fake/fake-stt-1",
         "alarm_list_digest": alarm_list_digest([ALARM]),
+        "passes": {
+            name: {"provider": None, "model": "fake-model-pinned"}
+            for name in ("extract", "prose")
+        },
     }
     assert await read_work("tenant-a", JOB) == {}
 
