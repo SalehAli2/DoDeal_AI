@@ -14,6 +14,10 @@ the segments (`Transcript.of`) and re-checked on construction. An adapter
 cannot hand back a profile or a flag its own segments contradict, so every
 provider is held to one rule. The conformance suite runs against each one.
 
+Code may doubt a transcript its segments do not: poor audio (audio.py) or
+speakers whose roles are unclear. Each such doubt is a fixed reason code in
+`uncertain_reasons`, and any reason makes the transcript uncertain.
+
 Segment text is the call's content: never on a repr, never logged.
 """
 
@@ -137,18 +141,33 @@ class Transcript(BaseModel):
     uncertain: bool
     provider: str = Field(min_length=1)
     model: str = Field(min_length=1)
+    # Why code doubts it beyond its segments' confidence, fixed codes only.
+    uncertain_reasons: tuple[str, ...] = ()
 
     @classmethod
     def of(
-        cls, segments: tuple[Segment, ...], *, provider: str, model: str
+        cls,
+        segments: tuple[Segment, ...],
+        *,
+        provider: str,
+        model: str,
+        reasons: tuple[str, ...] = (),
     ) -> Transcript:
         """The transcript of `segments`, profile and flag computed here."""
         return cls(
             segments=segments,
             language_profile=profile_of(segments),
-            uncertain=is_uncertain(segments),
+            uncertain=is_uncertain(segments) or bool(reasons),
             provider=provider,
             model=model,
+            uncertain_reasons=reasons,
+        )
+
+    def doubted(self, *reasons: str) -> Transcript:
+        """This transcript with `reasons` added: uncertain once there is one."""
+        added = tuple(dict.fromkeys((*self.uncertain_reasons, *reasons)))
+        return Transcript.of(
+            self.segments, provider=self.provider, model=self.model, reasons=added
         )
 
     @model_validator(mode="after")
@@ -159,7 +178,8 @@ class Transcript(BaseModel):
                 raise ValueError("segments_overlap")
         if self.language_profile is not profile_of(self.segments):
             raise ValueError("language_profile")
-        if self.uncertain is not is_uncertain(self.segments):
+        doubted = is_uncertain(self.segments) or bool(self.uncertain_reasons)
+        if self.uncertain is not doubted:
             raise ValueError("uncertain")
         return self
 

@@ -1,0 +1,10 @@
+Input #0, mp3, from 'call.mp3':
+  Duration: 00:02:30.00, start: 0.025057, bitrate: 32 kb/s
+  Stream #0:0: Audio: mp3, 8000 Hz, mono, fltp, 32 kb/s
+[silencedetect @ 0x7f10] silence_start: 0
+[silencedetect @ 0x7f10] silence_end: 100 | silence_duration: 100
+[silencedetect @ 0x7f10] silence_start: 130
+size=N/A time=00:02:30.00 bitrate=N/A speed= 950x
+[Parsed_volumedetect_1 @ 0x7f11] n_samples: 1200000
+[Parsed_volumedetect_1 @ 0x7f11] mean_volume: -55.8 dB
+[Parsed_volumedetect_1 @ 0x7f11] max_volume: -30.2 dB

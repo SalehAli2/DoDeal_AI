@@ -12,6 +12,12 @@ WORKDIR /app
 # orchestrator's runAsNonRoot check can verify it without reading /etc/passwd.
 RUN groupadd --system --gid 10001 app \
     && useradd --system --uid 10001 --gid app --no-create-home app
+# The call workers' audio layer (units/call_intelligence/audio.py): a worker
+# checks ffmpeg at start and refuses without it. From the distribution, so it
+# is patched with the base image; no recommends, and no package lists left.
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=build /app/.venv /app/.venv
 ENV PATH="/app/.venv/bin:$PATH"
 USER 10001:10001

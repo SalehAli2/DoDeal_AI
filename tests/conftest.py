@@ -37,7 +37,7 @@ from dodeal_ai.core import redis as redis_module
 from dodeal_ai.core.breaker import reset_breakers
 from dodeal_ai.core.config import Settings, get_settings
 from dodeal_ai.core.cost import limiter
-from dodeal_ai.units.call_intelligence import queues
+from dodeal_ai.units.call_intelligence import audio, queues
 from dodeal_ai.units.structured_intelligence import state
 from tests.helpers.fake_cost_redis import FakeCostRedis
 from tests.helpers.fake_operational_redis import FakeOperationalRedis
@@ -169,6 +169,19 @@ def redis_fakes(
     redis_module.get_operational_client.cache_clear()
     redis_module.get_jobs_client.cache_clear()
     redis_module.get_queue_client.cache_clear()
+
+
+async def _no_ffmpeg(args: object) -> tuple[int, str]:
+    """No ffmpeg on this machine, whatever is installed."""
+    raise FileNotFoundError("ffmpeg")
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_ffmpeg(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test runs the machine's ffmpeg: a worker's startup check finds none,
+    the same on every machine. A test that wants the audio layer hands
+    AudioTools a runner of its own."""
+    monkeypatch.setattr(audio, "run_ffmpeg", _no_ffmpeg)
 
 
 @pytest.fixture(autouse=True)

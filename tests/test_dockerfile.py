@@ -36,6 +36,14 @@ def test_the_final_stage_runs_as_a_non_root_user():
     assert stage.index(user) < stage.index(_instruction("CMD")[0])
 
 
+def test_the_final_stage_installs_ffmpeg_before_dropping_root():
+    """The call workers refuse to start without ffmpeg (audio.py)."""
+    stage = _final_stage()
+    (install,) = [line for line in _instruction("RUN") if "ffmpeg" in line]
+    assert "--no-install-recommends" in install
+    assert stage.index(install) < stage.index(_instruction("USER")[0])
+
+
 def test_the_image_checks_health_on_the_health_route():
     """A HEALTHCHECK exists and asks /health, not /ready."""
     (check,) = _instruction("HEALTHCHECK")

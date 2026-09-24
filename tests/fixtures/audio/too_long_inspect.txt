@@ -1,0 +1,4 @@
+Input #0, wav, from 'call.wav':
+  Duration: 01:00:01.00, bitrate: 128 kb/s
+  Stream #0:0: Audio: pcm_s16le ([1][0][0][0] / 0x0001), 8000 Hz, mono, s16, 128 kb/s
+[Parsed_volumedetect_1 @ 0x5582] mean_volume: -20.0 dB

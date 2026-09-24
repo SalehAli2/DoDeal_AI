@@ -15,7 +15,7 @@ job that could only fetch from anywhere, or from nowhere).
 from __future__ import annotations
 
 import re
-from typing import Annotated
+from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -88,6 +88,10 @@ class CallsConfig(BaseModel):
     phone_country_code: str = Field(
         default=DEFAULT_COUNTRY_CODE, pattern=r"^[1-9][0-9]{0,2}$"
     )
+    # How the recording's channels map to speakers (audio.py): "mono" is one
+    # mixed track; a stereo setting splits it, the agent on the side named.
+    # Stereo on a file that is not two channels fails it, unpaid.
+    audio_channels: Literal["mono", "stereo_agent_left", "stereo_agent_right"] = "mono"
     # The model route this tenant's call passes go through (core/llm/routing.py)
     # and the STT profile its calls are transcribed with: "default" is the
     # DODEAL_LLM_* / DODEAL_CALL_STT_* pair. Policy only (ROUTING_FIELDS).

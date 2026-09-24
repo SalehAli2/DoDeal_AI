@@ -1,0 +1,14 @@
+Input #0, wav, from 'call.wav':
+  Duration: 00:02:30.00, bitrate: 256 kb/s
+  Stream #0:0: Audio: pcm_s16le ([1][0][0][0] / 0x0001), 8000 Hz, stereo, s16, 256 kb/s
+Stream mapping:
+  Stream #0:0 -> #0:0 (pcm_s16le (native) -> pcm_s16le (native))
+Output #0, null, to 'pipe:':
+[silencedetect @ 0x5581] silence_start: 12.5
+[silencedetect @ 0x5581] silence_end: 15 | silence_duration: 2.5
+[silencedetect @ 0x5581] silence_start: 70.25
+[silencedetect @ 0x5581] silence_end: 80.25 | silence_duration: 10
+size=N/A time=00:02:30.00 bitrate=N/A speed= 812x
+[Parsed_volumedetect_1 @ 0x5582] n_samples: 2400000
+[Parsed_volumedetect_1 @ 0x5582] mean_volume: -22.4 dB
+[Parsed_volumedetect_1 @ 0x5582] max_volume: -3.1 dB

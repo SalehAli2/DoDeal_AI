@@ -20,7 +20,11 @@ THE ORDER, and what each step may cost:
      after 300 s, doubling per outage to 3600 s. A pause never costs an
      attempt, even one taken at the charge. Nothing is spent blind.
   6. One attempt is claimed, the recording downloaded (core/audio_download.py)
-     and its seconds charged, then transcribed. A transcription that failed
+     and inspected (audio.py) before any paid call: over 3600 s, unreadable,
+     or not two channels under a stereo setting fails it, unpaid. Its seconds
+     are charged -- twice for stereo, whose two sides are each transcribed,
+     each side kept once it exists -- then transcribed; poor audio makes the
+     transcript uncertain whatever the engine says. A transcription that failed
      and may succeed later is retried ONCE, as an attempt, its seconds charged
      again; the second failure is dead_letter and call.failed. A download that
      may succeed later is retried until the attempts run out.
@@ -58,6 +62,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from arq import Retry
@@ -99,6 +104,14 @@ from dodeal_ai.core.jobs import (
 from dodeal_ai.core.llm import LLMClient, routed
 from dodeal_ai.core.logging_config import job_log_context
 from dodeal_ai.units.call_intelligence.analysis import Wave1, wave1
+from dodeal_ai.units.call_intelligence.audio import (
+    MAX_CALL_SECONDS,
+    AudioError,
+    AudioQuality,
+    AudioTools,
+    merge_sides,
+    side_roles,
+)
 from dodeal_ai.units.call_intelligence.config import CallsConfig, resolve_calls_config
 from dodeal_ai.units.call_intelligence.paid import JobGone, PassUsage
 from dodeal_ai.units.call_intelligence.queues import enqueue_call, enqueue_stage2
@@ -141,6 +154,16 @@ TOO_SHORT = "too_short"
 # analysis_reason of a call done with no transcript at all.
 TRANSCRIPT = "transcript"
 NO_TRANSCRIPT = "no_transcript"
+# The work field the audio's numbers are kept under, and a stereo side's
+# transcript's prefix (`transcript:agent`), so no side is paid for twice.
+AUDIO = "audio"
+SIDE = "transcript:"
+
+# The permanent failures the audio layer adds before any paid call.
+TOO_LONG = "audio_too_long"
+CHANNELS_MISMATCH = "audio_channels_mismatch"
+NO_AUDIO_TOOLS = "audio_tools_unavailable"
+MONO = "mono"
 
 # Delivers one event for a job and settles its delivery field; True once the
 # CRM has it (or there is no callback), False when left to the schedule.
@@ -201,10 +224,12 @@ def stage1_result(
     transcript: Transcript | None,
     outcome_label: str | None,
     wave: Wave1 | None = None,
+    audio: AudioQuality | None = None,
 ) -> dict[str, object]:
     """The stage-1 result, held in db3 and delivered as call.stage1: the
-    transcript, the signals block, wave 1's analysis (or null and why) and the
-    versions. No transcript, no signals: both are null."""
+    transcript, the audio's numbers, the signals block, wave 1's analysis (or
+    null and why) and the versions. No transcript, no signals: both are null;
+    audio is null when the recording was not inspected."""
     duration = int(str(job.metadata["duration_seconds"]))
     return {
         "stage": 1,
@@ -217,6 +242,7 @@ def stage1_result(
         "transcript": None
         if transcript is None
         else transcript.model_dump(mode="json"),
+        "audio": None if audio is None else audio.to_dict(),
         "signals": None if wave is None else wave.signals,
         "analysis": None if wave is None else wave.analysis,
         "analysis_reason": NO_TRANSCRIPT if wave is None else wave.reason,
@@ -242,6 +268,7 @@ class CallRun:
     deliver_ms: int | None = None
     usage: PassUsage = field(default_factory=PassUsage)
     analysis_reason: str | None = None
+    audio: AudioQuality | None = None
 
     def moved(self, status: JobStatus, reason: str | None = None) -> None:
         self.status, self.reason = status.value, reason
@@ -388,6 +415,8 @@ async def _process(
 
     if kept is not None:
         run.transcript = Transcript.model_validate(kept)
+        found = work.get(AUDIO)
+        run.audio = None if found is None else AudioQuality.from_dict(found)
         if await _stage1(ctx, job, config, run.transcript, work, scope, run):
             await _done(ctx, job, config, None, run)
         return
@@ -412,7 +441,7 @@ async def _process(
             tenant, job_id, result, ttl_seconds=config.result_ttl_seconds
         )
     elif paid:
-        transcript = await _transcribe(ctx, job, config, scope, attempt, run)
+        transcript = await _transcribe(ctx, job, config, scope, attempt, run, work)
         if transcript is None:
             return
         await store_work(
@@ -461,7 +490,12 @@ async def _stage1(
         run.analyse_ms = _ms_since(started)
     run.analysis_reason = wave.reason
     result = stage1_result(
-        job, config, transcript=transcript, outcome_label=None, wave=wave
+        job,
+        config,
+        transcript=transcript,
+        outcome_label=None,
+        wave=wave,
+        audio=run.audio,
     )
     await store_result(
         job.tenant, job.job_id, result, ttl_seconds=config.result_ttl_seconds
@@ -528,12 +562,25 @@ async def _transcribe(
     scope: TenantScope,
     attempt: int,
     run: CallRun,
+    work: dict[str, dict[str, object]],
 ) -> Transcript | None:
-    """Download, charge the seconds, transcribe. None when the job was
-    failed, paused or scheduled to retry instead."""
+    """Download, inspect, charge the seconds, transcribe. None when the job
+    was failed, paused or scheduled to retry instead."""
     settings = get_settings()
-    transcriber: Transcriber = ctx["transcriber"]
     meta = job.metadata
+    seconds = int(str(meta["duration_seconds"]))
+    tools: AudioTools | None = ctx.get("audio")
+    stereo = config.audio_channels != MONO
+    refusal = (
+        TOO_LONG
+        if seconds > MAX_CALL_SECONDS
+        else NO_AUDIO_TOOLS
+        if stereo and tools is None
+        else None
+    )
+    if refusal is not None:
+        await _fail(ctx, job, config, refusal, dead=False, run=run)
+        return None
     started = time.monotonic()
     transcriptions = 0
     try:
@@ -549,9 +596,17 @@ async def _transcribe(
             allow_local=settings.call_demo_allow_local_audio,
         ) as audio:
             run.download_ms, run.bytes = _ms_since(started), audio.size_bytes
-            seconds = int(str(meta["duration_seconds"]))
+            if tools is not None:
+                run.audio = await _inspected(tools, audio.path, stereo)
+                await store_work(
+                    job.tenant,
+                    job.job_id,
+                    AUDIO,
+                    run.audio.to_dict(),
+                    ttl_seconds=config.result_ttl_seconds,
+                )
             try:
-                await charge_audio_seconds(scope, seconds)
+                await charge_audio_seconds(scope, seconds * (2 if stereo else 1))
             except CallsBudgetPaused as paused:
                 await _pause(job, paused.reason_code, claimed=True, run=run)
                 run.attempts = attempt - 1
@@ -562,33 +617,97 @@ async def _transcribe(
             transcriptions = count
             run.moved(JobStatus.TRANSCRIBING)
             metrics.AUDIO_SECONDS_PROCESSED.inc(seconds)
-            hint = meta.get("language_hint")
             started = time.monotonic()
-            spend = current_spend()
             try:
-                run.transcript = await transcriber.transcribe(
-                    audio.path, language_hint=hint if isinstance(hint, str) else None
-                )
-            except (TranscriptionError, asyncio.CancelledError):
-                # Possibly billed, by a model it never named: unpriced, not free.
-                if spend is not None:
-                    spend.record_audio(_UNKNOWN_MODEL, seconds)
-                raise
+                if stereo:
+                    assert tools is not None  # refused above without them
+                    transcript = await _two_sides(
+                        ctx, job, config, tools, audio.path, work
+                    )
+                else:
+                    transcript = await _paid(ctx, job, audio.path)
             finally:
                 run.transcribe_ms = _ms_since(started)
-            if spend is not None:
-                spend.record_audio(run.transcript.model, seconds)
-            return run.transcript
+            if run.audio is not None:
+                transcript = transcript.doubted(*run.audio.reasons())
+            run.transcript = transcript
+            return transcript
     except AudioDownloadError as refused:
         if run.download_ms is None:
             run.download_ms = _ms_since(started)
         await _download_failed(ctx, job, config, refused, attempt, run)
+        return None
+    except AudioError as refused:
+        await _fail(ctx, job, config, refused.reason, dead=False, run=run)
         return None
     except TranscriptionError as failed:
         await _transcription_failed(
             ctx, job, config, failed, attempt, transcriptions, run
         )
         return None
+
+
+async def _inspected(tools: AudioTools, path: Path, stereo: bool) -> AudioQuality:
+    """The recording's numbers, or AudioError for one too long, or not two
+    channels under a stereo setting: refused before any paid call."""
+    quality = await tools.inspect(path)
+    if quality.duration_seconds > MAX_CALL_SECONDS:
+        raise AudioError(TOO_LONG)
+    if stereo and quality.channels != 2:
+        raise AudioError(CHANNELS_MISMATCH)
+    return quality
+
+
+async def _paid(ctx: dict[str, Any], job: Job, path: Path) -> Transcript:
+    """One paid transcription of `path`, its seconds recorded on the spend
+    under the model that answered, or as unpriced when none did."""
+    transcriber: Transcriber = ctx["transcriber"]
+    hint = job.metadata.get("language_hint")
+    seconds = int(str(job.metadata["duration_seconds"]))
+    spend = current_spend()
+    try:
+        transcript = await transcriber.transcribe(
+            path, language_hint=hint if isinstance(hint, str) else None
+        )
+    except (TranscriptionError, asyncio.CancelledError):
+        # Possibly billed, by a model it never named: unpriced, not free.
+        if spend is not None:
+            spend.record_audio(_UNKNOWN_MODEL, seconds)
+        raise
+    if spend is not None:
+        spend.record_audio(transcript.model, seconds)
+    return transcript
+
+
+async def _two_sides(
+    ctx: dict[str, Any],
+    job: Job,
+    config: CallsConfig,
+    tools: AudioTools,
+    path: Path,
+    work: dict[str, dict[str, object]],
+) -> Transcript:
+    """Each side of a stereo call transcribed on its own and merged by time,
+    a side kept the moment it exists so a retry never pays for it again."""
+    roles = side_roles(config.audio_channels)
+    sides: list[tuple[str, Transcript]] = []
+    async with tools.split(path) as files:
+        for role, side_path in zip(roles, files, strict=True):
+            kept = work.get(f"{SIDE}{role}")
+            if kept is not None:
+                sides.append((role, Transcript.model_validate(kept)))
+                continue
+            side = await _paid(ctx, job, side_path)
+            await store_work(
+                job.tenant,
+                job.job_id,
+                f"{SIDE}{role}",
+                side.model_dump(mode="json"),
+                ttl_seconds=config.result_ttl_seconds,
+            )
+            sides.append((role, side))
+    first = sides[0][1]
+    return merge_sides(sides, provider=first.provider, model=first.model)
 
 
 async def _transcription_failed(
@@ -735,6 +854,8 @@ def _log_outcome(run: CallRun) -> None:
         "bytes": run.bytes,
         "language_profile": None if transcript is None else transcript.language_profile,
         "uncertain": None if transcript is None else transcript.uncertain,
+        "speech_ratio": None if run.audio is None else run.audio.speech_ratio,
+        "mean_volume_db": None if run.audio is None else run.audio.mean_volume_db,
         "download_ms": run.download_ms,
         "transcribe_ms": run.transcribe_ms,
         "analyse_ms": run.analyse_ms,

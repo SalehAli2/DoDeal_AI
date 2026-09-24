@@ -21,6 +21,11 @@ THE NORMAL QUEUE'S WORKER ALSO SWEEPS, every 300 s: a job stuck in a running
 status with no run is re-enqueued once (units/call_intelligence/sweep.py).
 arq runs a cron once per slot however many normal workers there are.
 
+FFMPEG IS CHECKED AT START on every transcribing worker (units/call_intelligence/
+audio.py): the quality check and the stereo split run on it before any paid
+call, so a worker without it refuses to start -- but for the demo, which runs
+without it and says so.
+
 THE TRANSCRIBER IS BUILT BY THE FACTORY, which refuses while no adapter exists,
 so a worker with nothing to transcribe with does not start. A test or the demo
 passes one in, and the worker starts with it only under the demo flag. The
@@ -38,6 +43,7 @@ missing one refuses the start rather than a paid call.
 
 from __future__ import annotations
 
+import logging
 import sys
 from typing import Any
 
@@ -46,11 +52,16 @@ from arq import cron, func
 from arq.connections import RedisSettings
 from arq.worker import run_worker
 
-from dodeal_ai.core.config import get_settings
+from dodeal_ai.core.config import Settings, get_settings
 from dodeal_ai.core.llm import aclose_llm, build_llm_client, build_router
 from dodeal_ai.core.logging_config import configure_logging, warn_if_demo_audio
 from dodeal_ai.core.prompting import clear_templates, preload_templates
 from dodeal_ai.core.redis import redis_url
+from dodeal_ai.units.call_intelligence.audio import (
+    AudioTools,
+    FfmpegMissing,
+    ensure_ffmpeg,
+)
 from dodeal_ai.units.call_intelligence.delivery import (
     deliver_callback,
     deliver_event,
@@ -99,6 +110,7 @@ def worker_settings(
         warn_if_demo_audio(settings)
         if queue != STAGE2_QUEUE:
             ctx["transcriber"] = select_transcriber(settings, transcriber)
+            ctx["audio"] = await _audio_tools(settings)
         preload_templates(UNIT_B_TEMPLATES)
         # The model's own pool, apart from the download's pinned client.
         llm_http = httpx.AsyncClient()
@@ -150,6 +162,21 @@ def worker_settings(
         "on_startup": startup,
         "on_shutdown": shutdown,
     }
+
+
+async def _audio_tools(settings: Settings) -> AudioTools | None:
+    """ffmpeg, checked before the worker takes a job: missing, the worker
+    refuses to start -- unless the demo flag is on, when the demo runs without
+    it (no quality check, mono only) and says so at ERROR."""
+    try:
+        return await ensure_ffmpeg()
+    except FfmpegMissing:
+        if not settings.call_demo_allow_local_audio:
+            raise
+        logging.getLogger("dodeal_ai.startup").error(
+            "ffmpeg_not_found", extra={"event": "ffmpeg_not_found"}
+        )
+        return None
 
 
 def _every(seconds: int) -> set[int]:
