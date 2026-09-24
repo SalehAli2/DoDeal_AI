@@ -226,7 +226,9 @@ async def evaluate(
             started = clock()
             try:
                 transcript = await transcriber.transcribe(
-                    call.audio, language_hint=call.language_hint
+                    call.audio,
+                    language_hint=call.language_hint,
+                    duration_seconds=call.duration_seconds,
                 )
             except TranscriptionError as failed:
                 row.error = failed.reason

@@ -54,10 +54,12 @@ DEFAULT_SEGMENTS: tuple[Segment, ...] = (
 
 @dataclass(frozen=True, slots=True)
 class TranscribeCall:
-    """One call the fake received: the file's size at the time, and the hint."""
+    """One call the fake received: the file's size at the time, the hint and
+    the call's length."""
 
     size_bytes: int
     language_hint: str | None
+    duration_seconds: float
 
 
 class FakeTranscriber:
@@ -75,10 +77,16 @@ class FakeTranscriber:
         self.calls: list[TranscribeCall] = []
 
     async def transcribe(
-        self, audio_path: Path, *, language_hint: str | None
+        self, audio_path: Path, *, language_hint: str | None, duration_seconds: float
     ) -> Transcript:
         size = audio_path.stat().st_size
-        self.calls.append(TranscribeCall(size_bytes=size, language_hint=language_hint))
+        self.calls.append(
+            TranscribeCall(
+                size_bytes=size,
+                language_hint=language_hint,
+                duration_seconds=duration_seconds,
+            )
+        )
         if size == 0:
             raise TranscriptionError("audio_empty", retryable=False)
         if self.fail is not None:

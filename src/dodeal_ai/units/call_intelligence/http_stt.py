@@ -145,7 +145,7 @@ class _HttpTranscriber(ABC):
         """The transcript of a readable answer."""
 
     async def transcribe(
-        self, audio_path: Path, *, language_hint: str | None
+        self, audio_path: Path, *, language_hint: str | None, duration_seconds: float
     ) -> Transcript:
         data = await asyncio.to_thread(audio_path.read_bytes)
         try:

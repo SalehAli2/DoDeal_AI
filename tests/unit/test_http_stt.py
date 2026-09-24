@@ -61,7 +61,7 @@ async def test_each_adapters_recorded_answer_parses(audio: Path) -> None:
     """OpenAI's verbose_json names no voice; the owner's service names each."""
     engine = Engine(recorded("openai_verbose.json"))
     plain = await adapter(OpenAiCompatibleTranscriber, engine).transcribe(
-        audio, language_hint="en"
+        audio, language_hint="en", duration_seconds=150
     )
     assert [(s.speaker, s.start_s, s.end_s) for s in plain.segments] == [
         ("unknown", 0.0, 4.6),
@@ -78,7 +78,7 @@ async def test_each_adapters_recorded_answer_parses(audio: Path) -> None:
 
     owner = Engine(recorded("diarized_http.json"))
     diarized = await adapter(DiarizedHttpTranscriber, owner).transcribe(
-        audio, language_hint="mixed"
+        audio, language_hint="mixed", duration_seconds=150
     )
     assert [(s.speaker, s.language, s.confidence) for s in diarized.segments] == [
         ("speaker_1", "en", 0.93),
@@ -104,7 +104,9 @@ async def test_a_4xx_is_permanent_and_every_failure_is_one_request(
     for kind in (OpenAiCompatibleTranscriber, DiarizedHttpTranscriber):
         engine = Engine(body, status)
         with pytest.raises(TranscriptionError) as caught:
-            await adapter(kind, engine).transcribe(audio, language_hint=None)
+            await adapter(kind, engine).transcribe(
+                audio, language_hint=None, duration_seconds=150
+            )
         assert (str(caught.value), caught.value.retryable) == (reason, retryable)
         assert len(engine.requests) == 1
 
@@ -117,11 +119,11 @@ async def test_a_dropped_connection_retries_and_no_speech_names_no_speakers(
 
     with pytest.raises(TranscriptionError, match="^stt_unavailable$"):
         await adapter(DiarizedHttpTranscriber, dropped).transcribe(  # type: ignore[arg-type]
-            audio, language_hint=None
+            audio, language_hint=None, duration_seconds=150
         )
     silent = await adapter(
         DiarizedHttpTranscriber, Engine({"segments": []})
-    ).transcribe(audio, language_hint=None)
+    ).transcribe(audio, language_hint=None, duration_seconds=150)
     assert silent.uncertain_reasons == ("stt_no_speakers",)
 
 

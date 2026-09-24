@@ -268,8 +268,12 @@ async def test_a_crash_after_transcription_retries_delivery_only(
 class _DyingTranscriber(FakeTranscriber):
     """Counts the call, then dies the way a killed worker does mid-request."""
 
-    async def transcribe(self, audio_path: Path, *, language_hint: str | None):
-        await super().transcribe(audio_path, language_hint=language_hint)
+    async def transcribe(
+        self, audio_path: Path, *, language_hint: str | None, duration_seconds: float
+    ):
+        await super().transcribe(
+            audio_path, language_hint=language_hint, duration_seconds=duration_seconds
+        )
         raise RuntimeError("the worker died mid-transcription")
 
 
@@ -551,8 +555,12 @@ async def test_a_dead_job_store_is_retried_by_arq(ctx: dict, monkeypatch) -> Non
 class _HungTranscriber(FakeTranscriber):
     """Counts the call, then never answers."""
 
-    async def transcribe(self, audio_path: Path, *, language_hint: str | None):
-        await super().transcribe(audio_path, language_hint=language_hint)
+    async def transcribe(
+        self, audio_path: Path, *, language_hint: str | None, duration_seconds: float
+    ):
+        await super().transcribe(
+            audio_path, language_hint=language_hint, duration_seconds=duration_seconds
+        )
         await asyncio.Event().wait()
         raise AssertionError("unreachable")
 
@@ -670,7 +678,13 @@ async def test_a_timeout_that_is_not_the_deadline_is_an_error(ctx: dict) -> None
     await _push()
 
     class _TimesOut(FakeTranscriber):
-        async def transcribe(self, audio_path: Path, *, language_hint: str | None):
+        async def transcribe(
+            self,
+            audio_path: Path,
+            *,
+            language_hint: str | None,
+            duration_seconds: float,
+        ):
             raise TimeoutError
 
     ctx["transcriber"] = _TimesOut()

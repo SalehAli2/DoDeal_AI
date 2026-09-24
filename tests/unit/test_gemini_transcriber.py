@@ -97,7 +97,9 @@ async def test_spk_1_and_spk_2_come_back_as_ordered_speaker_segments(
 ) -> None:
     """Diarized words become speaker turns, in order, in one request."""
     google = Google()
-    transcript = await transcriber(google).transcribe(audio, language_hint="mixed")
+    transcript = await transcriber(google).transcribe(
+        audio, language_hint="mixed", duration_seconds=150
+    )
     assert [(s.speaker, s.language, s.confidence) for s in transcript.segments] == [
         ("speaker_1", "en", None),
         ("speaker_2", "ar", None),
@@ -129,6 +131,90 @@ async def test_spk_1_and_spk_2_come_back_as_ordered_speaker_segments(
     assert audio_input["mime_type"] == "audio/flac"
 
 
+def _undiarized(answer: dict[str, Any]) -> dict[str, Any]:
+    """The recorded answer as Gemini gives it with no diarization asked: the
+    same words, none carrying a speaker."""
+    stripped = json.loads(json.dumps(answer))
+    for step in stripped["steps"]:
+        for part in step.get("content") or ():
+            for note in part.get("annotations") or ():
+                note.pop("speaker", None)
+    return stripped
+
+
+@pytest.mark.parametrize(("seconds", "diarized"), [(1800, True), (1801, False)])
+async def test_a_call_over_1800_seconds_is_sent_without_diarization(
+    audio: Path, seconds: int, diarized: bool
+) -> None:
+    """The guard (F-4): 1801 s makes a request without diarization, its
+    speakers unknown and the transcript uncertain; 1800 s keeps it."""
+    google = Google(RECORDED if diarized else _undiarized(RECORDED))
+    transcript = await transcriber(google).transcribe(
+        audio, language_hint=None, duration_seconds=seconds
+    )
+    (request,) = google.requests
+    mode = json.loads(request.content)["generation_config"]["transcription_config"][
+        "mode"
+    ]
+    expected = {"type": "verbatim", "timestamp_granularities": ["word"]}
+    if diarized:
+        assert mode == {**expected, "diarization_mode": "speaker"}
+        assert transcript.speakers == ("speaker_1", "speaker_2")
+        assert transcript.uncertain_reasons == ()
+        return
+    assert mode == expected
+    assert [
+        (s.speaker, s.start_s, s.end_s, s.language) for s in transcript.segments
+    ] == [
+        ("unknown", 0.1, 2.4, "en"),
+        ("unknown", 2.4, 4.0, "ar"),
+        ("unknown", 4.2, 5.9, "en"),
+    ]
+    assert transcript.segments[2].text == "2025 Great, when?"
+    assert transcript.uncertain
+    assert transcript.uncertain_reasons == ("long_call_no_diarization",)
+
+
+async def test_a_diarized_answer_missing_a_speaker_is_malformed(audio: Path) -> None:
+    """Diarization was asked for: a word with no speaker is never unknown."""
+    google = Google(_undiarized(RECORDED))
+    with pytest.raises(TranscriptionError, match=f"^{MALFORMED}$"):
+        await transcriber(google).transcribe(
+            audio, language_hint=None, duration_seconds=150
+        )
+    assert len(google.requests) == 1
+
+
+async def test_a_pause_ends_an_undiarized_segment(audio: Path) -> None:
+    """With no sentence's end between them, a pause of 1 s still cuts."""
+    answer = _undiarized(RECORDED)
+    (part,) = answer["steps"][-1]["content"]
+    part["annotations"] = [
+        {
+            "type": "word_info",
+            "text": "one",
+            "start_offset": "0.0s",
+            "end_offset": "0.5s",
+        },
+        {
+            "type": "word_info",
+            "text": "two",
+            "start_offset": "1.4s",
+            "end_offset": "1.8s",
+        },
+        {
+            "type": "word_info",
+            "text": "three",
+            "start_offset": "2.8s",
+            "end_offset": "3.1s",
+        },
+    ]
+    transcript = await transcriber(Google(answer)).transcribe(
+        audio, language_hint="en", duration_seconds=2400
+    )
+    assert [s.text for s in transcript.segments] == ["one two", "three"]
+
+
 async def test_the_upload_is_deleted_even_when_the_transcription_fails(
     audio: Path, monkeypatch
 ) -> None:
@@ -136,7 +222,9 @@ async def test_the_upload_is_deleted_even_when_the_transcription_fails(
     monkeypatch.setattr(gemini, "INLINE_MAX_BYTES", 8)
     google = Google(status=400)
     with pytest.raises(TranscriptionError) as caught:
-        await transcriber(google).transcribe(audio, language_hint=None)
+        await transcriber(google).transcribe(
+            audio, language_hint=None, duration_seconds=150
+        )
     assert (str(caught.value), caught.value.retryable) == (REFUSED, False)
     assert google.paths()[-2:] == [
         ("POST", "/v1beta/interactions"),
@@ -153,14 +241,18 @@ async def test_a_503_or_a_429_makes_exactly_one_request_on_either_layer(
     """The SDK's own retries are off: the worker's one retry is the only one."""
     google = Google(status=status)
     with pytest.raises(TranscriptionError) as caught:
-        await transcriber(google).transcribe(audio, language_hint=None)
+        await transcriber(google).transcribe(
+            audio, language_hint=None, duration_seconds=150
+        )
     assert (str(caught.value), caught.value.retryable) == (UNAVAILABLE, True)
     assert google.paths() == [("POST", "/v1beta/interactions")]
 
     monkeypatch.setattr(gemini, "INLINE_MAX_BYTES", 8)
     uploads = Google(upload_status=status)
     with pytest.raises(TranscriptionError, match=f"^{UNAVAILABLE}$"):
-        await transcriber(uploads).transcribe(audio, language_hint=None)
+        await transcriber(uploads).transcribe(
+            audio, language_hint=None, duration_seconds=150
+        )
     assert uploads.paths() == [("POST", "/upload/v1beta/files")]
 
 
@@ -180,7 +272,9 @@ async def test_failures_are_classified_by_status_and_never_carry_its_words(
             ]}]}]}), MALFORMED, False),
     ]:  # fmt: skip
         with pytest.raises(TranscriptionError) as caught:
-            await transcriber(google).transcribe(audio, language_hint="en")
+            await transcriber(google).transcribe(
+                audio, language_hint="en", duration_seconds=150
+            )
         assert (str(caught.value), caught.value.retryable) == (reason, retryable)
         assert "provider words" not in repr(caught.value)
 
@@ -188,7 +282,9 @@ async def test_failures_are_classified_by_status_and_never_carry_its_words(
         raise httpx.ConnectError("down", request=request)
 
     with pytest.raises(TranscriptionError, match=f"^{UNAVAILABLE}$"):
-        await transcriber(dropped).transcribe(audio, language_hint=None)  # type: ignore[arg-type]
+        await transcriber(dropped).transcribe(
+            audio, language_hint=None, duration_seconds=150
+        )  # type: ignore[arg-type]
 
 
 async def test_a_failed_delete_is_logged_by_type_and_the_call_still_succeeds(
@@ -197,7 +293,7 @@ async def test_a_failed_delete_is_logged_by_type_and_the_call_still_succeeds(
     monkeypatch.setattr(gemini, "INLINE_MAX_BYTES", 8)
     with caplog.at_level(logging.ERROR, logger="dodeal_ai.calls.stt"):
         transcript = await transcriber(Google(delete_status=500)).transcribe(
-            audio, language_hint=None
+            audio, language_hint=None, duration_seconds=150
         )
     assert transcript.speakers == ("speaker_1", "speaker_2")
     (record,) = caplog.records

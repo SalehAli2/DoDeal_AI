@@ -542,9 +542,19 @@ async def test_a_job_failed_during_transcription_is_not_analysed(
     await _push()
 
     class _Failing(FakeTranscriber):
-        async def transcribe(self, audio_path: Path, *, language_hint: str | None):
+        async def transcribe(
+            self,
+            audio_path: Path,
+            *,
+            language_hint: str | None,
+            duration_seconds: float,
+        ):
             await redis_fakes.jobs.hset(f"call_job:tenant-a:{JOB}", "status", "failed")
-            return await super().transcribe(audio_path, language_hint=language_hint)
+            return await super().transcribe(
+                audio_path,
+                language_hint=language_hint,
+                duration_seconds=duration_seconds,
+            )
 
     ctx["transcriber"] = _Failing(SEGMENTS)
     await process_call(ctx, "tenant-a", JOB)

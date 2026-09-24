@@ -199,10 +199,12 @@ class Transcript(BaseModel):
 @runtime_checkable
 class Transcriber(Protocol):
     """Exactly one method. `language_hint` is the CRM's guess (en, ar, mixed)
-    or None; an adapter may use it and must not trust it."""
+    or None; an adapter may use it and must not trust it. `duration_seconds`
+    is the call's length as the worker knows it, for an engine whose limits
+    depend on it (Gemini's diarization)."""
 
     async def transcribe(
-        self, audio_path: Path, *, language_hint: str | None
+        self, audio_path: Path, *, language_hint: str | None, duration_seconds: float
     ) -> Transcript:
         """Transcribe the file at `audio_path`, which exists for the call only.
         Raises TranscriptionError for anything the provider could not do."""

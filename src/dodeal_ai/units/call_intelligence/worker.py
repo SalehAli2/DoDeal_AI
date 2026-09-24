@@ -647,12 +647,15 @@ async def _transcribe(
                 transcriptions = count
                 run.moved(JobStatus.TRANSCRIBING)
                 metrics.AUDIO_SECONDS_PROCESSED.inc(seconds)
+                length = call_length(seconds, run.audio)
                 started = time.monotonic()
                 try:
                     if stereo:
-                        transcript = await _two_sides(ctx, job, config, files, work)
+                        transcript = await _two_sides(
+                            ctx, job, config, files, work, length
+                        )
                     else:
-                        transcript = await _paid(ctx, job, config, files[0])
+                        transcript = await _paid(ctx, job, config, files[0], length)
                 finally:
                     run.transcribe_ms = _ms_since(started)
             if run.audio is not None:
@@ -685,6 +688,13 @@ async def _inspected(tools: AudioTools, path: Path, stereo: bool) -> AudioQualit
     return quality
 
 
+def call_length(declared: int, audio: AudioQuality | None) -> float:
+    """The call's length an engine is told: the larger of the push's and
+    ffmpeg's, so a limit on length is never passed on either's word."""
+    measured = 0.0 if audio is None else audio.duration_seconds
+    return max(float(declared), measured)
+
+
 @asynccontextmanager
 async def _engine_audio(
     tools: AudioTools | None, path: Path, stereo: bool
@@ -715,17 +725,20 @@ def transcriber_for(ctx: dict[str, Any], profile: str) -> Transcriber:
 
 
 async def _paid(
-    ctx: dict[str, Any], job: Job, config: CallsConfig, path: Path
+    ctx: dict[str, Any], job: Job, config: CallsConfig, path: Path, length: float
 ) -> Transcript:
-    """One paid transcription of `path`, its seconds recorded on the spend
-    under the model that answered, or as unpriced when none did."""
+    """One paid transcription of `path`, a call `length` seconds long, its
+    seconds recorded on the spend under the model that answered, or as
+    unpriced when none did."""
     transcriber = transcriber_for(ctx, config.stt_profile)
     hint = job.metadata.get("language_hint")
     seconds = int(str(job.metadata["duration_seconds"]))
     spend = current_spend()
     try:
         transcript = await transcriber.transcribe(
-            path, language_hint=hint if isinstance(hint, str) else None
+            path,
+            language_hint=hint if isinstance(hint, str) else None,
+            duration_seconds=length,
         )
     except (TranscriptionError, asyncio.CancelledError):
         # Possibly billed, by a model it never named: unpriced, not free.
@@ -743,6 +756,7 @@ async def _two_sides(
     config: CallsConfig,
     files: tuple[Path, ...],
     work: dict[str, dict[str, object]],
+    length: float,
 ) -> Transcript:
     """Each side of a stereo call transcribed on its own and merged by time,
     a side kept the moment it exists so a retry never pays for it again."""
@@ -753,7 +767,7 @@ async def _two_sides(
         if kept is not None:
             sides.append((role, Transcript.model_validate(kept)))
             continue
-        side = await _paid(ctx, job, config, side_path)
+        side = await _paid(ctx, job, config, side_path, length)
         await store_work(
             job.tenant,
             job.job_id,

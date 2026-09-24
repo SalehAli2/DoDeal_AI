@@ -119,7 +119,9 @@ def test_each_implementation_is_a_transcriber(transcriber: Transcriber) -> None:
 async def test_segments_are_ordered_and_never_overlap(
     transcriber: Transcriber, audio: Path, hint: str | None
 ) -> None:
-    transcript = await transcriber.transcribe(audio, language_hint=hint)
+    transcript = await transcriber.transcribe(
+        audio, language_hint=hint, duration_seconds=150
+    )
     for segment in transcript.segments:
         assert 0 <= segment.start_s <= segment.end_s
     for before, after in zip(
@@ -131,7 +133,9 @@ async def test_segments_are_ordered_and_never_overlap(
 async def test_every_segment_names_a_speaker(
     transcriber: Transcriber, audio: Path
 ) -> None:
-    transcript = await transcriber.transcribe(audio, language_hint=None)
+    transcript = await transcriber.transcribe(
+        audio, language_hint=None, duration_seconds=150
+    )
     assert transcript.segments
     assert all(segment.speaker for segment in transcript.segments)
     assert set(transcript.speakers) == {s.speaker for s in transcript.segments}
@@ -140,7 +144,9 @@ async def test_every_segment_names_a_speaker(
 async def test_the_profile_and_the_flag_agree_with_the_segments(
     transcriber: Transcriber, audio: Path
 ) -> None:
-    transcript = await transcriber.transcribe(audio, language_hint="en")
+    transcript = await transcriber.transcribe(
+        audio, language_hint="en", duration_seconds=150
+    )
     assert transcript.language_profile is profile_of(transcript.segments)
     # An adapter may add a fixed doubt its segments cannot show (no speakers).
     doubted = is_uncertain(transcript.segments) or bool(transcript.uncertain_reasons)
@@ -151,7 +157,9 @@ async def test_the_profile_and_the_flag_agree_with_the_segments(
 async def test_segment_text_is_never_on_a_repr(
     transcriber: Transcriber, audio: Path
 ) -> None:
-    transcript = await transcriber.transcribe(audio, language_hint=None)
+    transcript = await transcriber.transcribe(
+        audio, language_hint=None, duration_seconds=150
+    )
     shown = repr(transcript) + "".join(repr(s) for s in transcript.segments)
     assert all(segment.text not in shown for segment in transcript.segments)
 
@@ -225,7 +233,7 @@ def test_a_malformed_segment_is_refused(fields: dict) -> None:
 
 async def test_the_fake_records_each_call_and_its_hint(audio: Path) -> None:
     fake = FakeTranscriber()
-    transcript = await fake.transcribe(audio, language_hint="ar")
+    transcript = await fake.transcribe(audio, language_hint="ar", duration_seconds=150)
     assert transcript.segments == DEFAULT_SEGMENTS
     assert transcript.language_profile is LanguageProfile.MIXED
     assert transcript.spoken_seconds == pytest.approx(18.8)
@@ -239,10 +247,12 @@ async def test_the_fake_refuses_empty_audio_and_raises_when_told(
     empty = tmp_path / "empty.audio"
     empty.write_bytes(b"")
     with pytest.raises(TranscriptionError, match="^audio_empty$"):
-        await FakeTranscriber().transcribe(empty, language_hint=None)
+        await FakeTranscriber().transcribe(
+            empty, language_hint=None, duration_seconds=150
+        )
     failing = FakeTranscriber(fail=TranscriptionError("provider_down", retryable=True))
     with pytest.raises(TranscriptionError) as caught:
-        await failing.transcribe(audio, language_hint=None)
+        await failing.transcribe(audio, language_hint=None, duration_seconds=150)
     assert caught.value.retryable
 
 

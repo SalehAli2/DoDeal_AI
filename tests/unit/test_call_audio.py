@@ -37,6 +37,7 @@ from dodeal_ai.units.call_intelligence.config import (
     new_config_version,
     parse_unit_b_section,
 )
+from dodeal_ai.units.call_intelligence.fake_transcriber import FakeTranscriber
 from dodeal_ai.units.call_intelligence.http_stt import DiarizedHttpTranscriber
 from dodeal_ai.units.call_intelligence.queues import NORMAL_QUEUE, STAGE2_QUEUE
 from dodeal_ai.units.call_intelligence.schemas import CallJobRequest
@@ -120,7 +121,7 @@ class _Sides:
         self.fail_right = fail_right
 
     async def transcribe(
-        self, audio_path: Path, *, language_hint: str | None
+        self, audio_path: Path, *, language_hint: str | None, duration_seconds: float
     ) -> Transcript:
         body = audio_path.read_bytes()
         self.heard.append(body)
@@ -463,6 +464,20 @@ async def test_a_file_ffprobe_cannot_decode_is_a_permanent_unpaid_failure(
     assert ffmpeg.runs == [] and ctx["transcriber"].heard == []
     assert job.transcriptions == 0 and ctx["deliver"].events == ["call.failed"]
     assert not [k for k in redis_fakes.cost.store if "audio_seconds" in k]
+
+
+@pytest.mark.parametrize(("declared", "told"), [(90, 150.0), (1801, 1801.0)])
+async def test_the_engine_is_told_the_longer_of_the_pushed_and_measured_length(
+    ctx: dict[str, Any], declared: int, told: float
+) -> None:
+    """ffmpeg measured 150 s: a push saying less is not believed, and one
+    saying more (over Gemini's diarization limit) is taken at its word."""
+    ctx["transcriber"] = FakeTranscriber()
+    await _calls_on()
+    await _push(declared)
+    await process_call(ctx, "tenant-a", JOB)
+    (call,) = ctx["transcriber"].calls
+    assert call.duration_seconds == told
 
 
 async def test_a_resumed_run_keeps_the_audio_numbers(ctx: dict[str, Any]) -> None:

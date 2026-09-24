@@ -22,6 +22,11 @@ language and no confidence: a segment's language is the script most of its
 letters are in (ar Arabic, en Latin; with none, the hint, else und), and its
 confidence is null.
 
+A CALL OVER MAX_DIARIZED_SECONDS (1800 s, Gemini's diarization limit) is sent
+WITHOUT diarization: every segment's speaker is unknown, a segment ends at a
+sentence's end or a pause of PAUSE_SECONDS, and the transcript is uncertain
+(long_call_no_diarization). 1800 s itself is still diarized.
+
 FAILURES, by HTTP status only, never the provider's message: 408, 429, 5xx, a
 timeout or a dropped connection is retryable; any other 4xx is permanent; an
 answer that arrived but cannot be read is permanent, never asked again.
@@ -48,6 +53,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from dodeal_ai.units.call_intelligence.audio import ENGINE_MIME
 from dodeal_ai.units.call_intelligence.evidence import script_language
+from dodeal_ai.units.call_intelligence.prompts import UNKNOWN
 from dodeal_ai.units.call_intelligence.transcriber import (
     Segment,
     Transcript,
@@ -65,6 +71,17 @@ INLINE_MAX_BYTES = 12 * 1024 * 1024
 UNAVAILABLE = "stt_unavailable"
 REFUSED = "stt_request_refused"
 MALFORMED = "stt_malformed_response"
+
+# Gemini diarizes up to this many seconds of audio. A longer call is sent
+# without diarization, rather than refused or split into voices it cannot
+# tell apart; set higher, a long call's request would fail or mislabel.
+MAX_DIARIZED_SECONDS = 1800
+LONG_CALL = "long_call_no_diarization"
+
+# Undiarized, a new segment starts after a pause this long, or after a word
+# that ends a sentence, so a long call is not one segment.
+PAUSE_SECONDS = 1.0
+_TERMINAL = (".", "!", "?", "…", "؟", "۔")
 
 # Statuses a later attempt may pass, besides every 5xx.
 _RETRYABLE = frozenset({408, 429})
@@ -99,15 +116,13 @@ def sdk_client(
     return client
 
 
-def generation_config(language_hint: str | None) -> dict[str, Any]:
-    """Verbatim, diarized, word-timed; the hint's languages when it names any."""
-    config: dict[str, Any] = {
-        "mode": {
-            "type": "verbatim",
-            "diarization_mode": "speaker",
-            "timestamp_granularities": ["word"],
-        }
-    }
+def generation_config(language_hint: str | None, *, diarize: bool) -> dict[str, Any]:
+    """Verbatim and word-timed, diarized when asked; the hint's languages when
+    it names any."""
+    mode: dict[str, Any] = {"type": "verbatim", "timestamp_granularities": ["word"]}
+    if diarize:
+        mode["diarization_mode"] = "speaker"
+    config: dict[str, Any] = {"mode": mode}
     if language_hint in _LANGUAGES:
         config["language_codes"] = _LANGUAGES[language_hint]
     return {"transcription_config": config}
@@ -135,7 +150,8 @@ class _Word(BaseModel):
     model_config = ConfigDict(extra="ignore", frozen=True)
 
     text: str
-    speaker: str = Field(pattern=r"^spk_[0-9]{1,3}$")
+    # Absent when diarization was not asked for; required when it was.
+    speaker: str | None = Field(default=None, pattern=r"^spk_[0-9]{1,3}$")
     start_offset: str = Field(pattern=_OFFSET)
     end_offset: str = Field(pattern=_OFFSET)
 
@@ -169,12 +185,25 @@ def _words(answer: dict[str, Any]) -> list[_Word]:
     return found
 
 
-def segments_of(words: list[_Word], hint: str | None) -> tuple[Segment, ...]:
-    """Consecutive words of one speaker as one segment, in time order, each
-    starting no earlier than the one before it ended."""
+def _continues(last: _Word, word: _Word, *, diarized: bool) -> bool:
+    """Whether `word` belongs to the segment `last` ends: the same speaker, or
+    undiarized, no sentence's end and no pause between them."""
+    if diarized:
+        return last.speaker == word.speaker
+    ended = last.text.rstrip().endswith(_TERMINAL)
+    # Offsets are strings to the millisecond; the float difference is not.
+    return not ended and round(word.start - last.end, 3) < PAUSE_SECONDS
+
+
+def segments_of(
+    words: list[_Word], hint: str | None, *, diarized: bool
+) -> tuple[Segment, ...]:
+    """Consecutive words of one speaker as one segment (undiarized: of one
+    sentence, unbroken by a pause), in time order, each starting no earlier
+    than the one before it ended."""
     turns: list[list[_Word]] = []
     for word in sorted(words, key=lambda word: word.start):
-        if turns and turns[-1][-1].speaker == word.speaker:
+        if turns and _continues(turns[-1][-1], word, diarized=diarized):
             turns[-1].append(word)
         else:
             turns.append([word])
@@ -188,13 +217,20 @@ def segments_of(words: list[_Word], hint: str | None) -> tuple[Segment, ...]:
             Segment(
                 start_s=start,
                 end_s=floor,
-                speaker=f"speaker_{turn[0].speaker.removeprefix('spk_')}",
+                speaker=_label(turn[0], diarized=diarized),
                 text=text,
                 language=script_language(text, hint),
                 confidence=None,
             )
         )
     return tuple(segments)
+
+
+def _label(word: _Word, *, diarized: bool) -> str:
+    """speaker_N for Gemini's spk_N; unknown when it was not asked."""
+    if not diarized or word.speaker is None:
+        return UNKNOWN
+    return f"speaker_{word.speaker.removeprefix('spk_')}"
 
 
 class GeminiTranscriber:
@@ -217,14 +253,15 @@ class GeminiTranscriber:
         )
 
     async def transcribe(
-        self, audio_path: Path, *, language_hint: str | None
+        self, audio_path: Path, *, language_hint: str | None, duration_seconds: float
     ) -> Transcript:
+        diarize = duration_seconds <= MAX_DIARIZED_SECONDS
         try:
             async with self._audio(audio_path, ENGINE_MIME) as audio:
                 answer: Any = await self._client.aio.interactions.create(
                     model=self._model,
                     input=[audio],
-                    generation_config=generation_config(language_hint),
+                    generation_config=generation_config(language_hint, diarize=diarize),
                     timeout=self._timeout_seconds,
                 )
         except (InteractionsError, genai_errors.APIError, httpx.TransportError) as e:
@@ -236,8 +273,13 @@ class GeminiTranscriber:
         )
         try:
             words = _words(received)
+            if diarize and any(word.speaker is None for word in words):
+                raise TranscriptionError(MALFORMED, retryable=False)
             return Transcript.of(
-                segments_of(words, language_hint), provider=PROVIDER, model=self._model
+                segments_of(words, language_hint, diarized=diarize),
+                provider=PROVIDER,
+                model=self._model,
+                reasons=() if diarize else (LONG_CALL,),
             )
         except ValidationError:
             raise TranscriptionError(MALFORMED, retryable=False) from None
