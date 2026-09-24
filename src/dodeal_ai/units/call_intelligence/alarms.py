@@ -14,7 +14,9 @@ between one phrase word and the next. One find per phrase per segment.
 A FIND carries the phrase's index in the sorted list, who said it, when and
 which segment; never the words. An agent's match is an off_channel_contact
 escalation: the list is the tenant's words for taking a client off the
-company's channels, and a client saying them is only recorded.
+company's channels, and a client saying them is only recorded. While the
+roles are not applied (prompts.said_by) the speaker is `unknown`, and every
+match raises off_channel_contact_review: it may be the agent's.
 
 alarm_list_digest is SHA-256 over the sorted, normalised list, one phrase per
 line: stage 1 carries it so a match can be read against the list in force.
@@ -27,10 +29,17 @@ import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
-from dodeal_ai.units.call_intelligence.prompts import AGENT, role_of, segment_id
+from dodeal_ai.units.call_intelligence.prompts import (
+    AGENT,
+    UNKNOWN,
+    said_by,
+    segment_id,
+)
 from dodeal_ai.units.call_intelligence.transcriber import Segment
 
 OFF_CHANNEL = "off_channel_contact"
+# The escalation for a match whose speaker is unknown: someone listens.
+OFF_CHANNEL_REVIEW = "off_channel_contact_review"
 
 # Words another word may sit between two of a phrase's words.
 MAX_GAP_WORDS = 2
@@ -128,7 +137,7 @@ def detect_alarms(segments: Sequence[Segment], phrases: Iterable[str]) -> AlarmF
     escalations: list[dict[str, object]] = []
     for index, segment in enumerate(segments):
         said = words(segment.text)
-        role = role_of(segment)
+        role = said_by(segment)
         for number, phrase in enumerate(wanted):
             if not phrase_in(phrase, said):
                 continue
@@ -138,10 +147,10 @@ def detect_alarms(segments: Sequence[Segment], phrases: Iterable[str]) -> AlarmF
                 "segment": segment_id(index),
             }
             finds.append({"phrase": number, **where})
-            if role == AGENT:
+            if role in (AGENT, UNKNOWN):
                 escalations.append(
                     {
-                        "type": OFF_CHANNEL,
+                        "type": OFF_CHANNEL if role == AGENT else OFF_CHANNEL_REVIEW,
                         "source": "alarm_phrase",
                         "phrase": number,
                         **where,

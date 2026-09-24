@@ -195,3 +195,42 @@ async def test_one_voice_named_by_its_channel_is_doubted_on_a_long_call(
     assert result["roles"] is None
     reasons = result["transcript"]["uncertain_reasons"]
     assert reasons == (["single_voice"] if doubted else [])
+
+
+@pytest.mark.parametrize("answered", [True, False])
+async def test_unapplied_roles_and_an_alarm_phrase_give_a_review_escalation(
+    ctx: dict[str, Any], answered: bool
+) -> None:
+    """The guard (F-3): an unclear answer or none, so the engine's labels stay;
+    the agent's alarm phrase and number are put down to no one, and each is
+    an off_channel_contact_review, never the client's."""
+    unclear = {
+        "speakers": [
+            _role("speaker_1", "agent", "this is the sales office", "s1"),
+            _role("speaker_2", "unclear", None, None),
+        ]
+    }
+    ctx["llm"] = (
+        FakeLLM(json_response(unclear), json_response(EXTRACTION), json_response(PROSE))
+        if answered
+        else None
+    )
+    await _push()
+    await process_call(ctx, "tenant-a", JOB)
+    result = await _result()
+    assert result["roles"]["applied"] is False
+    signals = result["signals"]
+    where = {"speaker": "unknown", "start_s": 10.0, "segment": "s3"}
+    assert signals["alarms"] == [{"phrase": 0, **where}]
+    assert signals["numbers"] == [
+        {**where, "last4": "4321", "match": "unattributed_number"}
+    ]
+    assert signals["escalations"] == [
+        {"type": "off_channel_contact_review", "source": "number", **where},
+        {
+            "type": "off_channel_contact_review",
+            "source": "alarm_phrase",
+            "phrase": 0,
+            **where,
+        },
+    ]

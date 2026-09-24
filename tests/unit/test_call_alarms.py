@@ -128,6 +128,23 @@ def test_the_digest_is_over_the_sorted_normalised_list() -> None:
     assert detect_alarms((), listed).digest == expected
 
 
+@pytest.mark.parametrize("label", ["speaker_2", "unknown"])
+def test_with_no_roles_applied_every_match_is_put_to_review(label: str) -> None:
+    """Whoever said it may be the agent: unknown, and a review escalation."""
+    found = detect_alarms((_say(label, "my personal number is on the card"),), PHRASES)
+    index = alarm_list(PHRASES).index("my personal number")
+    where = {"speaker": "unknown", "start_s": 3.0, "segment": "s1"}
+    assert found.finds == [{"phrase": index, **where}]
+    assert found.escalations == [
+        {
+            "type": "off_channel_contact_review",
+            "source": "alarm_phrase",
+            "phrase": index,
+            **where,
+        }
+    ]
+
+
 def test_the_switch_off_matches_nothing() -> None:
     segments = (_say("agent", "my personal number"),)
     assert alarms_if_enabled(segments, enabled=False, phrases=PHRASES) is None

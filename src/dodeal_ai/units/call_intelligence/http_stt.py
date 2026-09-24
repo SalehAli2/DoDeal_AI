@@ -40,6 +40,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from dodeal_ai.units.call_intelligence.audio import ENGINE_MIME
 from dodeal_ai.units.call_intelligence.evidence import script_language
 from dodeal_ai.units.call_intelligence.gemini import MALFORMED, REFUSED, UNAVAILABLE
+from dodeal_ai.units.call_intelligence.prompts import UNKNOWN
 from dodeal_ai.units.call_intelligence.transcriber import (
     Segment,
     Transcript,
@@ -51,7 +52,7 @@ DIARIZED_HTTP = "diarized_http"
 
 # The label of a segment whose engine names no speaker, and why its
 # transcript is uncertain.
-NO_SPEAKER = "unknown"
+NO_SPEAKER = UNKNOWN
 NO_SPEAKERS = "stt_no_speakers"
 
 _RETRYABLE = frozenset({408, 429})

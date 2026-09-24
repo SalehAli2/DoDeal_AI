@@ -134,6 +134,42 @@ def test_with_no_company_hash_the_leads_number_still_matches() -> None:
     assert [f["match"] for f in findings.finds] == ["lead"]
 
 
+@pytest.mark.parametrize("label", ["speaker_1", "unknown"])
+def test_with_no_roles_applied_a_number_not_the_leads_is_put_to_review(
+    label: str,
+) -> None:
+    """An engine's label or no speaker at all: the speaker is unknown, and
+    only the lead's own number raises nothing."""
+    findings = _detect(
+        _say(label, "reach me on 050 123 4567", start=1.0),
+        _say(label, "or text me on 055 765 4321", start=6.0),
+        _say(label, "the office is 056 111 2222", start=11.0),
+    )
+    assert [(f["speaker"], f["match"]) for f in findings.finds] == [
+        ("unknown", "lead"),
+        ("unknown", "unattributed_number"),
+        ("unknown", "agent_company"),
+    ]
+    assert findings.escalations == [
+        {
+            "type": "off_channel_contact_review",
+            "source": "number",
+            "speaker": "unknown",
+            "start_s": start,
+            "segment": segment,
+        }
+        for start, segment in ((6.0, "s2"), (11.0, "s3"))
+    ]
+    with_no_company = detect_numbers(
+        (_say(label, "055 765 4321"),),
+        lead_phone_hash=None,
+        agent_phone_hash=None,
+        country_code="971",
+    )
+    assert [f["match"] for f in with_no_company.finds] == ["unattributed_number"]
+    assert len(with_no_company.escalations) == 1
+
+
 def test_a_hash_is_compared_whatever_its_case() -> None:
     findings = detect_numbers(
         (_say("lead", "050 123 4567"),),

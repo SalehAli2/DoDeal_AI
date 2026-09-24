@@ -73,6 +73,10 @@ UNIT_B_TEMPLATES: tuple[str, ...] = (
 
 AGENT = "agent"
 CLIENT = "client"
+# A voice no role mapping named: an engine's own label (speaker_N) left as it
+# was because the roles were not applied, or an engine that names no speaker.
+UNKNOWN = "unknown"
+ENGINE_LABEL = re.compile(r"^speaker_[0-9]{1,3}$")
 
 _WHITESPACE = re.compile(r"\s+")
 
@@ -85,6 +89,14 @@ def segment_id(index: int) -> str:
 def role_of(segment: Segment) -> str:
     """agent for the agent's label, client for every other."""
     return AGENT if segment.speaker == AGENT else CLIENT
+
+
+def said_by(segment: Segment) -> str:
+    """Who a number or an alarm phrase is put down to: unknown while the
+    segment's label is one no role mapping named, else its role_of."""
+    if segment.speaker == UNKNOWN or ENGINE_LABEL.match(segment.speaker):
+        return UNKNOWN
+    return role_of(segment)
 
 
 def clock(seconds: float) -> str:

@@ -23,7 +23,6 @@ call that long has two sides; hearing one means one was lost.
 
 from __future__ import annotations
 
-import re
 from collections.abc import Callable
 from typing import Annotated, Literal
 
@@ -45,6 +44,7 @@ from dodeal_ai.units.call_intelligence.evidence import (
 from dodeal_ai.units.call_intelligence.prompts import (
     AGENT,
     CLIENT,
+    ENGINE_LABEL,
     REPROMPT_TAIL_TEMPLATE,
     ROLES_TEMPLATE,
     build_call_prompt,
@@ -83,13 +83,11 @@ SINGLE_VOICE = "single_voice"
 # a call may be one side's short message. Provisional, like the audio floors.
 SINGLE_VOICE_MIN_SECONDS = 30
 
-_ENGINE_LABEL = re.compile(r"^speaker_[0-9]{1,3}$")
-
 
 class SpeakerRole(Strict):
     """One voice's role, and the words that show it."""
 
-    speaker: Annotated[str, Field(pattern=_ENGINE_LABEL.pattern)]
+    speaker: Annotated[str, Field(pattern=ENGINE_LABEL.pattern)]
     role: Literal["agent", "client", "unclear"]
     quote: Quote
     segment: SegmentId
@@ -103,7 +101,7 @@ class Roles(Strict):
 
 def needs_roles(transcript: Transcript) -> bool:
     """Whether any voice carries the engine's label, not a role."""
-    return any(_ENGINE_LABEL.match(speaker) for speaker in transcript.speakers)
+    return any(ENGINE_LABEL.match(speaker) for speaker in transcript.speakers)
 
 
 def opening(transcript: Transcript, *, country_code: str) -> CallText:

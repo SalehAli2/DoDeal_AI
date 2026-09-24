@@ -32,6 +32,11 @@ when the push named the company number -- a known, different number, and an
 off_channel_contact escalation -- and `agent_unverified` when it did not:
 with nothing to compare against, nothing escalates.
 
+WHILE THE ROLES ARE NOT APPLIED (prompts.said_by) the speaker is `unknown`:
+the number may be the agent's own, so it is never counted as the client's.
+Any number but the lead's is `unattributed_number` (or `agent_company`) and
+raises off_channel_contact_review, for a person to listen to.
+
 THE PROMPT COPY masks every phone number as [PHONE] and every email address as
 [EMAIL]; the stored transcript keeps what was said. It masks wider than the
 phone rule finds: any run of 9 to 19 digits, joined only by spaces, full stops
@@ -48,12 +53,19 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from dodeal_ai.units.call_intelligence.prompts import AGENT, role_of, segment_id
+from dodeal_ai.units.call_intelligence.prompts import (
+    AGENT,
+    UNKNOWN,
+    said_by,
+    segment_id,
+)
 from dodeal_ai.units.call_intelligence.transcriber import Segment
 
 PHONE_MASK = "[PHONE]"
 EMAIL_MASK = "[EMAIL]"
 OFF_CHANNEL = "off_channel_contact"
+# The escalation for a number whose speaker is unknown: someone listens.
+OFF_CHANNEL_REVIEW = "off_channel_contact_review"
 
 # What a number said on the call matched.
 MATCH_LEAD = "lead"
@@ -61,6 +73,7 @@ MATCH_AGENT_COMPANY = "agent_company"
 MATCH_NEW_CLIENT = "new_client_number"
 MATCH_AGENT_PERSONAL = "agent_personal"
 MATCH_AGENT_UNVERIFIED = "agent_unverified"
+MATCH_UNATTRIBUTED = "unattributed_number"
 
 # The country code a local number is read under when the tenant sets none.
 DEFAULT_COUNTRY_CODE = "971"
@@ -300,6 +313,9 @@ class NumberFindings:
 def _match(digest: str, role: str, lead: str | None, agent: str | None) -> str:
     if lead is not None and digest == lead:
         return MATCH_LEAD
+    if role == UNKNOWN:
+        known = agent is not None and digest == agent
+        return MATCH_AGENT_COMPANY if known else MATCH_UNATTRIBUTED
     if role != AGENT:
         return MATCH_NEW_CLIENT
     if agent is None:
@@ -320,7 +336,7 @@ def detect_numbers(
     lead = lead_phone_hash.lower() if lead_phone_hash else None
     agent = agent_phone_hash.lower() if agent_phone_hash else None
     for index, segment in enumerate(segments):
-        role = role_of(segment)
+        role = said_by(segment)
         said = _EMAIL.sub(EMAIL_MASK, segment.text)
         for span in phone_spans(said, country_code=country_code):
             match = _match(phone_hash(span.digits), role, lead, agent)
@@ -334,6 +350,10 @@ def detect_numbers(
             )
             if match == MATCH_AGENT_PERSONAL:
                 escalations.append({"type": OFF_CHANNEL, "source": "number", **where})
+            elif role == UNKNOWN and match != MATCH_LEAD:
+                escalations.append(
+                    {"type": OFF_CHANNEL_REVIEW, "source": "number", **where}
+                )
     return NumberFindings(finds, escalations)
 
 
