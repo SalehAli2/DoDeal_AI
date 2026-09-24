@@ -356,19 +356,23 @@ class Settings(BaseSettings):
     # instance it is using: a queue connection and a cost/quota connection.
     # Local Redis by default; real hosts come from DevOps later. Different
     # logical DBs (0 and 1) keep the two namespaces separate.
-    redis_queue_url: str = "redis://localhost:6379/0"
-    redis_cost_url: str = "redis://localhost:6379/1"
+    #
+    # All four URLs are SecretStr (register item 158): a real one carries the
+    # store's password, so repr(settings) prints stars. Each is read in exactly
+    # ONE place, core/redis.py::redis_url, with .get_secret_value().
+    redis_queue_url: SecretStr = SecretStr("redis://localhost:6379/0")
+    redis_cost_url: SecretStr = SecretStr("redis://localhost:6379/1")
     # Per-request operational state for the feature units: idempotency
     # reservations, clarification rate limits, per-note attempt counters. A
     # THIRD logical DB, not a third namespace inside the cost DB: these keys
     # have different lifetimes and a different failure policy from the cost
     # counters (idempotency fails CLOSED, the cost cap fails open), and sharing
     # a DB would make a flush aimed at one of them hit the other.
-    redis_operational_url: str = "redis://localhost:6379/2"
+    redis_operational_url: SecretStr = SecretStr("redis://localhost:6379/2")
     # Unit B's job state and results (core/jobs.py, register item 50): a FOURTH
     # logical DB, because jobs fail CLOSED and outlive a request by days. A URL
     # shared with db2 would let a flush of reservations erase every call job.
-    redis_jobs_url: str = "redis://localhost:6379/3"
+    redis_jobs_url: SecretStr = SecretStr("redis://localhost:6379/3")
     # --- Redis connection budget (core/redis.py; audit H3) ------------------
     # PROVISIONAL, all four; gt=0 on every one, so a non-positive value fails
     # closed at construction rather than at the first command.

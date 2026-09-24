@@ -50,6 +50,7 @@ from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.llm import aclose_llm, build_llm_client, build_router
 from dodeal_ai.core.logging_config import configure_logging, warn_if_demo_audio
 from dodeal_ai.core.prompting import clear_templates, preload_templates
+from dodeal_ai.core.redis import redis_url
 from dodeal_ai.units.call_intelligence.delivery import (
     deliver_callback,
     deliver_event,
@@ -81,8 +82,9 @@ QUEUES = {
 
 
 def redis_settings() -> RedisSettings:
-    """arq's Redis settings, parsed from redis_queue_url; opens nothing."""
-    return RedisSettings.from_dsn(get_settings().redis_queue_url)
+    """arq's Redis settings, parsed from the queue URL (read through
+    core/redis.py's one read of it); opens nothing."""
+    return RedisSettings.from_dsn(redis_url("queue"))
 
 
 def worker_settings(

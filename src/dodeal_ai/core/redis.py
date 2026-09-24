@@ -44,7 +44,7 @@ does not touch an event loop; the first awaited command does. A liveness check
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Any
+from typing import Any, Literal
 
 import redis
 from arq.connections import ArqRedis
@@ -91,6 +91,24 @@ class BoundedPool(redis_async.BlockingConnectionPool):
             raise
 
 
+# The four stores, by the name their URL setting carries.
+type RedisStore = Literal["queue", "cost", "operational", "jobs"]
+
+
+def redis_url(store: RedisStore) -> str:
+    """THE one read of a Redis URL (register item 158). Each is a SecretStr in
+    Settings, since a real one carries a password; nothing else calls
+    get_secret_value() on them, so a grep finds every use."""
+    settings = get_settings()
+    secrets = {
+        "queue": settings.redis_queue_url,
+        "cost": settings.redis_cost_url,
+        "operational": settings.redis_operational_url,
+        "jobs": settings.redis_jobs_url,
+    }
+    return secrets[store].get_secret_value()
+
+
 def _build_pool(url: str, *, decode_responses: bool = True) -> BoundedPool:
     """A bounded pool for `url`, sized entirely from Settings.
 
@@ -121,7 +139,7 @@ def _build_pool(url: str, *, decode_responses: bool = True) -> BoundedPool:
 def get_cost_client() -> redis_async.Redis:
     """The cost/quota connection (db1). Cached so one client -- and so one pool
     -- is reused; a per-call pool would make the bound meaningless."""
-    return redis_async.Redis(connection_pool=_build_pool(get_settings().redis_cost_url))
+    return redis_async.Redis(connection_pool=_build_pool(redis_url("cost")))
 
 
 @lru_cache
@@ -134,9 +152,7 @@ def get_operational_client() -> redis_async.Redis:
     them, not so they can be tuned apart. A per-connection budget would be a new
     decision, and nothing has asked for one.
     """
-    return redis_async.Redis(
-        connection_pool=_build_pool(get_settings().redis_operational_url)
-    )
+    return redis_async.Redis(connection_pool=_build_pool(redis_url("operational")))
 
 
 @lru_cache
@@ -144,7 +160,7 @@ def get_jobs_client() -> redis_async.Redis:
     """The jobs connection (db3): call jobs, their index by call and their
     results. Same shape and settings as the other two, on its own pool, so a
     burst of job polling can never take db2's reservations' connections."""
-    return redis_async.Redis(connection_pool=_build_pool(get_settings().redis_jobs_url))
+    return redis_async.Redis(connection_pool=_build_pool(redis_url("jobs")))
 
 
 @lru_cache
@@ -153,9 +169,7 @@ def get_queue_client() -> ArqRedis:
     job lands in arq's own format, on a bounded pool of its own. Not decoded:
     arq's job bodies are bytes."""
     return ArqRedis(
-        connection_pool=_build_pool(
-            get_settings().redis_queue_url, decode_responses=False
-        )
+        connection_pool=_build_pool(redis_url("queue"), decode_responses=False)
     )
 
 

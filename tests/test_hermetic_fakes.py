@@ -14,7 +14,7 @@ import pytest
 
 from dodeal_ai import main
 from dodeal_ai.core import redis as redis_module
-from dodeal_ai.core.config import Settings, _build_settings, get_settings
+from dodeal_ai.core.config import Settings, _build_settings
 from dodeal_ai.core.cost import limiter
 from tests.helpers.fake_cost_redis import FakeCostRedis
 
@@ -211,12 +211,11 @@ def test_the_service_urls_point_at_a_closed_port_and_the_lane_keeps_its_own() ->
     DODEAL_REDIS_REAL_URL and names neither service URL, as a variable or as a
     Settings field.
     """
-    settings = get_settings()
     for variable, url in (
-        ("DODEAL_REDIS_COST_URL", settings.redis_cost_url),
-        ("DODEAL_REDIS_OPERATIONAL_URL", settings.redis_operational_url),
-        ("DODEAL_REDIS_JOBS_URL", settings.redis_jobs_url),
-        ("DODEAL_REDIS_QUEUE_URL", settings.redis_queue_url),
+        ("DODEAL_REDIS_COST_URL", redis_module.redis_url("cost")),
+        ("DODEAL_REDIS_OPERATIONAL_URL", redis_module.redis_url("operational")),
+        ("DODEAL_REDIS_JOBS_URL", redis_module.redis_url("jobs")),
+        ("DODEAL_REDIS_QUEUE_URL", redis_module.redis_url("queue")),
     ):
         assert os.environ[variable] == url
         parts = urlsplit(url)

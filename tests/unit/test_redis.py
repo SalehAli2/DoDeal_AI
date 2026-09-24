@@ -60,7 +60,7 @@ def test_the_two_clients_are_separate_logical_dbs():
 
     settings = Settings(_env_file=None, jwt_signing_key="test-key")
     assert settings.redis_cost_url != settings.redis_operational_url
-    assert settings.redis_operational_url.endswith("/2")
+    assert redis_module.redis_url("operational").endswith("/2")
 
 
 def test_the_two_factories_hold_separate_pools():
@@ -305,3 +305,88 @@ def test_the_jobs_and_queue_clients_read_their_own_urls(monkeypatch):
     assert redis_module.get_jobs_client() is redis_module.get_jobs_client()
     redis_module.get_jobs_client.cache_clear()
     redis_module.get_queue_client.cache_clear()
+
+
+# --- the four URLs are secrets (register item 158) ---------------------------
+
+_STORES = ("queue", "cost", "operational", "jobs")
+_PASSWORD = "hunter2-test-only"
+
+
+def _secret_urls(monkeypatch) -> dict[str, str]:
+    """Each store's URL with a password in it, set as the deployment would."""
+    urls = {
+        store: f"redis://:{_PASSWORD}-{store}@redis.internal:6379/{n}"
+        for n, store in enumerate(_STORES)
+    }
+    for store, url in urls.items():
+        monkeypatch.setenv(f"DODEAL_REDIS_{store.upper()}_URL", url)
+    from dodeal_ai.core.config import get_settings
+
+    get_settings.cache_clear()
+    return urls
+
+
+def test_repr_of_the_settings_shows_no_redis_url(monkeypatch):
+    """repr, str and a JSON dump print stars where each URL is."""
+    urls = _secret_urls(monkeypatch)
+    from dodeal_ai.core.config import get_settings
+
+    settings = get_settings()
+    for shown in (repr(settings), str(settings), settings.model_dump_json()):
+        assert _PASSWORD not in shown and "redis.internal" not in shown
+    assert {store: redis_module.redis_url(store) for store in _STORES} == urls
+
+
+def test_a_startup_failure_message_shows_no_url(monkeypatch):
+    """Another setting refused beside four password URLs: a fixed message, no
+    chained cause, and no URL anywhere in it."""
+    _secret_urls(monkeypatch)
+    monkeypatch.setenv("DODEAL_MAX_INFLIGHT", "0")
+    from dodeal_ai.core.config import ConfigError, get_settings
+
+    get_settings.cache_clear()
+    with pytest.raises(ConfigError) as caught:
+        get_settings()
+    assert caught.value.__cause__ is None and caught.value.__suppress_context__
+    for shown in (str(caught.value), repr(caught.value)):
+        assert _PASSWORD not in shown and "redis" not in shown
+
+
+def test_a_worker_refused_on_a_bad_queue_url_shows_no_url(monkeypatch):
+    """arq refuses a URL that is not redis://, with its own fixed text."""
+    from dodeal_ai.workers import calls
+
+    monkeypatch.setenv("DODEAL_REDIS_QUEUE_URL", f"http://:{_PASSWORD}@x:1/0")
+    from dodeal_ai.core.config import get_settings
+
+    get_settings.cache_clear()
+    with pytest.raises(AssertionError) as caught:
+        calls.redis_settings()
+    assert _PASSWORD not in str(caught.value)
+
+
+def test_each_url_is_read_in_exactly_one_place():
+    """Only core/redis.py::redis_url reads a Redis URL, and it calls
+    get_secret_value() once; every other module goes through it."""
+    fields = {f"redis_{store}_url" for store in _STORES}
+    readers: dict[str, list[str]] = {}
+    for path in sorted(pathlib.Path("src/dodeal_ai").rglob("*.py")):
+        if path.name == "config.py" and path.parent.name == "core":
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and node.attr in fields:
+                readers.setdefault(node.attr, []).append(path.as_posix())
+    assert readers == {name: ["src/dodeal_ai/core/redis.py"] for name in sorted(fields)}
+    tree = ast.parse(
+        pathlib.Path("src/dodeal_ai/core/redis.py").read_text(encoding="utf-8")
+    )
+    reads = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "get_secret_value"
+    ]
+    assert len(reads) == 1
