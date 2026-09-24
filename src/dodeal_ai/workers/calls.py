@@ -74,13 +74,14 @@ from dodeal_ai.units.call_intelligence.queues import (
     STAGE2_QUEUE,
 )
 from dodeal_ai.units.call_intelligence.stage2 import STAGE2_TRIES, analyse_stage2
+from dodeal_ai.units.call_intelligence.stt import select_transcribers
 from dodeal_ai.units.call_intelligence.sweep import (
     SWEEP_INTERVAL_SECONDS,
     sweep_stuck_jobs,
 )
 from dodeal_ai.units.call_intelligence.transcriber import (
+    DEFAULT_STT_PROFILE,
     Transcriber,
-    select_transcriber,
 )
 from dodeal_ai.units.call_intelligence.worker import process_call
 
@@ -109,8 +110,16 @@ def worker_settings(
         configure_logging()
         warn_if_demo_audio(settings)
         if queue != STAGE2_QUEUE:
-            ctx["transcriber"] = select_transcriber(settings, transcriber)
-            ctx["audio"] = await _audio_tools(settings)
+            # Speech-to-text's own pool; the SDK's timeout is set per request.
+            stt_http = httpx.AsyncClient()
+            try:
+                transcribers = select_transcribers(settings, transcriber, stt_http)
+                ctx["audio"] = await _audio_tools(settings)
+            except BaseException:
+                await stt_http.aclose()
+                raise
+            ctx["stt_http"], ctx["transcribers"] = stt_http, transcribers
+            ctx["transcriber"] = transcribers[DEFAULT_STT_PROFILE]
         preload_templates(UNIT_B_TEMPLATES)
         # The model's own pool, apart from the download's pinned client.
         llm_http = httpx.AsyncClient()
@@ -120,6 +129,8 @@ def worker_settings(
             )
         except BaseException:
             await llm_http.aclose()
+            if "stt_http" in ctx:
+                await ctx["stt_http"].aclose()
             clear_templates()
             raise
         ctx["llm_http"] = llm_http
@@ -133,7 +144,7 @@ def worker_settings(
 
     async def shutdown(ctx: dict[str, Any]) -> None:
         await aclose_llm(ctx.get("llm"))
-        for name in ("http", "llm_http"):
+        for name in ("http", "llm_http", "stt_http"):
             client = ctx.get(name)
             if client is not None:
                 await client.aclose()

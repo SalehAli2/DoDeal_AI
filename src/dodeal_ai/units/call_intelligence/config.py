@@ -23,6 +23,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.llm import DEFAULT_ROUTE, route_names
 from dodeal_ai.core.tenant_config import ResolvedSection, resolve_section
+from dodeal_ai.units.call_intelligence.alarms import words
+from dodeal_ai.units.call_intelligence.keywords import MAX_KEYWORD_TERMS
 from dodeal_ai.units.call_intelligence.numbers import DEFAULT_COUNTRY_CODE
 from dodeal_ai.units.call_intelligence.transcriber import (
     DEFAULT_STT_PROFILE,
@@ -56,6 +58,8 @@ _LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
 _HOSTNAME = re.compile(rf"{_LABEL}(?:\.{_LABEL})*")
 
 type _Word = Annotated[str, Field(min_length=1)]
+# A canonical name: a project's, not a paragraph.
+type _Term = Annotated[str, Field(min_length=1, max_length=120)]
 
 
 class CallsConfig(BaseModel):
@@ -82,6 +86,12 @@ class CallsConfig(BaseModel):
     priority_statuses: frozenset[_Word] = frozenset({"qualified", "negotiation"})
     # Phrases a later pass may alarm on; stored casefolded. Parsed only.
     alarm_phrases: frozenset[_Word] = frozenset()
+    # The company's canonical names for its projects, communities and
+    # developers, as written, at most 100. Used after transcription only
+    # (keywords.py, extras.py); never sent to the speech-to-text engine.
+    keyword_vocabulary: frozenset[_Term] = Field(
+        default=frozenset(), max_length=MAX_KEYWORD_TERMS
+    )
     # The country code a number said with a leading single 0 is hashed under
     # (numbers.py), 1 to 3 digits: 971, the UAE, where the agencies are. A wrong
     # one hashes every local number as another country's, so none matches.
@@ -166,6 +176,16 @@ class CallsConfig(BaseModel):
     @classmethod
     def _casefolded(cls, value: frozenset[str]) -> frozenset[str]:
         return frozenset(word.casefold() for word in value)
+
+    @field_validator("keyword_vocabulary")
+    @classmethod
+    def _distinct_terms(cls, value: frozenset[str]) -> frozenset[str]:
+        """Every term has words, and no two are one name normalised: the
+        canonical name a find gives must be unambiguous."""
+        split = [tuple(words(term)) for term in value]
+        if not all(split) or len(set(split)) != len(split):
+            raise ValueError("keyword_vocabulary")
+        return value
 
     @model_validator(mode="after")
     def _coherent(self) -> CallsConfig:

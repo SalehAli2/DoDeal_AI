@@ -170,7 +170,13 @@ async def wave2(
         wave,
         EXTRAS,
         Extras,
-        lambda metered: find_extras(metered, call, scope=scope, settings=settings),
+        lambda metered: find_extras(
+            metered,
+            call,
+            vocabulary=config.keyword_vocabulary,
+            scope=scope,
+            settings=settings,
+        ),
     )
     wave.parts[EXTRAS] = None if extras is None else extras_part(call, extras)
     return wave

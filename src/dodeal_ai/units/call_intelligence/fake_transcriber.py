@@ -1,6 +1,6 @@
 """FakeTranscriber: a Transcriber that runs no model, for the tests and the demo.
 
-`build_transcriber` never returns it -- there is no switch that selects it. A
+stt.py never builds it -- there is no switch that selects it. A
 test or scripts/call_demo.py constructs it and hands it to the worker itself,
 which starts with it only while CALL_DEMO_ALLOW_LOCAL_AUDIO is on.
 

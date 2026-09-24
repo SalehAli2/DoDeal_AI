@@ -13,6 +13,7 @@ dependencies = [
     "arq>=0.25.0",
     "prometheus-client>=0.21.0",
     "tzdata>=2025.2",
+    "google-genai==2.25.0",
 ]
 
 [build-system]

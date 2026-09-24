@@ -2,10 +2,9 @@
 
 ONE METHOD, like the LLM seam: `transcribe(audio_path, *, language_hint)`. A
 provider adapter is a class that satisfies it; nothing else in the unit knows
-which provider ran. No real adapter exists yet -- `build_transcriber` refuses
-rather than guess, and has no test switch: a test or the demo hands a
-Transcriber in directly (fake_transcriber.py), and `select_transcriber`
-refuses one handed in unless CALL_DEMO_ALLOW_LOCAL_AUDIO is on.
+which provider ran. The adapters are built per STT profile by stt.py, which
+never builds the fake: a test or the demo hands it in directly
+(fake_transcriber.py), refused unless CALL_DEMO_ALLOW_LOCAL_AUDIO is on.
 
 THE TRANSCRIPT CHECKS ITSELF. Segments are in order and never overlap, every
 segment names a speaker, and the two judgements made of the whole -- the
@@ -91,7 +90,8 @@ class Segment(BaseModel):
     text: str = Field(repr=False)
     # An ISO 639 code, lower case: en, ar, or whatever else was spoken.
     language: str = Field(pattern=r"^[a-z]{2,3}$")
-    confidence: float = Field(ge=0.0, le=1.0)
+    # None when the engine reports no confidence (Gemini): never invented.
+    confidence: float | None = Field(ge=0.0, le=1.0)
 
     @model_validator(mode="after")
     def _forwards(self) -> Segment:
@@ -123,12 +123,15 @@ def profile_of(segments: tuple[Segment, ...]) -> LanguageProfile:
 
 
 def is_uncertain(segments: tuple[Segment, ...]) -> bool:
-    """No speech, or a time-weighted mean confidence below the floor."""
-    total = sum(segment.seconds for segment in segments)
-    if total <= 0:
+    """No speech, or a time-weighted mean confidence below the floor, over the
+    segments that carry one; with none carrying one, only no speech."""
+    if sum(segment.seconds for segment in segments) <= 0:
         return True
-    mean = sum(s.confidence * s.seconds for s in segments) / total
-    return mean < MIN_MEAN_CONFIDENCE
+    rated = [(s.confidence, s.seconds) for s in segments if s.confidence is not None]
+    total = sum(seconds for _, seconds in rated)
+    if total <= 0:
+        return False
+    return sum(c * seconds for c, seconds in rated) / total < MIN_MEAN_CONFIDENCE
 
 
 class Transcript(BaseModel):
@@ -203,21 +206,3 @@ class Transcriber(Protocol):
     ) -> Transcript:
         """Transcribe the file at `audio_path`, which exists for the call only.
         Raises TranscriptionError for anything the provider could not do."""
-
-
-def build_transcriber(settings: Settings) -> Transcriber:
-    """The deployment's speech-to-text adapter. None exists yet, so this
-    refuses: a worker with no transcriber must not start and drain the queue
-    into failures. There is no test switch here and must never be one."""
-    raise TranscriberNotConfigured()
-
-
-def select_transcriber(settings: Settings, handed: Transcriber | None) -> Transcriber:
-    """A worker's transcriber: the factory's, or one handed in -- the fake,
-    for the demo -- only while CALL_DEMO_ALLOW_LOCAL_AUDIO is on. Off, the
-    worker refuses to start rather than answer real calls with invented words."""
-    if handed is None:
-        return build_transcriber(settings)
-    if not settings.call_demo_allow_local_audio:
-        raise HandedTranscriberRefused()
-    return handed

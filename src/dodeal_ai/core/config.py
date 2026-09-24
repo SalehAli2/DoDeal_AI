@@ -279,6 +279,18 @@ class Settings(BaseSettings):
     call_stt_profiles: dict[
         Annotated[str, Field(pattern=PROVIDER_NAME_PATTERN)], SttProfile
     ] = {}
+    # The "default" STT profile's endpoint. None uses the engine's own (Gemini's
+    # public API); the HTTP engines need one. A wrong one fails every call's
+    # transcription, retryable once, never billed twice.
+    call_stt_base_url: str | None = Field(default=None, pattern=r"^https?://")
+    # The "default" STT profile's model, pinned: Google's transcription model.
+    # Carried on every transcript and priced by STT_PRICES under this name; a
+    # wrong one is refused by the engine (a permanent failure, unpaid).
+    call_stt_model: str = Field(default="gemini-3.5-transcribe", min_length=1)
+    # The "default" STT profile's key. SecretStr, read in one place
+    # (units/call_intelligence/stt.py). Empty with a paid engine refuses the
+    # worker's start rather than fail every call.
+    call_stt_api_key: SecretStr | None = None
 
     # --- Watchdog: timeout + retry policy for external calls (§6) -----------
     # Placeholder values; tune per real LLM/tool latency later.

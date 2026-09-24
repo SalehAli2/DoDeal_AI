@@ -28,6 +28,7 @@ from dodeal_ai.core.jobs import Job, start_pass
 from dodeal_ai.core.llm import LLMClient
 from dodeal_ai.units.call_intelligence.alarms import alarms_if_enabled
 from dodeal_ai.units.call_intelligence.config import CallsConfig
+from dodeal_ai.units.call_intelligence.keywords import spot_keywords
 from dodeal_ai.units.call_intelligence.numbers import numbers_if_enabled
 from dodeal_ai.units.call_intelligence.paid import (
     PassFailed,
@@ -127,6 +128,12 @@ def _found_in_code(
         **call_signals(segments),
         "numbers": None if numbers is None else numbers.finds,
         "alarms": None if alarms is None else alarms.finds,
+        # The tenant's vocabulary spotted in code; None when it listed none.
+        "keywords": (
+            spot_keywords(segments, config.keyword_vocabulary)
+            if config.keyword_vocabulary
+            else None
+        ),
         "escalations": escalations,
     }
     return found, None if alarms is None else alarms.digest

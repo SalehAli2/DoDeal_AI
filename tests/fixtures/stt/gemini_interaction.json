@@ -1,0 +1,32 @@
+{
+  "id": "interaction-fixture-1",
+  "status": "completed",
+  "model": "gemini-3.5-transcribe",
+  "steps": [
+    {
+      "type": "model_output",
+      "content": [
+        {
+          "type": "text",
+          "text": "Hello this is the agent from the company. مرحبا أريد شقة. 2025 Great, when?",
+          "annotations": [
+            {"type": "word_info", "text": "Hello", "speaker": "spk_1", "start_offset": "0.100s", "end_offset": "0.450s"},
+            {"type": "word_info", "text": "this", "speaker": "spk_1", "start_offset": "0.500s", "end_offset": "0.700s"},
+            {"type": "word_info", "text": "is", "speaker": "spk_1", "start_offset": "0.700s", "end_offset": "0.800s"},
+            {"type": "word_info", "text": "the", "speaker": "spk_1", "start_offset": "0.800s", "end_offset": "0.900s"},
+            {"type": "word_info", "text": "agent", "speaker": "spk_1", "start_offset": "0.900s", "end_offset": "1.300s"},
+            {"type": "word_info", "text": "from", "speaker": "spk_1", "start_offset": "1.300s", "end_offset": "1.500s"},
+            {"type": "word_info", "text": "the", "speaker": "spk_1", "start_offset": "1.500s", "end_offset": "1.600s"},
+            {"type": "word_info", "text": "company.", "speaker": "spk_1", "start_offset": "1.600s", "end_offset": "2.400s"},
+            {"type": "word_info", "text": "مرحبا", "speaker": "spk_2", "start_offset": "2.300s", "end_offset": "2.900s"},
+            {"type": "word_info", "text": "أريد", "speaker": "spk_2", "start_offset": "3.000s", "end_offset": "3.400s"},
+            {"type": "word_info", "text": "شقة.", "speaker": "spk_2", "start_offset": "3.400s", "end_offset": "4.000s"},
+            {"type": "word_info", "text": "2025", "speaker": "spk_1", "start_offset": "4.200s", "end_offset": "4.900s"},
+            {"type": "word_info", "text": "Great,", "speaker": "spk_2", "start_offset": "5.000s", "end_offset": "5.400s"},
+            {"type": "word_info", "text": "when?", "speaker": "spk_2", "start_offset": "5.400s", "end_offset": "5.900s"}
+          ]
+        }
+      ]
+    }
+  ]
+}

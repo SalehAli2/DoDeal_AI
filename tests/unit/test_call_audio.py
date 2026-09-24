@@ -497,7 +497,7 @@ async def test_run_ffmpeg_reads_stderr_and_kills_a_cancelled_run(monkeypatch) ->
 
 async def test_a_worker_without_ffmpeg_refuses_to_start(monkeypatch) -> None:
     monkeypatch.setattr(
-        calls_worker, "select_transcriber", lambda settings, handed: _Sides()
+        calls_worker, "select_transcribers", lambda *_: {"default": _Sides()}
     )
     built = calls_worker.worker_settings(NORMAL_QUEUE)
     ctx: dict[str, Any] = {}

@@ -76,7 +76,8 @@ def words(text: str) -> list[str]:
     return _WORD.findall(normalise(text))
 
 
-def _same_word(said: str, wanted: str) -> bool:
+def same_word(said: str, wanted: str) -> bool:
+    """Whether `said` is `wanted` with at most a proclitic run in front."""
     if not said.endswith(wanted):
         return False
     return said[: len(said) - len(wanted)] in _PROCLITICS
@@ -91,12 +92,12 @@ def phrase_in(phrase: Sequence[str], said: Sequence[str]) -> bool:
             return True
         stop = min(len(said), position + MAX_GAP_WORDS + 2)
         return any(
-            _same_word(said[at], phrase[index]) and after(at, index + 1)
+            same_word(said[at], phrase[index]) and after(at, index + 1)
             for at in range(position + 1, stop)
         )
 
     return bool(phrase) and any(
-        _same_word(word, phrase[0]) and after(at, 1) for at, word in enumerate(said)
+        same_word(word, phrase[0]) and after(at, 1) for at, word in enumerate(said)
     )
 
 

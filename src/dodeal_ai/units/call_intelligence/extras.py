@@ -2,8 +2,10 @@
 could send next, and how serious the client is.
 
   keywords     the projects, communities, developers and topics said: each as
-               said, its words checked in the segment it cites, and an English
-               canonical form where one exists, else null
+               said, its words checked in the segment it cites, an English
+               form where one exists, else null, and the tenant's canonical
+               name when it is one on its keyword_vocabulary (config.py),
+               else null and kept as found
   tags         outcome (moved_forward, stalled, needs_follow_up, dead), stage
                (first_contact, follow_up, viewing, negotiation, closing) and
                client_type (end_user, investor, broker, unknown)
@@ -19,14 +21,14 @@ could send next, and how serious the client is.
 
 THE CHECKS, in code, any failure a malformed answer (one reprompt, then the
 pass fails and the extras part is null): every keyword's words in the segment
-it cites; every quote given under the quote check, and every yes quoted; the
-WhatsApp text within 60 words and in the summary language's script
-(evidence.in_language).
+it cites, and its canonical name, if any, exactly one on the list; every
+quote given under the quote check, and every yes quoted; the WhatsApp text
+within 60 words and in the summary language's script (evidence.in_language).
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Annotated, Literal
 
 from pydantic import Field
@@ -51,6 +53,7 @@ from dodeal_ai.units.call_intelligence.prompts import (
     EXTRAS_TEMPLATE,
     REPROMPT_TAIL_TEMPLATE,
     build_call_prompt,
+    one_line,
 )
 from dodeal_ai.units.structured_intelligence.llm_call import (
     call_model,
@@ -101,6 +104,9 @@ class Keyword(Strict):
     kind: Literal["project", "community", "developer", "topic"]
     said: Said
     english: _Name | None
+    # The tenant's listed name this keyword is; None when it is none. A default,
+    # so an answer kept before the vocabulary existed still reads back.
+    canonical: _Name | None = None
     segment: Cited
 
 
@@ -150,7 +156,16 @@ def _whatsapp_errors(call: CallText, text: str) -> Errors:
     return errors
 
 
-def check_extras(call: CallText) -> Callable[[Extras], None]:
+def extras_data(call: CallText, vocabulary: Iterable[str]) -> str:
+    """The call's data, then the tenant's vocabulary, one name per line."""
+    listed = [f"- {one_line(term)}" for term in sorted(vocabulary)]
+    shown = "\n".join(["VOCABULARY:", *listed]) if listed else "VOCABULARY: none"
+    return f"{call.data()}\n\n{shown}"
+
+
+def check_extras(
+    call: CallText, vocabulary: frozenset[str] = frozenset()
+) -> Callable[[Extras], None]:
     """The rules the schema cannot hold (module docstring), for call_model."""
 
     def check(answer: Extras) -> None:
@@ -159,6 +174,8 @@ def check_extras(call: CallText) -> Callable[[Extras], None]:
             errors += evidence_errors(
                 call, f"keywords.{n}", keyword.said, keyword.segment
             )
+            if keyword.canonical is not None and keyword.canonical not in vocabulary:
+                errors.append((f"keywords.{n}.canonical", "not_listed"))
         for name in SERIOUSNESS_CHECKS:
             found: SeriousCheck = getattr(answer.seriousness, name)
             owed = evidence_errors if found.answer == YES else quote_errors
@@ -171,12 +188,18 @@ def check_extras(call: CallText) -> Callable[[Extras], None]:
 
 
 async def find_extras(
-    client: LLMClient, call: CallText, *, scope: TenantScope, settings: Settings
+    client: LLMClient,
+    call: CallText,
+    *,
+    scope: TenantScope,
+    settings: Settings,
+    vocabulary: frozenset[str] = frozenset(),
 ) -> tuple[Extras, LLMResponse]:
-    """unit_b.extras: one call, or two when the first answer is malformed."""
+    """unit_b.extras: one call, or two when the first answer is malformed;
+    `vocabulary` is the tenant's keyword_vocabulary."""
     return await call_model(
         client,
-        build_call_prompt(EXTRAS_TEMPLATE, call.data()),
+        build_call_prompt(EXTRAS_TEMPLATE, extras_data(call, vocabulary)),
         Extras,
         EXTRAS_LABEL,
         scope=scope,
@@ -189,7 +212,7 @@ async def find_extras(
             reasoning=EXTRAS_REASONING_MAX_OUTPUT_TOKENS,
             client=client,
         ),
-        check=check_extras(call),
+        check=check_extras(call, vocabulary),
         reprompt_tail=REPROMPT_TAIL_TEMPLATE,
     )
 

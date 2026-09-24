@@ -116,6 +116,7 @@ from dodeal_ai.units.call_intelligence.config import CallsConfig, resolve_calls_
 from dodeal_ai.units.call_intelligence.paid import JobGone, PassUsage
 from dodeal_ai.units.call_intelligence.queues import enqueue_call, enqueue_stage2
 from dodeal_ai.units.call_intelligence.transcriber import (
+    DEFAULT_STT_PROFILE,
     Transcriber,
     Transcript,
     TranscriptionError,
@@ -163,6 +164,8 @@ SIDE = "transcript:"
 TOO_LONG = "audio_too_long"
 CHANNELS_MISMATCH = "audio_channels_mismatch"
 NO_AUDIO_TOOLS = "audio_tools_unavailable"
+# A tenant's STT profile this worker built no transcriber for.
+STT_PROFILE_MISSING = "stt_profile_not_configured"
 MONO = "mono"
 
 # Delivers one event for a job and settles its delivery field; True once the
@@ -625,7 +628,7 @@ async def _transcribe(
                         ctx, job, config, tools, audio.path, work
                     )
                 else:
-                    transcript = await _paid(ctx, job, audio.path)
+                    transcript = await _paid(ctx, job, config, audio.path)
             finally:
                 run.transcribe_ms = _ms_since(started)
             if run.audio is not None:
@@ -658,10 +661,24 @@ async def _inspected(tools: AudioTools, path: Path, stereo: bool) -> AudioQualit
     return quality
 
 
-async def _paid(ctx: dict[str, Any], job: Job, path: Path) -> Transcript:
+def transcriber_for(ctx: dict[str, Any], profile: str) -> Transcriber:
+    """The transcriber of the tenant's STT profile; a profile this worker has
+    none for fails the call, unpaid, never falling back to another engine."""
+    if profile == DEFAULT_STT_PROFILE:
+        transcriber: Transcriber = ctx["transcriber"]
+        return transcriber
+    named: Transcriber | None = ctx.get("transcribers", {}).get(profile)
+    if named is None:
+        raise TranscriptionError(STT_PROFILE_MISSING, retryable=False)
+    return named
+
+
+async def _paid(
+    ctx: dict[str, Any], job: Job, config: CallsConfig, path: Path
+) -> Transcript:
     """One paid transcription of `path`, its seconds recorded on the spend
     under the model that answered, or as unpriced when none did."""
-    transcriber: Transcriber = ctx["transcriber"]
+    transcriber = transcriber_for(ctx, config.stt_profile)
     hint = job.metadata.get("language_hint")
     seconds = int(str(job.metadata["duration_seconds"]))
     spend = current_spend()
@@ -697,7 +714,7 @@ async def _two_sides(
             if kept is not None:
                 sides.append((role, Transcript.model_validate(kept)))
                 continue
-            side = await _paid(ctx, job, side_path)
+            side = await _paid(ctx, job, config, side_path)
             await store_work(
                 job.tenant,
                 job.job_id,

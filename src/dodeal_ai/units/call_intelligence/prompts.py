@@ -39,15 +39,19 @@ OBJECTIONS_TEMPLATE = "call_intelligence/objections_v1.txt"
 SCORE_TEMPLATE = "call_intelligence/score_v1.txt"
 ESCALATIONS_TEMPLATE = "call_intelligence/escalations_v1.txt"
 COACHING_TEMPLATE = "call_intelligence/coaching_v1.txt"
-EXTRAS_TEMPLATE = "call_intelligence/extras_v1.txt"
+EXTRAS_TEMPLATE = "call_intelligence/extras_v2.txt"
 REPROMPT_TAIL_TEMPLATE = "call_intelligence/reprompt_tail_v1.txt"
 
-# Replaced by extract_v2 (evidence for every element); never sent again.
-RETIRED_TEMPLATES: tuple[str, ...] = ("call_intelligence/extract_v1.txt",)
+# Replaced by extract_v2 (evidence for every element) and extras_v2 (the
+# keyword vocabulary); never sent again.
+RETIRED_TEMPLATES: tuple[str, ...] = (
+    "call_intelligence/extract_v1.txt",
+    "call_intelligence/extras_v1.txt",
+)
 
 # The stamp stage 1 carries under versions.prompt. Move it with the digest
 # in the stamp test whenever one of UNIT_B_TEMPLATES changes.
-PROMPT_SET_VERSION = "unit_b_prompts_v2"
+PROMPT_SET_VERSION = "unit_b_prompts_v3"
 
 # Every template Unit B can send, in pass order, then the retired ones; the
 # worker preloads them all.

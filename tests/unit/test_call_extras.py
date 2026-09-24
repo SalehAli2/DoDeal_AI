@@ -163,7 +163,9 @@ def test_a_true_answer_passes_and_is_marked_manager_only() -> None:
     answer = Extras.model_validate(ANSWER)
     check_extras(_call())(answer)
     part = extras_part(_call(), answer)
-    assert part["keywords"] == ANSWER["keywords"]
+    assert part["keywords"] == [
+        {**keyword, "canonical": None} for keyword in ANSWER["keywords"]
+    ]
     assert part["tags"] == ANSWER["tags"]
     assert part["whatsapp_suggestion"] == {"language": "en", "text": ANSWER["whatsapp"]}
     seriousness = part["seriousness"]

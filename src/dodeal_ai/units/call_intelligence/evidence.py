@@ -111,10 +111,16 @@ class CallText:
         return index if index < len(self.segments) else None
 
     def low_confidence(self, segment: str | None) -> bool:
+        """Whether the segment an id names was rated below the floor; a
+        segment with no rating is not."""
         index = None if segment is None else self.index_of(segment)
-        return index is not None and (
-            self.segments[index].confidence < MIN_MEAN_CONFIDENCE
-        )
+        confidence = None if index is None else self.segments[index].confidence
+        return confidence is not None and confidence < MIN_MEAN_CONFIDENCE
+
+
+def script_letters(text: str) -> dict[SummaryLanguage, int]:
+    """How many of `text`'s letters are in each script, quotes included."""
+    return {code: len(pattern.findall(text)) for code, pattern in _SCRIPTS.items()}
 
 
 def _contains(said: Sequence[str], quote: Sequence[str]) -> bool:

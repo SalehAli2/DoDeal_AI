@@ -1,13 +1,15 @@
 """The Transcriber seam and its conformance suite (Unit B). Every adapter is run
 through the same assertions -- ordered, non-overlapping segments with speakers,
-and a profile and an uncertainty flag its own segments agree with. Today the
-only implementation is the fake, and the guard is that it passes."""
+and a profile and an uncertainty flag its own segments agree with. The fake,
+and Gemini through its SDK on a recorded response, never a live call."""
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from pathlib import Path
 
+import httpx
 import pytest
 from pydantic import ValidationError
 
@@ -16,19 +18,42 @@ from dodeal_ai.units.call_intelligence.fake_transcriber import (
     DEFAULT_SEGMENTS,
     FakeTranscriber,
 )
+from dodeal_ai.units.call_intelligence.gemini import GeminiTranscriber
+from dodeal_ai.units.call_intelligence.stt import build_transcribers
 from dodeal_ai.units.call_intelligence.transcriber import (
     LanguageProfile,
     Segment,
     Transcriber,
     Transcript,
     TranscriptionError,
-    build_transcriber,
     is_uncertain,
     profile_of,
 )
 
+RECORDED = Path(__file__).resolve().parents[1] / "fixtures" / "stt"
+
+
+def _gemini() -> Transcriber:
+    """Gemini through the real SDK, answered with a recorded response."""
+    answer = json.loads(
+        (RECORDED / "gemini_interaction.json").read_text(encoding="utf-8")
+    )
+    return GeminiTranscriber(
+        model="gemini-3.5-transcribe",
+        api_key="test-key",
+        http=httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda _: httpx.Response(200, json=answer))
+        ),
+        base_url=None,
+        timeout_seconds=30,
+    )
+
+
 # Every Transcriber this repo has; a real adapter is added here when it lands.
-IMPLEMENTATIONS: dict[str, Callable[[], Transcriber]] = {"fake": FakeTranscriber}
+IMPLEMENTATIONS: dict[str, Callable[[], Transcriber]] = {
+    "fake": FakeTranscriber,
+    "gemini": _gemini,
+}
 
 
 def _segment(
@@ -47,7 +72,7 @@ def _segment(
 @pytest.fixture
 def audio(tmp_path: Path) -> Path:
     path = tmp_path / "call.audio"
-    path.write_bytes(b"RIFF" + b"\x00" * 128)
+    path.write_bytes(b"RIFF\x00\x00\x00\x00WAVE" + b"\x00" * 120)
     return path
 
 
@@ -192,6 +217,7 @@ async def test_the_fake_refuses_empty_audio_and_raises_when_told(
     assert caught.value.retryable
 
 
-def test_the_factory_refuses_with_no_adapter_and_never_builds_the_fake() -> None:
-    with pytest.raises(ConfigError, match="^stt_not_configured$"):
-        build_transcriber(get_settings())
+async def test_the_factory_refuses_with_no_adapter_and_never_builds_the_fake() -> None:
+    async with httpx.AsyncClient() as http:
+        with pytest.raises(ConfigError, match="^stt_not_configured$"):
+            build_transcribers(get_settings(), http)
