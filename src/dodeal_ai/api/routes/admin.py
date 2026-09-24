@@ -25,7 +25,9 @@ section with GET first, changes what it means to, and PUTs all of it back.
 TWO STAMPS (register item 97). `version` is the config_version judgements are
 stamped with, and it moves only when a mark-affecting field changes
 (config.MARK_AFFECTING_FIELDS); `policy_version`,
-tenant-policy-<tenant>-<YYYYMMDD>-<n>, moves on every accepted PUT.
+tenant-policy-<tenant>-<YYYYMMDD>-<n>, moves on every accepted PUT. A change
+of `model_route`, or of unit_b's `stt_profile`, alone moves policy_version
+only: who runs a pass is policy, and an unknown name is 422.
 
 A refused section is 422 invalid_tenant_config with no field name and no value:
 the parser's own message could quote what was sent. The one log line is
@@ -175,9 +177,11 @@ async def put_calls_config(
     50). The body REPLACES the whole section, as for `unit_a`: a field left out
     is the default, and every switch defaults off. `unit_a` is untouched.
 
-    Every accepted PUT is a new dated config_version and policy_version. A
-    refused section -- an http callback, calls on with no audio host -- is 422
-    invalid_tenant_config, naming no field.
+    Every accepted PUT is a new dated policy_version, and a new dated
+    config_version unless it changes only model_route or stt_profile. A
+    refused section -- an http callback, calls on with no audio host, a route
+    or STT profile this deployment lacks -- is 422 invalid_tenant_config,
+    naming no field.
     """
     return await _put_section(request, context, UNIT_B_SECTION, new_config_version)
 

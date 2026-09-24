@@ -79,6 +79,7 @@ from dodeal_ai.units.call_intelligence.worker import (
     job_scope,
     owed_delivery,
     pause_delay,
+    tenant_client,
 )
 
 _logger = logging.getLogger("dodeal_ai.unit_b")
@@ -173,7 +174,8 @@ async def _analyse(
     if result is None or not isinstance(kept, dict):
         await _settle(ctx, job, run, Stage2State.FAILED, RESULT_GONE)
         return
-    client = ctx.get("llm")
+    config = await resolve_calls_config(tenant)
+    client = tenant_client(ctx, config)
     if client is None:
         await _settle(ctx, job, run, Stage2State.FAILED, NO_CLIENT)
         return
@@ -186,7 +188,6 @@ async def _analyse(
         delay = pause_delay(paused.reason_code, outages, window_seconds=window)
         await _again_or_fail(ctx, run, paused.reason_code, delay)
         return
-    config = await resolve_calls_config(tenant)
     transcript = Transcript.model_validate(kept)
     try:
         run.wave = await wave2(

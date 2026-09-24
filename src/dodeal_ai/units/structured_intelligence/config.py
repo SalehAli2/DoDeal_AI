@@ -49,6 +49,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from dodeal_ai.core.config import get_settings
+from dodeal_ai.core.llm import DEFAULT_ROUTE, route_names
 from dodeal_ai.core.tenant_config import (
     ResolvedSection,
     resolve_section,
@@ -323,6 +325,10 @@ class TenantConfig:
     # about individual people at all. Off by default -- a tenant opts in -- so a
     # deployment never publishes a person's numbers by accident. Off is 403.
     rep_numbers_enabled: bool
+    # The model route this tenant's passes go through (core/llm/routing.py):
+    # "default" is DODEAL_LLM_*, any other a DODEAL_MODEL_ROUTES name. Policy
+    # only: a judgement's marks do not depend on who ran the checks.
+    model_route: str
     config_version: str
     # Register item 97: the dated stamp of the runtime PUT these rules came from,
     # moved by every PUT. None under a tenant file or the default, where no PUT
@@ -405,6 +411,7 @@ _DEFAULT_CONFIG = TenantConfig(
     blocking_stages=frozenset({"qualified", "won", "lost"}),
     timezone="Asia/Dubai",
     rep_numbers_enabled=False,
+    model_route=DEFAULT_ROUTE,
     # -4: register item 142 changed the enforcement_mode vocabulary, so a file
     # saying "blocking" no longer parses. The rubric did not move and
     # RUBRIC_VERSION did not either -- this stamp is what makes an old
@@ -471,6 +478,15 @@ class TenantConfigFile(BaseModel):
     blocking_stages: frozenset[str] | None = None
     timezone: str | None = None
     rep_numbers_enabled: bool | None = None
+    model_route: str | None = None
+
+    @field_validator("model_route")
+    @classmethod
+    def _known_route(cls, value: str | None) -> str | None:
+        """A route this deployment configures; fixed message, never the name."""
+        if value is not None and value not in route_names(get_settings()):
+            raise ValueError("model_route")
+        return value
 
     @field_validator("timezone")
     @classmethod

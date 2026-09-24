@@ -96,6 +96,7 @@ from dodeal_ai.core.jobs import (
     store_work,
     transition,
 )
+from dodeal_ai.core.llm import LLMClient, routed
 from dodeal_ai.core.logging_config import job_log_context
 from dodeal_ai.units.call_intelligence.analysis import Wave1, wave1
 from dodeal_ai.units.call_intelligence.config import CallsConfig, resolve_calls_config
@@ -153,6 +154,13 @@ async def deliver_nothing(job: Job, event: str, config: CallsConfig) -> bool:
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+def tenant_client(ctx: dict[str, Any], config: CallsConfig) -> LLMClient | None:
+    """The worker's model client through the tenant's model route; None with
+    no client at all (the pass then records llm_not_configured)."""
+    client: LLMClient | None = ctx.get("llm")
+    return None if client is None else routed(client, config.model_route)
 
 
 def job_scope(job: Job) -> TenantScope:
@@ -438,7 +446,7 @@ async def _stage1(
     started = time.monotonic()
     try:
         wave = await wave1(
-            ctx.get("llm"),
+            tenant_client(ctx, config),
             job,
             config,
             transcript,

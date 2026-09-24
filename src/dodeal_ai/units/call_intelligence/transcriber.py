@@ -35,6 +35,15 @@ MOSTLY_SHARE = 0.8
 # transcript is uncertain: it is stored and delivered, never fully analysed.
 MIN_MEAN_CONFIDENCE = 0.6
 
+# The STT profile built from DODEAL_CALL_STT_*, which every tenant is on until
+# its unit_b stt_profile names one of CALL_STT_PROFILES.
+DEFAULT_STT_PROFILE = "default"
+
+
+def stt_profile_names(settings: Settings) -> frozenset[str]:
+    """Every STT profile a tenant may name: "default" and each configured one."""
+    return frozenset({DEFAULT_STT_PROFILE, *settings.call_stt_profiles})
+
 
 class LanguageProfile(StrEnum):
     MOSTLY_EN = "mostly_en"

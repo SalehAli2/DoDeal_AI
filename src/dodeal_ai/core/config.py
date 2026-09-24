@@ -109,6 +109,24 @@ class ModelProfile(BaseModel):
     fallback_profile: str | None = Field(default=None, min_length=1)
 
 
+# The speech-to-text engines an STT profile may name (units/call_intelligence/
+# transcriber.py); "fake" is the demo's, allowed only as CALL_STT_PROVIDER.
+type SttProvider = Literal["gemini", "openai_compatible", "diarized_http"]
+
+
+class SttProfile(BaseModel):
+    """One named speech-to-text choice a tenant may pick (unit_b stt_profile).
+    Its key is read from the variable it names, never from the JSON."""
+
+    model_config = {"frozen": True, "extra": "forbid"}
+
+    provider: SttProvider
+    # None uses the engine's own endpoint; required by the HTTP engines.
+    base_url: str | None = Field(default=None, pattern=r"^https?://")
+    model: str = Field(min_length=1)
+    api_key_env: str = Field(pattern=r"^[A-Z_][A-Z0-9_]{0,127}$")
+
+
 class ModelPrice(BaseModel):
     """One model's price, USD per million tokens (register item "cost")."""
 
@@ -249,6 +267,18 @@ class Settings(BaseSettings):
     # callbacks, so a laptop can serve both. False refuses them; True anywhere
     # real lets a push make this service fetch from and post to itself.
     call_demo_allow_local_audio: bool = False
+    # The speech-to-text engine the "default" STT profile runs on. "fake" is
+    # the demo's and starts only under CALL_DEMO_ALLOW_LOCAL_AUDIO; a worker
+    # with it and the flag off refuses to start rather than invent words.
+    call_stt_provider: Literal[
+        "fake", "gemini", "openai_compatible", "diarized_http"
+    ] = "fake"
+    # STT profiles a tenant may name besides "default", JSON {"<name>":
+    # {"provider":..,"base_url":..,"model":..,"api_key_env":"<VAR>"}}. {} =
+    # default only; a tenant naming one not here is refused (422).
+    call_stt_profiles: dict[
+        Annotated[str, Field(pattern=PROVIDER_NAME_PATTERN)], SttProfile
+    ] = {}
 
     # --- Watchdog: timeout + retry policy for external calls (§6) -----------
     # Placeholder values; tune per real LLM/tool latency later.
@@ -507,6 +537,8 @@ class Settings(BaseSettings):
                 raise ValueError("llm_fallback_profile_unknown")
         if "default" in self.model_routes:
             raise ValueError("model_route_reserved")
+        if "default" in self.call_stt_profiles:
+            raise ValueError("stt_profile_reserved")
         for passes in self.model_routes.values():
             if not set(passes.values()) <= set(self.llm_profiles):
                 raise ValueError("model_route_unknown_profile")

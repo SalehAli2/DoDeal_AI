@@ -21,10 +21,16 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from dodeal_ai.core.config import get_settings
+from dodeal_ai.core.llm import DEFAULT_ROUTE, route_names
 from dodeal_ai.core.tenant_config import ResolvedSection, resolve_section
 from dodeal_ai.units.call_intelligence.numbers import DEFAULT_COUNTRY_CODE
+from dodeal_ai.units.call_intelligence.transcriber import (
+    DEFAULT_STT_PROFILE,
+    stt_profile_names,
+)
 
 __all__ = [
+    "ROUTING_FIELDS",
     "UNIT_B_SECTION",
     "CallsConfig",
     "calls_config_of",
@@ -82,6 +88,11 @@ class CallsConfig(BaseModel):
     phone_country_code: str = Field(
         default=DEFAULT_COUNTRY_CODE, pattern=r"^[1-9][0-9]{0,2}$"
     )
+    # The model route this tenant's call passes go through (core/llm/routing.py)
+    # and the STT profile its calls are transcribed with: "default" is the
+    # DODEAL_LLM_* / DODEAL_CALL_STT_* pair. Policy only (ROUTING_FIELDS).
+    model_route: str = DEFAULT_ROUTE
+    stt_profile: str = DEFAULT_STT_PROFILE
 
     # The switches, all off: calls_enabled admits jobs at all (403 otherwise);
     # the other five name later passes and are parsed and stored only. A switch
@@ -131,6 +142,22 @@ class CallsConfig(BaseModel):
             hosts.append(host.lower())
         return frozenset(hosts)
 
+    @field_validator("model_route")
+    @classmethod
+    def _known_route(cls, value: str) -> str:
+        """A route this deployment configures; fixed message, never the name."""
+        if value not in route_names(get_settings()):
+            raise ValueError("model_route")
+        return value
+
+    @field_validator("stt_profile")
+    @classmethod
+    def _known_stt_profile(cls, value: str) -> str:
+        """An STT profile this deployment configures; never the name."""
+        if value not in stt_profile_names(get_settings()):
+            raise ValueError("stt_profile")
+        return value
+
     @field_validator("priority_statuses", "alarm_phrases")
     @classmethod
     def _casefolded(cls, value: frozenset[str]) -> frozenset[str]:
@@ -169,9 +196,27 @@ async def resolve_calls_config(tenant: str) -> CallsConfig:
     return calls_config_of(await resolve_section(tenant, UNIT_B_SECTION))
 
 
-def new_config_version(_body: dict, _in_force: object | None) -> None:
-    """The admin PUT's keeper for this section: every accepted PUT is a new
-    dated config_version, since no call rule is yet stamped on a judgement."""
+# The fields that say who runs a call, not what is asked of it: a PUT changing
+# only these keeps the config_version in force, and moves the policy_version.
+ROUTING_FIELDS = frozenset({"model_route", "stt_profile"})
+
+
+def new_config_version(body: dict, in_force: object | None) -> str | None:
+    """The admin PUT's keeper for this section: the config_version in force
+    when the body changes a routing field and nothing else; otherwise None, a
+    new dated one, as for every other accepted PUT. ValueError for a body the
+    parser refuses."""
+    if not isinstance(in_force, CallsConfig) or in_force.config_version is None:
+        return None
+    proposed = parse_unit_b_section({**body, "config_version": None})
+    unchanged = {"config_version", *ROUTING_FIELDS}
+    rules_alike = proposed.model_dump(exclude=unchanged) == in_force.model_dump(
+        exclude=unchanged
+    )
+    routing_moved = any(
+        getattr(proposed, name) != getattr(in_force, name) for name in ROUTING_FIELDS
+    )
+    return in_force.config_version if rules_alike and routing_moved else None
 
 
 def calls_section_of(config: CallsConfig) -> dict[str, object]:

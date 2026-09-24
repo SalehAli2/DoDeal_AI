@@ -65,7 +65,7 @@ from dodeal_ai.core.errors import (
     SubjectNotFoundError,
 )
 from dodeal_ai.core.inflight import history_counter
-from dodeal_ai.core.llm import LLMClient, get_llm_client
+from dodeal_ai.core.llm import LLMClient, get_llm_client, routed
 from dodeal_ai.tools.leads import LeadsClient, get_leads_client
 from dodeal_ai.units.structured_intelligence.brief import (
     Brief,
@@ -135,8 +135,16 @@ def _deps(
     `leads` is None on the direct routes: they do not fetch, so there is no
     client to hand them and saying so is more honest than passing one they must
     not call. See JudgementDeps.
+
+    `llm` goes through the tenant's model route (core/llm/routing.py): on
+    "default" it is the client as it came.
     """
-    return JudgementDeps(leads=leads, llm=llm, config=config, settings=settings)
+    return JudgementDeps(
+        leads=leads,
+        llm=routed(llm, config.model_route),
+        config=config,
+        settings=settings,
+    )
 
 
 @router.post("/notes/judgements")
