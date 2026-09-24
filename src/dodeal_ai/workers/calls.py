@@ -21,10 +21,10 @@ THE NORMAL QUEUE'S WORKER ALSO SWEEPS, every 300 s: a job stuck in a running
 status with no run is re-enqueued once (units/call_intelligence/sweep.py).
 arq runs a cron once per slot however many normal workers there are.
 
-FFMPEG IS CHECKED AT START on every transcribing worker (units/call_intelligence/
-audio.py): the quality check and the stereo split run on it before any paid
-call, so a worker without it refuses to start -- but for the demo, which runs
-without it and says so.
+FFMPEG AND FFPROBE ARE CHECKED AT START on every transcribing worker
+(units/call_intelligence/audio.py): the format probe, the quality check and
+the conversion to FLAC run on them before any paid call, so a worker without
+them refuses to start -- but for the demo, which runs without them and says so.
 
 THE TRANSCRIBER IS BUILT BY THE FACTORY, which refuses while no adapter exists,
 so a worker with nothing to transcribe with does not start. A test or the demo
@@ -181,9 +181,10 @@ def worker_settings(
 
 
 async def _audio_tools(settings: Settings) -> AudioTools | None:
-    """ffmpeg, checked before the worker takes a job: missing, the worker
-    refuses to start -- unless the demo flag is on, when the demo runs without
-    it (no quality check, mono only) and says so at ERROR."""
+    """ffmpeg and ffprobe, checked before the worker takes a job: missing, the
+    worker refuses to start -- unless the demo flag is on, when the demo runs
+    without them (no probe, no quality check, no FLAC, mono only) and says so
+    at ERROR."""
     try:
         return await ensure_ffmpeg()
     except FfmpegMissing:

@@ -17,9 +17,7 @@ from dodeal_ai.units.call_intelligence.gemini import (
     MALFORMED,
     REFUSED,
     UNAVAILABLE,
-    UNKNOWN_FORMAT,
     GeminiTranscriber,
-    audio_mime,
     failure,
 )
 from dodeal_ai.units.call_intelligence.stt import build_transcribers
@@ -127,7 +125,8 @@ async def test_spk_1_and_spk_2_come_back_as_ordered_speaker_segments(
         "language_codes": ["ar", "en"],
     }
     (audio_input,) = body["input"][0]["content"]
-    assert audio_input["mime_type"] == "audio/wav"
+    # Whatever the file, the worker converted it: FLAC is what is declared.
+    assert audio_input["mime_type"] == "audio/flac"
 
 
 async def test_the_upload_is_deleted_even_when_the_transcription_fails(
@@ -166,7 +165,7 @@ async def test_a_503_or_a_429_makes_exactly_one_request_on_either_layer(
 
 
 async def test_failures_are_classified_by_status_and_never_carry_its_words(
-    audio: Path, tmp_path: Path
+    audio: Path,
 ) -> None:
     """408 and a dropped connection retry; other 4xx, bad answers never do."""
     assert failure(gemini.genai_errors.APIError(302, {})).reason == MALFORMED
@@ -190,18 +189,6 @@ async def test_failures_are_classified_by_status_and_never_carry_its_words(
 
     with pytest.raises(TranscriptionError, match=f"^{UNAVAILABLE}$"):
         await transcriber(dropped).transcribe(audio, language_hint=None)  # type: ignore[arg-type]
-    unknown = tmp_path / "call.m4a"
-    unknown.write_bytes(b"\x00\x00\x00\x20ftypM4A ")
-    silent = Google()
-    with pytest.raises(TranscriptionError, match=f"^{UNKNOWN_FORMAT}$"):
-        await transcriber(silent).transcribe(unknown, language_hint=None)
-    assert silent.requests == []
-    assert [audio_mime(head) for head in (b"\xff\xf1", b"\xff\xfb", b"ID3", b"x")] == [
-        "audio/aac",
-        "audio/mp3",
-        "audio/mp3",
-        None,
-    ]
 
 
 async def test_a_failed_delete_is_logged_by_type_and_the_call_still_succeeds(

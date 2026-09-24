@@ -178,10 +178,11 @@ async def _no_ffmpeg(args: object) -> tuple[int, str]:
 
 @pytest.fixture(autouse=True)
 def _hermetic_ffmpeg(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No test runs the machine's ffmpeg: a worker's startup check finds none,
-    the same on every machine. A test that wants the audio layer hands
-    AudioTools a runner of its own."""
+    """No test runs the machine's ffmpeg or ffprobe: a worker's startup check
+    finds neither, the same on every machine. A test that wants the audio
+    layer hands AudioTools runners of its own."""
     monkeypatch.setattr(audio, "run_ffmpeg", _no_ffmpeg)
+    monkeypatch.setattr(audio, "run_ffprobe", _no_ffmpeg)
 
 
 @pytest.fixture(autouse=True)

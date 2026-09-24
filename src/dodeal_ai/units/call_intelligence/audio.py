@@ -1,13 +1,19 @@
 """The audio layer (Unit B): what is known about a recording before any paid
-call, and a stereo recording split into its two sides. Engine-independent, on
-ffmpeg, checked at worker start.
+call, and the one format every engine is sent. Engine-independent, on ffmpeg
+and ffprobe, both checked at worker start.
 
-  inspect  one ffmpeg pass over the file: its duration, its channels, the
-           speech ratio (1 less the share silencedetect finds silent) and the
-           mean loudness (volumedetect)
-  split    a stereo recording into two 16 kHz mono files, one per side, in a
-           private directory deleted however the caller leaves the block
-  merge    the two sides' transcripts into one, by time, as agent and client
+  probe      ffprobe decodes an audio frame from the file's first seconds, or
+             it is audio_format_unknown, whatever its container claims
+  inspect    one ffmpeg pass over the file: its duration, its channels, the
+             speech ratio (1 less the share silencedetect finds silent) and
+             the mean loudness (volumedetect)
+  converted  the recording as one 16 kHz mono FLAC file, its channels mixed
+  split      a stereo recording as two 16 kHz mono FLAC files, one per side
+  merge      the two sides' transcripts into one, by time, as agent and client
+
+EVERY ENGINE IS SENT 16 kHz MONO FLAC (ENGINE_MIME), written to a private
+directory deleted however the caller leaves the block: no engine is left to
+guess a container.
 
 THE QUALITY FLOORS ARE PROVISIONAL (BRD B12): a speech ratio under 0.30 or a
 mean volume under -40 dB makes the transcript uncertain whatever the engine
@@ -15,12 +21,13 @@ says, and a number ffmpeg did not report counts as under its floor. Silence is
 anything quieter than the volume floor for half a second or more.
 
 THE LONGEST CALL is 3600 s: over it, audio_too_long, a permanent failure. A
-file ffmpeg cannot read is audio_unreadable, and a stereo setting on a file
-that is not two channels audio_channels_mismatch; both permanent, before any
-paid call.
+file ffprobe cannot decode is audio_format_unknown, one ffmpeg cannot read or
+convert audio_unreadable, and a stereo setting on a file that is not two
+channels audio_channels_mismatch; all permanent, before any paid call.
 
-ffmpeg runs as an async subprocess, killed if its caller is cancelled. Its
-output is parsed for numbers and never logged: it names the file.
+ffmpeg and ffprobe run as async subprocesses, killed if their caller is
+cancelled. Their output is parsed for numbers and never logged: it names the
+file.
 """
 
 from __future__ import annotations
@@ -49,8 +56,19 @@ MIN_MEAN_VOLUME_DB = -40.0
 # floor for this long is not speech.
 SILENCE_MIN_SECONDS = 0.5
 
-# What each side of a stereo recording is transcribed at.
-SIDE_SAMPLE_RATE = 16_000
+# What every engine is sent: FLAC, mono, at this rate. Lossless, a fraction of
+# a WAV's size, and a format every engine documents.
+ENGINE_SAMPLE_RATE = 16_000
+ENGINE_MIME = "audio/flac"
+_FLAC = ("-c:a", "flac", "-ar", str(ENGINE_SAMPLE_RATE))
+
+# How many seconds from the start ffprobe decodes to prove it can: past any
+# decoder's start-up delay, and never the whole file.
+PROBE_SECONDS = 5
+
+# The permanent refusals of a file itself, before any paid call.
+UNKNOWN_FORMAT = "audio_format_unknown"
+UNREADABLE = "audio_unreadable"
 
 # The reasons a transcript is uncertain on its audio alone.
 LOW_SPEECH = "low_speech_ratio"
@@ -61,7 +79,8 @@ _PLACES = 3
 
 type AudioChannels = Literal["mono", "stereo_agent_left", "stereo_agent_right"]
 
-# One ffmpeg run: its arguments in, its exit code and its stderr text out.
+# One ffmpeg run: its arguments in, its exit code and its stderr text out. An
+# ffprobe run hands back its stdout instead, where it prints what was asked.
 type FfmpegRunner = Callable[[Sequence[str]], Awaitable[tuple[int, str]]]
 
 _DURATION = re.compile(r"Duration:\s*(\d+):(\d{2}):(\d{2}(?:\.\d+)?)")
@@ -81,7 +100,7 @@ class AudioError(Exception):
 
 
 class FfmpegMissing(ConfigError):
-    """ffmpeg is not on this worker's path, or will not run."""
+    """ffmpeg or ffprobe is not on this worker's path, or will not run."""
 
     def __init__(self) -> None:
         super().__init__("ffmpeg_not_found")
@@ -130,21 +149,33 @@ class AudioQuality:
 
 async def run_ffmpeg(args: Sequence[str]) -> tuple[int, str]:
     """ffmpeg with `args`: its exit code and stderr. Killed if cancelled."""
+    return await _run("ffmpeg", args, stdout=False)
+
+
+async def run_ffprobe(args: Sequence[str]) -> tuple[int, str]:
+    """ffprobe with `args`: its exit code and stdout. Killed if cancelled."""
+    return await _run("ffprobe", args, stdout=True)
+
+
+async def _run(program: str, args: Sequence[str], *, stdout: bool) -> tuple[int, str]:
+    """`program` with `args`: its exit code and the one output asked for."""
+    pipe, devnull = asyncio.subprocess.PIPE, asyncio.subprocess.DEVNULL
     process = await asyncio.create_subprocess_exec(
-        "ffmpeg",
+        program,
         *args,
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.PIPE,
+        stdin=devnull,
+        stdout=pipe if stdout else devnull,
+        stderr=devnull if stdout else pipe,
     )
     try:
-        _, stderr = await process.communicate()
+        out, err = await process.communicate()
     finally:
         if process.returncode is None:
             with suppress(ProcessLookupError):
                 process.kill()
             await process.wait()
-    return int(process.returncode or 0), stderr.decode("utf-8", errors="replace")
+    text = out if stdout else err
+    return int(process.returncode or 0), text.decode("utf-8", errors="replace")
 
 
 def _seconds(match: re.Match[str]) -> float:
@@ -157,7 +188,7 @@ def parse_quality(output: str) -> AudioQuality:
     duration, which is a file ffmpeg could not read."""
     duration = _DURATION.search(output)
     if duration is None:
-        raise AudioError("audio_unreadable")
+        raise AudioError(UNREADABLE)
     seconds = _seconds(duration)
     channels_match = _CHANNELS.search(output)
     channels = (
@@ -183,11 +214,28 @@ def parse_quality(output: str) -> AudioQuality:
 
 
 class AudioTools:
-    """ffmpeg, as this layer runs it: built by `ensure_ffmpeg` at worker start
-    on `run_ffmpeg`, or by a test on a runner of its own."""
+    """ffmpeg and ffprobe, as this layer runs them: built by `ensure_ffmpeg` at
+    worker start on `run_ffmpeg` and `run_ffprobe`, or by a test on runners of
+    its own."""
 
-    def __init__(self, runner: FfmpegRunner) -> None:
+    def __init__(self, runner: FfmpegRunner, probe: FfmpegRunner) -> None:
         self._run = runner
+        self._probe = probe
+
+    async def probe(self, path: Path) -> None:
+        """AudioError(audio_format_unknown) unless ffprobe decodes at least one
+        frame of the first audio stream within the first PROBE_SECONDS."""
+        code, output = await self._probe(
+            [
+                *("-v", "error", "-select_streams", "a:0"),
+                *("-read_intervals", f"%+{PROBE_SECONDS}", "-count_frames"),
+                *("-show_entries", "stream=nb_read_frames"),
+                *("-of", "default=noprint_wrappers=1:nokey=1", str(path)),
+            ]
+        )
+        frames = output.strip()
+        if code != 0 or not frames.isdecimal() or int(frames) < 1:
+            raise AudioError(UNKNOWN_FORMAT)
 
     async def inspect(self, path: Path) -> AudioQuality:
         """Duration, channels, speech ratio and mean volume, in one pass."""
@@ -206,48 +254,71 @@ class AudioTools:
             ]
         )
         if code != 0:
-            raise AudioError("audio_unreadable")
+            raise AudioError(UNREADABLE)
         return parse_quality(output)
 
     @asynccontextmanager
-    async def split(self, path: Path) -> AsyncIterator[tuple[Path, Path]]:
-        """The left and right channels as two 16 kHz mono files, deleted with
-        their directory when the block exits, however it exits."""
-        directory = Path(await asyncio.to_thread(tempfile.mkdtemp, prefix="call-"))
-        try:
-            left, right = directory / "left.wav", directory / "right.wav"
-            rate = str(SIDE_SAMPLE_RATE)
+    async def converted(self, path: Path) -> AsyncIterator[Path]:
+        """The first audio stream as one 16 kHz mono FLAC file, its channels
+        mixed, deleted with its directory when the block exits."""
+        async with _scratch() as directory:
+            flac = directory / "call.flac"
             code, _ = await self._run(
                 [
-                    "-hide_banner",
-                    "-nostats",
-                    "-y",
-                    "-i",
-                    str(path),
-                    "-filter_complex",
-                    "[0:a]pan=mono|c0=c0[l];[0:a]pan=mono|c0=c1[r]",
-                    *("-map", "[l]", "-ac", "1", "-ar", rate, str(left)),
-                    *("-map", "[r]", "-ac", "1", "-ar", rate, str(right)),
+                    *("-hide_banner", "-nostats", "-y", "-i", str(path)),
+                    *("-map", "0:a:0", "-ac", "1", *_FLAC, str(flac)),
                 ]
             )
             if code != 0:
-                raise AudioError("audio_unreadable")
+                raise AudioError(UNREADABLE)
+            yield flac
+
+    @asynccontextmanager
+    async def split(self, path: Path) -> AsyncIterator[tuple[Path, Path]]:
+        """The left and right channels as two 16 kHz mono FLAC files, deleted
+        with their directory when the block exits, however it exits."""
+        async with _scratch() as directory:
+            left, right = directory / "left.flac", directory / "right.flac"
+            code, _ = await self._run(
+                [
+                    *("-hide_banner", "-nostats", "-y", "-i", str(path)),
+                    "-filter_complex",
+                    "[0:a]pan=mono|c0=c0[l];[0:a]pan=mono|c0=c1[r]",
+                    *("-map", "[l]", "-ac", "1", *_FLAC, str(left)),
+                    *("-map", "[r]", "-ac", "1", *_FLAC, str(right)),
+                ]
+            )
+            if code != 0:
+                raise AudioError(UNREADABLE)
             yield left, right
-        finally:
-            await asyncio.to_thread(shutil.rmtree, directory, ignore_errors=True)
 
 
-async def ensure_ffmpeg(runner: FfmpegRunner | None = None) -> AudioTools:
-    """The worker's AudioTools once `ffmpeg -version` runs; FfmpegMissing when
-    it cannot, so a worker without it never starts to fail every call."""
-    runner = run_ffmpeg if runner is None else runner
+@asynccontextmanager
+async def _scratch() -> AsyncIterator[Path]:
+    """A private directory, deleted with its files however the block exits."""
+    directory = Path(await asyncio.to_thread(tempfile.mkdtemp, prefix="call-"))
     try:
-        code, _ = await runner(["-hide_banner", "-version"])
-    except OSError:
-        raise FfmpegMissing() from None
-    if code != 0:
-        raise FfmpegMissing()
-    return AudioTools(runner)
+        yield directory
+    finally:
+        await asyncio.to_thread(shutil.rmtree, directory, ignore_errors=True)
+
+
+async def ensure_ffmpeg(
+    runner: FfmpegRunner | None = None, probe: FfmpegRunner | None = None
+) -> AudioTools:
+    """The worker's AudioTools once `ffmpeg -version` and `ffprobe -version`
+    run; FfmpegMissing when either cannot, so a worker without them never
+    starts to fail every call."""
+    runner = run_ffmpeg if runner is None else runner
+    probe = run_ffprobe if probe is None else probe
+    for tool in (runner, probe):
+        try:
+            code, _ = await tool(["-hide_banner", "-version"])
+        except OSError:
+            raise FfmpegMissing() from None
+        if code != 0:
+            raise FfmpegMissing()
+    return AudioTools(runner, probe)
 
 
 def side_roles(channels: AudioChannels) -> tuple[str, str]:

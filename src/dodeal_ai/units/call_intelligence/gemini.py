@@ -4,7 +4,8 @@ Google's official google-genai SDK, pinned in pyproject.toml.
 THE API SURFACE, as Google's transcription guide gives it (read 2026-09-24):
 the Interactions API, `client.aio.interactions.create`, with one audio input
 and generation_config.transcription_config asking for verbatim text, speaker
-diarization and word timestamps, the language hint as language_codes. A file
+diarization and word timestamps, the language hint as language_codes. The
+audio is always 16 kHz mono FLAC, converted by the worker (audio.py). A file
 up to INLINE_MAX_BYTES goes inline, base64; a larger one through the Files
 API, deleted in a finally whatever happened. No custom vocabulary is sent:
 the tenant's keyword_vocabulary is used after transcription (keywords.py).
@@ -45,6 +46,7 @@ from google.genai._gaos.lib.compat_errors import APIError as InteractionsError
 from google.genai._gaos.utils import RetryConfig
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from dodeal_ai.units.call_intelligence.audio import ENGINE_MIME
 from dodeal_ai.units.call_intelligence.evidence import script_language
 from dodeal_ai.units.call_intelligence.transcriber import (
     Segment,
@@ -63,36 +65,12 @@ INLINE_MAX_BYTES = 12 * 1024 * 1024
 UNAVAILABLE = "stt_unavailable"
 REFUSED = "stt_request_refused"
 MALFORMED = "stt_malformed_response"
-UNKNOWN_FORMAT = "audio_format_unknown"
 
 # Statuses a later attempt may pass, besides every 5xx.
 _RETRYABLE = frozenset({408, 429})
 
-# The formats Google documents for audio input, by their first bytes: (offset,
-# signature, MIME type). MPEG frames (mp3, aac) are told apart in audio_mime.
-_SIGNATURES: tuple[tuple[int, bytes, str], ...] = (
-    (8, b"WAVE", "audio/wav"),
-    (8, b"AIFF", "audio/aiff"),
-    (0, b"ID3", "audio/mp3"),
-    (0, b"OggS", "audio/ogg"),
-    (0, b"fLaC", "audio/flac"),
-)
-_HEAD_BYTES = 12
-
 _LANGUAGES: dict[str, list[str]] = {"en": ["en"], "ar": ["ar"], "mixed": ["ar", "en"]}
 _OFFSET = r"^[0-9]+(\.[0-9]+)?s$"
-
-
-def audio_mime(head: bytes) -> str | None:
-    """The MIME type of a file starting with `head`, or None for a format
-    Gemini does not document."""
-    for offset, signature, mime in _SIGNATURES:
-        if head[offset : offset + len(signature)] == signature:
-            return mime
-    if len(head) < 2 or head[0] != 0xFF or head[1] & 0xE0 != 0xE0:
-        return None
-    # An MPEG frame: layer bits 00 are ADTS (aac), any other layer is mp3.
-    return "audio/aac" if head[1] & 0x06 == 0 else "audio/mp3"
 
 
 def sdk_client(
@@ -219,11 +197,6 @@ def segments_of(words: list[_Word], hint: str | None) -> tuple[Segment, ...]:
     return tuple(segments)
 
 
-def _head(path: Path) -> bytes:
-    with path.open("rb") as audio:
-        return audio.read(_HEAD_BYTES)
-
-
 class GeminiTranscriber:
     """The Transcriber on Gemini (module docstring). `http` is the worker's
     pool for speech-to-text, which the worker closes."""
@@ -246,11 +219,8 @@ class GeminiTranscriber:
     async def transcribe(
         self, audio_path: Path, *, language_hint: str | None
     ) -> Transcript:
-        mime = audio_mime(await asyncio.to_thread(_head, audio_path))
-        if mime is None:
-            raise TranscriptionError(UNKNOWN_FORMAT, retryable=False)
         try:
-            async with self._audio(audio_path, mime) as audio:
+            async with self._audio(audio_path, ENGINE_MIME) as audio:
                 answer: Any = await self._client.aio.interactions.create(
                     model=self._model,
                     input=[audio],

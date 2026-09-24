@@ -10,6 +10,9 @@ own engine or buys one behind an OpenAI-style endpoint.
       docs/contracts/audio_service.md: segments with speakers, each label
       renamed speaker_N in order of first speech for the roles pass.
 
+The file is always 16 kHz mono FLAC, converted by the worker (audio.py), and
+goes as audio/flac.
+
 ONE REQUEST PER ATTEMPT, never retried here: the worker's one retry (BRD B6)
 is the only one. The key goes as a bearer token and is never logged.
 FAILURES, by HTTP status only, never the body: 408, 429, 5xx, a timeout or a
@@ -34,14 +37,9 @@ from typing import Any
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from dodeal_ai.units.call_intelligence.audio import ENGINE_MIME
 from dodeal_ai.units.call_intelligence.evidence import script_language
-from dodeal_ai.units.call_intelligence.gemini import (
-    MALFORMED,
-    REFUSED,
-    UNAVAILABLE,
-    UNKNOWN_FORMAT,
-    audio_mime,
-)
+from dodeal_ai.units.call_intelligence.gemini import MALFORMED, REFUSED, UNAVAILABLE
 from dodeal_ai.units.call_intelligence.transcriber import (
     Segment,
     Transcript,
@@ -149,15 +147,12 @@ class _HttpTranscriber(ABC):
         self, audio_path: Path, *, language_hint: str | None
     ) -> Transcript:
         data = await asyncio.to_thread(audio_path.read_bytes)
-        mime = audio_mime(data[:12])
-        if mime is None:
-            raise TranscriptionError(UNKNOWN_FORMAT, retryable=False)
         try:
             response = await self._http.post(
                 self._url,
                 headers={"Authorization": f"Bearer {self._api_key}"},
                 data=self._fields(language_hint),
-                files={"file": (audio_path.name, data, mime)},
+                files={"file": (audio_path.name, data, ENGINE_MIME)},
                 timeout=self._timeout_seconds,
             )
         except httpx.TransportError:

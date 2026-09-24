@@ -19,11 +19,13 @@ THE ORDER, and what each step may cost:
      PAUSES. Over budget it waits out the cost window; a store outage retries
      after 300 s, doubling per outage to 3600 s. A pause never costs an
      attempt, even one taken at the charge. Nothing is spent blind.
-  6. One attempt is claimed, the recording downloaded (core/audio_download.py)
-     and inspected (audio.py) before any paid call: over 3600 s, unreadable,
-     or not two channels under a stereo setting fails it, unpaid. Its seconds
-     are charged -- twice for stereo, whose two sides are each transcribed,
-     each side kept once it exists -- then transcribed; poor audio makes the
+  6. One attempt is claimed, the recording downloaded (core/audio_download.py),
+     probed, inspected and converted (audio.py) before any paid call: a file
+     ffprobe cannot decode, over 3600 s, unreadable, or not two channels under
+     a stereo setting fails it, unpaid. Every engine is sent 16 kHz mono FLAC:
+     the call's one track, or each side of a stereo call. Its seconds are
+     charged -- twice for stereo, whose two sides are each transcribed, each
+     side kept once it exists -- then transcribed; poor audio makes the
      transcript uncertain whatever the engine says. A transcription that failed
      and may succeed later is retried ONCE, as an attempt, its seconds charged
      again; the second failure is dead_letter and call.failed. A download that
@@ -59,7 +61,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -622,6 +625,7 @@ async def _transcribe(
         ) as audio:
             run.download_ms, run.bytes = _ms_since(started), audio.size_bytes
             if tools is not None:
+                await tools.probe(audio.path)
                 run.audio = await _inspected(tools, audio.path, stereo)
                 await store_work(
                     job.tenant,
@@ -630,29 +634,27 @@ async def _transcribe(
                     run.audio.to_dict(),
                     ttl_seconds=config.result_ttl_seconds,
                 )
-            try:
-                await charge_audio_seconds(scope, seconds * (2 if stereo else 1))
-            except CallsBudgetPaused as paused:
-                await _pause(job, paused.reason_code, claimed=True, run=run)
-                run.attempts = attempt - 1
-                return None
-            count = await start_transcription(job, now=_now())
-            if count is None:
-                return None
-            transcriptions = count
-            run.moved(JobStatus.TRANSCRIBING)
-            metrics.AUDIO_SECONDS_PROCESSED.inc(seconds)
-            started = time.monotonic()
-            try:
-                if stereo:
-                    assert tools is not None  # refused above without them
-                    transcript = await _two_sides(
-                        ctx, job, config, tools, audio.path, work
-                    )
-                else:
-                    transcript = await _paid(ctx, job, config, audio.path)
-            finally:
-                run.transcribe_ms = _ms_since(started)
+            async with _engine_audio(tools, audio.path, stereo) as files:
+                try:
+                    await charge_audio_seconds(scope, seconds * len(files))
+                except CallsBudgetPaused as paused:
+                    await _pause(job, paused.reason_code, claimed=True, run=run)
+                    run.attempts = attempt - 1
+                    return None
+                count = await start_transcription(job, now=_now())
+                if count is None:
+                    return None
+                transcriptions = count
+                run.moved(JobStatus.TRANSCRIBING)
+                metrics.AUDIO_SECONDS_PROCESSED.inc(seconds)
+                started = time.monotonic()
+                try:
+                    if stereo:
+                        transcript = await _two_sides(ctx, job, config, files, work)
+                    else:
+                        transcript = await _paid(ctx, job, config, files[0])
+                finally:
+                    run.transcribe_ms = _ms_since(started)
             if run.audio is not None:
                 transcript = transcript.doubted(*run.audio.reasons())
             run.transcript = transcript
@@ -681,6 +683,23 @@ async def _inspected(tools: AudioTools, path: Path, stereo: bool) -> AudioQualit
     if stereo and quality.channels != 2:
         raise AudioError(CHANNELS_MISMATCH)
     return quality
+
+
+@asynccontextmanager
+async def _engine_audio(
+    tools: AudioTools | None, path: Path, stereo: bool
+) -> AsyncIterator[tuple[Path, ...]]:
+    """What the engine is sent, made before any charge: one 16 kHz mono FLAC
+    file, or one per side for stereo. Only the demo without ffmpeg (mono, as
+    the worker's start allows) sends the download as it came."""
+    if tools is None:
+        yield (path,)
+    elif stereo:
+        async with tools.split(path) as sides:
+            yield sides
+    else:
+        async with tools.converted(path) as flac:
+            yield (flac,)
 
 
 def transcriber_for(ctx: dict[str, Any], profile: str) -> Transcriber:
@@ -722,29 +741,27 @@ async def _two_sides(
     ctx: dict[str, Any],
     job: Job,
     config: CallsConfig,
-    tools: AudioTools,
-    path: Path,
+    files: tuple[Path, ...],
     work: dict[str, dict[str, object]],
 ) -> Transcript:
     """Each side of a stereo call transcribed on its own and merged by time,
     a side kept the moment it exists so a retry never pays for it again."""
     roles = side_roles(config.audio_channels)
     sides: list[tuple[str, Transcript]] = []
-    async with tools.split(path) as files:
-        for role, side_path in zip(roles, files, strict=True):
-            kept = work.get(f"{SIDE}{role}")
-            if kept is not None:
-                sides.append((role, Transcript.model_validate(kept)))
-                continue
-            side = await _paid(ctx, job, config, side_path)
-            await store_work(
-                job.tenant,
-                job.job_id,
-                f"{SIDE}{role}",
-                side.model_dump(mode="json"),
-                ttl_seconds=config.result_ttl_seconds,
-            )
-            sides.append((role, side))
+    for role, side_path in zip(roles, files, strict=True):
+        kept = work.get(f"{SIDE}{role}")
+        if kept is not None:
+            sides.append((role, Transcript.model_validate(kept)))
+            continue
+        side = await _paid(ctx, job, config, side_path)
+        await store_work(
+            job.tenant,
+            job.job_id,
+            f"{SIDE}{role}",
+            side.model_dump(mode="json"),
+            ttl_seconds=config.result_ttl_seconds,
+        )
+        sides.append((role, side))
     first = sides[0][1]
     return merge_sides(sides, provider=first.provider, model=first.model)
 

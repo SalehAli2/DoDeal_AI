@@ -30,12 +30,14 @@ from dodeal_ai.units.call_intelligence.audio import (
     merge_sides,
     parse_quality,
     run_ffmpeg,
+    run_ffprobe,
 )
 from dodeal_ai.units.call_intelligence.config import (
     UNIT_B_SECTION,
     new_config_version,
     parse_unit_b_section,
 )
+from dodeal_ai.units.call_intelligence.http_stt import DiarizedHttpTranscriber
 from dodeal_ai.units.call_intelligence.queues import NORMAL_QUEUE, STAGE2_QUEUE
 from dodeal_ai.units.call_intelligence.schemas import CallJobRequest
 from dodeal_ai.units.call_intelligence.transcriber import (
@@ -52,6 +54,9 @@ HOST = "audio.tenant-a.example"
 JOB = "job-1"
 ON = {"calls_enabled": True, "audio_hosts": [HOST]}
 LEFT, RIGHT = b"LEFT" * 64, b"RIGHT" * 64
+FLAC = b"fLaC" + b"\x00" * 60
+M4A = b"\x00\x00\x00\x20ftypM4A " + b"\x00" * 60
+STT_FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "stt"
 
 
 def _recorded(name: str) -> str:
@@ -72,22 +77,39 @@ def _segment(
 
 
 class _Ffmpeg:
-    """A recorded ffmpeg: every run's arguments, the inspect output named, and
-    a split that writes one file per side."""
+    """A recorded ffmpeg and ffprobe: every run's arguments, the inspect output
+    named, a split that writes one file per side, a conversion that writes
+    one, and a probe that decodes `frames` frames."""
 
-    def __init__(self, inspect: str, *, split_code: int = 0) -> None:
+    def __init__(
+        self, inspect: str, *, split_code: int = 0, frames: str = "1\n"
+    ) -> None:
         self.inspect = inspect
         self.split_code = split_code
+        self.frames = frames
         self.runs: list[list[str]] = []
+        self.probes: list[list[str]] = []
 
     async def __call__(self, args: Sequence[str]) -> tuple[int, str]:
         self.runs.append(list(args))
+        outputs = [Path(args[i + 2]) for i, a in enumerate(args) if a == "-ar"]
         if "-filter_complex" in args:
-            outputs = [Path(args[i + 2]) for i, a in enumerate(args) if a == "-ar"]
             for path, body in zip(outputs, (LEFT, RIGHT), strict=True):
                 path.write_bytes(body)
             return self.split_code, ""
+        if outputs:
+            (flac,) = outputs
+            flac.write_bytes(FLAC)
+            return 0, ""
         return 0, _recorded(self.inspect)
+
+    async def probe(self, args: Sequence[str]) -> tuple[int, str]:
+        self.probes.append(list(args))
+        return 0, self.frames
+
+
+def _tools(ffmpeg: _Ffmpeg) -> AudioTools:
+    return AudioTools(ffmpeg, ffmpeg.probe)
 
 
 class _Sides:
@@ -147,7 +169,7 @@ async def ctx() -> AsyncIterator[dict[str, Any]]:
             "transcriber": _Sides(),
             "resolve": _resolve,
             "deliver": _Deliveries(),
-            "audio": AudioTools(_Ffmpeg("mono")),
+            "audio": _tools(_Ffmpeg("mono")),
         }
 
 
@@ -195,7 +217,7 @@ async def test_a_stereo_recording_splits_into_two_sides_merged_as_agent_and_clie
     """Two 16 kHz mono files, each transcribed once, merged by time; the
     agent's side is the one the setting names."""
     ffmpeg = _Ffmpeg("stereo")
-    ctx["audio"] = AudioTools(ffmpeg)
+    ctx["audio"] = _tools(ffmpeg)
     await _calls_on(audio_channels="stereo_agent_left")
     await _push()
 
@@ -203,6 +225,7 @@ async def test_a_stereo_recording_splits_into_two_sides_merged_as_agent_and_clie
 
     (_, split) = ffmpeg.runs
     assert split.count("-ar") == 2 and split.count("16000") == 2
+    assert split.count("flac") == 2
     assert "[0:a]pan=mono|c0=c0[l];[0:a]pan=mono|c0=c1[r]" in split
     assert sorted(ctx["transcriber"].heard) == sorted([LEFT, RIGHT])
     result = await read_result("tenant-a", JOB)
@@ -222,13 +245,14 @@ async def test_a_stereo_recording_splits_into_two_sides_merged_as_agent_and_clie
     }
     assert result["transcript"]["uncertain"] is False
     sides = [Path(split[i + 2]) for i, a in enumerate(split) if a == "-ar"]
-    assert len(sides) == 2 and not any(path.parent.exists() for path in sides)
+    assert [path.suffix for path in sides] == [".flac", ".flac"]
+    assert not any(path.parent.exists() for path in sides)
 
 
 async def test_a_near_silent_recording_is_uncertain_whatever_the_engine_says(
     ctx: dict[str, Any], caplog: pytest.LogCaptureFixture
 ) -> None:
-    ctx["audio"] = AudioTools(_Ffmpeg("near_silent"))
+    ctx["audio"] = _tools(_Ffmpeg("near_silent"))
     await _calls_on()
     await _push()
 
@@ -255,7 +279,7 @@ async def test_a_near_silent_recording_is_uncertain_whatever_the_engine_says(
 async def test_a_file_over_3600_seconds_fails_permanently_unpaid(
     ctx: dict[str, Any], redis_fakes: RedisFakes
 ) -> None:
-    ctx["audio"] = AudioTools(_Ffmpeg("too_long"))
+    ctx["audio"] = _tools(_Ffmpeg("too_long"))
     await _calls_on()
     await _push()
 
@@ -296,9 +320,9 @@ async def test_each_refusal_is_permanent_and_unpaid(
         async def _broken(args: Sequence[str]) -> tuple[int, str]:
             return 1, "call.wav: Invalid data found when processing input"
 
-        ctx["audio"] = AudioTools(_broken)
+        ctx["audio"] = AudioTools(_broken, ffmpeg.probe)
     else:
-        ctx["audio"] = AudioTools(ffmpeg)
+        ctx["audio"] = _tools(ffmpeg)
     await _calls_on(**changes)
     await _push(duration)
 
@@ -337,7 +361,7 @@ async def test_a_side_received_is_never_paid_for_again(
     ctx: dict[str, Any], redis_fakes: RedisFakes
 ) -> None:
     """The right side fails and may pass later: the retry pays for it alone."""
-    ctx["audio"] = AudioTools(_Ffmpeg("stereo"))
+    ctx["audio"] = _tools(_Ffmpeg("stereo"))
     ctx["transcriber"] = _Sides(
         fail_right=TranscriptionError("stt_unavailable", retryable=True)
     )
@@ -359,9 +383,89 @@ async def test_a_side_received_is_never_paid_for_again(
     assert [int(value) for value in charged] == [2 * 2 * 150]
 
 
+async def test_an_m4a_is_converted_and_the_engine_is_sent_flac(
+    ctx: dict[str, Any],
+) -> None:
+    """The guard (F-1): whatever came down, ffprobe decoded it, ffmpeg made it
+    16 kHz mono FLAC, and the engine is posted that file as audio/flac."""
+    engine: list[httpx.Request] = []
+
+    def _engine(request: httpx.Request) -> httpx.Response:
+        engine.append(request)
+        body = (STT_FIXTURES / "diarized_http.json").read_text(encoding="utf-8")
+        return httpx.Response(200, content=body.encode("utf-8"))
+
+    def _m4a(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=M4A, headers={"content-type": "audio/mp4"})
+
+    ffmpeg = _Ffmpeg("mono")
+    ctx["audio"] = _tools(ffmpeg)
+    async with (
+        httpx.AsyncClient(transport=httpx.MockTransport(_m4a)) as download,
+        httpx.AsyncClient(transport=httpx.MockTransport(_engine)) as stt,
+    ):
+        ctx["http"] = download
+        ctx["transcriber"] = DiarizedHttpTranscriber(
+            base_url="http://stt.test",
+            model="m1",
+            api_key="test-key",
+            http=stt,
+            timeout_seconds=30,
+        )
+        await _calls_on()
+        await _push()
+        await process_call(ctx, "tenant-a", JOB)
+
+    (probe,) = ffmpeg.probes
+    assert probe[probe.index("-select_streams") + 1] == "a:0"
+    assert "-count_frames" in probe
+    (_, convert) = ffmpeg.runs
+    downloaded = convert[convert.index("-i") + 1]
+    assert probe[-1] == downloaded
+    assert convert[convert.index("-map") :] == [
+        *("-map", "0:a:0", "-ac", "1", "-c:a", "flac", "-ar", "16000"),
+        convert[-1],
+    ]
+    assert Path(convert[-1]).suffix == ".flac"
+    assert not Path(convert[-1]).parent.exists()
+    (request,) = engine
+    form = request.content
+    assert b'filename="call.flac"\r\nContent-Type: audio/flac\r\n\r\n' + FLAC in form
+    assert M4A not in form
+    job = await read_job("tenant-a", JOB)
+    assert job is not None and job.status is JobStatus.DONE
+
+
+@pytest.mark.parametrize(
+    ("code", "frames"), [(0, ""), (0, "0\n"), (0, "N/A\n"), (1, "1\n")]
+)
+async def test_a_file_ffprobe_cannot_decode_is_a_permanent_unpaid_failure(
+    ctx: dict[str, Any], redis_fakes: RedisFakes, code: int, frames: str
+) -> None:
+    """No frame decoded, or ffprobe failing: audio_format_unknown, before
+    ffmpeg, the charge or any engine."""
+    ffmpeg = _Ffmpeg("mono", frames=frames)
+
+    async def _probe(args: Sequence[str]) -> tuple[int, str]:
+        return code, frames
+
+    ctx["audio"] = AudioTools(ffmpeg, _probe)
+    await _calls_on()
+    await _push()
+
+    await process_call(ctx, "tenant-a", JOB)
+
+    job = await read_job("tenant-a", JOB)
+    assert job is not None
+    assert (job.status, job.reason) == (JobStatus.FAILED, "audio_format_unknown")
+    assert ffmpeg.runs == [] and ctx["transcriber"].heard == []
+    assert job.transcriptions == 0 and ctx["deliver"].events == ["call.failed"]
+    assert not [k for k in redis_fakes.cost.store if "audio_seconds" in k]
+
+
 async def test_a_resumed_run_keeps_the_audio_numbers(ctx: dict[str, Any]) -> None:
     """A run that finds the transcript kept reports the numbers it was kept with."""
-    ctx["audio"] = AudioTools(_Ffmpeg("mono"))
+    ctx["audio"] = _tools(_Ffmpeg("mono"))
     ctx["deliver"] = _Crashing()
     await _calls_on()
     await _push()
@@ -420,7 +524,7 @@ async def test_a_failed_split_is_unreadable_and_leaves_no_directory(
     tmp_path: Path,
 ) -> None:
     ffmpeg = _Ffmpeg("stereo", split_code=1)
-    tools = AudioTools(ffmpeg)
+    tools = _tools(ffmpeg)
     with pytest.raises(AudioError, match="^audio_unreadable$"):
         async with tools.split(tmp_path / "call.wav"):
             raise AssertionError("never reached")
@@ -453,8 +557,12 @@ async def test_ffmpeg_is_checked_and_a_missing_one_named() -> None:
     with pytest.raises(FfmpegMissing, match="^ffmpeg_not_found$"):
         await ensure_ffmpeg()
     with pytest.raises(FfmpegMissing):
-        await ensure_ffmpeg(_fails)
-    assert isinstance(await ensure_ffmpeg(_works), AudioTools)
+        await ensure_ffmpeg(_fails, _works)
+    with pytest.raises(FfmpegMissing):
+        await ensure_ffmpeg(_works, _fails)
+    with pytest.raises(FfmpegMissing):
+        await ensure_ffmpeg(_works)
+    assert isinstance(await ensure_ffmpeg(_works, _works), AudioTools)
 
 
 class _Process:
@@ -468,7 +576,7 @@ class _Process:
         if self.hang:
             await asyncio.Event().wait()
         self.returncode = 0
-        return b"", b"mean_volume: -20.0 dB\n"
+        return b"1\n", b"mean_volume: -20.0 dB\n"
 
     def kill(self) -> None:
         self.killed = True
@@ -495,6 +603,8 @@ async def test_run_ffmpeg_reads_stderr_and_kills_a_cancelled_run(monkeypatch) ->
     with pytest.raises(asyncio.CancelledError):
         await task
     assert made[1][1].killed
+    assert await run_ffprobe(["-version"]) == (0, "1\n")
+    assert made[2][0] == ("ffprobe", "-version")
 
 
 # --- the worker's start --------------------------------------------------------
@@ -536,6 +646,7 @@ async def test_a_worker_with_ffmpeg_holds_its_tools_and_stage2_checks_none(
         return 0, "ffmpeg version 7.1"
 
     monkeypatch.setattr(audio, "run_ffmpeg", _works)
+    monkeypatch.setattr(audio, "run_ffprobe", _works)
     monkeypatch.setenv("DODEAL_CALL_DEMO_ALLOW_LOCAL_AUDIO", "true")
     monkeypatch.setenv("DODEAL_LLM_PROVIDER", "groq")
     monkeypatch.setenv("DODEAL_LLM_MODEL", "m")

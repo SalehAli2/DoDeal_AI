@@ -73,6 +73,7 @@ async def test_each_adapters_recorded_answer_parses(audio: Path) -> None:
     assert request.headers["authorization"] == "Bearer test-key"
     form = request.content.decode("latin-1")
     assert 'name="response_format"\r\n\r\nverbose_json' in form
+    assert 'filename="call.wav"\r\nContent-Type: audio/flac\r\n' in form
     assert 'name="language"\r\n\r\nen' in form
 
     owner = Engine(recorded("diarized_http.json"))
@@ -108,8 +109,8 @@ async def test_a_4xx_is_permanent_and_every_failure_is_one_request(
         assert len(engine.requests) == 1
 
 
-async def test_a_dropped_connection_retries_and_an_unknown_format_is_never_sent(
-    audio: Path, tmp_path: Path
+async def test_a_dropped_connection_retries_and_no_speech_names_no_speakers(
+    audio: Path,
 ) -> None:
     def dropped(request: httpx.Request) -> httpx.Response:
         raise httpx.ReadTimeout("slow", request=request)
@@ -118,18 +119,10 @@ async def test_a_dropped_connection_retries_and_an_unknown_format_is_never_sent(
         await adapter(DiarizedHttpTranscriber, dropped).transcribe(  # type: ignore[arg-type]
             audio, language_hint=None
         )
-    video = tmp_path / "call.mp4"
-    video.write_bytes(b"\x00\x00\x00\x20ftypisom")
-    unused = Engine({})
-    with pytest.raises(TranscriptionError, match="^audio_format_unknown$"):
-        await adapter(OpenAiCompatibleTranscriber, unused).transcribe(
-            video, language_hint=None
-        )
     silent = await adapter(
         DiarizedHttpTranscriber, Engine({"segments": []})
     ).transcribe(audio, language_hint=None)
     assert silent.uncertain_reasons == ("stt_no_speakers",)
-    assert unused.requests == []
 
 
 async def test_a_tenants_stt_profile_selects_its_adapter(monkeypatch) -> None:
