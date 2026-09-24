@@ -335,3 +335,18 @@ def test_a_tenant_profile_the_worker_has_no_engine_for_fails_the_call() -> None:
     assert transcriber_for(ctx, "default") is default
     with pytest.raises(TranscriptionError, match="^stt_profile_not_configured$"):
         transcriber_for(ctx, "second")
+
+
+async def test_gemini_is_built_with_the_stt_timeout(monkeypatch, audio: Path) -> None:
+    """The guard (F-7) on Gemini: the SDK's request carries 600 s."""
+    google = Google()
+    monkeypatch.setenv("DODEAL_CALL_STT_PROVIDER", "gemini")
+    monkeypatch.setenv("DODEAL_CALL_STT_API_KEY", "k1")
+    get_settings.cache_clear()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(google)) as http:
+        built = build_transcribers(get_settings(), http)
+        await built["default"].transcribe(
+            audio, language_hint=None, duration_seconds=150
+        )
+    (request,) = google.requests
+    assert set(request.extensions["timeout"].values()) == {600}

@@ -29,6 +29,11 @@ from pydantic_settings.exceptions import SettingsError
 # the pool size itself is, through redis_max_connections below.
 REDIS_POOL_HEADROOM = 4
 
+# How far inside a call job's timeout one STT request must end: the run stops
+# itself 60 s before arq's cancel, and the failure needs the rest to be
+# recorded as a retry. A request timeout closer than this is refused.
+STT_TIMEOUT_MARGIN_SECONDS = 120
+
 
 class ConfigError(RuntimeError):
     """Required configuration missing or invalid.
@@ -291,6 +296,10 @@ class Settings(BaseSettings):
     # (units/call_intelligence/stt.py). Empty with a paid engine refuses the
     # worker's start rather than fail every call.
     call_stt_api_key: SecretStr | None = None
+    # One speech-to-text request's timeout, every profile and engine alike. 600 s
+    # holds an hour's call; too low fails long calls (retried once, paid again),
+    # and within 120 s of CALL_JOB_TIMEOUT_SECONDS refuses to start.
+    call_stt_timeout_seconds: int = Field(default=600, gt=0)
 
     # --- Watchdog: timeout + retry policy for external calls (§6) -----------
     # Placeholder values; tune per real LLM/tool latency later.
@@ -528,6 +537,15 @@ class Settings(BaseSettings):
             self.service_jwt_previous_signing_key,
         ):
             raise ValueError("service_jwt_signing_key")
+        return self
+
+    @model_validator(mode="after")
+    def _stt_request_ends_inside_the_run(self) -> Settings:
+        """An STT request must time out while the run can still record it as
+        a retry: STT_TIMEOUT_MARGIN_SECONDS or more before the job's timeout."""
+        room = self.call_job_timeout_seconds - self.call_stt_timeout_seconds
+        if room <= STT_TIMEOUT_MARGIN_SECONDS:
+            raise ValueError("call_stt_timeout_seconds")
         return self
 
     @model_validator(mode="after")

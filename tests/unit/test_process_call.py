@@ -16,8 +16,9 @@ from typing import Any
 import httpx
 import pytest
 from arq import Retry
+from pydantic import ValidationError
 
-from dodeal_ai.core.config import ConfigError, get_settings
+from dodeal_ai.core.config import ConfigError, Settings, get_settings
 from dodeal_ai.core.jobs import (
     RUNNING_JOBS_KEY,
     DeliveryState,
@@ -701,18 +702,45 @@ def test_the_deadline_is_the_job_timeout_less_its_margin(monkeypatch) -> None:
         get_settings()
 
 
-@pytest.mark.parametrize(("seconds", "refused"), [(119, True), (120, False)])
+@pytest.mark.parametrize(
+    ("seconds", "refused"), [(119, True), (121, True), (122, False)]
+)
 def test_a_job_timeout_under_120_is_refused(
     monkeypatch, seconds: int, refused: bool
 ) -> None:
-    """A run gets at least 60 s before it stops itself."""
+    """A run gets at least 60 s before it stops itself, and room for a 1 s
+    STT request and its 120 s margin: 122 s is the least that starts."""
     monkeypatch.setenv("DODEAL_CALL_JOB_TIMEOUT_SECONDS", str(seconds))
+    monkeypatch.setenv("DODEAL_CALL_STT_TIMEOUT_SECONDS", "1")
     get_settings.cache_clear()
     if refused:
         with pytest.raises(ConfigError):
             get_settings()
     else:
-        assert get_settings().call_job_timeout_seconds == 120
+        assert get_settings().call_job_timeout_seconds == 122
+
+
+@pytest.mark.parametrize(
+    ("stt", "job", "refused"),
+    [(600, 1800, False), (1679, 1800, False), (1680, 1800, True), (600, 720, True)],
+)
+def test_an_stt_timeout_within_120_s_of_the_job_timeout_is_refused(
+    monkeypatch, stt: int, job: int, refused: bool
+) -> None:
+    """600 by default; one that leaves the run 120 s or less refuses to start."""
+    monkeypatch.setenv("DODEAL_CALL_STT_TIMEOUT_SECONDS", str(stt))
+    monkeypatch.setenv("DODEAL_CALL_JOB_TIMEOUT_SECONDS", str(job))
+    get_settings.cache_clear()
+    if refused:
+        with pytest.raises(ValidationError) as caught:
+            Settings(_env_file=None, jwt_signing_key="test-key")
+        assert [e["msg"] for e in caught.value.errors()] == [
+            "Value error, call_stt_timeout_seconds"
+        ]
+        with pytest.raises(ConfigError):
+            get_settings()
+    else:
+        assert get_settings().call_stt_timeout_seconds == stt
 
 
 # --- stuck jobs: the sweep ------------------------------------------------------

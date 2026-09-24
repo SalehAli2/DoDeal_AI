@@ -47,8 +47,8 @@ def build_profile(
 ) -> Transcriber:
     """One STT profile's transcriber; ConfigError when it cannot be built."""
     key = _api_key(name, profile, settings)
-    # The job's own deadline bounds a transcription; this never cuts one shorter.
-    timeout = settings.call_job_timeout_seconds
+    # One request's own limit, inside the job's deadline (core/config.py).
+    timeout = settings.call_stt_timeout_seconds
     if profile.provider == "gemini":
         return GeminiTranscriber(
             model=profile.model,

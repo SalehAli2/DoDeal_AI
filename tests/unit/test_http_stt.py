@@ -161,3 +161,28 @@ async def test_a_tenants_stt_profile_selects_its_adapter(monkeypatch) -> None:
         get_settings.cache_clear()
         with pytest.raises(ConfigError, match="^stt_base_url_missing:owner$"):
             build_transcribers(get_settings(), http)
+
+
+@pytest.mark.parametrize("provider", ["diarized_http", "openai_compatible"])
+async def test_every_engine_is_built_with_the_stt_timeout(
+    monkeypatch, audio: Path, provider: str
+) -> None:
+    """The guard (F-7): each request's timeout is CALL_STT_TIMEOUT_SECONDS,
+    600 by default, never the job's 1800."""
+    answer = (
+        "diarized_http.json" if provider == "diarized_http" else "openai_verbose.json"
+    )
+    engine = Engine(recorded(answer))
+    monkeypatch.setenv("DODEAL_CALL_STT_PROVIDER", provider)
+    monkeypatch.setenv("DODEAL_CALL_STT_BASE_URL", "http://stt.test/v1")
+    monkeypatch.setenv("DODEAL_CALL_STT_API_KEY", "k1")
+    get_settings.cache_clear()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(engine)) as http:
+        built = build_transcribers(get_settings(), http)
+        await built["default"].transcribe(
+            audio, language_hint=None, duration_seconds=150
+        )
+    (request,) = engine.requests
+    assert request.extensions["timeout"] == dict.fromkeys(
+        ("connect", "read", "write", "pool"), 600
+    )
