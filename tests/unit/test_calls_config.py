@@ -217,6 +217,29 @@ def test_a_put_is_the_rules_in_force_and_get_shows_them(client: TestClient) -> N
     assert got[UNIT_B_SECTION]["audio_hosts"] == ["audio.tenant-a.example"]
 
 
+def test_a_unit_b_put_keeps_config_version(client: TestClient) -> None:
+    """The guard (F-8): every rule changed, and only policy_version moves --
+    on the PUT's answer, on GET, and in the section in force."""
+    first = client.put(CALLS_URL, json=ON, headers=_headers()).json()
+    changed = {
+        **ON,
+        "min_transcribe_seconds": 45,
+        "alarm_phrases": ["call my own number"],
+        "alarm_phrases_enabled": True,
+    }
+    second = client.put(CALLS_URL, json=changed, headers=_headers())
+    assert second.status_code == 200
+    assert second.json()["version"] == first["version"]
+    assert second.json()["policy_version"] != first["policy_version"]
+    got = client.get(CALLS_URL, headers=_headers()).json()
+    assert (got["version"], got["policy_version"]) == (
+        first["version"],
+        second.json()["policy_version"],
+    )
+    assert got[UNIT_B_SECTION]["min_transcribe_seconds"] == 45
+    assert got[UNIT_B_SECTION]["config_version"] == first["version"]
+
+
 def test_get_with_nothing_set_is_the_default_all_off(client: TestClient) -> None:
     got = client.get(CALLS_URL, headers=_headers()).json()
     assert (got["source"], got["version"]) == ("default", None)

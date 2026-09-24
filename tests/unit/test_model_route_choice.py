@@ -159,17 +159,18 @@ async def test_a_unit_b_routing_change_moves_policy_version_only(
     assert moved.policy_version != first.policy_version
 
 
-def test_a_unit_b_rule_change_still_moves_config_version() -> None:
-    """Anything besides the routing fields, or nothing at all, is a new one."""
+def test_a_unit_b_rule_change_keeps_config_version_too() -> None:
+    """Routing or rules, or nothing at all: the one in force (F-8). A first
+    one is minted only while none is in force."""
     in_force = parse_unit_b_section({"config_version": "cfg-1"})
     assert new_config_version({"model_route": "device"}, in_force) == "cfg-1"
     assert (
         new_config_version(
             {"model_route": "device", "min_transcribe_seconds": 9}, in_force
         )
-        is None
+        == "cfg-1"
     )
-    assert new_config_version({}, in_force) is None
+    assert new_config_version({}, in_force) == "cfg-1"
     assert new_config_version({"model_route": "device"}, None) is None
     assert new_config_version({"model_route": "device"}, CallsConfig()) is None
 

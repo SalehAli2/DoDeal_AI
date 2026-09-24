@@ -32,7 +32,6 @@ from dodeal_ai.units.call_intelligence.transcriber import (
 )
 
 __all__ = [
-    "ROUTING_FIELDS",
     "UNIT_B_SECTION",
     "CallsConfig",
     "calls_config_of",
@@ -104,7 +103,7 @@ class CallsConfig(BaseModel):
     audio_channels: Literal["mono", "stereo_agent_left", "stereo_agent_right"] = "mono"
     # The model route this tenant's call passes go through (core/llm/routing.py)
     # and the STT profile its calls are transcribed with: "default" is the
-    # DODEAL_LLM_* / DODEAL_CALL_STT_* pair. Policy only (ROUTING_FIELDS).
+    # DODEAL_LLM_* / DODEAL_CALL_STT_* pair. Policy, like every unit_b field.
     model_route: str = DEFAULT_ROUTE
     stt_profile: str = DEFAULT_STT_PROFILE
 
@@ -220,27 +219,14 @@ async def resolve_calls_config(tenant: str) -> CallsConfig:
     return calls_config_of(await resolve_section(tenant, UNIT_B_SECTION))
 
 
-# The fields that say who runs a call, not what is asked of it: a PUT changing
-# only these keeps the config_version in force, and moves the policy_version.
-ROUTING_FIELDS = frozenset({"model_route", "stt_profile"})
-
-
 def new_config_version(body: dict, in_force: object | None) -> str | None:
-    """The admin PUT's keeper for this section: the config_version in force
-    when the body changes a routing field and nothing else; otherwise None, a
-    new dated one, as for every other accepted PUT. ValueError for a body the
-    parser refuses."""
-    if not isinstance(in_force, CallsConfig) or in_force.config_version is None:
-        return None
-    proposed = parse_unit_b_section({**body, "config_version": None})
-    unchanged = {"config_version", *ROUTING_FIELDS}
-    rules_alike = proposed.model_dump(exclude=unchanged) == in_force.model_dump(
-        exclude=unchanged
-    )
-    routing_moved = any(
-        getattr(proposed, name) != getattr(in_force, name) for name in ROUTING_FIELDS
-    )
-    return in_force.config_version if rules_alike and routing_moved else None
+    """The admin PUT's keeper for this section: the config_version in force,
+    whatever the body changes. A unit_b PUT moves only the policy_version: no
+    call rule marks a note, and the config_version is what marks are grouped
+    by. None -- a first dated one -- only while none is in force."""
+    if isinstance(in_force, CallsConfig) and in_force.config_version is not None:
+        return in_force.config_version
+    return None
 
 
 def calls_section_of(config: CallsConfig) -> dict[str, object]:
