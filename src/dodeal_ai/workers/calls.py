@@ -83,6 +83,7 @@ from dodeal_ai.units.call_intelligence.transcriber import (
     DEFAULT_STT_PROFILE,
     Transcriber,
 )
+from dodeal_ai.units.call_intelligence.translation import translate_call
 from dodeal_ai.units.call_intelligence.worker import process_call
 
 QUEUES = {
@@ -156,7 +157,11 @@ def worker_settings(
         else []
     )
     functions = (
-        [func(analyse_stage2, max_tries=STAGE2_TRIES)]
+        [
+            func(analyse_stage2, max_tries=STAGE2_TRIES),
+            # Never re-run: a re-run would pay again for chunks answered.
+            func(translate_call, max_tries=1),
+        ]
         if queue == STAGE2_QUEUE
         else [
             func(process_call, max_tries=settings.call_max_tries + 1),

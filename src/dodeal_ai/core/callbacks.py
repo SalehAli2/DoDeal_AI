@@ -43,7 +43,9 @@ CALL_STAGE1 = "call.stage1"
 # Wave 2's result, sent by the stage-2 task once stage 2 is done.
 CALL_STAGE2 = "call.stage2"
 CALL_FAILED = "call.failed"
-EVENTS = (CALL_STAGE1, CALL_STAGE2, CALL_FAILED)
+# A done call's translation, asked for by the CRM: sent once, read by GET.
+CALL_TRANSLATION = "call.translation"
+EVENTS = (CALL_STAGE1, CALL_STAGE2, CALL_FAILED, CALL_TRANSLATION)
 
 # The waits before each retry of a failed delivery, in seconds: a minute, five,
 # thirty, two hours. After the last, the delivery has failed.

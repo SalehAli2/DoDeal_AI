@@ -599,7 +599,7 @@ def test_event_ids_are_stable_per_job_and_event() -> None:
     assert event_id("tenant-a", JOB, CALL_STAGE1) == event_id(
         "tenant-a", JOB, CALL_STAGE1
     )
-    assert len({event_id("tenant-a", JOB, e) for e in EVENTS}) == 3
+    assert len({event_id("tenant-a", JOB, e) for e in EVENTS}) == len(EVENTS) == 4
     assert event_id("tenant-b", JOB, CALL_STAGE1) != event_id(
         "tenant-a", JOB, CALL_STAGE1
     )

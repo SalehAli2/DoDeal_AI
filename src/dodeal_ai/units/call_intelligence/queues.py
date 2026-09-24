@@ -46,6 +46,7 @@ PROCESS_CALL = "process_call"
 DELIVER_CALLBACK = "deliver_callback"
 # The task the stage-2 queue runs (units/call_intelligence/stage2.py).
 ANALYSE_STAGE2 = "analyse_stage2"
+TRANSLATE_CALL = "translate_call"
 
 
 def queue_for(lead_status: str | None, config: CallsConfig) -> str:
@@ -162,6 +163,25 @@ async def enqueue_stage2(tenant: str, job_id: str, *, sweep: bool = False) -> No
                 tenant,
                 job_id,
                 _job_id=stage2_arq_id(tenant, job_id, sweep=sweep),
+                _queue_name=STAGE2_QUEUE,
+            )
+        )
+    except redis.RedisError:
+        raise QueueUnavailable() from None
+
+
+async def enqueue_translation(tenant: str, job_id: str, target: str) -> None:
+    """Put `translate_call(tenant, job_id, target)` on the stage-2 queue, once
+    per job and language. A queue that cannot be reached is QueueUnavailable."""
+    client = get_queue_client()
+    try:
+        await queue_breaker().call(
+            lambda: client.enqueue_job(
+                TRANSLATE_CALL,
+                tenant,
+                job_id,
+                target,
+                _job_id=f"translate:{tenant}:{job_id}:{target}",
                 _queue_name=STAGE2_QUEUE,
             )
         )

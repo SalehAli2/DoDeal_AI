@@ -13,9 +13,14 @@ call's author as an asserted subject (`author:<author_id>`).
                              analysed again with the versions in force, on
                              its own counter (`cost:reanalysis:tenant`); the
                              same call, stages and versions is the same job
+  POST /api/v1/calls/jobs/{job_id}/translation {target: ar|en}
+                             202; 409 result_expired, 409 already_in_language;
+                             counted on the READS counter, sent back as
+                             call.translation
   GET  /api/v1/calls/jobs/{job_id}
                              {job_id, status, reason, delivery, stage2,
-                             result, stage2_result}, each result while held;
+                             result, stage2_result, translations}, each while
+                             held;
                              another tenant's job is 404. Counted on the
                              READS counter, and every read is audited.
 """
@@ -41,6 +46,11 @@ from dodeal_ai.units.call_intelligence.schemas import (
     CallJobAccepted,
     CallJobRequest,
     ReanalysisRequest,
+)
+from dodeal_ai.units.call_intelligence.translation import (
+    TranslationAccepted,
+    TranslationRequest,
+    request_translation,
 )
 
 router = APIRouter(prefix="/api/v1/calls", tags=["unit-b"])
@@ -74,6 +84,17 @@ async def create_reanalysis_job(
         await resolve_calls_config(context.tenant),
         now=datetime.now(UTC),
     )
+
+
+@router.post("/jobs/{job_id}/translation", status_code=202)
+async def create_translation(
+    body: TranslationRequest,
+    context: Annotated[RequestContext, Depends(service_gate4_reads_cost)],
+    job_id: Annotated[str, Path(pattern=r"^[0-9a-f]{32}$")],
+) -> TranslationAccepted:
+    """Translate a done call's transcript; the answer comes as
+    call.translation and through the status route."""
+    return await request_translation(context, job_id, body)
 
 
 @router.get("/jobs/{job_id}")

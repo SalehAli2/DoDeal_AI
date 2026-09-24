@@ -26,9 +26,13 @@ from dodeal_ai.core.jobs import (
     read_job,
     read_result,
     read_stage2_result,
+    read_translation,
 )
 
 _audit = logging.getLogger("dodeal_ai.audit")
+
+# The languages a call may be translated into (translation.py).
+TRANSLATION_TARGETS = ("ar", "en")
 
 
 class CallJobView(BaseModel):
@@ -43,6 +47,18 @@ class CallJobView(BaseModel):
     stage2: Stage2State | None
     result: dict[str, object] | None
     stage2_result: dict[str, object] | None
+    # The held translations by target (translation.py); {} for none.
+    translations: dict[str, object] = {}
+
+
+async def read_translations(tenant: str, job_id: str) -> dict[str, object]:
+    """Every held translation of the job, by target."""
+    held: dict[str, object] = {}
+    for target in TRANSLATION_TARGETS:
+        found = await read_translation(tenant, job_id, target)
+        if found is not None:
+            held[target] = found
+    return held
 
 
 async def read_call_job(context: RequestContext, job_id: str) -> CallJobView:
@@ -52,6 +68,9 @@ async def read_call_job(context: RequestContext, job_id: str) -> CallJobView:
         result = None if job is None else await read_result(context.tenant, job_id)
         stage2 = (
             None if job is None else await read_stage2_result(context.tenant, job_id)
+        )
+        translations = (
+            {} if job is None else await read_translations(context.tenant, job_id)
         )
     except JobStoreUnavailable:
         raise JobStoreUnavailableResponse() from None
@@ -78,4 +97,5 @@ async def read_call_job(context: RequestContext, job_id: str) -> CallJobView:
         stage2=job.stage2,
         result=result,
         stage2_result=stage2,
+        translations=translations,
     )

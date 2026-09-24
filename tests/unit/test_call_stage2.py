@@ -352,7 +352,7 @@ async def test_stage2_is_held_and_delivered_as_call_stage2(
     assert all(held[name] is not None for name in parts if name != "score")
     assert held["reasons"] == {"score": "scoring_off"}
     assert held["versions"] == {
-        "prompt": "unit_b_prompts_v4",
+        "prompt": "unit_b_prompts_v5",
         "objection_list": "objection_list_v1",
         "rubric": "call_rubric_v1",
         "tone_list": "tone_list_v1",
@@ -676,10 +676,11 @@ async def test_arq_is_asked_under_both_stage2_ids(redis_fakes: RedisFakes) -> No
 # --- the worker ----------------------------------------------------------------------
 
 
-def test_the_stage2_worker_runs_only_analyse_stage2_and_sweeps_nothing() -> None:
+def test_the_stage2_worker_runs_stage2_and_translations_and_sweeps_nothing() -> None:
     built = calls_worker.worker_settings(STAGE2_QUEUE)
     assert [(f.name, f.max_tries) for f in built["functions"]] == [
-        ("analyse_stage2", calls_worker.STAGE2_TRIES)
+        ("analyse_stage2", calls_worker.STAGE2_TRIES),
+        ("translate_call", 1),
     ]
     assert (built["queue_name"], built["cron_jobs"]) == (STAGE2_QUEUE, [])
     assert calls_worker.QUEUES["stage2"] == STAGE2_QUEUE

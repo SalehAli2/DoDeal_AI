@@ -310,7 +310,10 @@ def test_the_demos_workers_include_stage2() -> None:
 
     workers = call_demo.demo_workers(FakeTranscriber())
     assert [w["queue_name"] for w in workers] == [NORMAL_QUEUE, STAGE2_QUEUE]
-    assert [f.name for f in workers[1]["functions"]] == ["analyse_stage2"]
+    assert [f.name for f in workers[1]["functions"]] == [
+        "analyse_stage2",
+        "translate_call",
+    ]
 
 
 def test_the_demo_call_is_long_enough_for_stage2() -> None:

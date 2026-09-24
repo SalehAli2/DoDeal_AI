@@ -185,6 +185,10 @@ def stage2_result_key(tenant: str, job_id: str) -> str:
     return f"call_stage2:{tenant}:{job_id}"
 
 
+def translation_key(tenant: str, job_id: str, target: str) -> str:
+    return f"call_translation:{tenant}:{job_id}:{target}"
+
+
 def work_key(tenant: str, job_id: str) -> str:
     return f"call_work:{tenant}:{job_id}"
 
@@ -906,6 +910,32 @@ async def store_stage2_result(
 async def read_stage2_result(tenant: str, job_id: str) -> dict[str, object] | None:
     """The held stage-2 result, or None once it has expired or before it is."""
     return await _read_json(stage2_result_key(tenant, job_id))
+
+
+async def store_translation(
+    tenant: str,
+    job_id: str,
+    target: str,
+    result: dict[str, object],
+    *,
+    ttl_seconds: int,
+) -> None:
+    """Hold a call's translation into `target` for `ttl_seconds`."""
+    client = get_jobs_client()
+    await _call(
+        lambda: client.set(
+            translation_key(tenant, job_id, target),
+            json.dumps(result, sort_keys=True),
+            ex=ttl_seconds,
+        )
+    )
+
+
+async def read_translation(
+    tenant: str, job_id: str, target: str
+) -> dict[str, object] | None:
+    """The held translation into `target`, or None."""
+    return await _read_json(translation_key(tenant, job_id, target))
 
 
 async def _read_json(key: str) -> dict[str, object] | None:

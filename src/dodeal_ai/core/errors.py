@@ -276,6 +276,20 @@ class CallJobNotFound(DodealError):
         super().__init__("call_job_not_found", 404)
 
 
+class ResultExpired(DodealError):
+    """The call's stage-1 result, and its transcript, are no longer held."""
+
+    def __init__(self) -> None:
+        super().__init__("result_expired", 409)
+
+
+class AlreadyInLanguage(DodealError):
+    """A translation asked for into the language the call is already in."""
+
+    def __init__(self) -> None:
+        super().__init__("already_in_language", 409)
+
+
 class JobStoreUnavailableResponse(DodealError):
     """db3 could not be read or written (register item 50). Fails closed: the
     job store is the job, so there is no answer to guess."""
