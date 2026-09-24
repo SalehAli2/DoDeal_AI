@@ -50,6 +50,12 @@ decides what a salesperson is told about their own work:
     core/jobs.py      a call job's state. Wrong -> a job paid twice or lost.
     units/call_intelligence/worker.py  process_call. Wrong -> a paid retry
                        nobody asked for, or a job stranded.
+    units/call_intelligence/ numbers, alarms, evidence, paid, analysis, sweep,
+                       queues and the wave 2 passes. Wrong -> a number a
+                       model reads, an invented quote believed, a received
+                       answer paid for twice, a stuck job never swept.
+    units/call_intelligence/stage2.py  analyse_stage2. Wrong -> a stage 2
+                       left pending, or its event never sent.
 
 A file matched by both a `**` pattern and its own exact pattern is checked
 against both and printed twice; the stricter floor governs. That is deliberate
@@ -167,6 +173,30 @@ _FLOORS: dict[str, float] = {
     "src/dodeal_ai/core/jobs.py": 100,
     # process_call: 95, as item 113 sets it, for a defensive branch or two.
     "src/dodeal_ai/units/call_intelligence/worker.py": 95,
+    # Unit B batch 3. What a model may read of a call (the mask), what code
+    # finds without one (alarms), and the quote check every pass rests on: a
+    # gap is a number shown or an invented quote believed.
+    "src/dodeal_ai/units/call_intelligence/numbers.py": 100,
+    "src/dodeal_ai/units/call_intelligence/alarms.py": 100,
+    "src/dodeal_ai/units/call_intelligence/evidence.py": 100,
+    # The retry-once rule and the work kept: a gap is a received answer paid for
+    # twice. Wave 1 is the order its passes run in.
+    "src/dodeal_ai/units/call_intelligence/paid.py": 100,
+    "src/dodeal_ai/units/call_intelligence/analysis.py": 100,
+    # The sweep and the queues it asks: a gap is a stuck job or a lost stage 2
+    # never found, or a second copy of one that was only waiting.
+    "src/dodeal_ai/units/call_intelligence/sweep.py": 100,
+    "src/dodeal_ai/units/call_intelligence/queues.py": 100,
+    # Wave 2 and its five passes: each rule a schema cannot hold, and every
+    # mark, total and band computed in code. A gap is a rule nobody ran.
+    "src/dodeal_ai/units/call_intelligence/wave2.py": 100,
+    "src/dodeal_ai/units/call_intelligence/objections.py": 100,
+    "src/dodeal_ai/units/call_intelligence/score.py": 100,
+    "src/dodeal_ai/units/call_intelligence/escalations.py": 100,
+    "src/dodeal_ai/units/call_intelligence/coaching.py": 100,
+    "src/dodeal_ai/units/call_intelligence/extras.py": 100,
+    # analyse_stage2: 95, as for process_call, for a defensive branch or two.
+    "src/dodeal_ai/units/call_intelligence/stage2.py": 95,
 }
 
 

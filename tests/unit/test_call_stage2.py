@@ -646,6 +646,20 @@ async def test_a_sweep_that_cannot_ask_arq_about_stage2_stops(
     assert (await _job()).stage2_sweeps == 0
 
 
+async def test_stage2_that_cannot_be_queued_is_queue_unavailable(monkeypatch) -> None:
+    import fakeredis
+    from arq.connections import ArqRedis
+
+    server = fakeredis.FakeServer()
+    server.connected = False
+    down = ArqRedis(
+        connection_pool=fakeredis.FakeAsyncRedis(server=server).connection_pool
+    )
+    monkeypatch.setattr(queues, "get_queue_client", lambda: down)
+    with pytest.raises(QueueUnavailable):
+        await queues.enqueue_stage2("tenant-a", JOB)
+
+
 async def test_arq_is_asked_under_both_stage2_ids(redis_fakes: RedisFakes) -> None:
     assert not await queues.stage2_on_the_queue("tenant-a", JOB)
     await queues.enqueue_stage2("tenant-a", JOB, sweep=True)
