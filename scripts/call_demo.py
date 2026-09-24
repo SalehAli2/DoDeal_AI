@@ -10,9 +10,12 @@ WHAT IT RUNS, on http://127.0.0.1:<port>:
                         the four X-DODEAL headers and the status it answered
                         -- NEVER the body, which carries the transcript
 
-and, with --worker, a call worker on the normal queue whose transcriber is the
-FakeTranscriber (no speech-to-text adapter exists yet). The worker builds the
-real model client from DODEAL_LLM_* like any call worker, and runs wave 1.
+and, with --worker, the two call workers a demo call needs (demo_workers): the
+normal queue's, whose transcriber is the FakeTranscriber (no speech-to-text
+adapter exists yet), and the stage-2 queue's. Both build the real model client
+from DODEAL_LLM_* like any call worker, so a demo call runs wave 1, sends
+call.stage1, then runs wave 2 and sends call.stage2. The pushed call is 150 s,
+past scoring_min_seconds, so it is eligible for stage 2.
 
 --transcript <path> (with --worker) hands the FakeTranscriber a hand-written
 transcript, so the real model runs wave 1 on words you wrote. A path inside
@@ -62,7 +65,7 @@ import wave
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -70,7 +73,7 @@ from starlette.responses import Response
 from starlette.routing import Route
 
 if TYPE_CHECKING:
-    from dodeal_ai.units.call_intelligence.transcriber import Segment
+    from dodeal_ai.units.call_intelligence.transcriber import Segment, Transcriber
 
 AUDIO_PATH = "/demo-call.wav"
 CALLBACK_PATH = "/callback"
@@ -89,6 +92,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # A typed transcript's confidence when the file gives none.
 TYPED_CONFIDENCE = 1.0
+
+# The demo call's length: past scoring_min_seconds (120 by default), so the
+# call is eligible for full analysis and reaches stage 2.
+DEMO_CALL_SECONDS = 150
 
 
 class TranscriptRefused(ValueError):
@@ -182,7 +189,7 @@ def push_body(port: int, *, now: datetime) -> dict[str, object]:
         "call_id": 9001,
         "lead_id": 1004,
         "author_id": 7,
-        "duration_seconds": 95,
+        "duration_seconds": DEMO_CALL_SECONDS,
         "recorded_at": now.isoformat(),
         "audio_url": f"http://127.0.0.1:{port}{AUDIO_PATH}",
         "audio_url_expires_at": (now + timedelta(hours=1)).isoformat(),
@@ -207,9 +214,10 @@ def instructions(
     auth = "-H 'Authorization: Bearer '\"$SERVICE_TOKEN\""
     common = f"-H {_quote(f'Host: {host}')} {auth} -H 'Content-Type: application/json'"
     return [
-        "1. Start the service (and a worker, or --worker here) with:",
+        "1. Start the service (and the normal and stage2 workers, or --worker here)",
+        "   with:",
         "   DODEAL_CALL_DEMO_ALLOW_LOCAL_AUDIO=true",
-        "   DODEAL_LLM_PROVIDER, DODEAL_LLM_MODEL and DODEAL_LLM_API_KEY for wave 1",
+        "   DODEAL_LLM_PROVIDER, DODEAL_LLM_MODEL and DODEAL_LLM_API_KEY for both waves",
         f"   DODEAL_CALL_CALLBACK_SECRETS={json.dumps({tenant: secret})}",
         "",
         "2. A service token, into $SERVICE_TOKEN:",
@@ -243,7 +251,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--worker",
         action="store_true",
-        help="Also run a call worker on the normal queue with the FakeTranscriber.",
+        help=(
+            "Also run the call workers: the normal queue's with the "
+            "FakeTranscriber, and the stage-2 queue's."
+        ),
     )
     parser.add_argument(
         "--transcript",
@@ -255,6 +266,19 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if args.transcript is not None and not args.worker:
         parser.error("--transcript needs --worker: the worker is what reads it")
     return args
+
+
+def demo_workers(transcriber: Transcriber) -> list[dict[str, Any]]:
+    """The arq settings of the demo's call workers: the normal queue's with
+    `transcriber`, and the stage-2 queue's, so a demo call reaches
+    call.stage2."""
+    from dodeal_ai.units.call_intelligence.queues import NORMAL_QUEUE, STAGE2_QUEUE
+    from dodeal_ai.workers.calls import worker_settings
+
+    return [
+        worker_settings(NORMAL_QUEUE, transcriber=transcriber),
+        worker_settings(STAGE2_QUEUE),
+    ]
 
 
 async def _serve(
@@ -278,12 +302,9 @@ async def _serve(
         from arq.worker import Worker
 
         from dodeal_ai.units.call_intelligence.fake_transcriber import FakeTranscriber
-        from dodeal_ai.units.call_intelligence.queues import NORMAL_QUEUE
-        from dodeal_ai.workers.calls import worker_settings
 
         fake = FakeTranscriber() if segments is None else FakeTranscriber(segments)
-        worker = Worker(**worker_settings(NORMAL_QUEUE, transcriber=fake))
-        tasks.append(worker.main())
+        tasks += [Worker(**settings).main() for settings in demo_workers(fake)]
     await asyncio.gather(*tasks)
 
 

@@ -301,3 +301,18 @@ def test_a_malformed_transcript_is_refused(tmp_path, payload: object) -> None:
 def test_a_transcript_needs_the_worker() -> None:
     with pytest.raises(SystemExit):
         call_demo._parse_args(["--transcript", "call.json"])
+
+
+def test_the_demos_workers_include_stage2() -> None:
+    """The guard: a demo call reaches call.stage2."""
+    from dodeal_ai.units.call_intelligence.fake_transcriber import FakeTranscriber
+    from dodeal_ai.units.call_intelligence.queues import NORMAL_QUEUE, STAGE2_QUEUE
+
+    workers = call_demo.demo_workers(FakeTranscriber())
+    assert [w["queue_name"] for w in workers] == [NORMAL_QUEUE, STAGE2_QUEUE]
+    assert [f.name for f in workers[1]["functions"]] == ["analyse_stage2"]
+
+
+def test_the_demo_call_is_long_enough_for_stage2() -> None:
+    body = call_demo.push_body(8765, now=NOW)
+    assert body["duration_seconds"] >= parse_unit_b_section({}).scoring_min_seconds
