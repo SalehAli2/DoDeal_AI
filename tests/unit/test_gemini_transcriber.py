@@ -239,7 +239,7 @@ async def test_the_factory_builds_gemini_per_profile_and_reads_each_key_once(
         built = build_transcribers(get_settings(), http)
         assert sorted(built) == ["default", "second"]
         assert all(isinstance(t, GeminiTranscriber) for t in built.values())
-        monkeypatch.setenv("DODEAL_CALL_STT_PROVIDER", "diarized_http")
+        monkeypatch.setenv("DODEAL_CALL_STT_PROVIDER", "fake")
         get_settings.cache_clear()
         with pytest.raises(ConfigError, match="^stt_not_configured$"):
             build_transcribers(get_settings(), http)

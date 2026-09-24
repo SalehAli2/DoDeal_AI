@@ -123,6 +123,16 @@ def script_letters(text: str) -> dict[SummaryLanguage, int]:
     return {code: len(pattern.findall(text)) for code, pattern in _SCRIPTS.items()}
 
 
+def script_language(text: str, hint: str | None) -> str:
+    """A segment's language by the script most of its letters are in -- ar for
+    Arabic, en for Latin, a tie ar -- for an engine that names none; with no
+    letters, the hint when it is one of the two, else und."""
+    letters = script_letters(text)
+    if letters["ar"] or letters["en"]:
+        return "ar" if letters["ar"] >= letters["en"] else "en"
+    return hint if hint in ("ar", "en") else "und"
+
+
 def _contains(said: Sequence[str], quote: Sequence[str]) -> bool:
     size = len(quote)
     return any(said[at : at + size] == quote for at in range(len(said) - size + 1))

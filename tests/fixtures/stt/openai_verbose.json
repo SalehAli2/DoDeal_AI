@@ -1,0 +1,10 @@
+{
+  "task": "transcribe",
+  "language": "english",
+  "duration": 9.5,
+  "text": "Good morning, this is the sales office. I want a villa by the sea.",
+  "segments": [
+    {"id": 0, "seek": 0, "start": 0.0, "end": 4.6, "text": " Good morning, this is the sales office.", "avg_logprob": -0.21, "no_speech_prob": 0.01},
+    {"id": 1, "seek": 0, "start": 4.4, "end": 9.5, "text": " I want a villa by the sea.", "avg_logprob": -0.3, "no_speech_prob": 0.02}
+  ]
+}

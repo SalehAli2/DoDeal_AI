@@ -16,6 +16,10 @@ import httpx
 
 from dodeal_ai.core.config import ConfigError, Settings, SttProfile
 from dodeal_ai.units.call_intelligence.gemini import GeminiTranscriber
+from dodeal_ai.units.call_intelligence.http_stt import (
+    DiarizedHttpTranscriber,
+    OpenAiCompatibleTranscriber,
+)
 from dodeal_ai.units.call_intelligence.transcriber import (
     DEFAULT_STT_PROFILE,
     HandedTranscriberRefused,
@@ -42,16 +46,30 @@ def build_profile(
     name: str, profile: SttProfile, settings: Settings, http: httpx.AsyncClient
 ) -> Transcriber:
     """One STT profile's transcriber; ConfigError when it cannot be built."""
-    if profile.provider != "gemini":
-        raise TranscriberNotConfigured()
-    return GeminiTranscriber(
-        model=profile.model,
-        api_key=_api_key(name, profile, settings),
-        http=http,
+    key = _api_key(name, profile, settings)
+    # The job's own deadline bounds a transcription; this never cuts one shorter.
+    timeout = settings.call_job_timeout_seconds
+    if profile.provider == "gemini":
+        return GeminiTranscriber(
+            model=profile.model,
+            api_key=key,
+            http=http,
+            base_url=profile.base_url,
+            timeout_seconds=timeout,
+        )
+    if profile.base_url is None:
+        raise ConfigError(f"stt_base_url_missing:{name}")
+    engine = (
+        OpenAiCompatibleTranscriber
+        if profile.provider == "openai_compatible"
+        else DiarizedHttpTranscriber
+    )
+    return engine(
         base_url=profile.base_url,
-        # The job's own deadline bounds a transcription; this only never cuts
-        # one shorter.
-        timeout_seconds=settings.call_job_timeout_seconds,
+        model=profile.model,
+        api_key=key,
+        http=http,
+        timeout_seconds=timeout,
     )
 
 

@@ -45,7 +45,7 @@ from google.genai._gaos.lib.compat_errors import APIError as InteractionsError
 from google.genai._gaos.utils import RetryConfig
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from dodeal_ai.units.call_intelligence.evidence import script_letters
+from dodeal_ai.units.call_intelligence.evidence import script_language
 from dodeal_ai.units.call_intelligence.transcriber import (
     Segment,
     Transcript,
@@ -191,13 +191,6 @@ def _words(answer: dict[str, Any]) -> list[_Word]:
     return found
 
 
-def _language(text: str, hint: str | None) -> str:
-    letters = script_letters(text)
-    if letters["ar"] or letters["en"]:
-        return "ar" if letters["ar"] >= letters["en"] else "en"
-    return hint if hint in ("ar", "en") else "und"
-
-
 def segments_of(words: list[_Word], hint: str | None) -> tuple[Segment, ...]:
     """Consecutive words of one speaker as one segment, in time order, each
     starting no earlier than the one before it ended."""
@@ -219,7 +212,7 @@ def segments_of(words: list[_Word], hint: str | None) -> tuple[Segment, ...]:
                 end_s=floor,
                 speaker=f"speaker_{turn[0].speaker.removeprefix('spk_')}",
                 text=text,
-                language=_language(text, hint),
+                language=script_language(text, hint),
                 confidence=None,
             )
         )

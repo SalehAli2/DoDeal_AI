@@ -1,7 +1,7 @@
 """The Transcriber seam and its conformance suite (Unit B). Every adapter is run
 through the same assertions -- ordered, non-overlapping segments with speakers,
-and a profile and an uncertainty flag its own segments agree with. The fake,
-and Gemini through its SDK on a recorded response, never a live call."""
+and a profile and an uncertainty flag its own segments agree with. The fake
+(demo only), and each real adapter on a recorded response, never a live call."""
 
 from __future__ import annotations
 
@@ -19,6 +19,10 @@ from dodeal_ai.units.call_intelligence.fake_transcriber import (
     FakeTranscriber,
 )
 from dodeal_ai.units.call_intelligence.gemini import GeminiTranscriber
+from dodeal_ai.units.call_intelligence.http_stt import (
+    DiarizedHttpTranscriber,
+    OpenAiCompatibleTranscriber,
+)
 from dodeal_ai.units.call_intelligence.stt import build_transcribers
 from dodeal_ai.units.call_intelligence.transcriber import (
     LanguageProfile,
@@ -49,10 +53,33 @@ def _gemini() -> Transcriber:
     )
 
 
+def _http(kind: type, fixture: str) -> Callable[[], Transcriber]:
+    """An HTTP adapter answered with its recorded response."""
+    answer = json.loads((RECORDED / fixture).read_text(encoding="utf-8"))
+
+    def build() -> Transcriber:
+        transcriber: Transcriber = kind(
+            base_url="http://stt.test",
+            model="m1",
+            api_key="test-key",
+            http=httpx.AsyncClient(
+                transport=httpx.MockTransport(
+                    lambda _: httpx.Response(200, json=answer)
+                )
+            ),
+            timeout_seconds=30,
+        )
+        return transcriber
+
+    return build
+
+
 # Every Transcriber this repo has; a real adapter is added here when it lands.
 IMPLEMENTATIONS: dict[str, Callable[[], Transcriber]] = {
     "fake": FakeTranscriber,
     "gemini": _gemini,
+    "openai_compatible": _http(OpenAiCompatibleTranscriber, "openai_verbose.json"),
+    "diarized_http": _http(DiarizedHttpTranscriber, "diarized_http.json"),
 }
 
 
@@ -115,7 +142,9 @@ async def test_the_profile_and_the_flag_agree_with_the_segments(
 ) -> None:
     transcript = await transcriber.transcribe(audio, language_hint="en")
     assert transcript.language_profile is profile_of(transcript.segments)
-    assert transcript.uncertain is is_uncertain(transcript.segments)
+    # An adapter may add a fixed doubt its segments cannot show (no speakers).
+    doubted = is_uncertain(transcript.segments) or bool(transcript.uncertain_reasons)
+    assert transcript.uncertain is doubted
     assert transcript.provider and transcript.model
 
 

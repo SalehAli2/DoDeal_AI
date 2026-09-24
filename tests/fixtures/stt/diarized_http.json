@@ -1,0 +1,8 @@
+{
+  "model": "owner-stt-1",
+  "segments": [
+    {"start": 4.5, "end": 8.0, "speaker": "B", "text": "أريد فيلا قرب البحر", "language": "ar-AE", "confidence": null},
+    {"start": 0.0, "end": 4.2, "speaker": "A", "text": "Good morning, this is the sales office.", "language": "en", "confidence": 0.93},
+    {"start": 8.2, "end": 9.0, "speaker": "A", "text": "2025", "language": "english", "confidence": 0.8}
+  ]
+}

@@ -221,14 +221,18 @@ def test_the_shape_is_held_by_the_schema(change: dict) -> None:
 
 
 def test_the_whatsapp_suggestion_has_no_way_out_but_the_callback() -> None:
-    """LLM06: the service's only POSTs are the signed callback and the model
-    call, and the extras module imports nothing that could send."""
+    """LLM06: the service's only POSTs are the signed callback, the model call
+    and the audio to an HTTP STT engine; extras imports nothing that sends."""
     posts = sorted(
         path.relative_to(SRC).as_posix()
         for path in SRC.rglob("*.py")
         if re.search(r"(?<!router)\.post\(", path.read_text(encoding="utf-8"))
     )
-    assert posts == ["core/callbacks.py", "core/llm/openai_compatible.py"]
+    assert posts == [
+        "core/callbacks.py",
+        "core/llm/openai_compatible.py",
+        "units/call_intelligence/http_stt.py",
+    ]
     tree = ast.parse((SRC / "units/call_intelligence/extras.py").read_text("utf-8"))
     imported = {
         node.module or "" for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
