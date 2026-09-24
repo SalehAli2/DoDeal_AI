@@ -40,6 +40,7 @@ PROFILE_UNIT_B_OBJECTIONS = "unit_b.objections"
 PROFILE_UNIT_B_SCORE = "unit_b.score"
 PROFILE_UNIT_B_ESCALATIONS = "unit_b.escalations"
 PROFILE_UNIT_B_COACHING = "unit_b.coaching"
+PROFILE_UNIT_B_EXTRAS = "unit_b.extras"
 
 KNOWN_PROFILES: tuple[str, ...] = (
     PROFILE_UNIT_A_CLASSIFY,
@@ -51,6 +52,7 @@ KNOWN_PROFILES: tuple[str, ...] = (
     PROFILE_UNIT_B_SCORE,
     PROFILE_UNIT_B_ESCALATIONS,
     PROFILE_UNIT_B_COACHING,
+    PROFILE_UNIT_B_EXTRAS,
 )
 
 

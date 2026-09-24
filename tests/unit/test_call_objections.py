@@ -39,13 +39,14 @@ from dodeal_ai.units.call_intelligence.paid import JobGone, PassUsage
 from dodeal_ai.units.call_intelligence.prompts import (
     COACHING_TEMPLATE,
     ESCALATIONS_TEMPLATE,
+    EXTRAS_TEMPLATE,
     OBJECTIONS_TEMPLATE,
     REPROMPT_TAIL_TEMPLATE,
 )
 from dodeal_ai.units.call_intelligence.transcriber import Segment, Transcript
 from dodeal_ai.units.call_intelligence.wave2 import OBJECTIONS, wave2
 from tests.helpers.fake_llm import FakeLLM, json_response
-from tests.helpers.wave2_answers import coaching_answer
+from tests.helpers.wave2_answers import coaching_answer, extras_answer
 
 SCOPE = RequestContext.for_admitted_job(
     "tenant-a", request_id="req-1"
@@ -250,6 +251,7 @@ async def _done_job():
 async def _wave2(llm: FakeLLM, job, work: dict | None = None, usage=None):
     llm.script_for(ESCALATIONS_TEMPLATE, json_response({"escalations": []}))
     llm.script_for(COACHING_TEMPLATE, json_response(coaching_answer(SEGMENTS[0].text)))
+    llm.script_for(EXTRAS_TEMPLATE, json_response(extras_answer()))
     return await wave2(
         llm,
         job,
@@ -277,6 +279,7 @@ async def test_wave2_runs_the_objections_pass_and_keeps_its_answer() -> None:
         "unit_b.objections",
         "unit_b.escalations",
         "unit_b.coaching",
+        "unit_b.extras",
     ]
     assert wave.models[OBJECTIONS] == "fake-model-pinned"
     assert usage.tokens[OBJECTIONS]["calls"] == 1
@@ -286,6 +289,7 @@ async def test_wave2_runs_the_objections_pass_and_keeps_its_answer() -> None:
         OBJECTIONS: 1,
         "escalations": 1,
         "coaching": 1,
+        "extras": 1,
     }
 
 
@@ -304,7 +308,11 @@ async def test_a_kept_answer_is_never_paid_for_again() -> None:
     work = {OBJECTIONS: {"answer": ANSWER, "model": "kept-model"}}
     llm = FakeLLM()
     wave = await _wave2(llm, job, work)
-    assert llm.profiles == ["unit_b.escalations", "unit_b.coaching"]
+    assert llm.profiles == [
+        "unit_b.escalations",
+        "unit_b.coaching",
+        "unit_b.extras",
+    ]
     assert wave.models[OBJECTIONS] == "kept-model"
 
 

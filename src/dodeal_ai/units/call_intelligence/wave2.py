@@ -8,6 +8,9 @@ another, each on its own profile.
                                  off_channel_contact (escalations.py)
   coaching    unit_b.coaching    observations, moments, a plan and the call's
                                  stages, tone-checked in code (coaching.py)
+  extras      unit_b.extras      keywords, tags, a WhatsApp suggestion never
+                                 sent by us, and seriousness, banded in code
+                                 (extras.py)
 
 EACH PASS STANDS ALONE. Its answer becomes its part; a pass that fails --
 twice unanswered, or malformed after its one reprompt -- leaves its part null
@@ -42,6 +45,7 @@ from dodeal_ai.units.call_intelligence.escalations import (
     find_flags,
 )
 from dodeal_ai.units.call_intelligence.evidence import CallText
+from dodeal_ai.units.call_intelligence.extras import Extras, extras_part, find_extras
 from dodeal_ai.units.call_intelligence.objections import (
     Objections,
     find_objections,
@@ -67,6 +71,7 @@ OBJECTIONS = "objections"
 SCORE = "score"
 ESCALATIONS = "escalations"
 COACHING = "coaching"
+EXTRAS = "extras"
 
 
 @dataclass(slots=True)
@@ -126,6 +131,14 @@ async def wave2(
         lambda metered: coach(metered, call, scope=scope, settings=settings),
     )
     wave.parts[COACHING] = None if coached is None else coaching_part(call, coached)
+    extras = await _part(
+        run,
+        wave,
+        EXTRAS,
+        Extras,
+        lambda metered: find_extras(metered, call, scope=scope, settings=settings),
+    )
+    wave.parts[EXTRAS] = None if extras is None else extras_part(call, extras)
     return wave
 
 

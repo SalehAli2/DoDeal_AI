@@ -21,6 +21,7 @@ from dodeal_ai.units.call_intelligence.paid import PassUsage
 from dodeal_ai.units.call_intelligence.prompts import (
     COACHING_TEMPLATE,
     ESCALATIONS_TEMPLATE,
+    EXTRAS_TEMPLATE,
 )
 from dodeal_ai.units.call_intelligence.score import (
     CHECK_NAMES,
@@ -36,7 +37,7 @@ from dodeal_ai.units.call_intelligence.score import (
 from dodeal_ai.units.call_intelligence.transcriber import Segment, Transcript
 from dodeal_ai.units.call_intelligence.wave2 import OBJECTIONS, SCORE, wave2
 from tests.helpers.fake_llm import FakeLLM, json_response
-from tests.helpers.wave2_answers import coaching_answer
+from tests.helpers.wave2_answers import coaching_answer, extras_answer
 
 SCOPE = RequestContext.for_admitted_job(
     "tenant-a", request_id="req-1"
@@ -398,6 +399,7 @@ async def _wave2(
 ):
     llm.script_for(ESCALATIONS_TEMPLATE, json_response({"escalations": []}))
     llm.script_for(COACHING_TEMPLATE, json_response(coaching_answer(segments[0].text)))
+    llm.script_for(EXTRAS_TEMPLATE, json_response(extras_answer()))
     return await wave2(
         llm,
         await _done_job(),
@@ -425,6 +427,7 @@ async def test_a_scored_call_runs_the_pass_on_its_own_profile() -> None:
         PROFILE_UNIT_B_SCORE,
         "unit_b.escalations",
         "unit_b.coaching",
+        "unit_b.extras",
     ]
     assert llm.calls[1].max_output_tokens == 2500
 
@@ -459,7 +462,12 @@ async def test_a_call_with_no_score_never_runs_the_pass(
     failed = {} if objections else {OBJECTIONS: "objections_malformed_output"}
     assert wave.reasons == {**failed, SCORE: reason}
     asked = ["unit_b.objections"] * (1 if objections else 2)
-    assert llm.profiles == [*asked, "unit_b.escalations", "unit_b.coaching"]
+    assert llm.profiles == [
+        *asked,
+        "unit_b.escalations",
+        "unit_b.coaching",
+        "unit_b.extras",
+    ]
     assert OBJECTIONS in wave.parts
 
 
@@ -474,4 +482,5 @@ async def test_a_failed_score_pass_is_null_with_its_reason() -> None:
         PROFILE_UNIT_B_SCORE,
         "unit_b.escalations",
         "unit_b.coaching",
+        "unit_b.extras",
     ]

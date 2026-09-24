@@ -39,6 +39,7 @@ from dodeal_ai.units.call_intelligence.fake_transcriber import FakeTranscriber
 from dodeal_ai.units.call_intelligence.prompts import (
     COACHING_TEMPLATE,
     ESCALATIONS_TEMPLATE,
+    EXTRAS_TEMPLATE,
 )
 from dodeal_ai.units.call_intelligence.queues import NORMAL_QUEUE, STAGE2_QUEUE
 from dodeal_ai.units.call_intelligence.schemas import CallJobRequest
@@ -48,7 +49,7 @@ from dodeal_ai.units.call_intelligence.worker import STAGE1, process_call
 from dodeal_ai.workers import calls as calls_worker
 from tests.conftest import RedisFakes
 from tests.helpers.fake_llm import FakeLLM, json_response
-from tests.helpers.wave2_answers import coaching_answer
+from tests.helpers.wave2_answers import coaching_answer, extras_answer
 
 HOST = "audio.tenant-a.example"
 JOB = "job-1"
@@ -246,6 +247,7 @@ def _stage2_ctx(*answers: object, job_try: int = 1) -> dict[str, Any]:
     llm = FakeLLM(*(json_response(a) for a in answers or (NONE_RAISED,)))
     llm.script_for(ESCALATIONS_TEMPLATE, json_response({"escalations": []}))
     llm.script_for(COACHING_TEMPLATE, json_response(coaching_answer(SEGMENTS[0].text)))
+    llm.script_for(EXTRAS_TEMPLATE, json_response(extras_answer()))
     return {"llm": llm, "job_try": job_try}
 
 
@@ -266,6 +268,7 @@ async def test_stage2_settles_done_on_the_stage1_transcript(
         "unit_b.objections",
         "unit_b.escalations",
         "unit_b.coaching",
+        "unit_b.extras",
     ]
 
     job = await _job()
@@ -381,7 +384,7 @@ async def test_a_run_cut_off_by_its_deadline_runs_again_and_resumes(
     job = await _job()
     assert (job.stage2, job.passes) == (
         Stage2State.DONE,
-        {"objections": 2, "escalations": 1, "coaching": 1},
+        {"objections": 2, "escalations": 1, "coaching": 1, "extras": 1},
     )
 
 
