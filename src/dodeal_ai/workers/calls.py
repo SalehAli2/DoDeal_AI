@@ -57,6 +57,7 @@ from dodeal_ai.core.llm import aclose_llm, build_llm_client, build_router
 from dodeal_ai.core.logging_config import configure_logging, warn_if_demo_audio
 from dodeal_ai.core.prompting import clear_templates, preload_templates
 from dodeal_ai.core.redis import redis_url
+from dodeal_ai.core.safety import check_production_safety
 from dodeal_ai.units.call_intelligence.audio import (
     AudioTools,
     FfmpegMissing,
@@ -109,6 +110,8 @@ def worker_settings(
 
     async def startup(ctx: dict[str, Any]) -> None:
         configure_logging()
+        # Production refuses the demo's shortcuts before anything opens.
+        check_production_safety(settings)
         warn_if_demo_audio(settings)
         if queue != STAGE2_QUEUE:
             # Speech-to-text's own pool; the SDK's timeout is set per request.

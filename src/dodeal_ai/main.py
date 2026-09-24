@@ -27,6 +27,7 @@ from dodeal_ai.core.redis import (
     get_operational_client,
     get_queue_client,
 )
+from dodeal_ai.core.safety import check_production_safety
 from dodeal_ai.core.tenant_config import (
     clear_tenant_configs,
     load_tenant_configs,
@@ -134,6 +135,8 @@ async def lifespan(app: FastAPI):
     # Fail closed: if required config (signing key) is absent, refuse to start.
     settings = get_settings()
     configure_logging()
+    # Production refuses the demo's shortcuts before anything else is read.
+    check_production_safety(settings)
     # FIRST, before any socket or pool exists: a missing template must refuse
     # here, not on the first paid call days later. Read once for the app's life
     # so no judgement makes a disk read on the event loop (register item 85).

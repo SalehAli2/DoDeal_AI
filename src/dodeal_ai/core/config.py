@@ -521,6 +521,12 @@ class Settings(BaseSettings):
     # public, it tells anyone the service's traffic and failure rates.
     metrics_enabled: bool = False
 
+    # --- Where this runs (core/safety.py) ----------------------------------
+    # development, staging or production. development by default, so a laptop
+    # and the demo start as ever; production refuses the demo's shortcuts at
+    # start, and left at development in production those shortcuts all pass.
+    environment: Literal["development", "staging", "production"] = "development"
+
     # --- Logging (core/logging_config.py) ------------------------------
     # Effective level for the "dodeal_ai" logger tree (audit, error, cost,
     # resilience, validation, ...). Third-party libraries are unaffected --
