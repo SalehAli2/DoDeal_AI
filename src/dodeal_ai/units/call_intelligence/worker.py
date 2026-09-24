@@ -36,7 +36,9 @@ THE ORDER, and what each step may cost:
      signals, numbers, alarm phrases and their escalations -- found in code. A
      pass that fails leaves analysis null with its reason; the transcript and
      the signals block still go. A run that finds a kept transcript resumes wave 1
-     there, with no attempt spent and nothing received paid for again.
+     there, with no attempt spent and nothing received paid for again. A
+     transcript with no segments is uncertain (no_speech) and wave 1 is not
+     run: no model is called, and stage 1 goes with analysis null, no_speech.
   8. The stage-1 result is stored for result_ttl_seconds and the job is
      `done`, its delivery pending when the tenant has a callback (item 50);
      call.stage1 is then delivered, and what came of it is the delivery field,
@@ -128,6 +130,7 @@ from dodeal_ai.units.call_intelligence.reanalysis import (
 )
 from dodeal_ai.units.call_intelligence.transcriber import (
     DEFAULT_STT_PROFILE,
+    NO_SPEECH,
     Transcriber,
     Transcript,
     TranscriptionError,
@@ -244,8 +247,9 @@ def stage1_result(
 ) -> dict[str, object]:
     """The stage-1 result, held in db3 and delivered as call.stage1: the
     transcript, the audio's numbers, the signals block, wave 1's analysis (or
-    null and why) and the versions. No transcript, no signals: both are null;
-    audio is null when the recording was not inspected."""
+    null and why) and the versions. No wave 1 -- no transcript, or one with no
+    speech -- and the signals and versions are null too; audio is null when
+    the recording was not inspected."""
     duration = int(str(job.metadata["duration_seconds"]))
     return {
         "stage": 1,
@@ -262,9 +266,14 @@ def stage1_result(
         "roles": None if wave is None else wave.roles,
         "signals": None if wave is None else wave.signals,
         "analysis": None if wave is None else wave.analysis,
-        "analysis_reason": NO_TRANSCRIPT if wave is None else wave.reason,
+        "analysis_reason": _unanalysed(transcript) if wave is None else wave.reason,
         "versions": None if wave is None else wave.versions,
     }
+
+
+def _unanalysed(transcript: Transcript | None) -> str:
+    """Why wave 1 did not run: no transcript, or one with no speech in it."""
+    return NO_TRANSCRIPT if transcript is None else NO_SPEECH
 
 
 @dataclass(slots=True)
@@ -493,31 +502,37 @@ async def _stage1(
     ):
         return False
     run.moved(JobStatus.ANALYSING)
-    started = time.monotonic()
-    stage1 = stage_wanted(job, 1)
-    try:
-        wave = await wave1(
-            tenant_client(ctx, config) if stage1 else None,
-            job,
-            config,
-            transcript,
-            work=work,
-            scope=scope,
-            settings=get_settings(),
-            usage=run.usage,
-        )
-    except JobGone:
-        return False
-    finally:
-        run.analyse_ms = _ms_since(started)
-    if not stage1:
-        wave = replace(wave, reason=STAGE1_NOT_REQUESTED)
-    run.analysis_reason = wave.reason
-    run.transcript = wave.transcript
+    wave: Wave1 | None = None
+    if not transcript.segments:
+        # Nothing heard: nothing for a pass to read, so no model is called.
+        transcript = transcript.doubted(NO_SPEECH)
+        run.analysis_reason = NO_SPEECH
+    else:
+        started = time.monotonic()
+        stage1 = stage_wanted(job, 1)
+        try:
+            wave = await wave1(
+                tenant_client(ctx, config) if stage1 else None,
+                job,
+                config,
+                transcript,
+                work=work,
+                scope=scope,
+                settings=get_settings(),
+                usage=run.usage,
+            )
+        except JobGone:
+            return False
+        finally:
+            run.analyse_ms = _ms_since(started)
+        if not stage1:
+            wave = replace(wave, reason=STAGE1_NOT_REQUESTED)
+        transcript, run.analysis_reason = wave.transcript, wave.reason
+    run.transcript = transcript
     result = stage1_result(
         job,
         config,
-        transcript=wave.transcript,
+        transcript=transcript,
         outcome_label=None,
         wave=wave,
         audio=run.audio,

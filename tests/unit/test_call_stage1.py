@@ -30,7 +30,7 @@ from dodeal_ai.units.call_intelligence.config import (
 from dodeal_ai.units.call_intelligence.fake_transcriber import FakeTranscriber
 from dodeal_ai.units.call_intelligence.queues import NORMAL_QUEUE
 from dodeal_ai.units.call_intelligence.schemas import CallJobRequest
-from dodeal_ai.units.call_intelligence.transcriber import Segment
+from dodeal_ai.units.call_intelligence.transcriber import Segment, Transcript
 from dodeal_ai.units.call_intelligence.worker import STAGE1, process_call
 from tests.helpers.fake_llm import FakeLLM, json_response
 
@@ -384,6 +384,51 @@ async def test_a_model_outage_delivers_the_transcript_with_analysis_null(
     assert ctx["llm"].call_count == 2
     assert await _status() is JobStatus.DONE
     assert ctx["deliver"].events == [STAGE1]
+
+
+@pytest.mark.parametrize("engine_doubts", [(), ("stt_no_speakers",)])
+async def test_a_transcript_with_no_segments_is_no_speech_and_calls_no_model(
+    ctx: dict[str, Any], engine_doubts: tuple[str, ...]
+) -> None:
+    """The guard (F-5): nothing heard, so wave 1 is not run -- no roles, no
+    pass, no model call -- and stage 1 goes with analysis null, no_speech."""
+
+    class _Silent(FakeTranscriber):
+        async def transcribe(
+            self,
+            audio_path: Path,
+            *,
+            language_hint: str | None,
+            duration_seconds: float,
+        ) -> Transcript:
+            await super().transcribe(
+                audio_path,
+                language_hint=language_hint,
+                duration_seconds=duration_seconds,
+            )
+            return Transcript.of(
+                (), provider="recorded", model="recorded-stt-1", reasons=engine_doubts
+            )
+
+    ctx["transcriber"] = _Silent(())
+    ctx["llm"] = FakeLLM()
+    await _push()
+    await process_call(ctx, "tenant-a", JOB)
+
+    assert ctx["llm"].calls == []
+    result = await _result()
+    assert (result["analysis"], result["analysis_reason"]) == (None, "no_speech")
+    transcript = result["transcript"]
+    assert transcript["segments"] == [] and transcript["uncertain"] is True
+    assert transcript["uncertain_reasons"] == [*engine_doubts, "no_speech"]
+    assert (result["roles"], result["signals"], result["versions"]) == (
+        None,
+        None,
+        None,
+    )
+    assert result["eligible_for_full_analysis"] is False
+    assert ctx["deliver"].events == ["call.stage1"]
+    assert await _status() is JobStatus.DONE
 
 
 @pytest.mark.parametrize("llm", ["down", "none"])

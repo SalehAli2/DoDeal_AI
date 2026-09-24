@@ -1,10 +1,11 @@
 """The Transcriber seam (Unit B): a recording on disk in, a Transcript out.
 
-ONE METHOD, like the LLM seam: `transcribe(audio_path, *, language_hint)`. A
-provider adapter is a class that satisfies it; nothing else in the unit knows
-which provider ran. The adapters are built per STT profile by stt.py, which
-never builds the fake: a test or the demo hands it in directly
-(fake_transcriber.py), refused unless CALL_DEMO_ALLOW_LOCAL_AUDIO is on.
+ONE METHOD, like the LLM seam: `transcribe(audio_path, *, language_hint,
+duration_seconds)`. A provider adapter is a class that satisfies it; nothing
+else in the unit knows which provider ran. The adapters are built per STT
+profile by stt.py, which never builds the fake: a test or the demo hands it in
+directly (fake_transcriber.py), refused unless CALL_DEMO_ALLOW_LOCAL_AUDIO is
+on.
 
 THE TRANSCRIPT CHECKS ITSELF. Segments are in order and never overlap, every
 segment names a speaker, and the two judgements made of the whole -- the
@@ -37,6 +38,10 @@ MOSTLY_SHARE = 0.8
 # Below this time-weighted mean confidence, or with no speech at all, the
 # transcript is uncertain: it is stored and delivered, never fully analysed.
 MIN_MEAN_CONFIDENCE = 0.6
+
+# Why a transcript with no segments at all is uncertain: nothing was said
+# that an engine heard, so there is nothing for any pass to read.
+NO_SPEECH = "no_speech"
 
 # The STT profile built from DODEAL_CALL_STT_*, which every tenant is on until
 # its unit_b stt_profile names one of CALL_STT_PROFILES.
