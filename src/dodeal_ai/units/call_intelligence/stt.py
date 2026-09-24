@@ -38,9 +38,10 @@ def _api_key(name: str, profile: SttProfile, settings: Settings) -> str:
     return key
 
 
-def _build(
+def build_profile(
     name: str, profile: SttProfile, settings: Settings, http: httpx.AsyncClient
 ) -> Transcriber:
+    """One STT profile's transcriber; ConfigError when it cannot be built."""
     if profile.provider != "gemini":
         raise TranscriberNotConfigured()
     return GeminiTranscriber(
@@ -69,7 +70,7 @@ def build_transcribers(
     )
     profiles = {DEFAULT_STT_PROFILE: default, **settings.call_stt_profiles}
     return {
-        name: _build(name, profile, settings, http)
+        name: build_profile(name, profile, settings, http)
         for name, profile in profiles.items()
     }
 
