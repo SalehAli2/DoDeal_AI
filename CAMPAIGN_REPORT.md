@@ -7443,3 +7443,14 @@ failure modes, then one stress test (sabotage in brackets).
 - roles: a client labelled agent; an invented quote believed. Test: "this is Nada from the company" maps to agent, and an invented quote fails (quote check off fails 1; the clear-mapping rule off fails 1).
 - reanalysis: the audio transcribed and paid again; a push collides with the call's first job. Test: never calls the transcriber; the same versions twice give one job (index off fails 1; no-transcript guard off fails 1).
 - stt-eval, stt-compare, translation, docs, floors: no sabotage owed. There are 51 floors, all met, and a 16-digit card number is masked.
+
+## Unit B fixes F-1 to F-8 and the production-safety check
+- F-1 audio: an engine is paid to misread a container; a stereo side is sent unconverted. Test: an m4a reaches the engine as audio/flac (conversion off fails 1; probe off fails 5).
+- F-2 roles: one voice called agent is applied as a mapping; a one-sided long call reads as certain. Test: one agent and no client is not applied and is uncertain (client rule off fails 2).
+- F-3 signals: an agent's alarm phrase under unapplied roles counts as the client's; nobody reviews it. Test: unapplied roles plus an alarm phrase give off_channel_contact_review (agent-only rule fails 4).
+- F-4 gemini: a call over 1800 s is refused or mislabelled by diarization; an undiarized call becomes one segment. Test: 1801 s sends no diarization and 1800 s keeps it (limit off fails 2).
+- F-5 stage1: an empty transcript is paid through wave 1; an analysis is invented from nothing. Test: no segments means no model call (branch off fails 2).
+- F-6 translation: a failed call.translation is lost for good; a retry asks the model again. Test: the failed first send is retried with the same id and body (delivery lookup off fails 2).
+- F-7 stt: one hung STT request uses up the job's whole deadline; its timeout lands too late to record. Test: every adapter gets 600 (job timeout put back fails 3).
+- F-8 tenant_config: a unit_b PUT moves config_version and splits its groupings; the re-analysis identity churns. Test: a PUT that changes rules keeps config_version (keeper off fails 4).
+- 9 safety: production starts with the demo flag or an http backend; a fake STT makes up words in production. Test: each refusal alone stops the start (gate off fails 8).
