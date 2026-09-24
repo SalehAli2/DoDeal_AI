@@ -17,6 +17,8 @@ another tenant's job, and one index of every running job across tenants:
                                       its last transition's unix time -- a
                                       paused job by its wake-up time, once
                                       noted
+  call_jobs_running                   the same, for the jobs in a running
+                                      status only: the sweep reads it first
   call_stage2_pending                 a sorted set: every done job whose
                                       stage 2 is pending, scored when it
                                       became pending or the sweep re-queued it
@@ -181,8 +183,22 @@ _PASS_FIELD = "pass:"
 # Every job not yet terminal, across tenants, scored by its last transition.
 ACTIVE_JOBS_KEY = "call_jobs_active"
 
+# The part of the active set a run holds, scored alike: what the sweep reads
+# first, so a backlog of waiting jobs never hides one whose run died.
+RUNNING_JOBS_KEY = "call_jobs_running"
+
 # Every done job whose stage 2 is pending, scored when it became pending.
 STAGE2_PENDING_KEY = "call_stage2_pending"
+
+# The statuses a run holds a job in; a job left in one has lost its run.
+RUNNING_STATUSES: frozenset[JobStatus] = frozenset(
+    {
+        JobStatus.DOWNLOADING,
+        JobStatus.TRANSCRIBING,
+        JobStatus.ANALYSING,
+        JobStatus.DELIVERING,
+    }
+)
 
 
 def active_member(tenant: str, job_id: str) -> str:
@@ -192,21 +208,31 @@ def active_member(tenant: str, job_id: str) -> str:
 
 
 # Prepended to every script that moves a job still running. KEYS[1] the job,
-# KEYS[2] its call index, KEYS[3] the active set: both keys expire `ttl` from
-# now and the job is scored at `score`, this move's time.
-_TOUCH = """
+# KEYS[2] its call index, KEYS[3] the active set, KEYS[4] the running set:
+# both keys expire `ttl` from now and the job is scored at `score`, this
+# move's time, in the running set too while its status is a running one.
+_RUNNING_TABLE = ", ".join(
+    f"{status.value} = true" for status in sorted(RUNNING_STATUSES)
+)
+_TOUCH = f"""
+local RUNNING = {{{_RUNNING_TABLE}}}
 local function touch(ttl, score, member)
   redis.call('EXPIRE', KEYS[1], ttl)
   redis.call('EXPIRE', KEYS[2], ttl)
   redis.call('ZADD', KEYS[3], score, member)
+  if RUNNING[redis.call('HGET', KEYS[1], 'status')] then
+    redis.call('ZADD', KEYS[4], score, member)
+  else
+    redis.call('ZREM', KEYS[4], member)
+  end
 end
 """
 
 
-# KEYS: the new job, the call index, the active set. ARGV: the new job_id, the
-# record TTL, now's score, the member, then field/value pairs. Returns {1,
-# job_id} when this call made the job, {0, the existing job_id} when the call
-# already had one; nothing is written then.
+# KEYS: the new job, the call index, the active set, the running set. ARGV:
+# the new job_id, the record TTL, now's score, the member, then field/value
+# pairs. Returns {1, job_id} when this call made the job, {0, the existing
+# job_id} when the call already had one; nothing is written then.
 _CREATE_SCRIPT = (
     _TOUCH
     + """
@@ -223,13 +249,14 @@ return {1, ARGV[1]}
 """
 )
 
-# KEYS: the job, the call index, the active set, the stage-2 pending set.
-# ARGV: status, now, reason, the result TTL, "1" when the status is terminal,
-# the delivery state or "" to leave it, the stage-2 state or "" to leave it,
-# the record TTL, now's score, the member, then every terminal status. 0
-# missing, -1 already terminal, 1 moved. A terminal move sets finished_at and
-# the result TTL on both keys and leaves the active set; any other is touched.
-# A stage 2 made pending joins the pending set at now's score.
+# KEYS: the job, the call index, the active set, the running set, the stage-2
+# pending set. ARGV: status, now, reason, the result TTL, "1" when the status
+# is terminal, the delivery state or "" to leave it, the stage-2 state or ""
+# to leave it, the record TTL, now's score, the member, then every terminal
+# status. 0 missing, -1 already terminal, 1 moved. A terminal move sets
+# finished_at and the result TTL on both keys and leaves the active and
+# running sets; any other is touched. A stage 2 made pending joins the pending
+# set at now's score.
 _TRANSITION_SCRIPT = (
     _TOUCH
     + """
@@ -249,7 +276,7 @@ end
 if ARGV[7] ~= '' then
   redis.call('HSET', KEYS[1], 'stage2', ARGV[7])
   if ARGV[7] == 'pending' then
-    redis.call('ZADD', KEYS[4], ARGV[9], ARGV[10])
+    redis.call('ZADD', KEYS[5], ARGV[9], ARGV[10])
   end
 end
 if ARGV[5] == '1' then
@@ -257,6 +284,7 @@ if ARGV[5] == '1' then
   redis.call('EXPIRE', KEYS[1], ARGV[4])
   redis.call('EXPIRE', KEYS[2], ARGV[4])
   redis.call('ZREM', KEYS[3], ARGV[10])
+  redis.call('ZREM', KEYS[4], ARGV[10])
 else
   touch(ARGV[8], ARGV[9], ARGV[10])
 end
@@ -264,10 +292,11 @@ return 1
 """
 )
 
-# KEYS: the job, the call index, the active set. ARGV: max tries, now, the
-# running status, the record TTL, now's score, the member, then every terminal
-# status. {-2, 0} missing, {-1, 0} terminal, {0, attempts} at the cap (nothing
-# moves), {1, attempts} claimed: attempts incremented, the reason cleared.
+# KEYS: the job, the call index, the active set, the running set. ARGV: max
+# tries, now, the running status, the record TTL, now's score, the member, then
+# every terminal status. {-2, 0} missing, {-1, 0} terminal, {0, attempts} at
+# the cap (nothing moves), {1, attempts} claimed: attempts incremented, the
+# reason cleared.
 _CLAIM_SCRIPT = (
     _TOUCH
     + """
@@ -291,11 +320,12 @@ return {1, attempts}
 """
 )
 
-# KEYS: the job, the call index, the active set. ARGV: the paused status, now,
-# reason, "1" to give back the attempt this run claimed, "1" when the cost store
-# was down, the record TTL, now's score, the member, then every terminal
-# status. {0, 0} missing, {-1, 0} terminal, else the job's pause and outage
-# counts after this one. A pause never costs an attempt (core(105)).
+# KEYS: the job, the call index, the active set, the running set. ARGV: the
+# paused status, now, reason, "1" to give back the attempt this run claimed,
+# "1" when the cost store was down, the record TTL, now's score, the member,
+# then every terminal status. {0, 0} missing, {-1, 0} terminal, else the job's
+# pause and outage counts after this one. A pause never costs an attempt
+# (core(105)).
 _PAUSE_SCRIPT = (
     _TOUCH
     + """
@@ -321,10 +351,10 @@ return {redis.call('HINCRBY', KEYS[1], 'pauses', 1), outages}
 """
 )
 
-# KEYS: the job, the call index, the active set. ARGV: now, the transcribing
-# status, the record TTL, now's score, the member, then every terminal status.
-# 0 missing, -1 terminal, else the job's transcriptions after this one:
-# `transcribing` and counted in one step, before the paid call is made.
+# KEYS: the job, the call index, the active set, the running set. ARGV: now,
+# the transcribing status, the record TTL, now's score, the member, then every
+# terminal status. 0 missing, -1 terminal, else the job's transcriptions after
+# this one: `transcribing` and counted in one step, before the paid call.
 _TRANSCRIBE_SCRIPT = (
     _TOUCH
     + """
@@ -403,10 +433,10 @@ redis.call('ZADD', KEYS[2], 'XX', ARGV[2], ARGV[1])
 return redis.call('HINCRBY', KEYS[1], 'stage2_sweeps', 1)
 """
 
-# KEYS: the job, the call index, the active set. ARGV: now, the pass's field,
-# the record TTL, now's score, the member, then every terminal status. 0
-# missing, -1 terminal, else the pass's starts after this one: counted before
-# the paid call is made, the status left as it is.
+# KEYS: the job, the call index, the active set, the running set. ARGV: now,
+# the pass's field, the record TTL, now's score, the member, then every
+# terminal status. 0 missing, -1 terminal, else the pass's starts after this
+# one: counted before the paid call is made, the status left as it is.
 _PASS_SCRIPT = (
     _TOUCH
     + """
@@ -446,14 +476,17 @@ redis.call('EXPIRE', KEYS[1], ARGV[3])
 return 1
 """
 
-# KEYS: the job, the active set. ARGV: the member, now's score, then pairs of
-# a status the sweep may re-enqueue and the seconds past its score it waits. A
-# job gone leaves the set: {0}. One in another status, not yet past its wait,
-# or swept at its last transition already: {-1}. Else it is marked swept at
-# that transition: {1, its sweeps so far, its queue, its status, its pauses}.
+# KEYS: the job, the active set, the running set. ARGV: the member, now's
+# score, then pairs of a status the sweep may re-enqueue and the seconds past
+# its score it waits. A job gone leaves both sets: {0}. One in another status,
+# not yet past its wait, or swept at its last transition already: {-1}. Else
+# it is marked swept at that transition: {1, its sweeps so far, its queue, its
+# status, its pauses}; a running one is re-scored at now in the running set,
+# so it waits there for its re-run instead of filling the next sweep's batch.
 _SWEEP_SCRIPT = """
 if redis.call('EXISTS', KEYS[1]) == 0 then
   redis.call('ZREM', KEYS[2], ARGV[1])
+  redis.call('ZREM', KEYS[3], ARGV[1])
   return {0}
 end
 local current = redis.call('HGET', KEYS[1], 'status')
@@ -472,6 +505,7 @@ if redis.call('HGET', KEYS[1], 'swept') == moved then
   return {-1}
 end
 redis.call('HSET', KEYS[1], 'swept', moved)
+redis.call('ZADD', KEYS[3], 'XX', ARGV[2], ARGV[1])
 local sweeps = redis.call('HINCRBY', KEYS[1], 'sweeps', 1)
 local pauses = redis.call('HGET', KEYS[1], 'pauses') or '0'
 return {1, sweeps, redis.call('HGET', KEYS[1], 'queue'), current, pauses}
@@ -517,12 +551,14 @@ async def _call[T](factory: Callable[[], Awaitable[T]]) -> T:
         raise JobStoreUnavailable() from None
 
 
-def _keys(job: Job) -> tuple[str, str, str]:
-    """A moving script's three keys: the job, its call index, the active set."""
+def _keys(job: Job) -> tuple[str, str, str, str]:
+    """A moving script's four keys: the job, its call index, the active set,
+    the running set."""
     return (
         job_key(job.tenant, job.job_id),
         call_index_key(job.tenant, job.call_id),
         ACTIVE_JOBS_KEY,
+        RUNNING_JOBS_KEY,
     )
 
 
@@ -568,10 +604,11 @@ async def create_job(
     made, existing = await _call(
         lambda: client.eval(
             _CREATE_SCRIPT,
-            3,
+            4,
             job_key(tenant, job_id),
             call_index_key(tenant, call_id),
             ACTIVE_JOBS_KEY,
+            RUNNING_JOBS_KEY,
             job_id,
             *_touch_args(tenant, job_id, now),
             *pairs,
@@ -641,7 +678,7 @@ async def transition(
     moved = await _call(
         lambda: client.eval(
             _TRANSITION_SCRIPT,
-            4,
+            5,
             *_keys(job),
             STAGE2_PENDING_KEY,
             status.value,
@@ -720,7 +757,7 @@ async def claim_attempt(
     outcome, attempts = await _call(
         lambda: client.eval(
             _CLAIM_SCRIPT,
-            3,
+            4,
             *_keys(job),
             max_tries,
             now.isoformat(),
@@ -741,7 +778,7 @@ async def start_transcription(job: Job, *, now: datetime) -> int | None:
     count = await _call(
         lambda: client.eval(
             _TRANSCRIBE_SCRIPT,
-            3,
+            4,
             *_keys(job),
             now.isoformat(),
             JobStatus.TRANSCRIBING.value,
@@ -759,7 +796,7 @@ async def start_pass(job: Job, name: str, *, now: datetime) -> int | None:
     count = await _call(
         lambda: client.eval(
             _PASS_SCRIPT,
-            3,
+            4,
             *_keys(job),
             now.isoformat(),
             f"{_PASS_FIELD}{name}",
@@ -801,7 +838,7 @@ async def pause(
     pauses, outages = await _call(
         lambda: client.eval(
             _PAUSE_SCRIPT,
-            3,
+            4,
             *_keys(job),
             JobStatus.PAUSED_BUDGET.value,
             now.isoformat(),
@@ -840,6 +877,12 @@ async def stale_jobs(before: datetime, *, limit: int) -> list[tuple[str, str]]:
     """Up to `limit` (tenant, job_id) pairs whose last move was before
     `before`, oldest first."""
     return await _stale(ACTIVE_JOBS_KEY, before, limit)
+
+
+async def stale_running(before: datetime, *, limit: int) -> list[tuple[str, str]]:
+    """Up to `limit` (tenant, job_id) pairs in a running status whose last
+    move was before `before`, oldest first."""
+    return await _stale(RUNNING_JOBS_KEY, before, limit)
 
 
 async def stale_stage2(before: datetime, *, limit: int) -> list[tuple[str, str]]:
@@ -892,9 +935,10 @@ async def mark_swept(
     marked = await _call(
         lambda: client.eval(
             _SWEEP_SCRIPT,
-            2,
+            3,
             job_key(tenant, job_id),
             ACTIVE_JOBS_KEY,
+            RUNNING_JOBS_KEY,
             active_member(tenant, job_id),
             now.timestamp(),
             *pairs,

@@ -19,6 +19,7 @@ from arq import Retry
 
 from dodeal_ai.core.config import ConfigError, get_settings
 from dodeal_ai.core.jobs import (
+    RUNNING_JOBS_KEY,
     DeliveryState,
     JobStatus,
     create_job,
@@ -782,6 +783,73 @@ async def test_a_sweep_with_the_queue_down_takes_its_mark_back(
 
 def _later(seconds: float) -> datetime:
     return datetime.now(UTC) + timedelta(seconds=seconds)
+
+
+async def _backlog(size: int) -> None:
+    """`size` queued jobs pushed three hours ago, which arq lost."""
+    pushed = datetime.now(UTC) - timedelta(hours=3)
+    for n in range(size):
+        await create_job(
+            "tenant-a",
+            1000 + n,
+            job_id=f"queued-{n}",
+            request_id="req-backlog",
+            queue=NORMAL_QUEUE,
+            metadata={},
+            now=pushed,
+        )
+
+
+async def test_500_queued_jobs_do_not_delay_one_stuck_transcribing_job(
+    ctx: dict, redis_fakes: RedisFakes
+) -> None:
+    """The guard: running jobs first, the backlog takes what is left."""
+    await _calls_on()
+    await _backlog(sweep.SWEEP_BATCH)
+    await _push()
+    await _left_transcribing(ctx)
+
+    assert await sweep.sweep(now=_stuck_later()) == sweep.SWEEP_BATCH
+    swept = await _swept_ids(redis_fakes)
+    assert f"arq:job:tenant-a:{JOB}:sweep:1" in swept
+    assert len(swept) == sweep.SWEEP_BATCH
+    assert await sweep.sweep(now=_stuck_later()) == 1
+
+
+async def test_a_batch_filled_by_running_jobs_leaves_the_rest_for_the_next_sweep(
+    ctx: dict, redis_fakes: RedisFakes, monkeypatch
+) -> None:
+    """A swept running job waits for its re-run apart from the batch."""
+    monkeypatch.setattr(sweep, "SWEEP_BATCH", 1)
+    await _calls_on()
+    await _backlog(1)
+    await _push()
+    await _left_transcribing(ctx)
+    stuck = _stuck_later()
+
+    assert await sweep.sweep(now=stuck) == 1
+    assert await _swept_ids(redis_fakes) == [f"arq:job:tenant-a:{JOB}:sweep:1"]
+    running = await redis_fakes.jobs.zscore(RUNNING_JOBS_KEY, f"tenant-a:{JOB}")
+    assert running == stuck.timestamp()
+    assert await sweep.sweep(now=stuck) == 1
+    assert "arq:job:tenant-a:queued-0:sweep:1" in await _swept_ids(redis_fakes)
+
+
+async def test_the_running_index_follows_the_status(
+    ctx: dict, redis_fakes: RedisFakes
+) -> None:
+    async def running() -> list[str]:
+        return await redis_fakes.jobs.zrange(RUNNING_JOBS_KEY, 0, -1)
+
+    await _calls_on()
+    await _push()
+    assert await running() == []
+    await _left_transcribing(ctx)
+    assert await running() == [f"tenant-a:{JOB}"]
+    ctx["transcriber"] = FakeTranscriber()
+    await process_call(ctx, "tenant-a", JOB)
+    assert (await _job()).status is JobStatus.DONE
+    assert await running() == []
 
 
 async def test_a_queued_job_with_no_arq_entry_is_re_enqueued_after_an_hour(

@@ -20,6 +20,13 @@ moves and stalls again can be. The re-run takes the interrupted path: a
 transcription or a pass is retried once, a download or a delivery spends an
 attempt, and past those the job is dead-lettered and call.failed goes.
 
+RUNNING FIRST, IN ONE BATCH OF 500. A sweep reads the stale running jobs
+first (their own index, core/jobs.py), then the pending stage 2s, then the
+active set for the queued and paused, each taking what the ones before it
+left of the batch: a backlog of waiting jobs never delays a job whose run
+died. The active set is read last for every status, so a running job the
+index missed is still found.
+
 A LOST STAGE 2. A done job whose stage 2 has been pending 7200 s, held by arq
 under neither of its stage-2 ids, is re-queued ONCE, and waited for 7200 s
 more; found so again, its stage 2 fails with stage2_lost and call.failed goes
@@ -42,6 +49,7 @@ from dodeal_ai.core.callbacks import CALL_FAILED
 from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.errors import QueueUnavailable
 from dodeal_ai.core.jobs import (
+    RUNNING_STATUSES,
     JobStatus,
     Stage2State,
     mark_stage2_requeued,
@@ -50,6 +58,7 @@ from dodeal_ai.core.jobs import (
     settle_stage2,
     stage2_stuck,
     stale_jobs,
+    stale_running,
     stale_stage2,
     unmark_swept,
 )
@@ -84,18 +93,11 @@ STAGE2_WAIT_SECONDS = 7200
 # Why stage 2 failed: lost, re-queued once, and lost again.
 STAGE2_LOST = "stage2_lost"
 
-# Stale jobs read per sweep; the rest wait for the next one, oldest first.
+# Stale jobs read per sweep, running ones first; the rest wait for the next.
 SWEEP_BATCH = 500
 
 # The statuses a run holds a job in; a job left in one has lost its run.
-STUCK_STATUSES = frozenset(
-    {
-        JobStatus.DOWNLOADING,
-        JobStatus.TRANSCRIBING,
-        JobStatus.ANALYSING,
-        JobStatus.DELIVERING,
-    }
-)
+STUCK_STATUSES = RUNNING_STATUSES
 
 # The statuses a job waits in on purpose, while arq holds it.
 WAITING_STATUSES = frozenset({JobStatus.QUEUED, JobStatus.PAUSED_BUDGET})
@@ -118,18 +120,25 @@ async def sweep_stuck_jobs(ctx: dict[str, Any]) -> int:
 
 
 async def sweep(*, now: datetime, deliver: Deliver = deliver_nothing) -> int:
-    """One pass over the stale end of the active set, then of the stage-2
-    pending set. A queue that cannot be reached ends the pass, anything it
-    had marked taken back, for the next one."""
-    swept = 0
+    """One pass over one batch: the stale running jobs, then the pending
+    stage 2s, then the rest of the active set. A queue that cannot be reached
+    ends the pass, anything it had marked taken back, for the next one."""
+    swept, left = 0, SWEEP_BATCH
     waits = stuck_after()
-    before = now - timedelta(seconds=min(waits.values()))
     try:
-        for tenant, job_id in await stale_jobs(before, limit=SWEEP_BATCH):
+        died = now - timedelta(seconds=waits[JobStatus.TRANSCRIBING])
+        running = await stale_running(died, limit=left)
+        left -= len(running)
+        for tenant, job_id in running:
             swept += await _sweep_job(tenant, job_id, now, waits)
         lost = now - timedelta(seconds=STAGE2_WAIT_SECONDS)
-        for tenant, job_id in await stale_stage2(lost, limit=SWEEP_BATCH):
+        stage2 = await stale_stage2(lost, limit=left) if left else []
+        left -= len(stage2)
+        for tenant, job_id in stage2:
             swept += await _sweep_stage2(tenant, job_id, now, deliver)
+        before = now - timedelta(seconds=min(waits.values()))
+        for tenant, job_id in await stale_jobs(before, limit=left) if left else []:
+            swept += await _sweep_job(tenant, job_id, now, waits)
     except QueueUnavailable:
         _logger.warning(
             "call_job_sweep_stopped",

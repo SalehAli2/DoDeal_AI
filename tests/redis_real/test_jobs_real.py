@@ -13,6 +13,7 @@ from redis import asyncio as redis_async
 from dodeal_ai.core.jobs import (
     _CLAIM_SCRIPT,
     _CREATE_SCRIPT,
+    _PAUSE_SCRIPT,
     _STAGE2_REQUEUED_SCRIPT,
     _STAGE2_SCRIPT,
     _STAGE2_STUCK_SCRIPT,
@@ -20,6 +21,7 @@ from dodeal_ai.core.jobs import (
     _TERMINAL_ARGS,
     _TRANSITION_SCRIPT,
     ACTIVE_JOBS_KEY,
+    RUNNING_JOBS_KEY,
     STAGE2_PENDING_KEY,
     active_member,
     call_index_key,
@@ -35,11 +37,12 @@ _RECORD_TTL = 604_800
 _SCORE = 1_790_000_000.0
 
 
-def _keys(prefix: str, job_id: str) -> tuple[str, str, str]:
+def _keys(prefix: str, job_id: str) -> tuple[str, str, str, str]:
     return (
         prefix + job_key(_TENANT, job_id),
         prefix + call_index_key(_TENANT, _CALL),
         prefix + ACTIVE_JOBS_KEY,
+        prefix + RUNNING_JOBS_KEY,
     )
 
 
@@ -52,7 +55,7 @@ async def _create(
 ) -> tuple[int, str]:
     made, existing = await client.eval(
         _CREATE_SCRIPT,
-        3,
+        4,
         *_keys(prefix, job_id),
         job_id,
         *_touch(job_id),
@@ -89,13 +92,14 @@ async def test_a_terminal_move_is_final_and_expires_both_keys(
 ) -> None:
     await _create(real_redis, key_prefix, "job-1")
     keys = _keys(key_prefix, "job-1")
-    job, index, active = keys
+    job, index, active, running = keys
 
     async def _move(status: str) -> int:
         return await real_redis.eval(
             _TRANSITION_SCRIPT,
-            3,
+            5,
             *keys,
+            key_prefix + STAGE2_PENDING_KEY,
             status,
             "t",
             "",
@@ -110,7 +114,7 @@ async def test_a_terminal_move_is_final_and_expires_both_keys(
     moved, again = await _move("done"), await _move("failed")
     claim = await real_redis.eval(
         _CLAIM_SCRIPT,
-        3,
+        4,
         *keys,
         2,
         "t",
@@ -124,6 +128,7 @@ async def test_a_terminal_move_is_final_and_expires_both_keys(
     for key in (job, index):
         assert 0 < await real_redis.ttl(key) <= _TTL
     assert await real_redis.zscore(active, active_member(_TENANT, "job-1")) is None
+    assert await real_redis.zscore(running, active_member(_TENANT, "job-1")) is None
 
 
 async def test_a_running_job_expires_and_is_swept_once_per_stall(
@@ -132,7 +137,7 @@ async def test_a_running_job_expires_and_is_swept_once_per_stall(
     """The push gives both keys the record TTL and a score; a stuck job is
     marked once for its last transition, then not again."""
     await _create(real_redis, key_prefix, "job-1")
-    job, index, active = _keys(key_prefix, "job-1")
+    job, index, active, running = _keys(key_prefix, "job-1")
     member = active_member(_TENANT, "job-1")
     for key in (job, index):
         assert _TTL < await real_redis.ttl(key) <= _RECORD_TTL
@@ -140,7 +145,7 @@ async def test_a_running_job_expires_and_is_swept_once_per_stall(
 
     async def _sweep() -> list[object]:
         return await real_redis.eval(
-            _SWEEP_SCRIPT, 2, job, active, member, _SCORE, "queued", 0
+            _SWEEP_SCRIPT, 3, job, active, running, member, _SCORE, "queued", 0
         )
 
     first, second = await _sweep(), await _sweep()
@@ -152,15 +157,16 @@ async def test_a_pending_stage2_is_indexed_requeued_once_and_leaves_on_settle(
     real_redis: redis_async.Redis, key_prefix: str
 ) -> None:
     await _create(real_redis, key_prefix, "job-1")
-    job, index, active = _keys(key_prefix, "job-1")
+    job, index, active, running = _keys(key_prefix, "job-1")
     pending = key_prefix + STAGE2_PENDING_KEY
     member = active_member(_TENANT, "job-1")
     done = await real_redis.eval(
         _TRANSITION_SCRIPT,
-        4,
+        5,
         job,
         index,
         active,
+        running,
         pending,
         "done",
         "t",
@@ -199,3 +205,39 @@ async def test_a_pending_stage2_is_indexed_requeued_once_and_leaves_on_settle(
     ]
     assert await real_redis.zscore(pending, member) is None
     assert await _stuck(_SCORE + 999) == -1
+
+
+async def test_the_running_index_follows_the_status(
+    real_redis: redis_async.Redis, key_prefix: str
+) -> None:
+    """A claim puts the job in the running set at its score; a pause and a
+    terminal move take it out; the push never puts it in."""
+    await _create(real_redis, key_prefix, "job-1")
+    keys = _keys(key_prefix, "job-1")
+    running, member = keys[3], active_member(_TENANT, "job-1")
+    assert await real_redis.zscore(running, member) is None
+
+    await real_redis.eval(
+        _CLAIM_SCRIPT,
+        4,
+        *keys,
+        2,
+        "t",
+        "downloading",
+        *_touch("job-1"),
+        *_TERMINAL_ARGS,
+    )
+    assert await real_redis.zscore(running, member) == _SCORE
+    await real_redis.eval(
+        _PAUSE_SCRIPT,
+        4,
+        *keys,
+        "paused_budget",
+        "t",
+        "x",
+        "0",
+        "0",
+        *_touch("job-1"),
+        *_TERMINAL_ARGS,
+    )
+    assert await real_redis.zscore(running, member) is None
