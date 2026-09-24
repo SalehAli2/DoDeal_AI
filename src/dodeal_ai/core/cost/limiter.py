@@ -254,6 +254,19 @@ async def enforce_calls_cost(tenant: str, amount: int = 1) -> None:
     )
 
 
+async def enforce_reanalysis_cost(tenant: str, amount: int = 1) -> None:
+    """Gate 4 for a call re-analysis: `cost:reanalysis:tenant:{t}` against its
+    own cap, never the pushes' or `cost:tenant`, so a re-run of old calls cannot
+    starve new ones. Fails OPEN at the route, as every request counter does."""
+    await _enforce_one_counter(
+        tenant,
+        f"cost:reanalysis:tenant:{tenant}",
+        limit=get_settings().cost_reanalysis_per_tenant_limit,
+        reason_code="reanalysis_quota_exceeded",
+        amount=amount,
+    )
+
+
 async def _enforce_one_counter(
     tenant: str, key: str, *, limit: int, reason_code: str, amount: int
 ) -> None:

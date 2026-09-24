@@ -8,6 +8,11 @@ call's author as an asserted subject (`author:<author_id>`).
   POST /api/v1/calls/jobs    202 {job_id, status}; the same call again is the
                              same job_id; 403 calls_not_enabled while the
                              tenant's `unit_b.calls_enabled` is off
+  POST /api/v1/calls/reanalysis
+                             202 {job_id, status}: a stored call's transcript
+                             analysed again with the versions in force, on
+                             its own counter (`cost:reanalysis:tenant`); the
+                             same call, stages and versions is the same job
   GET  /api/v1/calls/jobs/{job_id}
                              {job_id, status, reason, delivery, stage2,
                              result, stage2_result}, each result while held;
@@ -25,12 +30,18 @@ from fastapi import APIRouter, Depends, Path
 from dodeal_ai.core.auth.dependencies import (
     service_gate4_calls_cost,
     service_gate4_reads_cost,
+    service_gate4_reanalysis_cost,
 )
 from dodeal_ai.core.context import RequestContext
 from dodeal_ai.units.call_intelligence.admission import admit_call
 from dodeal_ai.units.call_intelligence.config import resolve_calls_config
 from dodeal_ai.units.call_intelligence.reads import CallJobView, read_call_job
-from dodeal_ai.units.call_intelligence.schemas import CallJobAccepted, CallJobRequest
+from dodeal_ai.units.call_intelligence.reanalysis import admit_reanalysis
+from dodeal_ai.units.call_intelligence.schemas import (
+    CallJobAccepted,
+    CallJobRequest,
+    ReanalysisRequest,
+)
 
 router = APIRouter(prefix="/api/v1/calls", tags=["unit-b"])
 
@@ -43,6 +54,21 @@ async def create_call_job(
     """Admit one recorded call. Work happens on a worker, never here: the
     answer is the job to poll and the callbacks to expect."""
     return await admit_call(
+        context.scope_for_author(body.author_id, budget="calls"),
+        body,
+        await resolve_calls_config(context.tenant),
+        now=datetime.now(UTC),
+    )
+
+
+@router.post("/reanalysis", status_code=202)
+async def create_reanalysis_job(
+    body: ReanalysisRequest,
+    context: Annotated[RequestContext, Depends(service_gate4_reanalysis_cost)],
+) -> CallJobAccepted:
+    """Analyse a stored call again. The transcript is the CRM's copy of stage
+    1's; the audio is never fetched and never transcribed again."""
+    return await admit_reanalysis(
         context.scope_for_author(body.author_id, budget="calls"),
         body,
         await resolve_calls_config(context.tenant),

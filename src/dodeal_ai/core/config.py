@@ -431,6 +431,10 @@ class Settings(BaseSettings):
     # item 50): a job is minutes of audio and paid passes, so its own cap, never
     # the live one. 2000 is a busy sales floor's day; too low 429s real calls.
     cost_calls_per_tenant_limit: int = Field(default=2_000, gt=0)
+    # The tenant's call re-analyses per window, on `cost:reanalysis:tenant`: a
+    # list or prompt change re-runs many stored calls at once, so its own cap,
+    # never the pushes'. 20000 is a month of calls; too low 429s a re-run.
+    cost_reanalysis_per_tenant_limit: int = Field(default=20_000, gt=0)
 
     # Token budget (core/cost/limiter.py), on the SAME window as the request
     # caps above but on its own keys: "requests made" and "tokens spent" are

@@ -60,7 +60,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -115,6 +115,14 @@ from dodeal_ai.units.call_intelligence.audio import (
 from dodeal_ai.units.call_intelligence.config import CallsConfig, resolve_calls_config
 from dodeal_ai.units.call_intelligence.paid import JobGone, PassUsage
 from dodeal_ai.units.call_intelligence.queues import enqueue_call, enqueue_stage2
+from dodeal_ai.units.call_intelligence.reanalysis import (
+    NO_TRANSCRIPT as REANALYSIS_NO_TRANSCRIPT,
+)
+from dodeal_ai.units.call_intelligence.reanalysis import (
+    TRANSCRIPT_WORK,
+    is_reanalysis,
+    stage_wanted,
+)
 from dodeal_ai.units.call_intelligence.transcriber import (
     DEFAULT_STT_PROFILE,
     Transcriber,
@@ -153,7 +161,7 @@ TOO_SHORT = "too_short"
 
 # The work field a transcript is kept under until stage 1 is stored, and the
 # analysis_reason of a call done with no transcript at all.
-TRANSCRIPT = "transcript"
+TRANSCRIPT = TRANSCRIPT_WORK
 NO_TRANSCRIPT = "no_transcript"
 # The work field the audio's numbers are kept under, and a stereo side's
 # transcript's prefix (`transcript:agent`), so no side is paid for twice.
@@ -164,6 +172,8 @@ SIDE = "transcript:"
 TOO_LONG = "audio_too_long"
 CHANNELS_MISMATCH = "audio_channels_mismatch"
 NO_AUDIO_TOOLS = "audio_tools_unavailable"
+# A re-analysis that asked for stage 2 alone: stage 1 kept its signals only.
+STAGE1_NOT_REQUESTED = "stage1_not_requested"
 # A tenant's STT profile this worker built no transcriber for.
 STT_PROFILE_MISSING = "stt_profile_not_configured"
 MONO = "mono"
@@ -398,6 +408,10 @@ async def _process(
     )
     # A transcript wave 1 has not finished with: resumed without an attempt.
     kept = work.get(TRANSCRIPT)
+    if is_reanalysis(job) and label is None and stored is None and kept is None:
+        # Never the audio: a re-analysis resumes from its transcript or fails.
+        await _fail(ctx, job, config, REANALYSIS_NO_TRANSCRIPT, dead=False, run=run)
+        return
     paid = label is None and stored is None and kept is None
     # `transcribing` with nothing stored: the last run died mid-transcription.
     interrupted = paid and job.status is JobStatus.TRANSCRIBING
@@ -477,9 +491,10 @@ async def _stage1(
         return False
     run.moved(JobStatus.ANALYSING)
     started = time.monotonic()
+    stage1 = stage_wanted(job, 1)
     try:
         wave = await wave1(
-            tenant_client(ctx, config),
+            tenant_client(ctx, config) if stage1 else None,
             job,
             config,
             transcript,
@@ -492,6 +507,8 @@ async def _stage1(
         return False
     finally:
         run.analyse_ms = _ms_since(started)
+    if not stage1:
+        wave = replace(wave, reason=STAGE1_NOT_REQUESTED)
     run.analysis_reason = wave.reason
     run.transcript = wave.transcript
     result = stage1_result(
@@ -519,18 +536,21 @@ async def _done(
     """`done` with its delivery owed and its stage-2 state, then call.stage1
     sent once, and only then stage 2 queued for an eligible call."""
     eligible = eligible_for_full_analysis(job, config, run.transcript)
-    stage2 = Stage2State.PENDING if eligible else Stage2State.NOT_ELIGIBLE
+    wanted = eligible and stage_wanted(job, 2)
+    stage2 = Stage2State.PENDING if wanted else Stage2State.NOT_ELIGIBLE
+    stage1 = stage_wanted(job, 1)
     await transition(
         job,
         JobStatus.DONE,
         now=_now(),
         reason=label,
         ttl_seconds=config.result_ttl_seconds,
-        delivery=owed_delivery(config),
+        delivery=owed_delivery(config) if stage1 else None,
         stage2=stage2,
     )
     run.moved(JobStatus.DONE, label)
-    await _deliver(ctx, job, STAGE1, config, run)
+    if stage1:
+        await _deliver(ctx, job, STAGE1, config, run)
     if stage2 is Stage2State.PENDING:
         await _queue_stage2(job)
 

@@ -18,6 +18,7 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validato
 
 from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.jobs import JobStatus
+from dodeal_ai.units.call_intelligence.transcriber import Transcript
 
 # The longest audio link accepted, in characters. A signed link with its
 # query string is a few hundred; far past this is not a link we should fetch.
@@ -85,6 +86,30 @@ class CallJobRequest(BaseModel):
         except (binascii.Error, ValueError):
             raise ValueError("agent_voiceprint") from None
         return value
+
+
+class ReanalysisRequest(BaseModel):
+    """A stored call to analyse again with the versions in force now: the
+    stage-1 transcript as delivered, never the audio, and why."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    call_id: int = Field(ge=1)
+    lead_id: int = Field(ge=1)
+    author_id: int = Field(ge=1)
+    duration_seconds: int = Field(ge=0)
+    recorded_at: AwareDatetime
+    transcript: Transcript
+    reason: Literal["objection_list_changed", "checklist_changed", "prompt_changed"]
+    # Which stages to run again: 1, 2 or both, each once.
+    stages: list[Literal[1, 2]] = Field(min_length=1, max_length=2)
+
+    @field_validator("stages")
+    @classmethod
+    def _each_once(cls, value: list[int]) -> list[int]:
+        if len(set(value)) != len(value):
+            raise ValueError("stages")
+        return sorted(value)
 
 
 class CallJobAccepted(BaseModel):

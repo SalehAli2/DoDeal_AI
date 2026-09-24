@@ -61,6 +61,7 @@ from dodeal_ai.core.cost.limiter import (
     enforce_cost,
     enforce_history_cost,
     enforce_reads_cost,
+    enforce_reanalysis_cost,
     enforce_tenant_cost,
 )
 from dodeal_ai.core.tenancy import TenantMismatchError, check_tenant
@@ -377,6 +378,15 @@ async def service_gate4_calls_cost(
     """Gate 4 for a call-job push (register item 50): the tenant's CALLS
     request counter alone, so a burst of recordings never moves `cost:tenant`."""
     return await _service_gate4(request, context, enforce_calls_cost)
+
+
+async def service_gate4_reanalysis_cost(
+    request: Request,
+    context: Annotated[RequestContext, Depends(build_service_context)],
+) -> RequestContext:
+    """Gate 4 for a call re-analysis: the tenant's REANALYSIS request counter
+    alone, so re-running old calls never moves the pushes' or `cost:tenant`."""
+    return await _service_gate4(request, context, enforce_reanalysis_cost)
 
 
 async def _service_gate4(

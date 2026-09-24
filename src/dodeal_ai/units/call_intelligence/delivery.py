@@ -58,6 +58,7 @@ from dodeal_ai.core.jobs import (
 from dodeal_ai.core.logging_config import job_log_context
 from dodeal_ai.units.call_intelligence.config import CallsConfig, resolve_calls_config
 from dodeal_ai.units.call_intelligence.queues import enqueue_delivery
+from dodeal_ai.units.call_intelligence.reanalysis import is_reanalysis
 
 _logger = logging.getLogger("dodeal_ai.unit_b")
 
@@ -85,6 +86,8 @@ async def event_body(job: Job, event: str) -> bytes:
         "lead_id": job.metadata.get("lead_id"),
         "author_id": job.metadata.get("author_id"),
     }
+    if is_reanalysis(job):
+        body["reanalysis"] = True
     if event == CALL_STAGE1:
         body["result"] = await read_result(job.tenant, job.job_id)
     elif event == CALL_STAGE2:

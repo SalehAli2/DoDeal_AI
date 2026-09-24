@@ -155,6 +155,9 @@ class Job:
     stage2_sweeps: int = 0
     # Stage 2's own callback; None while none is owed.
     stage2_delivery: DeliveryState | None = None
+    # The index key the job was admitted under, when not its call's own: a
+    # re-analysis job's (reanalysis_index_key), so it never touches the call's.
+    index: str | None = None
 
     @property
     def terminal(self) -> bool:
@@ -167,6 +170,11 @@ def job_key(tenant: str, job_id: str) -> str:
 
 def call_index_key(tenant: str, call_id: int) -> str:
     return f"call_job_by_call:{tenant}:{call_id}"
+
+
+def reanalysis_index_key(tenant: str, digest: str) -> str:
+    """A re-analysis's index: one job per call, stages and versions."""
+    return f"call_job_by_reanalysis:{tenant}:{digest}"
 
 
 def result_key(tenant: str, job_id: str) -> str:
@@ -561,7 +569,7 @@ def _keys(job: Job) -> tuple[str, str, str, str]:
     the running set."""
     return (
         job_key(job.tenant, job.job_id),
-        call_index_key(job.tenant, job.call_id),
+        job.index or call_index_key(job.tenant, job.call_id),
         ACTIVE_JOBS_KEY,
         RUNNING_JOBS_KEY,
     )
@@ -582,9 +590,11 @@ async def create_job(
     queue: str,
     metadata: dict[str, object],
     now: datetime,
+    index: str | None = None,
 ) -> tuple[str, bool]:
-    """Admit `call_id` as `job_id`, queued, unless the call already has a job.
-    Returns (the call's job_id, whether this call made it)."""
+    """Admit `call_id` as `job_id`, queued, unless the call already has a job
+    -- or, with `index`, unless that index already names one. Returns (the
+    job_id, whether this call made it)."""
     stamp = now.isoformat()
     fields = {
         "tenant": tenant,
@@ -603,6 +613,7 @@ async def create_job(
         "updated_at": stamp,
         "finished_at": "",
         "metadata": json.dumps(metadata, sort_keys=True),
+        **({} if index is None else {"index": index}),
     }
     pairs = [item for pair in fields.items() for item in pair]
     client = get_jobs_client()
@@ -611,7 +622,7 @@ async def create_job(
             _CREATE_SCRIPT,
             4,
             job_key(tenant, job_id),
-            call_index_key(tenant, call_id),
+            index or call_index_key(tenant, call_id),
             ACTIVE_JOBS_KEY,
             RUNNING_JOBS_KEY,
             job_id,
@@ -662,6 +673,7 @@ async def read_job(tenant: str, job_id: str) -> Job | None:
         updated_at=raw["updated_at"],
         finished_at=raw["finished_at"] or None,
         metadata=json.loads(raw["metadata"]),
+        index=raw.get("index") or None,
     )
 
 
