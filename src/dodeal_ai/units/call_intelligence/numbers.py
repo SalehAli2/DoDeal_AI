@@ -34,8 +34,10 @@ with nothing to compare against, nothing escalates.
 
 WHILE THE ROLES ARE NOT APPLIED (prompts.said_by) the speaker is `unknown`:
 the number may be the agent's own, so it is never counted as the client's.
-Any number but the lead's is `unattributed_number` (or `agent_company`) and
-raises off_channel_contact_review, for a person to listen to.
+The lead's number is `lead` and the company's `agent_company`, and neither
+raises anything: whoever said it, it is a known channel. Any other number is
+`unattributed_number` and raises off_channel_contact_review, for a person to
+listen to.
 
 THE PROMPT COPY masks every phone number as [PHONE] and every email address as
 [EMAIL]; the stored transcript keeps what was said. It masks wider than the
@@ -64,7 +66,8 @@ from dodeal_ai.units.call_intelligence.transcriber import Segment
 PHONE_MASK = "[PHONE]"
 EMAIL_MASK = "[EMAIL]"
 OFF_CHANNEL = "off_channel_contact"
-# The escalation for a number whose speaker is unknown: someone listens.
+# The escalation for an unattributed number (speaker unknown, neither hash
+# matched): someone listens.
 OFF_CHANNEL_REVIEW = "off_channel_contact_review"
 
 # What a number said on the call matched.
@@ -350,7 +353,7 @@ def detect_numbers(
             )
             if match == MATCH_AGENT_PERSONAL:
                 escalations.append({"type": OFF_CHANNEL, "source": "number", **where})
-            elif role == UNKNOWN and match != MATCH_LEAD:
+            elif match == MATCH_UNATTRIBUTED:
                 escalations.append(
                     {"type": OFF_CHANNEL_REVIEW, "source": "number", **where}
                 )

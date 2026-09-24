@@ -233,6 +233,8 @@ async def test_a_call_is_analysed_and_delivered_with_its_stage1_payload(
         "version",
         "agent",
         "client",
+        "talk_balance",
+        "talk_reason",
         "numbers",
         "alarms",
         "keywords",

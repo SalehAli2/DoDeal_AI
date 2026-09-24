@@ -16,6 +16,14 @@ turn an interruption: read these numbers beside the transcriber's name.
 
 Per speaker means per role, agent and client (prompts.py::role_of). A role
 that never spoke has no rate: its words_per_minute is None, not 0.
+
+WHILE THE ROLES ARE NOT APPLIED -- any segment's speaker unknown
+(prompts.said_by) -- no one is known to be the agent, so every talk signal,
+agent and client, is None and talk_reason is roles_not_applied.
+
+talk_balance reads the agent's reported talk_share: client_led below
+CLIENT_LED_BELOW, agent_heavy above AGENT_HEAVY_ABOVE, balanced between them,
+both ends included; None when the share is.
 """
 
 from __future__ import annotations
@@ -23,7 +31,13 @@ from __future__ import annotations
 from collections.abc import Sequence
 from itertools import pairwise
 
-from dodeal_ai.units.call_intelligence.prompts import AGENT, CLIENT, role_of
+from dodeal_ai.units.call_intelligence.prompts import (
+    AGENT,
+    CLIENT,
+    UNKNOWN,
+    role_of,
+    said_by,
+)
 from dodeal_ai.units.call_intelligence.transcriber import Segment
 
 SIGNALS_VERSION = "call_signals_v1"
@@ -42,6 +56,18 @@ _RATE_PLACES = 1
 _GAP_PLACES = 3
 
 _SECONDS_PER_MINUTE = 60
+
+# Why the talk signals are None, a fixed code (module docstring).
+ROLES_NOT_APPLIED = "roles_not_applied"
+
+# talk_balance's bands over the agent's talk share. Provisional, like the
+# interruption rule: a third either side of an even split. A wrong value
+# labels an ordinary call agent_heavy or client_led.
+CLIENT_LED_BELOW = 0.35
+AGENT_HEAVY_ABOVE = 0.65
+CLIENT_LED = "client_led"
+BALANCED = "balanced"
+AGENT_HEAVY = "agent_heavy"
 
 
 def _ends_a_sentence(text: str) -> bool:
@@ -72,8 +98,34 @@ def talk_share(segments: Sequence[Segment], role: str) -> float | None:
     return round(seconds / total, _SHARE_PLACES)
 
 
+def talk_balance(agent_share: float | None) -> str | None:
+    """Which side led the talk, by the agent's share; None without one."""
+    if agent_share is None:
+        return None
+    if agent_share < CLIENT_LED_BELOW:
+        return CLIENT_LED
+    if agent_share > AGENT_HEAVY_ABOVE:
+        return AGENT_HEAVY
+    return BALANCED
+
+
+def roles_applied(segments: Sequence[Segment]) -> bool:
+    """Whether every segment's speaker is a role, none unknown."""
+    return all(said_by(segment) != UNKNOWN for segment in segments)
+
+
 def call_signals(segments: Sequence[Segment]) -> dict[str, object]:
-    """The signals block stage 1 carries: its version, then one entry a role."""
+    """The signals block stage 1 carries: its version, one entry a role, the
+    talk balance and why the talk signals are None, when they are."""
+    if not roles_applied(segments):
+        unknown = dict.fromkeys(("talk_share", "words_per_minute", "interruptions"))
+        return {
+            "version": SIGNALS_VERSION,
+            AGENT: unknown,
+            CLIENT: dict(unknown),
+            "talk_balance": None,
+            "talk_reason": ROLES_NOT_APPLIED,
+        }
     cut_ins = interruptions(segments)
     block: dict[str, object] = {"version": SIGNALS_VERSION}
     for role in (AGENT, CLIENT):
@@ -89,4 +141,6 @@ def call_signals(segments: Sequence[Segment]) -> dict[str, object]:
             ),
             "interruptions": cut_ins[role],
         }
+    block["talk_balance"] = talk_balance(talk_share(segments, AGENT))
+    block["talk_reason"] = None
     return block

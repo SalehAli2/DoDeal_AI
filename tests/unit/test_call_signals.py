@@ -1,12 +1,16 @@
 """Call signals (units/call_intelligence/signals.py): scripted transcripts give
-the expected talk shares, words per minute and interruptions."""
+the expected talk shares, words per minute, interruptions and talk balance,
+and none of them while the roles are not applied."""
 
 from __future__ import annotations
+
+import pytest
 
 from dodeal_ai.units.call_intelligence.signals import (
     SIGNALS_VERSION,
     call_signals,
     interruptions,
+    talk_balance,
 )
 from dodeal_ai.units.call_intelligence.transcriber import Segment
 
@@ -43,6 +47,8 @@ def test_a_scripted_call_gives_the_expected_numbers() -> None:
             "words_per_minute": 60.0,
             "interruptions": 1,
         },
+        "talk_balance": "agent_heavy",
+        "talk_reason": None,
     }
 
 
@@ -78,3 +84,66 @@ def test_no_speech_has_no_shares() -> None:
         "words_per_minute": None,
         "interruptions": 0,
     }
+
+
+# --- the guard: no roles, no talk signals ------------------------------------------
+
+_NO_TALK = {"talk_share": None, "words_per_minute": None, "interruptions": None}
+
+
+@pytest.mark.parametrize(
+    "labels",
+    [("speaker_1", "speaker_2"), ("unknown", "unknown"), ("agent", "unknown")],
+)
+def test_with_roles_not_applied_every_talk_signal_is_null(
+    labels: tuple[str, str],
+) -> None:
+    first, second = labels
+    script = (
+        _say(0, 7, first, "one two three and"),
+        _say(7.1, 10, second, "wait four five."),
+    )
+    assert call_signals(script) == {
+        "version": SIGNALS_VERSION,
+        "agent": _NO_TALK,
+        "client": _NO_TALK,
+        "talk_balance": None,
+        "talk_reason": "roles_not_applied",
+    }
+
+
+# --- talk balance ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("share", "balance"),
+    [
+        (0.70, "agent_heavy"),
+        (0.50, "balanced"),
+        (0.66, "agent_heavy"),
+        (0.65, "balanced"),
+        (0.35, "balanced"),
+        (0.34, "client_led"),
+        (0.0, "client_led"),
+        (None, None),
+    ],
+)
+def test_talk_balance_reads_the_agents_share(
+    share: float | None, balance: str | None
+) -> None:
+    assert talk_balance(share) == balance
+
+
+def test_an_even_call_is_balanced_beside_its_numbers() -> None:
+    script = (_say(0, 5, "agent", "hello there."), _say(5.5, 10.5, "lead", "hi."))
+    signals = call_signals(script)
+    assert (signals["agent"], signals["talk_balance"], signals["talk_reason"]) == (
+        {"talk_share": 0.5, "words_per_minute": 24.0, "interruptions": 0},
+        "balanced",
+        None,
+    )
+
+
+def test_no_speech_has_no_balance() -> None:
+    signals = call_signals(())
+    assert (signals["talk_balance"], signals["talk_reason"]) == (None, None)
