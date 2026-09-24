@@ -11,9 +11,14 @@ or a client quoted, under the quote check, from that voice's own segment.
 
 CODE DECIDES what the answer is worth. The mapping is applied -- each label
 becomes agent or client, a voice first heard later a client -- only when it is
-clear: exactly one agent and no unclear. Otherwise, or when the pass failed,
-the labels stay and the transcript is uncertain; more than two voices make it
-uncertain too, mapped or not. Stage 1 carries the answer and what became of it.
+clear: exactly one agent, at least one client and no unclear. Otherwise, or
+when the pass failed, the labels stay and the transcript is uncertain; more
+than two voices make it uncertain too, mapped or not. Stage 1 carries the
+answer and what became of it.
+
+ONE VOICE on a call of SINGLE_VOICE_MIN_SECONDS or more is uncertain
+(single_voice), whoever labelled it: the engine or a stereo channel. A sales
+call that long has two sides; hearing one means one was lost.
 """
 
 from __future__ import annotations
@@ -72,6 +77,11 @@ UNCLEAR = "unclear"
 ROLES_FAILED = "roles_failed"
 ROLES_UNCLEAR = "roles_unclear"
 OVER_TWO = "speakers_over_two"
+SINGLE_VOICE = "single_voice"
+
+# From this long (the call's duration), one voice heard is doubted: under it,
+# a call may be one side's short message. Provisional, like the audio floors.
+SINGLE_VOICE_MIN_SECONDS = 30
 
 _ENGINE_LABEL = re.compile(r"^speaker_[0-9]{1,3}$")
 
@@ -164,16 +174,24 @@ async def ask_roles(
     )
 
 
+def single_voice(transcript: Transcript, call_seconds: float) -> tuple[str, ...]:
+    """(single_voice,) for one voice heard on a call long enough to have two."""
+    alone = len(transcript.speakers) == 1
+    return (SINGLE_VOICE,) if alone and call_seconds >= SINGLE_VOICE_MIN_SECONDS else ()
+
+
 def apply_roles(
-    transcript: Transcript, answer: Roles | None
+    transcript: Transcript, answer: Roles | None, *, call_seconds: float
 ) -> tuple[Transcript, dict[str, object]]:
     """The transcript relabelled when the answer's mapping is clear, doubted
-    when it is not, failed (None) or over two voices; and stage 1's block."""
+    when it is not, failed (None), over two voices or one voice on a long
+    call; and stage 1's block."""
     mapping = {} if answer is None else {s.speaker: s.role for s in answer.speakers}
     roles: list[str] = list(mapping.values())
-    clear = roles.count(AGENT) == 1 and UNCLEAR not in roles
+    clear = roles.count(AGENT) == 1 and CLIENT in roles and UNCLEAR not in roles
     reasons = [
         *([OVER_TWO] if len(transcript.speakers) > 2 else []),
+        *single_voice(transcript, call_seconds),
         *([ROLES_FAILED] if answer is None else []),
         *([ROLES_UNCLEAR] if answer is not None and not clear else []),
     ]

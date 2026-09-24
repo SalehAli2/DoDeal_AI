@@ -58,6 +58,7 @@ from dodeal_ai.units.call_intelligence.roles import (
     ask_roles,
     needs_roles,
     opening,
+    single_voice,
 )
 from dodeal_ai.units.call_intelligence.signals import SIGNALS_VERSION, call_signals
 from dodeal_ai.units.call_intelligence.transcriber import Transcript
@@ -172,7 +173,10 @@ async def wave1(
         if client is None
         else PassRun(job, work, config.result_ttl_seconds, client, usage, start_pass)
     )
-    transcript, roles = await _roles(run, transcript, config, scope, settings, stamps)
+    seconds = int(str(job.metadata["duration_seconds"]))
+    transcript, roles = await _roles(
+        run, transcript, seconds, config, scope, settings, stamps
+    )
     call = CallText.of(transcript, country_code=config.phone_country_code)
     code, digest = _found_in_code(transcript, config, job)
     versions: dict[str, object] = {
@@ -212,15 +216,17 @@ async def wave1(
 async def _roles(
     run: PassRun | None,
     transcript: Transcript,
+    call_seconds: int,
     config: CallsConfig,
     scope: TenantScope,
     settings: Settings,
     stamps: dict[str, Stamp],
 ) -> tuple[Transcript, dict[str, object] | None]:
     """The transcript with its voices' roles, and the roles block; as it
-    came, and None, when no voice carries the engine's label."""
+    came, and None, when no voice carries the engine's label -- doubted
+    even then when one voice is all a long call has."""
     if not needs_roles(transcript):
-        return transcript, None
+        return transcript.doubted(*single_voice(transcript, call_seconds)), None
     answer: Roles | None = None
     if run is not None:
         head = opening(transcript, country_code=config.phone_country_code)
@@ -235,7 +241,7 @@ async def _roles(
             )
         except PassFailed:
             answer = None
-    return apply_roles(transcript, answer)
+    return apply_roles(transcript, answer, call_seconds=call_seconds)
 
 
 def _stamp(versions: dict[str, object], stamps: dict[str, Stamp]) -> None:
