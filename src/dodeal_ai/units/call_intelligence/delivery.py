@@ -17,6 +17,11 @@ call.stage2, or call.failed for stage 2 only -- a done job whose stage 2
 failed. A done job sends no other call.failed, so the event and the job's
 stage-2 state together say which delivery an attempt settles.
 
+SO HAS EACH TRANSLATION, one per target, on the same schedule: its event goes
+through here as `call.translation:<target>` (translation_event), which names
+its delivery field, its event id and its retries; the CRM sees the event
+call.translation, its body as translation.py always sent it.
+
 A tenant with no callback_url has nothing to deliver and no delivery field;
 the CRM reads the result by GET. One whose URL was removed while a retry was
 pending gets delivery_failed: there is nowhere left to send it.
@@ -40,6 +45,7 @@ from dodeal_ai.core.callbacks import (
     CALL_FAILED,
     CALL_STAGE1,
     CALL_STAGE2,
+    CALL_TRANSLATION,
     DELIVERY_DELAYS_SECONDS,
     Delivery,
     event_id,
@@ -47,13 +53,17 @@ from dodeal_ai.core.callbacks import (
 )
 from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.jobs import (
+    DELIVERY_FIELD,
+    STAGE2_DELIVERY_FIELD,
     DeliveryState,
     Job,
     Stage2State,
     read_job,
     read_result,
     read_stage2_result,
+    read_translation,
     settle_delivery,
+    translation_delivery_field,
 )
 from dodeal_ai.core.logging_config import job_log_context
 from dodeal_ai.units.call_intelligence.config import CallsConfig, resolve_calls_config
@@ -71,13 +81,40 @@ def stage2_event(job: Job, event: str) -> bool:
     )
 
 
+def translation_event(target: str) -> str:
+    """The event a translation into `target` is delivered as, here and on the
+    retry queue; the CRM is sent call.translation."""
+    return f"{CALL_TRANSLATION}:{target}"
+
+
+def _target(event: str) -> str | None:
+    """The target of a translation's event; None for any other event."""
+    name, _, target = event.partition(":")
+    return target if name == CALL_TRANSLATION and target else None
+
+
+def _field(job: Job, event: str) -> str:
+    """The job's field `event`'s delivery lives in."""
+    target = _target(event)
+    if target is not None:
+        return translation_delivery_field(target)
+    return STAGE2_DELIVERY_FIELD if stage2_event(job, event) else DELIVERY_FIELD
+
+
 def _owed(job: Job, event: str) -> DeliveryState | None:
-    """The delivery `event` settles: stage 2's own, or the job's."""
+    """The delivery `event` settles: a translation's, stage 2's own, or the
+    job's."""
+    target = _target(event)
+    if target is not None:
+        return job.translation_delivery.get(target)
     return job.stage2_delivery if stage2_event(job, event) else job.delivery
 
 
 async def event_body(job: Job, event: str) -> bytes:
     """The event's JSON body, from the job as it is now in db3."""
+    target = _target(event)
+    if target is not None:
+        return await _translation_body(job, event, target)
     body: dict[str, object] = {
         "event": event,
         "event_id": event_id(job.tenant, job.job_id, event),
@@ -104,6 +141,18 @@ async def event_body(job: Job, event: str) -> bytes:
     return json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
+async def _translation_body(job: Job, event: str, target: str) -> bytes:
+    """call.translation's body: the ids and the translation as held now."""
+    body: dict[str, object] = {
+        "event": CALL_TRANSLATION,
+        "event_id": event_id(job.tenant, job.job_id, event),
+        "job_id": job.job_id,
+        "call_id": job.call_id,
+        "result": await read_translation(job.tenant, job.job_id, target),
+    }
+    return json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
 async def _attempt(
     ctx: dict[str, Any], job: Job, event: str, config: CallsConfig
 ) -> tuple[Delivery | None, Job]:
@@ -115,7 +164,7 @@ async def _attempt(
     outcome = await post_event(
         config.callback_url,
         tenant=job.tenant,
-        event=event,
+        event=event.partition(":")[0],
         event_id=event_id(job.tenant, job.job_id, event),
         body=await event_body(current, event),
         timestamp=str(int(time.time())),
@@ -132,7 +181,7 @@ async def _delivered(job: Job, event: str) -> None:
         job,
         DeliveryState.DELIVERED,
         now=datetime.now(UTC),
-        stage2=stage2_event(job, event),
+        delivery_field=_field(job, event),
     )
 
 
@@ -216,7 +265,7 @@ async def _delivery_failed(job: Job, event: str) -> None:
         job,
         DeliveryState.DELIVERY_FAILED,
         now=datetime.now(UTC),
-        stage2=stage2_event(job, event),
+        delivery_field=_field(job, event),
     )
 
 
@@ -224,7 +273,9 @@ def _log(job: Job, event: str, outcome: Delivery | None, *, attempt: int) -> Non
     """One line and one count per attempt: which event, which attempt, what
     came of it."""
     word = "no_callback" if outcome is None else outcome.value
-    metrics.CALLBACK_DELIVERIES.labels(event=event, outcome=word).inc()
+    metrics.CALLBACK_DELIVERIES.labels(
+        event=event.partition(":")[0], outcome=word
+    ).inc()
     _logger.info(
         "callback_attempt",
         extra={

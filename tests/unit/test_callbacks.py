@@ -22,6 +22,7 @@ from dodeal_ai.core.callbacks import (
     CALL_FAILED,
     CALL_STAGE1,
     CALL_STAGE2,
+    CALL_TRANSLATION,
     EVENTS,
     Delivery,
     event_id,
@@ -35,6 +36,7 @@ from dodeal_ai.core.jobs import (
     create_job,
     read_job,
     read_stage2_result,
+    read_translation,
     settle_stage2,
 )
 from dodeal_ai.core.tenant_config import set_override
@@ -58,6 +60,7 @@ from dodeal_ai.units.call_intelligence.queues import NORMAL_QUEUE
 from dodeal_ai.units.call_intelligence.schemas import CallJobRequest
 from dodeal_ai.units.call_intelligence.stage2 import analyse_stage2
 from dodeal_ai.units.call_intelligence.transcriber import Segment
+from dodeal_ai.units.call_intelligence.translation import translate_call
 from dodeal_ai.units.call_intelligence.worker import process_call
 from tests.conftest import RedisFakes
 from tests.helpers.fake_llm import FakeLLM, json_response
@@ -348,6 +351,74 @@ async def test_a_lost_stage2_sends_call_failed_for_stage2_on_its_own_delivery(
     }
     await deliver_callback(ctx, *queued.args)
     assert len(world.posts) == 3
+
+
+async def test_a_translation_whose_first_send_failed_is_retried(
+    ctx: dict, world: _World, redis_fakes: RedisFakes
+) -> None:
+    """The guard (F-6): call.translation on the normal schedule, on a delivery
+    of its own: the failed first send is retried after 60 s with the same id
+    and body, from the held translation, and the model is never asked again."""
+    await _setup()
+    await process_call(ctx, "tenant-a", JOB)
+    answer = {
+        "segments": [
+            {"segment": f"s{n + 1}", "text": text}
+            for n, text in enumerate(["صباح الخير", "أريد شقة", "نلتقي الثلاثاء"])
+        ]
+    }
+    llm = FakeLLM(json_response(answer))
+    world.crm_status = [503]
+
+    await translate_call({**ctx, "llm": llm}, "tenant-a", JOB, "ar")
+
+    (queued,) = await redis_fakes.queue.queued_jobs(queue_name=NORMAL_QUEUE)
+    assert queued.args == ("tenant-a", JOB, "call.translation:ar", 1)
+    assert round((queued.score - queued.enqueue_time.timestamp() * 1000) / 1000) == 60
+    job = await _job()
+    assert job.translation_delivery == {"ar": DeliveryState.PENDING}
+
+    await deliver_callback(ctx, *queued.args)
+
+    _, failed, retried = world.posts
+    for sent in (failed, retried):
+        assert sent.headers["x-dodeal-event"] == CALL_TRANSLATION
+        assert sent.headers["x-dodeal-event-id"] == event_id(
+            "tenant-a", JOB, "call.translation:ar"
+        )
+        assert _signed(sent)
+    assert failed.content == retried.content
+    body = json.loads(retried.content)
+    assert set(body) == {"event", "event_id", "job_id", "call_id", "result"}
+    assert body["result"] == await read_translation("tenant-a", JOB, "ar")
+    assert llm.call_count == 1
+    job = await _job()
+    assert job.translation_delivery == {"ar": DeliveryState.DELIVERED}
+    assert job.delivery is DeliveryState.DELIVERED
+    await deliver_callback(ctx, *queued.args)
+    assert len(world.posts) == 3
+
+
+async def test_a_translation_that_never_lands_fails_its_own_delivery_only(
+    ctx: dict, world: _World, redis_fakes: RedisFakes
+) -> None:
+    """Every retry on the schedule refused: the translation's delivery fails,
+    stage 1's stays delivered."""
+    await _setup()
+    await process_call(ctx, "tenant-a", JOB)
+    world.crm_status = [503] * 5
+    await translate_call({**ctx, "llm": None}, "tenant-a", JOB, "en")
+    for _ in range(4):
+        (queued,) = [
+            job
+            for job in await redis_fakes.queue.queued_jobs(queue_name=NORMAL_QUEUE)
+            if job.args[3] == len(world.posts) - 1
+        ]
+        await deliver_callback(ctx, *queued.args)
+    job = await _job()
+    assert job.translation_delivery == {"en": DeliveryState.DELIVERY_FAILED}
+    assert job.delivery is DeliveryState.DELIVERED
+    assert len(world.posts) == 1 + 5
 
 
 async def test_stage2_goes_signed_as_call_stage2_on_its_own_delivery(

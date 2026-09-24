@@ -52,7 +52,8 @@ settles it done or failed, with the reason in `stage2_reason`. It is set with
 the move to done, in the same script, and moves only out of pending. A
 pending stage 2 sits in call_stage2_pending until it settles, so the sweep
 can find one whose run was lost; its callback, call.stage2 or call.failed for
-stage 2, has a delivery field of its own, `stage2_delivery`.
+stage 2, has a delivery field of its own, `stage2_delivery`. So has each
+translation's call.translation, one per target (`translation_delivery:ar`).
 
 FAILS CLOSED. The job store is the job: a store that cannot be read or written
 raises JobStoreUnavailable (a 503 at the route, a retry in the worker), never a
@@ -158,6 +159,8 @@ class Job:
     # The index key the job was admitted under, when not its call's own: a
     # re-analysis job's (reanalysis_index_key), so it never touches the call's.
     index: str | None = None
+    # Each translation's own callback, by target; absent while none is owed.
+    translation_delivery: dict[str, DeliveryState] = field(default_factory=dict)
 
     @property
     def terminal(self) -> bool:
@@ -195,6 +198,8 @@ def work_key(tenant: str, job_id: str) -> str:
 
 # A pass's start count lives in the job hash under this prefix and its name.
 _PASS_FIELD = "pass:"
+# A translation's delivery lives under this prefix and its target.
+_TRANSLATION_DELIVERY_FIELD = "translation_delivery:"
 
 
 # Every job not yet terminal, across tenants, scored by its last transition.
@@ -401,6 +406,16 @@ if redis.call('HGET', KEYS[1], ARGV[3]) ~= 'pending' then
   return -1
 end
 redis.call('HSET', KEYS[1], ARGV[3], ARGV[1], 'updated_at', ARGV[2])
+return 1
+"""
+
+# KEYS: the job. ARGV: the delivery's field, now. 0 missing, 1 owed: pending
+# again even when an earlier one settled, for a new translation to send.
+_OWE_SCRIPT = """
+if redis.call('EXISTS', KEYS[1]) == 0 then
+  return 0
+end
+redis.call('HSET', KEYS[1], ARGV[1], 'pending', 'updated_at', ARGV[2])
 return 1
 """
 
@@ -678,6 +693,11 @@ async def read_job(tenant: str, job_id: str) -> Job | None:
         finished_at=raw["finished_at"] or None,
         metadata=json.loads(raw["metadata"]),
         index=raw.get("index") or None,
+        translation_delivery={
+            name.removeprefix(_TRANSLATION_DELIVERY_FIELD): DeliveryState(value)
+            for name, value in raw.items()
+            if name.startswith(_TRANSLATION_DELIVERY_FIELD)
+        },
     )
 
 
@@ -749,13 +769,25 @@ DELIVERY_FIELD = "delivery"
 STAGE2_DELIVERY_FIELD = "stage2_delivery"
 
 
+def translation_delivery_field(target: str) -> str:
+    """The field the translation into `target` has its delivery in."""
+    return f"{_TRANSLATION_DELIVERY_FIELD}{target}"
+
+
 async def settle_delivery(
-    job: Job, state: DeliveryState, *, now: datetime, stage2: bool = False
+    job: Job,
+    state: DeliveryState,
+    *,
+    now: datetime,
+    stage2: bool = False,
+    delivery_field: str | None = None,
 ) -> bool:
-    """A pending delivery -- stage 2's own when `stage2` -- becomes `state`,
-    whatever the job's status. False when it was not pending -- settled
-    already, or never owed -- or is gone."""
+    """A pending delivery -- `delivery_field`'s when given, else stage 2's own
+    when `stage2`, else the job's -- becomes `state`, whatever the job's
+    status. False when it was not pending -- settled already, or never owed --
+    or is gone."""
     client = get_jobs_client()
+    named = delivery_field or (STAGE2_DELIVERY_FIELD if stage2 else DELIVERY_FIELD)
     settled = await _call(
         lambda: client.eval(
             _SETTLE_SCRIPT,
@@ -763,10 +795,26 @@ async def settle_delivery(
             job_key(job.tenant, job.job_id),
             state.value,
             now.isoformat(),
-            STAGE2_DELIVERY_FIELD if stage2 else DELIVERY_FIELD,
+            named,
         )
     )
     return int(settled) == 1
+
+
+async def owe_translation_delivery(job: Job, target: str, *, now: datetime) -> bool:
+    """The translation into `target` owed to the callback: its delivery
+    pending, whatever came of an earlier one. False when the job is gone."""
+    client = get_jobs_client()
+    owed = await _call(
+        lambda: client.eval(
+            _OWE_SCRIPT,
+            1,
+            job_key(job.tenant, job.job_id),
+            translation_delivery_field(target),
+            now.isoformat(),
+        )
+    )
+    return int(owed) == 1
 
 
 async def claim_attempt(

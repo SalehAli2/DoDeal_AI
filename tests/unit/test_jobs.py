@@ -5,6 +5,7 @@ apart, and a store that cannot answer fails closed."""
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import fakeredis
@@ -28,6 +29,7 @@ from dodeal_ai.core.jobs import (
     mark_stage2_requeued,
     mark_swept,
     note_wake,
+    owe_translation_delivery,
     pause,
     read_job,
     read_result,
@@ -46,6 +48,7 @@ from dodeal_ai.core.jobs import (
     store_stage2_result,
     store_work,
     transition,
+    translation_delivery_field,
     unmark_swept,
 )
 from tests.conftest import RedisFakes
@@ -624,6 +627,32 @@ async def test_stage2s_own_delivery_settles_apart_from_stage1s() -> None:
     assert not await settle_delivery(
         job, DeliveryState.DELIVERED, now=LATER, stage2=True
     )
+
+
+async def test_each_translation_owes_and_settles_a_delivery_of_its_own() -> None:
+    """One field per target, apart from stage 1's; owed again for a new send
+    after it settled; nothing owed on a job that is gone."""
+    await _create()
+    job = await _job()
+    assert await owe_translation_delivery(job, "ar", now=NOW)
+    field = translation_delivery_field("ar")
+    assert await settle_delivery(
+        job, DeliveryState.DELIVERED, now=LATER, delivery_field=field
+    )
+    assert not await settle_delivery(
+        job, DeliveryState.DELIVERED, now=LATER, delivery_field=field
+    )
+    assert await owe_translation_delivery(job, "en", now=NOW)
+    settled = await _job()
+    assert settled.translation_delivery == {
+        "ar": DeliveryState.DELIVERED,
+        "en": DeliveryState.PENDING,
+    }
+    assert settled.delivery is None
+    assert await owe_translation_delivery(job, "ar", now=LATER)
+    assert (await _job()).translation_delivery["ar"] is DeliveryState.PENDING
+    gone = replace(job, job_id="job-gone")
+    assert not await owe_translation_delivery(gone, "ar", now=NOW)
 
 
 async def test_a_move_without_a_stage2_state_leaves_it_alone() -> None:

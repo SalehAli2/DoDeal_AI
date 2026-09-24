@@ -17,13 +17,14 @@ answer gets its one reprompt and then fails the translation. The task is never
 re-run (max_tries 1), so no answered chunk is paid for twice.
 
 THE RESULT is held beside the stage-1 result for the tenant's result hold,
-readable through the status route, and sent once, signed, to the callback; a
-send that fails is not retried -- the CRM reads it by GET.
+readable through the status route, and sent signed to the callback as
+call.translation: one attempt inline, then the normal callback schedule
+(delivery.py), on a delivery state of its own per target. The model is never
+asked again for a send that failed: every retry reads the held result.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
@@ -31,8 +32,6 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from dodeal_ai.core.audio_download import resolve_host
-from dodeal_ai.core.callbacks import CALL_TRANSLATION, event_id, post_event
 from dodeal_ai.core.config import Settings, get_settings
 from dodeal_ai.core.context import RequestContext, TenantScope
 from dodeal_ai.core.errors import (
@@ -45,16 +44,15 @@ from dodeal_ai.core.errors import (
 )
 from dodeal_ai.core.jobs import (
     JobStoreUnavailable,
+    owe_translation_delivery,
     read_job,
     read_result,
     store_translation,
 )
 from dodeal_ai.core.llm import LLMClient
 from dodeal_ai.core.llm.profiles import PROFILE_UNIT_B_TRANSLATE, task_ceiling
-from dodeal_ai.units.call_intelligence.config import (
-    CallsConfig,
-    resolve_calls_config,
-)
+from dodeal_ai.units.call_intelligence.config import resolve_calls_config
+from dodeal_ai.units.call_intelligence.delivery import translation_event
 from dodeal_ai.units.call_intelligence.evidence import CallText, Errors, in_language
 from dodeal_ai.units.call_intelligence.prompts import (
     PROMPT_SET_VERSION,
@@ -68,7 +66,12 @@ from dodeal_ai.units.call_intelligence.prompts import (
 )
 from dodeal_ai.units.call_intelligence.queues import enqueue_translation
 from dodeal_ai.units.call_intelligence.transcriber import LanguageProfile, Transcript
-from dodeal_ai.units.call_intelligence.worker import job_scope, tenant_client
+from dodeal_ai.units.call_intelligence.worker import (
+    Deliver,
+    deliver_nothing,
+    job_scope,
+    tenant_client,
+)
 from dodeal_ai.units.structured_intelligence.llm_call import (
     call_model,
     output_rejected,
@@ -227,7 +230,8 @@ async def _chunk(
 async def translate_call(
     ctx: dict[str, Any], tenant: str, job_id: str, target: Target
 ) -> None:
-    """The stage-2 queue's translation task: translate, hold, send once."""
+    """The stage-2 queue's translation task: translate, hold, and send on the
+    callback schedule."""
     job = await read_job(tenant, job_id)
     result = None if job is None else await read_result(tenant, job_id)
     if job is None or result is None or result.get("transcript") is None:
@@ -277,36 +281,9 @@ async def translate_call(
             "reason": translation["reason"],
         },
     )
-    if config.callback_url is not None:
-        await _send(ctx, job.tenant, job_id, job.call_id, translation, config)
-
-
-async def _send(
-    ctx: dict[str, Any],
-    tenant: str,
-    job_id: str,
-    call_id: int,
-    translation: dict[str, object],
-    config: CallsConfig,
-) -> None:
-    """call.translation, signed, once; the CRM reads it by GET otherwise."""
-    assert config.callback_url is not None  # only called with one
-    event = f"{CALL_TRANSLATION}:{translation['target']}"
-    body = {
-        "event": CALL_TRANSLATION,
-        "event_id": event_id(tenant, job_id, event),
-        "job_id": job_id,
-        "call_id": call_id,
-        "result": translation,
-    }
-    await post_event(
-        config.callback_url,
-        tenant=tenant,
-        event=CALL_TRANSLATION,
-        event_id=event_id(tenant, job_id, event),
-        body=json.dumps(body, sort_keys=True, separators=(",", ":")).encode(),
-        timestamp=str(int(datetime.now(UTC).timestamp())),
-        http=ctx["http"],
-        resolve=ctx.get("resolve", resolve_host),
-        allow_local=get_settings().call_demo_allow_local_audio,
-    )
+    if config.callback_url is not None and await owe_translation_delivery(
+        job, target, now=datetime.now(UTC)
+    ):
+        # One attempt now; a failure is left to the schedule (delivery.py).
+        deliver: Deliver = ctx.get("deliver", deliver_nothing)
+        await deliver(job, translation_event(target), config)
