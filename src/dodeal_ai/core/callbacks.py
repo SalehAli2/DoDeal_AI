@@ -40,7 +40,7 @@ from dodeal_ai.core.audio_download import (
 from dodeal_ai.core.config import get_settings
 
 CALL_STAGE1 = "call.stage1"
-# Declared for the analysis passes to come; nothing sends it yet.
+# Wave 2's result, sent by the stage-2 task once stage 2 is done.
 CALL_STAGE2 = "call.stage2"
 CALL_FAILED = "call.failed"
 EVENTS = (CALL_STAGE1, CALL_STAGE2, CALL_FAILED)

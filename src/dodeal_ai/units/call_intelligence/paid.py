@@ -13,7 +13,8 @@ a pass is counted in db3 before the paid call:
     fails the pass at once: a response we received is never paid for again.
 
 The tokens each pass spent in a run are counted per pass for its outcome line,
-both answers of a reprompt included.
+both answers of a reprompt included, and apart from them the reasoning tokens
+the provider reported: a count only, never the reasoning itself.
 """
 
 from __future__ import annotations
@@ -49,15 +50,18 @@ class JobGone(Exception):
 
 @dataclass(slots=True)
 class PassUsage:
-    """Tokens per pass, as the provider reported them, in this run."""
+    """Tokens per pass, as the provider reported them, in this run; and the
+    part of each pass's output that was reasoning."""
 
     tokens: dict[str, dict[str, int]] = field(default_factory=dict)
+    reasoning: dict[str, int] = field(default_factory=dict)
 
     def add(self, name: str, response: LLMResponse) -> None:
         spent = self.tokens.setdefault(name, {"input": 0, "output": 0, "calls": 0})
         spent["input"] += response.input_tokens
         spent["output"] += response.output_tokens
         spent["calls"] += 1
+        self.reasoning[name] = self.reasoning.get(name, 0) + response.reasoning_tokens
 
 
 class _Metered:

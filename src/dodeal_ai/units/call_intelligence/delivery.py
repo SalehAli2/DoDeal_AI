@@ -21,8 +21,9 @@ A tenant with no callback_url has nothing to deliver and no delivery field;
 the CRM reads the result by GET. One whose URL was removed while a retry was
 pending gets delivery_failed: there is nowhere left to send it.
 
-The body is built from db3 at every attempt: ids, the stage-1 result or the
-failure's status and reason. Never the audio link, a hash or a voiceprint.
+The body is built from db3 at every attempt: ids, the stage-1 or stage-2
+result, or the failure's status and reason. Never the audio link, a hash or a
+voiceprint.
 """
 
 from __future__ import annotations
@@ -51,6 +52,7 @@ from dodeal_ai.core.jobs import (
     Stage2State,
     read_job,
     read_result,
+    read_stage2_result,
     settle_delivery,
 )
 from dodeal_ai.core.logging_config import job_log_context
@@ -85,6 +87,8 @@ async def event_body(job: Job, event: str) -> bytes:
     }
     if event == CALL_STAGE1:
         body["result"] = await read_result(job.tenant, job.job_id)
+    elif event == CALL_STAGE2:
+        body["result"] = await read_stage2_result(job.tenant, job.job_id)
     elif stage2_event(job, event):
         # call.failed for stage 2 only: the job stays done, stage 1 stands.
         body["stage"] = 2

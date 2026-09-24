@@ -8,7 +8,8 @@ another tenant's job, and one index of every running job across tenants:
                                       pauses, outages, reason, delivery,
                                       request_id, queue, timestamps, metadata
   call_job_by_call:{tenant}:{call_id} the job_id this call was admitted as
-  call_result:{tenant}:{job_id}       the stage result, EX result_ttl_seconds
+  call_result:{tenant}:{job_id}       the stage-1 result, EX result_ttl_seconds
+  call_stage2:{tenant}:{job_id}       the stage-2 result, EX result_ttl_seconds
   call_work:{tenant}:{job_id}         a hash of what stage 1 has paid for so
                                       far -- the transcript, each pass's
                                       outcome -- EX result_ttl_seconds
@@ -170,6 +171,10 @@ def call_index_key(tenant: str, call_id: int) -> str:
 
 def result_key(tenant: str, job_id: str) -> str:
     return f"call_result:{tenant}:{job_id}"
+
+
+def stage2_result_key(tenant: str, job_id: str) -> str:
+    return f"call_stage2:{tenant}:{job_id}"
 
 
 def work_key(tenant: str, job_id: str) -> str:
@@ -868,8 +873,32 @@ async def store_result(
 
 async def read_result(tenant: str, job_id: str) -> dict[str, object] | None:
     """The held result, or None once it has expired or was never stored."""
+    return await _read_json(result_key(tenant, job_id))
+
+
+async def store_stage2_result(
+    tenant: str, job_id: str, result: dict[str, object], *, ttl_seconds: int
+) -> None:
+    """Hold the job's stage-2 result beside its stage-1 result, for
+    `ttl_seconds`."""
     client = get_jobs_client()
-    raw = await _call(lambda: client.get(result_key(tenant, job_id)))
+    await _call(
+        lambda: client.set(
+            stage2_result_key(tenant, job_id),
+            json.dumps(result, sort_keys=True),
+            ex=ttl_seconds,
+        )
+    )
+
+
+async def read_stage2_result(tenant: str, job_id: str) -> dict[str, object] | None:
+    """The held stage-2 result, or None once it has expired or before it is."""
+    return await _read_json(stage2_result_key(tenant, job_id))
+
+
+async def _read_json(key: str) -> dict[str, object] | None:
+    client = get_jobs_client()
+    raw = await _call(lambda: client.get(key))
     return None if raw is None else json.loads(raw)
 
 

@@ -13,19 +13,22 @@ import httpx
 import pytest
 from arq import Retry
 
-from dodeal_ai.core.callbacks import CALL_FAILED
+from dodeal_ai.core.callbacks import CALL_FAILED, CALL_STAGE2
 from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.errors import QueueUnavailable
 from dodeal_ai.core.jobs import (
     STAGE2_PENDING_KEY,
+    DeliveryState,
     JobStatus,
     JobStoreUnavailable,
     Stage2State,
     create_job,
     job_key,
     read_job,
+    read_stage2_result,
     result_key,
     settle_stage2,
+    stage2_result_key,
 )
 from dodeal_ai.core.tenant_config import set_override
 from dodeal_ai.units.call_intelligence import queues, stage2, sweep, worker
@@ -326,6 +329,85 @@ async def test_a_failed_pass_still_settles_stage2_done(
         "objections": "objections_malformed_output",
         "score": "scoring_off",
     }
+
+
+def _delivering(*answers: object) -> dict[str, Any]:
+    return {**_stage2_ctx(*answers), "deliver": _Order()}
+
+
+async def test_stage2_is_held_and_delivered_as_call_stage2(
+    ctx: dict, redis_fakes: RedisFakes, caplog: pytest.LogCaptureFixture
+) -> None:
+    await _done_and_pending(ctx)
+    stage2_ctx = _delivering()
+    with caplog.at_level(logging.INFO, logger="dodeal_ai.unit_b"):
+        await analyse_stage2(stage2_ctx, "tenant-a", JOB)
+
+    assert stage2_ctx["deliver"].seen == [CALL_STAGE2]
+    held = await read_stage2_result("tenant-a", JOB)
+    assert held is not None
+    parts = ("objections", "score", "escalations", "coaching", "extras")
+    assert set(held) == {"stage", "call_id", "reasons", "versions", *parts}
+    assert (held["stage"], held["call_id"], held["score"]) == (2, 7, None)
+    assert all(held[name] is not None for name in parts if name != "score")
+    assert held["reasons"] == {"score": "scoring_off"}
+    assert held["versions"] == {
+        "prompt": "unit_b_prompts_v2",
+        "objection_list": "objection_list_v1",
+        "rubric": "call_rubric_v1",
+        "tone_list": "tone_list_v1",
+        "model": dict.fromkeys(
+            ("objections", "escalations", "coaching", "extras"), "fake-model-pinned"
+        ),
+    }
+    ttl = await redis_fakes.jobs.ttl(stage2_result_key("tenant-a", JOB))
+    assert 0 < ttl <= 259_200
+    (line,) = [r for r in caplog.records if r.getMessage() == "call_stage2_outcome"]
+    spent = {"input": 100, "output": 20, "calls": 1}
+    passed = ("objections", "escalations", "coaching", "extras")
+    assert line.pass_tokens == dict.fromkeys(passed, spent)
+    assert line.pass_reasoning_tokens == dict.fromkeys(passed, 0)
+
+
+async def test_one_failed_pass_still_delivers_the_others(ctx: dict) -> None:
+    """The guard: the failed part is null with its reason, the rest goes."""
+    await _done_and_pending(ctx)
+    stage2_ctx = _delivering({}, {})
+    await analyse_stage2(stage2_ctx, "tenant-a", JOB)
+
+    assert stage2_ctx["deliver"].seen == [CALL_STAGE2]
+    held = await read_stage2_result("tenant-a", JOB)
+    assert held is not None
+    assert (held["objections"], held["reasons"]["objections"]) == (
+        None,
+        "objections_malformed_output",
+    )
+    assert all(held[name] is not None for name in ("escalations", "coaching", "extras"))
+
+
+async def test_a_failed_stage2_sends_call_failed_and_holds_no_result(ctx: dict) -> None:
+    await _done_and_pending(ctx)
+    stage2_ctx = {"llm": None, "deliver": _Order()}
+    await analyse_stage2(stage2_ctx, "tenant-a", JOB)
+    assert stage2_ctx["deliver"].seen == [CALL_FAILED]
+    assert await read_stage2_result("tenant-a", JOB) is None
+
+
+@pytest.mark.parametrize(
+    ("state", "event"),
+    [(Stage2State.DONE, CALL_STAGE2), (Stage2State.FAILED, CALL_FAILED)],
+)
+async def test_a_rerun_sends_a_stage2_event_left_pending(
+    ctx: dict, state: Stage2State, event: str
+) -> None:
+    """The last run died between the settle and the send."""
+    await _done_and_pending(ctx)
+    await settle_stage2(
+        await _job(), state, now=datetime.now(UTC), delivery=DeliveryState.PENDING
+    )
+    stage2_ctx = {"deliver": _Order()}
+    await analyse_stage2(stage2_ctx, "tenant-a", JOB)
+    assert stage2_ctx["deliver"].seen == [event]
 
 
 @pytest.mark.parametrize(

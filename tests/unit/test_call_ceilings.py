@@ -36,7 +36,7 @@ from dodeal_ai.units.call_intelligence.prompts import (
 )
 from dodeal_ai.units.call_intelligence.transcriber import Segment, Transcript
 from dodeal_ai.units.call_intelligence.wave2 import wave2
-from tests.helpers.fake_llm import FakeLLM, json_response
+from tests.helpers.fake_llm import FakeLLM, json_response, response
 from tests.helpers.wave2_answers import coaching_answer, extras_answer
 
 SCOPE = RequestContext.for_admitted_job(
@@ -233,3 +233,10 @@ def test_an_answer_carrying_its_reasoning_is_refused(schema: type[BaseModel]) ->
     name = next(k for k, v in PASSES.items() if v[0].__module__ == schema.__module__)
     with pytest.raises(ValidationError):
         schema.model_validate({**PASSES[name][2], "reasoning": "hidden thoughts"})
+
+
+def test_reasoning_is_counted_per_pass_and_never_kept() -> None:
+    usage = PassUsage()
+    usage.add("coaching", response("{}", reasoning_tokens=12))
+    usage.add("coaching", response("{}", reasoning_tokens=3))
+    assert (usage.reasoning, usage.tokens["coaching"]["calls"]) == ({"coaching": 15}, 2)

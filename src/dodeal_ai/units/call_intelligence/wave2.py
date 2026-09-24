@@ -20,6 +20,11 @@ re-run of stage 2 pays for nothing it already received.
 
 The transcript is read as wave 1 read it: the prompt copy, masked under the
 tenant's country code, the summary language decided in code.
+
+THE STAGE-2 RESULT (stage2_result), held in db3 and delivered as call.stage2:
+each pass's part, null where the pass failed or did not run, the reason for
+each null, and the versions -- the prompt set, the objection list, the rubric,
+the tone list, and the model each pass's answer came from.
 """
 
 from __future__ import annotations
@@ -34,6 +39,7 @@ from dodeal_ai.core.context import TenantScope
 from dodeal_ai.core.jobs import Job, start_stage2_pass
 from dodeal_ai.core.llm import LLMClient, LLMResponse
 from dodeal_ai.units.call_intelligence.coaching import (
+    TONE_LIST_VERSION,
     Coaching,
     coach,
     coaching_part,
@@ -47,6 +53,7 @@ from dodeal_ai.units.call_intelligence.escalations import (
 from dodeal_ai.units.call_intelligence.evidence import CallText
 from dodeal_ai.units.call_intelligence.extras import Extras, extras_part, find_extras
 from dodeal_ai.units.call_intelligence.objections import (
+    OBJECTION_LIST_VERSION,
     Objections,
     find_objections,
     objections_part,
@@ -57,8 +64,13 @@ from dodeal_ai.units.call_intelligence.paid import (
     PassUsage,
     run_pass,
 )
-from dodeal_ai.units.call_intelligence.prompts import AGENT, CLIENT
+from dodeal_ai.units.call_intelligence.prompts import (
+    AGENT,
+    CLIENT,
+    PROMPT_SET_VERSION,
+)
 from dodeal_ai.units.call_intelligence.score import (
+    RUBRIC_VERSION,
     ScoreChecks,
     ask_checks,
     score_call,
@@ -72,6 +84,7 @@ SCORE = "score"
 ESCALATIONS = "escalations"
 COACHING = "coaching"
 EXTRAS = "extras"
+PASS_NAMES = (OBJECTIONS, SCORE, ESCALATIONS, COACHING, EXTRAS)
 
 
 @dataclass(slots=True)
@@ -81,6 +94,24 @@ class Wave2:
     parts: dict[str, dict[str, object] | None] = field(default_factory=dict)
     reasons: dict[str, str] = field(default_factory=dict)
     models: dict[str, str] = field(default_factory=dict)
+
+
+def stage2_result(job: Job, wave: Wave2) -> dict[str, object]:
+    """The stage-2 result: every part, why each null one is null, and the
+    versions it ran on."""
+    return {
+        "stage": 2,
+        "call_id": job.call_id,
+        **{name: wave.parts.get(name) for name in PASS_NAMES},
+        "reasons": dict(wave.reasons),
+        "versions": {
+            "prompt": PROMPT_SET_VERSION,
+            "objection_list": OBJECTION_LIST_VERSION,
+            "rubric": RUBRIC_VERSION,
+            "tone_list": TONE_LIST_VERSION,
+            "model": dict(wave.models),
+        },
+    }
 
 
 async def wave2(

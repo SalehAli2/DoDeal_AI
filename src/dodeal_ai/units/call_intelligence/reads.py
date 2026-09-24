@@ -1,6 +1,6 @@
 """Reading a call job back (register item 50): status, reason, the callback's
-delivery and wave 2's state beside the status, and the result while it is
-held.
+delivery and wave 2's state beside the status, and the stage-1 and stage-2
+results while each is held.
 
 TENANT BY KEY. The job is looked up under the tenant the gates verified, so
 another tenant's job_id is simply not there: 404 call_job_not_found, the same
@@ -25,6 +25,7 @@ from dodeal_ai.core.jobs import (
     Stage2State,
     read_job,
     read_result,
+    read_stage2_result,
 )
 
 _audit = logging.getLogger("dodeal_ai.audit")
@@ -33,7 +34,7 @@ _audit = logging.getLogger("dodeal_ai.audit")
 class CallJobView(BaseModel):
     """What the CRM reads: where the job is, why, whether its callback went
     (None: no callback to send), where wave 2 is (None: not done yet), and its
-    result while held."""
+    results while held."""
 
     job_id: str
     status: JobStatus
@@ -41,6 +42,7 @@ class CallJobView(BaseModel):
     delivery: DeliveryState | None
     stage2: Stage2State | None
     result: dict[str, object] | None
+    stage2_result: dict[str, object] | None
 
 
 async def read_call_job(context: RequestContext, job_id: str) -> CallJobView:
@@ -48,6 +50,9 @@ async def read_call_job(context: RequestContext, job_id: str) -> CallJobView:
     try:
         job = await read_job(context.tenant, job_id)
         result = None if job is None else await read_result(context.tenant, job_id)
+        stage2 = (
+            None if job is None else await read_stage2_result(context.tenant, job_id)
+        )
     except JobStoreUnavailable:
         raise JobStoreUnavailableResponse() from None
     _audit.info(
@@ -60,6 +65,7 @@ async def read_call_job(context: RequestContext, job_id: str) -> CallJobView:
             "found": job is not None,
             "status": None if job is None else job.status.value,
             "result_held": result is not None,
+            "stage2_result_held": stage2 is not None,
         },
     )
     if job is None:
@@ -71,4 +77,5 @@ async def read_call_job(context: RequestContext, job_id: str) -> CallJobView:
         delivery=job.delivery,
         stage2=job.stage2,
         result=result,
+        stage2_result=stage2,
     )

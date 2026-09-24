@@ -34,6 +34,7 @@ from dodeal_ai.core.jobs import (
     Stage2State,
     create_job,
     read_job,
+    read_stage2_result,
     settle_stage2,
 )
 from dodeal_ai.core.tenant_config import set_override
@@ -47,10 +48,20 @@ from dodeal_ai.units.call_intelligence.config import (
 )
 from dodeal_ai.units.call_intelligence.delivery import deliver_callback, deliver_event
 from dodeal_ai.units.call_intelligence.fake_transcriber import FakeTranscriber
+from dodeal_ai.units.call_intelligence.prompts import (
+    COACHING_TEMPLATE,
+    ESCALATIONS_TEMPLATE,
+    EXTRAS_TEMPLATE,
+    OBJECTIONS_TEMPLATE,
+)
 from dodeal_ai.units.call_intelligence.queues import NORMAL_QUEUE
 from dodeal_ai.units.call_intelligence.schemas import CallJobRequest
+from dodeal_ai.units.call_intelligence.stage2 import analyse_stage2
+from dodeal_ai.units.call_intelligence.transcriber import Segment
 from dodeal_ai.units.call_intelligence.worker import process_call
 from tests.conftest import RedisFakes
+from tests.helpers.fake_llm import FakeLLM, json_response
+from tests.helpers.wave2_answers import coaching_answer, extras_answer
 
 SECRET = "callback-secret-for-tenant-a"
 AUDIO_HOST = "audio.tenant-a.example"
@@ -337,6 +348,56 @@ async def test_a_lost_stage2_sends_call_failed_for_stage2_on_its_own_delivery(
     }
     await deliver_callback(ctx, *queued.args)
     assert len(world.posts) == 3
+
+
+async def test_stage2_goes_signed_as_call_stage2_on_its_own_delivery(
+    ctx: dict, world: _World
+) -> None:
+    """Signed like stage 1, its own event id, the held stage-2 result as the
+    body's result; stage 1's delivery untouched."""
+    said = (
+        Segment(
+            start_s=0,
+            end_s=5,
+            speaker="agent",
+            text="Good morning, calling about the viewing.",
+            language="en",
+            confidence=0.9,
+        ),
+        Segment(
+            start_s=5,
+            end_s=10,
+            speaker="lead",
+            text="Yes, I still want to see the flat.",
+            language="en",
+            confidence=0.9,
+        ),
+    )
+    ctx["transcriber"] = FakeTranscriber(said)
+    await _setup()
+    await process_call(ctx, "tenant-a", JOB)
+    llm = FakeLLM()
+    llm.script_for(OBJECTIONS_TEMPLATE, json_response({"objections": []}))
+    llm.script_for(ESCALATIONS_TEMPLATE, json_response({"escalations": []}))
+    llm.script_for(COACHING_TEMPLATE, json_response(coaching_answer(said[0].text)))
+    llm.script_for(EXTRAS_TEMPLATE, json_response(extras_answer()))
+    await analyse_stage2({**ctx, "llm": llm}, "tenant-a", JOB)
+
+    stage1, stage2 = world.posts
+    assert stage1.headers["x-dodeal-event"] == CALL_STAGE1
+    assert stage2.headers["x-dodeal-event"] == CALL_STAGE2
+    assert stage2.headers["x-dodeal-event-id"] == event_id("tenant-a", JOB, CALL_STAGE2)
+    assert _signed(stage2)
+    body = json.loads(stage2.content)
+    assert body["result"] == await read_stage2_result("tenant-a", JOB)
+    assert body["result"]["stage"] == 2
+    job = await _job()
+    assert (job.status, job.stage2, job.delivery, job.stage2_delivery) == (
+        JobStatus.DONE,
+        Stage2State.DONE,
+        DeliveryState.DELIVERED,
+        DeliveryState.DELIVERED,
+    )
 
 
 async def test_a_stage2_call_failed_refused_fails_its_own_delivery_only(

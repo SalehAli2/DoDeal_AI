@@ -31,6 +31,7 @@ from dodeal_ai.core.jobs import (
     pause,
     read_job,
     read_result,
+    read_stage2_result,
     read_work,
     result_key,
     settle_delivery,
@@ -42,6 +43,7 @@ from dodeal_ai.core.jobs import (
     start_stage2_pass,
     start_transcription,
     store_result,
+    store_stage2_result,
     store_work,
     transition,
     unmark_swept,
@@ -406,6 +408,8 @@ async def test_every_operation_fails_closed_on_a_dead_store(dead_store) -> None:
         stale_stage2(NOW, limit=10),
         stage2_stuck("tenant-a", "job-1", now=NOW, wait_seconds=0),
         mark_stage2_requeued("tenant-a", "job-1", now=NOW),
+        store_stage2_result("tenant-a", "job-1", {}, ttl_seconds=TTL),
+        read_stage2_result("tenant-a", "job-1"),
     ]
     for operation in operations:
         with pytest.raises(JobStoreUnavailable) as caught:

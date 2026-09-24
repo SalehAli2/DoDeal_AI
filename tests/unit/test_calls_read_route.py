@@ -15,7 +15,7 @@ import pytest
 
 from dodeal_ai.core import jobs
 from dodeal_ai.core.config import get_settings
-from dodeal_ai.core.jobs import job_key, store_result
+from dodeal_ai.core.jobs import job_key, store_result, store_stage2_result
 from dodeal_ai.core.logging_config import JsonFormatter
 from dodeal_ai.main import app
 from tests.conftest import RedisFakes
@@ -98,6 +98,7 @@ async def test_a_queued_job_reads_back_with_no_result(client) -> None:
         "delivery": None,
         "stage2": None,
         "result": None,
+        "stage2_result": None,
     }
 
 
@@ -124,6 +125,21 @@ async def test_a_done_job_reads_back_its_result_while_held(
         {"stage": 1},
     )
     assert body["stage2"] == "not_eligible"
+    assert body["stage2_result"] is None
+
+
+async def test_a_done_stage2_reads_back_its_result_while_held(
+    client, redis_fakes: RedisFakes, audit_log: io.StringIO
+) -> None:
+    job_id = await _pushed(client)
+    await redis_fakes.jobs.hset(
+        job_key("tenant-a", job_id), mapping={"status": "done", "stage2": "done"}
+    )
+    await store_stage2_result("tenant-a", job_id, {"stage": 2}, ttl_seconds=60)
+
+    body = (await client.get(f"{PUSH_URL}/{job_id}", headers=_headers())).json()
+    assert (body["stage2"], body["stage2_result"]) == ("done", {"stage": 2})
+    assert [line["stage2_result_held"] for line in _reads(audit_log)] == [True]
 
 
 async def test_another_tenants_job_is_404(client, audit_log: io.StringIO) -> None:
