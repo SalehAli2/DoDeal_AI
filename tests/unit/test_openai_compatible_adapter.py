@@ -1208,3 +1208,19 @@ async def test_cached_and_reasoning_tokens_come_from_usage_details(
         cached,
         reasoning,
     )
+
+
+async def test_a_reasoning_models_thoughts_never_cross_the_seam(monkeypatch) -> None:
+    """Only message.content is read: reasoning text in the reply reaches no
+    field of the response and no repr; its token count alone does."""
+    body = _ok_body(content='{"a": 1}')
+    message = body["choices"][0]["message"]
+    message["reasoning_content"] = BODY_SENTINEL
+    message["reasoning"] = BODY_SENTINEL
+    body["usage"]["completion_tokens_details"] = {"reasoning_tokens": 900}
+    recorder = Recorder(httpx.Response(200, json=body))
+    response = await _call(_settings(monkeypatch), GROQ_BASE_URL, recorder)
+    assert isinstance(response, LLMResponse)
+    assert (response.text, response.reasoning_tokens) == ('{"a": 1}', 900)
+    fields = [getattr(response, name) for name in LLMResponse.__dataclass_fields__]
+    assert BODY_SENTINEL not in repr(fields)

@@ -43,7 +43,7 @@ from typing import Literal
 from dodeal_ai.core.config import Settings
 from dodeal_ai.core.context import TenantScope
 from dodeal_ai.core.llm import LLMClient, LLMResponse
-from dodeal_ai.core.llm.profiles import PROFILE_UNIT_B_SCORE
+from dodeal_ai.core.llm.profiles import PROFILE_UNIT_B_SCORE, task_ceiling
 from dodeal_ai.units.call_intelligence.evidence import (
     CallText,
     Errors,
@@ -69,6 +69,9 @@ RUBRIC_VERSION = "call_rubric_v1"
 # What the answer may cost (register item 15): thirteen checks with a quote
 # each, sized against an Arabic call on a non-reasoning model.
 SCORE_MAX_OUTPUT_TOKENS = 2500
+# The same answer on a reasoning profile, whose hidden reasoning is spent
+# inside the ceiling (register item 116): the ceiling follows the profile.
+SCORE_REASONING_MAX_OUTPUT_TOKENS = 6000
 
 # The client's talk share at which the agent listened more, and below which
 # the client did not engage enough to judge the call.
@@ -189,7 +192,12 @@ async def ask_checks(
         scope=scope,
         settings=settings,
         profile=PROFILE_UNIT_B_SCORE,
-        max_output_tokens=SCORE_MAX_OUTPUT_TOKENS,
+        max_output_tokens=task_ceiling(
+            settings,
+            PROFILE_UNIT_B_SCORE,
+            plain=SCORE_MAX_OUTPUT_TOKENS,
+            reasoning=SCORE_REASONING_MAX_OUTPUT_TOKENS,
+        ),
         check=check_score(call),
         reprompt_tail=REPROMPT_TAIL_TEMPLATE,
     )

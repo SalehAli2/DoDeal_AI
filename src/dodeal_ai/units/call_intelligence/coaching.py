@@ -28,7 +28,7 @@ from pydantic import Field
 from dodeal_ai.core.config import Settings
 from dodeal_ai.core.context import TenantScope
 from dodeal_ai.core.llm import LLMClient, LLMResponse
-from dodeal_ai.core.llm.profiles import PROFILE_UNIT_B_COACHING
+from dodeal_ai.core.llm.profiles import PROFILE_UNIT_B_COACHING, task_ceiling
 from dodeal_ai.units.call_intelligence.alarms import phrase_in, words
 from dodeal_ai.units.call_intelligence.evidence import (
     CallText,
@@ -59,6 +59,9 @@ COACHING_LABEL = "llm.unit_b.coaching"
 # moments, three actions and seven stages, sized against Arabic coaching on a
 # non-reasoning model.
 COACHING_MAX_OUTPUT_TOKENS = 2000
+# The same answer on a reasoning profile, whose hidden reasoning is spent
+# inside the ceiling (register item 116): the ceiling follows the profile.
+COACHING_REASONING_MAX_OUTPUT_TOKENS = 4000
 
 # The tone list (BRD P6): absolute or harsh words a coach does not use. Small
 # on purpose -- a match costs a reprompt -- and versioned: a change is a new
@@ -226,7 +229,12 @@ async def coach(
         scope=scope,
         settings=settings,
         profile=PROFILE_UNIT_B_COACHING,
-        max_output_tokens=COACHING_MAX_OUTPUT_TOKENS,
+        max_output_tokens=task_ceiling(
+            settings,
+            PROFILE_UNIT_B_COACHING,
+            plain=COACHING_MAX_OUTPUT_TOKENS,
+            reasoning=COACHING_REASONING_MAX_OUTPUT_TOKENS,
+        ),
         check=check_coaching(call),
         reprompt_tail=REPROMPT_TAIL_TEMPLATE,
     )

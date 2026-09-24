@@ -26,7 +26,7 @@ from pydantic import Field
 from dodeal_ai.core.config import Settings
 from dodeal_ai.core.context import TenantScope
 from dodeal_ai.core.llm import LLMClient, LLMResponse
-from dodeal_ai.core.llm.profiles import PROFILE_UNIT_B_ESCALATIONS
+from dodeal_ai.core.llm.profiles import PROFILE_UNIT_B_ESCALATIONS, task_ceiling
 from dodeal_ai.units.call_intelligence.evidence import (
     CallText,
     Cited,
@@ -52,6 +52,9 @@ ESCALATIONS_LABEL = "llm.unit_b.escalations"
 # What the answer may cost (register item 15): up to ten flags with a quote
 # each, sized against an Arabic call on a non-reasoning model.
 ESCALATIONS_MAX_OUTPUT_TOKENS = 2500
+# The same answer on a reasoning profile, whose hidden reasoning is spent
+# inside the ceiling (register item 116): the ceiling follows the profile.
+ESCALATIONS_REASONING_MAX_OUTPUT_TOKENS = 6000
 
 # More flags than any honest call raises.
 MAX_FLAGS = 10
@@ -120,7 +123,12 @@ async def find_flags(
         scope=scope,
         settings=settings,
         profile=PROFILE_UNIT_B_ESCALATIONS,
-        max_output_tokens=ESCALATIONS_MAX_OUTPUT_TOKENS,
+        max_output_tokens=task_ceiling(
+            settings,
+            PROFILE_UNIT_B_ESCALATIONS,
+            plain=ESCALATIONS_MAX_OUTPUT_TOKENS,
+            reasoning=ESCALATIONS_REASONING_MAX_OUTPUT_TOKENS,
+        ),
         check=check_flags(call),
         reprompt_tail=REPROMPT_TAIL_TEMPLATE,
     )

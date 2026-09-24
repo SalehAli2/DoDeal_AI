@@ -23,7 +23,7 @@ from pydantic import Field
 from dodeal_ai.core.config import Settings
 from dodeal_ai.core.context import TenantScope
 from dodeal_ai.core.llm import LLMClient, LLMResponse
-from dodeal_ai.core.llm.profiles import PROFILE_UNIT_B_OBJECTIONS
+from dodeal_ai.core.llm.profiles import PROFILE_UNIT_B_OBJECTIONS, task_ceiling
 from dodeal_ai.units.call_intelligence.evidence import (
     CallText,
     Cited,
@@ -67,6 +67,9 @@ OBJECTION_CATEGORIES = (
 # What the answer may cost (register item 15): up to ten objections, each with
 # three quotes, sized against an Arabic call on a non-reasoning model.
 OBJECTIONS_MAX_OUTPUT_TOKENS = 2500
+# The same answer on a reasoning profile, whose hidden reasoning is spent
+# inside the ceiling (register item 116): the ceiling follows the profile.
+OBJECTIONS_REASONING_MAX_OUTPUT_TOKENS = 6000
 
 # More than any honest call raises: the same worry again is the same objection.
 MAX_OBJECTIONS = 10
@@ -149,7 +152,12 @@ async def find_objections(
         scope=scope,
         settings=settings,
         profile=PROFILE_UNIT_B_OBJECTIONS,
-        max_output_tokens=OBJECTIONS_MAX_OUTPUT_TOKENS,
+        max_output_tokens=task_ceiling(
+            settings,
+            PROFILE_UNIT_B_OBJECTIONS,
+            plain=OBJECTIONS_MAX_OUTPUT_TOKENS,
+            reasoning=OBJECTIONS_REASONING_MAX_OUTPUT_TOKENS,
+        ),
         check=check_objections(call),
         reprompt_tail=REPROMPT_TAIL_TEMPLATE,
     )

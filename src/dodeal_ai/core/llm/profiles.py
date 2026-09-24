@@ -36,6 +36,8 @@ PROFILE_UNIT_B_EXTRACT = "unit_b.extract"
 PROFILE_UNIT_B_PROSE = "unit_b.prose"
 
 # Unit B's wave 2 passes, one profile each (units/call_intelligence/wave2.py).
+# Each has two ceilings, and takes the larger when its profile reasons
+# (task_ceiling below): the hidden reasoning is spent inside the ceiling.
 PROFILE_UNIT_B_OBJECTIONS = "unit_b.objections"
 PROFILE_UNIT_B_SCORE = "unit_b.score"
 PROFILE_UNIT_B_ESCALATIONS = "unit_b.escalations"
@@ -84,6 +86,15 @@ class ResolvedProfile:
         if self.max_output_tokens is None:
             return task_ceiling
         return min(task_ceiling, self.max_output_tokens)
+
+
+def task_ceiling(settings: Settings, name: str, *, plain: int, reasoning: int) -> int:
+    """`reasoning` when the profile sets a reasoning_effort, else `plain`: the
+    fallback pair never reasons. The profile's max_output_tokens may still
+    lower either; never raises, leaving an unconfigured seam to the call."""
+    profile: ModelProfile | None = settings.llm_profiles.get(name)
+    reasons = profile is not None and profile.reasoning_effort is not None
+    return reasoning if reasons else plain
 
 
 def resolve_profile(settings: Settings, name: str) -> ResolvedProfile:
