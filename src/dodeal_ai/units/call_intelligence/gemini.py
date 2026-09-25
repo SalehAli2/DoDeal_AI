@@ -15,9 +15,10 @@ Interactions client (on 408, 409, 429 and 5xx, with no per-call switch) and
 the Files client. Both are switched off in `sdk_client`, so the worker's one
 retry (BRD B6) is the only one and no received answer is paid for twice.
 
-THE ANSWER: word_info annotations, each a word with its speaker (spk_N) and
-its start and end offsets. Consecutive words of one speaker are one segment,
-labelled speaker_N, clamped so segments never overlap. The API names no
+THE ANSWER: word_info annotations, each a word with its speaker (spk_N in
+the docs, spk:N from the live API, seen 2026-09-25) and its start and end
+offsets. Consecutive words of one speaker are one segment, labelled
+speaker_N, clamped so segments never overlap. The API names no
 language and no confidence: a segment's language is the script most of its
 letters are in (ar Arabic, en Latin; with none, the hint, else und), and its
 confidence is null.
@@ -88,6 +89,7 @@ _RETRYABLE = frozenset({408, 429})
 
 _LANGUAGES: dict[str, list[str]] = {"en": ["en"], "ar": ["ar"], "mixed": ["ar", "en"]}
 _OFFSET = r"^[0-9]+(\.[0-9]+)?s$"
+_SPEAKER = r"^spk[_:][0-9]{1,3}$"
 
 
 def sdk_client(
@@ -150,8 +152,9 @@ class _Word(BaseModel):
     model_config = ConfigDict(extra="ignore", frozen=True)
 
     text: str
-    # Absent when diarization was not asked for; required when it was.
-    speaker: str | None = Field(default=None, pattern=r"^spk_[0-9]{1,3}$")
+    # Absent when diarization was not asked for; required when it was. The
+    # docs show spk_N, the live API sends spk:N; both are accepted.
+    speaker: str | None = Field(default=None, pattern=_SPEAKER)
     start_offset: str = Field(pattern=_OFFSET)
     end_offset: str = Field(pattern=_OFFSET)
 
@@ -227,10 +230,11 @@ def segments_of(
 
 
 def _label(word: _Word, *, diarized: bool) -> str:
-    """speaker_N for Gemini's spk_N; unknown when it was not asked."""
+    """speaker_N for Gemini's spk_N or spk:N; unknown when it was not asked."""
     if not diarized or word.speaker is None:
         return UNKNOWN
-    return f"speaker_{word.speaker.removeprefix('spk_')}"
+    # The pattern leaves exactly one separator before the number.
+    return f"speaker_{word.speaker[len('spk_') :]}"
 
 
 class GeminiTranscriber:

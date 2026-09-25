@@ -131,6 +131,78 @@ async def test_spk_1_and_spk_2_come_back_as_ordered_speaker_segments(
     assert audio_input["mime_type"] == "audio/flac"
 
 
+def _live(words: list[tuple[str, str, str, str]]) -> dict[str, Any]:
+    """An answer in the shape the live API sent on 2026-09-25: word_info
+    annotations with spk:N speakers. The words are made up."""
+    notes = [
+        {
+            "type": "word_info",
+            "text": text,
+            "speaker": speaker,
+            "start_offset": start,
+            "end_offset": end,
+        }
+        for text, speaker, start, end in words
+    ]
+    text = " ".join(word[0] for word in words)
+    return {
+        "id": "interaction-live-shape",
+        "status": "completed",
+        "steps": [
+            {
+                "type": "model_output",
+                "content": [{"type": "text", "text": text, "annotations": notes}],
+            }
+        ],
+    }
+
+
+async def test_the_live_spk_colon_labels_come_back_as_speaker_0_and_1(
+    audio: Path,
+) -> None:
+    """The live API's spk:0 and spk:1 become speaker_0 and speaker_1."""
+    google = Google(
+        _live(
+            [
+                ("Good", "spk:0", "0.000s", "0.400s"),
+                ("morning.", "spk:0", "0.400s", "1.900s"),
+                ("Hi,", "spk:1", "1.900s", "2.300s"),
+                ("yes.", "spk:1", "2.300s", "2.800s"),
+                ("Great.", "spk:0", "3.000s", "3.500s"),
+            ]
+        )
+    )
+    transcript = await transcriber(google).transcribe(
+        audio, language_hint="en", duration_seconds=60
+    )
+    assert [(s.speaker, s.start_s, s.end_s, s.text) for s in transcript.segments] == [
+        ("speaker_0", 0.0, 1.9, "Good morning."),
+        ("speaker_1", 1.9, 2.8, "Hi, yes."),
+        ("speaker_0", 3.0, 3.5, "Great."),
+    ]
+
+
+async def test_the_documented_spk_underscore_label_still_parses(audio: Path) -> None:
+    """The documented spk_1 form keeps working beside the live one."""
+    google = Google(_live([("Hello.", "spk_1", "0.100s", "0.900s")]))
+    transcript = await transcriber(google).transcribe(
+        audio, language_hint="en", duration_seconds=60
+    )
+    assert [s.speaker for s in transcript.segments] == ["speaker_1"]
+
+
+@pytest.mark.parametrize("speaker", ["spk-1", "spk:", "spk::1", "spk:1234", "SPK:1"])
+async def test_a_speaker_in_neither_form_is_malformed(
+    audio: Path, speaker: str
+) -> None:
+    google = Google(_live([("Hello.", speaker, "0.100s", "0.900s")]))
+    with pytest.raises(TranscriptionError) as caught:
+        await transcriber(google).transcribe(
+            audio, language_hint="en", duration_seconds=60
+        )
+    assert caught.value.reason == MALFORMED
+
+
 def _undiarized(answer: dict[str, Any]) -> dict[str, Any]:
     """The recorded answer as Gemini gives it with no diarization asked: the
     same words, none carrying a speaker."""
