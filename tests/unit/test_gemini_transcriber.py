@@ -12,6 +12,7 @@ import httpx
 import pytest
 
 from dodeal_ai.core.config import ConfigError, get_settings
+from dodeal_ai.core.cost.spend import spending
 from dodeal_ai.units.call_intelligence import gemini
 from dodeal_ai.units.call_intelligence.gemini import (
     MALFORMED,
@@ -201,6 +202,52 @@ async def test_a_speaker_in_neither_form_is_malformed(
             audio, language_hint="en", duration_seconds=60
         )
     assert caught.value.reason == MALFORMED
+
+
+@pytest.mark.parametrize(
+    ("usage", "counted"),
+    [
+        (RECORDED["usage"], (4821, 4800)),
+        (None, (None, None)),
+        ({"total_input_tokens": 50}, (50, None)),
+        (
+            {
+                "total_input_tokens": 50,
+                "input_tokens_by_modality": [{"modality": "AUDIO", "tokens": 40}],
+            },
+            (50, 40),
+        ),
+        ({"total_input_tokens": -1}, (None, None)),
+        (
+            {
+                "total_input_tokens": 50,
+                "input_tokens_by_modality": [{"modality": "audio", "tokens": -4}],
+            },
+            (None, None),
+        ),
+    ],
+    ids=["recorded", "absent", "no-modalities", "upper-case", "negative", "bad-entry"],
+)
+async def test_the_reported_usage_goes_on_the_spend_and_never_fails_the_call(
+    audio: Path, usage: dict[str, Any] | None, counted: tuple[int | None, ...]
+) -> None:
+    answer = {key: value for key, value in RECORDED.items() if key != "usage"}
+    if usage is not None:
+        answer["usage"] = usage
+    with spending("unit_b") as spend:
+        transcript = await transcriber(Google(answer)).transcribe(
+            audio, language_hint="mixed", duration_seconds=150
+        )
+    assert len(transcript.segments) == 4
+    assert spend.stt_usage == [counted]
+
+
+def test_a_usage_block_that_is_not_one_is_unreported() -> None:
+    """The SDK hands back a plain dict for a body its types do not fit."""
+    with spending("unit_b") as spend:
+        gemini.record_usage({"usage": ["not", "a", "block"]})
+        gemini.record_usage(["not", "an", "answer"])
+    assert spend.stt_usage == [(None, None), (None, None)]
 
 
 def _undiarized(answer: dict[str, Any]) -> dict[str, Any]:

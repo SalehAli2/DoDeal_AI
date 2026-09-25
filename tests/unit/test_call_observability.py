@@ -9,6 +9,7 @@ import json
 import logging
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -36,11 +37,20 @@ from dodeal_ai.units.call_intelligence.fake_transcriber import (
     DEFAULT_SEGMENTS,
     FakeTranscriber,
 )
+from dodeal_ai.units.call_intelligence.gemini import GeminiTranscriber
 from dodeal_ai.units.call_intelligence.queues import NORMAL_QUEUE, enqueue_call
 from dodeal_ai.units.call_intelligence.schemas import CallJobRequest
 from dodeal_ai.units.call_intelligence.worker import process_call
 
 HOST = "audio.tenant-a.example"
+GEMINI_ANSWER = json.loads(
+    (
+        Path(__file__).resolve().parents[1]
+        / "fixtures"
+        / "stt"
+        / "gemini_interaction.json"
+    ).read_text(encoding="utf-8")
+)
 LINK = f"https://{HOST}/7.wav?sig=SIGNED-LINK"
 PHONE = "cd" * 32
 JOB = "job-1"
@@ -386,6 +396,64 @@ async def test_the_outcome_line_carries_the_calls_spend(
     )
     assert outcome["cost_usd"] == pytest.approx(150 / 60 * 0.006)
     assert outcome["price_table_version"] == "prices-2026-09"
+    # The fake engine reports no tokens: null, never a zero that reads as one.
+    assert (outcome["stt_input_tokens"], outcome["stt_audio_input_tokens"]) == (
+        None,
+        None,
+    )
+
+
+def _gemini(request: httpx.Request) -> httpx.Response:
+    """Google's API answering the recorded interaction, usage included."""
+    return httpx.Response(200, json=GEMINI_ANSWER)
+
+
+async def test_geminis_reported_usage_is_on_the_outcome_line(
+    ctx: dict, lines: io.StringIO
+) -> None:
+    """Total input and audio input tokens beside audio_seconds, unpriced."""
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_gemini)) as http:
+        ctx["transcriber"] = GeminiTranscriber(
+            model="gemini-3.5-transcribe",
+            api_key="test-key",
+            http=http,
+            base_url=None,
+            timeout_seconds=30,
+        )
+        await _push()
+        await process_call(ctx, "tenant-a", JOB)
+    (outcome,) = [x for x in _parsed(lines) if x["message"] == "call_job_outcome"]
+    assert (
+        outcome["status"],
+        outcome["audio_seconds"],
+        outcome["stt_input_tokens"],
+        outcome["stt_audio_input_tokens"],
+    ) == ("done", 150, 4821, 4800)
+
+
+async def test_a_failed_transcription_leaves_the_tokens_unreported(
+    ctx: dict, lines: io.StringIO
+) -> None:
+    """A run that paid for a failure knows no token count: null, not partial."""
+    from dodeal_ai.core.cost.spend import current_spend
+    from dodeal_ai.units.call_intelligence.transcriber import TranscriptionError
+
+    class _ReportsThenFails(FakeTranscriber):
+        async def transcribe(self, *args: Any, **kwargs: Any) -> Any:
+            spend = current_spend()
+            assert spend is not None
+            spend.record_stt_usage(900, 800)
+            raise TranscriptionError("stt_malformed_response", retryable=False)
+
+    ctx["transcriber"] = _ReportsThenFails()
+    await _push()
+    await process_call(ctx, "tenant-a", JOB)
+    (outcome,) = [x for x in _parsed(lines) if x["message"] == "call_job_outcome"]
+    assert (
+        outcome["status"],
+        outcome["stt_input_tokens"],
+        outcome["stt_audio_input_tokens"],
+    ) == ("failed", None, None)
 
 
 async def test_a_failed_transcription_logs_its_seconds_unpriced(

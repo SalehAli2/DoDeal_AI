@@ -28,5 +28,14 @@
         }
       ]
     }
-  ]
+  ],
+  "usage": {
+    "total_input_tokens": 4821,
+    "input_tokens_by_modality": [
+      {"modality": "text", "tokens": 21},
+      {"modality": "audio", "tokens": 4800}
+    ],
+    "total_output_tokens": 180,
+    "total_tokens": 5001
+  }
 }

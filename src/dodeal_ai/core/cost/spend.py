@@ -4,7 +4,9 @@ happens and priced once, at its outcome line (register item "cost").
 COUNTED WHERE IT IS PAID. Every model call already passes through
 `complete_once` once, the reprompt included; `record_model_call` there adds it
 to the task's Spend, so `model_calls` counts CALLS and a reprompted pass costs
-two. Speech-to-text seconds are added by the call worker as it transcribes.
+two. Speech-to-text seconds are added by the call worker as it transcribes,
+and the tokens an engine reports (Gemini) by its adapter as each answer
+arrives: counted on the line, never priced.
 
 THE TASK'S SPEND RIDES A CONTEXT VARIABLE, set by `spending(unit)` around the
 task. Gathered passes inherit the same object, so all three of a judgement's
@@ -25,7 +27,7 @@ rate plus cached at the cached rate.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -59,6 +61,9 @@ class Spend:
     model_calls: int = 0
     tokens: dict[str, _Tokens] = field(default_factory=dict)
     audio: dict[str, int] = field(default_factory=dict)
+    # Per speech-to-text answer: (input tokens, audio input tokens) as the
+    # engine reported them, None where it did not.
+    stt_usage: list[tuple[int | None, int | None]] = field(default_factory=list)
     _cost: tuple[float | None] | None = None
 
     def record_call(self, response: LLMResponse) -> None:
@@ -73,6 +78,12 @@ class Spend:
     def record_audio(self, model: str, seconds: int) -> None:
         self.audio[model] = self.audio.get(model, 0) + seconds
         self._cost = None
+
+    def record_stt_usage(
+        self, input_tokens: int | None, audio_tokens: int | None
+    ) -> None:
+        """One transcription's reported tokens; None, None when it had none."""
+        self.stt_usage.append((input_tokens, audio_tokens))
 
     def _total(self, kind: str) -> int:
         return sum(getattr(counts, kind) for counts in self.tokens.values())
@@ -128,6 +139,8 @@ class Spend:
         }
         if self.unit == "unit_b":
             fields["audio_seconds"] = sum(self.audio.values())
+            fields["stt_input_tokens"] = _reported(n for n, _ in self.stt_usage)
+            fields["stt_audio_input_tokens"] = _reported(n for _, n in self.stt_usage)
         return fields
 
     def count(self, outcome: str) -> None:
@@ -135,6 +148,15 @@ class Spend:
         cost = self.cost_usd()
         if cost is not None:
             metrics.TASK_COST_USD.labels(unit=self.unit, outcome=outcome).inc(cost)
+
+
+def _reported(counts: Iterable[int | None]) -> int | None:
+    """The sum when every transcription reported its count, else None: never a
+    partial sum that reads as the real one."""
+    found = list(counts)
+    if not found or None in found:
+        return None
+    return sum(n for n in found if n is not None)
 
 
 @contextmanager

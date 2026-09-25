@@ -28,6 +28,10 @@ WITHOUT diarization: every segment's speaker is unknown, a segment ends at a
 sentence's end or a pause of PAUSE_SECONDS, and the transcript is uncertain
 (long_call_no_diarization). 1800 s itself is still diarized.
 
+USAGE: the answer's total input tokens and its audio input tokens go onto the
+run's spend as they arrive, before the words are read, for the outcome line
+(core/cost/spend.py). Counted, never priced; unreadable, they are unreported.
+
 FAILURES, by HTTP status only, never the provider's message: 408, 429, 5xx, a
 timeout or a dropped connection is retryable; any other 4xx is permanent; an
 answer that arrived but cannot be read is permanent, never asked again.
@@ -50,8 +54,9 @@ from google.genai import types
 from google.genai._gaos.lib.compat_errors import APIConnectionError
 from google.genai._gaos.lib.compat_errors import APIError as InteractionsError
 from google.genai._gaos.utils import RetryConfig
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, ValidationError
 
+from dodeal_ai.core.cost.spend import current_spend
 from dodeal_ai.units.call_intelligence.audio import ENGINE_MIME
 from dodeal_ai.units.call_intelligence.evidence import script_language
 from dodeal_ai.units.call_intelligence.prompts import UNKNOWN
@@ -167,6 +172,45 @@ class _Word(BaseModel):
         return float(self.end_offset[:-1])
 
 
+class _Modality(BaseModel):
+    """One entry of usage.input_tokens_by_modality."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    modality: str
+    tokens: StrictInt = Field(ge=0)
+
+
+class _Usage(BaseModel):
+    """The answer's usage block, as the outcome line needs it."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    total_input_tokens: StrictInt | None = Field(default=None, ge=0)
+    input_tokens_by_modality: list[_Modality] = []
+
+
+def record_usage(answer: object) -> None:
+    """The answer's input and audio input tokens onto the run's spend, None
+    for what it did not report or reported unreadably: a usage block never
+    fails a transcript that was paid for."""
+    spend = current_spend()
+    if spend is None:
+        return
+    block = answer.get("usage") if isinstance(answer, dict) else None
+    try:
+        usage = _Usage.model_validate(block or {})
+    except ValidationError:
+        spend.record_stt_usage(None, None)
+        return
+    audio = [
+        entry.tokens
+        for entry in usage.input_tokens_by_modality
+        if entry.modality.lower() == "audio"
+    ]
+    spend.record_stt_usage(usage.total_input_tokens, sum(audio) if audio else None)
+
+
 def _words(answer: dict[str, Any]) -> list[_Word]:
     """Every word of the answer's text output; ValidationError for a word
     missing its speaker or its times, MALFORMED for text with no words."""
@@ -275,6 +319,7 @@ class GeminiTranscriber:
         received = (
             answer.model_dump(mode="json") if isinstance(answer, BaseModel) else answer
         )
+        record_usage(received)
         try:
             words = _words(received)
             if diarize and any(word.speaker is None for word in words):

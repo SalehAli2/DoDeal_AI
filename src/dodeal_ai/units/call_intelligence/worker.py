@@ -771,9 +771,11 @@ async def _paid(
             duration_seconds=length,
         )
     except (TranscriptionError, asyncio.CancelledError):
-        # Possibly billed, by a model it never named: unpriced, not free.
+        # Possibly billed, by a model it never named: unpriced, not free, and
+        # its tokens unknown.
         if spend is not None:
             spend.record_audio(_UNKNOWN_MODEL, seconds)
+            spend.record_stt_usage(None, None)
         raise
     if spend is not None:
         spend.record_audio(transcript.model, seconds)

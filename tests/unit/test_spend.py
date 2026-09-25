@@ -249,3 +249,31 @@ def test_an_unpriced_task_counts_no_cost() -> None:
         "task_cost_usd_total", {"unit": "unit_b", "outcome": "done"}
     )
     assert after == before
+
+
+def test_stt_tokens_are_summed_only_when_every_answer_reported_them() -> None:
+    """Both sides of a stereo call add up; one side unreported makes the count
+    null, never a partial sum. Counted only: the cost is untouched."""
+    both = Spend(unit="unit_b")
+    both.record_stt_usage(900, 800)
+    both.record_stt_usage(100, 90)
+    fields = both.fields()
+    assert (fields["stt_input_tokens"], fields["stt_audio_input_tokens"]) == (
+        1000,
+        890,
+    )
+    assert fields["cost_usd"] == 0.0
+    one_side = Spend(unit="unit_b")
+    one_side.record_stt_usage(900, 800)
+    one_side.record_stt_usage(100, None)
+    fields = one_side.fields()
+    assert (fields["stt_input_tokens"], fields["stt_audio_input_tokens"]) == (
+        1000,
+        None,
+    )
+    fields = Spend(unit="unit_b").fields()
+    assert (fields["stt_input_tokens"], fields["stt_audio_input_tokens"]) == (
+        None,
+        None,
+    )
+    assert "stt_input_tokens" not in Spend(unit="unit_a").fields()
