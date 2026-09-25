@@ -40,6 +40,7 @@ from dodeal_ai.units.call_intelligence.prompts import (
     CLIENT,
     OBJECTIONS_TEMPLATE,
     REPROMPT_TAIL_TEMPLATE,
+    REPROMPT_TAILS,
     build_call_prompt,
 )
 from dodeal_ai.units.structured_intelligence.llm_call import (
@@ -161,6 +162,7 @@ async def find_objections(
         ),
         check=check_objections(call),
         reprompt_tail=REPROMPT_TAIL_TEMPLATE,
+        tail_by_error=REPROMPT_TAILS,
     )
 
 

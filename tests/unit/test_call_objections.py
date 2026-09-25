@@ -41,7 +41,7 @@ from dodeal_ai.units.call_intelligence.prompts import (
     ESCALATIONS_TEMPLATE,
     EXTRAS_TEMPLATE,
     OBJECTIONS_TEMPLATE,
-    REPROMPT_TAIL_TEMPLATE,
+    QUOTE_EXACT_TAIL_TEMPLATE,
 )
 from dodeal_ai.units.call_intelligence.transcriber import Segment, Transcript
 from dodeal_ai.units.call_intelligence.wave2 import OBJECTIONS, wave2
@@ -128,7 +128,7 @@ async def test_an_invented_quote_fails_after_one_reprompt() -> None:
         await _find(llm)
 
     assert llm.call_count == 2
-    tail = build_prompt(REPROMPT_TAIL_TEMPLATE, caller_data="").stable
+    tail = build_prompt(QUOTE_EXACT_TAIL_TEMPLATE, caller_data="").stable
     assert (llm.prompts[0].tail, llm.prompts[1].tail) == ("", tail)
     assert llm.prompts[1].variable == llm.prompts[0].variable
 

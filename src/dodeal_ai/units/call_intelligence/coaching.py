@@ -45,6 +45,7 @@ from dodeal_ai.units.call_intelligence.evidence import (
 from dodeal_ai.units.call_intelligence.prompts import (
     COACHING_TEMPLATE,
     REPROMPT_TAIL_TEMPLATE,
+    REPROMPT_TAILS,
     build_call_prompt,
     clock,
 )
@@ -238,6 +239,7 @@ async def coach(
         ),
         check=check_coaching(call),
         reprompt_tail=REPROMPT_TAIL_TEMPLATE,
+        tail_by_error=REPROMPT_TAILS,
     )
 
 

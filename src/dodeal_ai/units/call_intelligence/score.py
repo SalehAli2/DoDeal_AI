@@ -55,6 +55,7 @@ from dodeal_ai.units.call_intelligence.evidence import (
 )
 from dodeal_ai.units.call_intelligence.prompts import (
     REPROMPT_TAIL_TEMPLATE,
+    REPROMPT_TAILS,
     SCORE_TEMPLATE,
     build_call_prompt,
 )
@@ -201,6 +202,7 @@ async def ask_checks(
         ),
         check=check_score(call),
         reprompt_tail=REPROMPT_TAIL_TEMPLATE,
+        tail_by_error=REPROMPT_TAILS,
     )
 
 

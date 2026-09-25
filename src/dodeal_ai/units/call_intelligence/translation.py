@@ -57,6 +57,7 @@ from dodeal_ai.units.call_intelligence.evidence import CallText, Errors, in_lang
 from dodeal_ai.units.call_intelligence.prompts import (
     PROMPT_SET_VERSION,
     REPROMPT_TAIL_TEMPLATE,
+    REPROMPT_TAILS,
     TRANSLATE_TEMPLATE,
     build_call_prompt,
     clock,
@@ -218,6 +219,7 @@ async def _chunk(
             ),
             check=check_translation(run, target),
             reprompt_tail=REPROMPT_TAIL_TEMPLATE,
+            tail_by_error=REPROMPT_TAILS,
         )
         return answer
 

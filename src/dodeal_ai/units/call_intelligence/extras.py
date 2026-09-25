@@ -52,6 +52,7 @@ from dodeal_ai.units.call_intelligence.evidence import (
 from dodeal_ai.units.call_intelligence.prompts import (
     EXTRAS_TEMPLATE,
     REPROMPT_TAIL_TEMPLATE,
+    REPROMPT_TAILS,
     build_call_prompt,
     one_line,
 )
@@ -214,6 +215,7 @@ async def find_extras(
         ),
         check=check_extras(call, vocabulary),
         reprompt_tail=REPROMPT_TAIL_TEMPLATE,
+        tail_by_error=REPROMPT_TAILS,
     )
 
 

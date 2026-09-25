@@ -54,6 +54,7 @@ from dodeal_ai.units.call_intelligence.prompts import (
     EXTRACT_TEMPLATE,
     PROSE_TEMPLATE,
     REPROMPT_TAIL_TEMPLATE,
+    REPROMPT_TAILS,
     build_call_prompt,
 )
 from dodeal_ai.units.structured_intelligence.llm_call import (
@@ -256,6 +257,7 @@ async def extract(
         max_output_tokens=EXTRACT_MAX_OUTPUT_TOKENS,
         check=check_extraction(call),
         reprompt_tail=REPROMPT_TAIL_TEMPLATE,
+        tail_by_error=REPROMPT_TAILS,
     )
 
 
@@ -282,4 +284,5 @@ async def write_prose(
         max_output_tokens=PROSE_MAX_OUTPUT_TOKENS,
         check=check_prose(call),
         reprompt_tail=REPROMPT_TAIL_TEMPLATE,
+        tail_by_error=REPROMPT_TAILS,
     )

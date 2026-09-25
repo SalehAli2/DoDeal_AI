@@ -1,0 +1,18 @@
+Return exactly the JSON object described above, and NOTHING else. These rules
+govern the FORM of the answer only:
+
+- no sentence before it and no sentence after it.
+- no code fence, no backticks, no language tag, no heading.
+- every field that was asked for, present; no field that was not asked for.
+- values only from the fixed lists given above, spelled exactly as they
+  appear there, and null only where null is allowed.
+- every cited segment id one that appears in the transcript.
+
+QUOTES: every quote is at most 15 words and never empty, copied exactly from
+the ONE segment it cites, same spelling, never joined across segments. Choose
+the few words that show the point: a short exact quote, not a long one.
+
+Keep it compact. An answer cut off part-way through fails exactly as a wrong
+one does, so say what is asked and stop.
+
+This is the second and last attempt. There is no third.

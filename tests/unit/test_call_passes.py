@@ -26,8 +26,15 @@ from dodeal_ai.units.call_intelligence.passes import (
     settled,
     write_prose,
 )
-from dodeal_ai.units.call_intelligence.prompts import REPROMPT_TAIL_TEMPLATE
+from dodeal_ai.units.call_intelligence.prompts import (
+    EXTRACT_TEMPLATE,
+    QUOTE_EXACT_TAIL_TEMPLATE,
+    QUOTE_LENGTH_TAIL_TEMPLATE,
+    REPROMPT_TAIL_TEMPLATE,
+    build_call_prompt,
+)
 from dodeal_ai.units.call_intelligence.transcriber import Segment, Transcript
+from dodeal_ai.units.structured_intelligence import llm_call
 from tests.conftest import RedisFakes
 from tests.helpers.fake_llm import FakeLLM, json_response
 
@@ -118,9 +125,60 @@ async def test_an_invented_quote_reprompts_then_fails_the_pass() -> None:
         await _extract(llm)
 
     assert llm.call_count == 2
-    tail = build_prompt(REPROMPT_TAIL_TEMPLATE, caller_data="").stable
+    tail = build_prompt(QUOTE_EXACT_TAIL_TEMPLATE, caller_data="").stable
     assert (llm.prompts[0].tail, llm.prompts[1].tail) == ("", tail)
     assert llm.prompts[1].variable == llm.prompts[0].variable
+
+
+def _tail(template: str) -> str:
+    return build_prompt(template, caller_data="").stable
+
+
+@pytest.mark.parametrize(
+    ("budget", "template"),
+    [
+        (_detail("x", STATED, "budget " * 41, "s2"), QUOTE_LENGTH_TAIL_TEMPLATE),
+        (
+            _detail("x", STATED, "I can pay two million", "s2"),
+            QUOTE_EXACT_TAIL_TEMPLATE,
+        ),
+        (_detail("x", STATED, None, None), REPROMPT_TAIL_TEMPLATE),
+    ],
+)
+async def test_the_reprompt_tail_is_chosen_by_the_first_failures_code(
+    budget: dict, template: str
+) -> None:
+    """The guard: a quote_length failure reprompts with the quote tail, a quote
+    not in its segment with the exact-copy tail, anything else with the usual."""
+    rejected = _extraction(budget=budget)
+    llm = FakeLLM(json_response(rejected), json_response(_extraction()))
+
+    await _extract(llm)
+
+    first, second = llm.prompts
+    assert (first.tail, second.tail) == ("", _tail(template))
+    assert (second.stable, second.variable) == (first.stable, first.variable)
+    assert "budget budget" not in second.tail + second.variable
+
+
+async def test_call_model_without_a_tail_map_keeps_its_one_tail() -> None:
+    """Unit A's default: a quote_length failure still gets reprompt_tail."""
+    rejected = _extraction(budget=_detail("x", STATED, "budget " * 41, "s2"))
+    llm = FakeLLM(json_response(rejected), json_response(_extraction()))
+
+    await llm_call.call_model(
+        llm,
+        build_call_prompt(EXTRACT_TEMPLATE, _call().data()),
+        passes.Extraction,
+        passes.EXTRACT_LABEL,
+        scope=SCOPE,
+        settings=get_settings(),
+        profile=PROFILE_UNIT_B_EXTRACT,
+        max_output_tokens=passes.EXTRACT_MAX_OUTPUT_TOKENS,
+        check=passes.check_extraction(_call()),
+    )
+
+    assert llm.prompts[1].tail == _tail(llm_call.REPROMPT_TAIL_TEMPLATE)
 
 
 async def test_a_not_mentioned_budget_stays_null() -> None:

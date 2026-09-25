@@ -28,7 +28,8 @@ labels are the transcriber's, and only the agent is named by it.
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from types import MappingProxyType
 
 from dodeal_ai.core.prompting import AssembledPrompt, build_prompt
 from dodeal_ai.units.call_intelligence.transcriber import Segment
@@ -43,6 +44,17 @@ COACHING_TEMPLATE = "call_intelligence/coaching_v2.txt"
 EXTRAS_TEMPLATE = "call_intelligence/extras_v3.txt"
 TRANSLATE_TEMPLATE = "call_intelligence/translate_v1.txt"
 REPROMPT_TAIL_TEMPLATE = "call_intelligence/reprompt_tail_v1.txt"
+QUOTE_LENGTH_TAIL_TEMPLATE = "call_intelligence/reprompt_tail_quote_length_v1.txt"
+QUOTE_EXACT_TAIL_TEMPLATE = "call_intelligence/reprompt_tail_quote_exact_v1.txt"
+
+# The reprompt tail by the first failure's code; any other code gets
+# REPROMPT_TAIL_TEMPLATE. Fixed files only: the rejected answer is never sent.
+REPROMPT_TAILS: Mapping[str, str] = MappingProxyType(
+    {
+        "quote_length": QUOTE_LENGTH_TAIL_TEMPLATE,
+        "quote_not_in_segment": QUOTE_EXACT_TAIL_TEMPLATE,
+    }
+)
 
 # Replaced by extract_v2 (evidence for every element) and extras_v2 (the
 # keyword vocabulary), then every quoting template by its successor with the
@@ -61,7 +73,7 @@ RETIRED_TEMPLATES: tuple[str, ...] = (
 
 # The stamp stage 1 carries under versions.prompt. Move it with the digest
 # in the stamp test whenever one of UNIT_B_TEMPLATES changes.
-PROMPT_SET_VERSION = "unit_b_prompts_v6"
+PROMPT_SET_VERSION = "unit_b_prompts_v7"
 
 # Every template Unit B can send, in pass order, then the retired ones; the
 # worker preloads them all.
@@ -76,6 +88,8 @@ UNIT_B_TEMPLATES: tuple[str, ...] = (
     EXTRAS_TEMPLATE,
     TRANSLATE_TEMPLATE,
     REPROMPT_TAIL_TEMPLATE,
+    QUOTE_LENGTH_TAIL_TEMPLATE,
+    QUOTE_EXACT_TAIL_TEMPLATE,
     *RETIRED_TEMPLATES,
 )
 

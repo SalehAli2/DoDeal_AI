@@ -51,7 +51,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 from pydantic import BaseModel
 
@@ -264,6 +264,7 @@ async def call_model[M: BaseModel](
     check: Callable[[M], None] | None = None,
     reprompt: bool = True,
     reprompt_tail: str = REPROMPT_TAIL_TEMPLATE,
+    tail_by_error: Mapping[str, str] | None = None,
 ) -> tuple[M, LLMResponse]:
     """Send a prompt, validate the answer, and on a malformed one send it ONCE
     more with a stricter tail. Returns the validated output beside the raw
@@ -304,6 +305,10 @@ async def call_model[M: BaseModel](
     `reprompt_tail` names the tail's template: Unit A's by default, and a unit
     with a prompt set of its own (Unit B) passes that set's tail, so a Unit A
     tail edit never changes a prompt stamped with another unit's version.
+
+    `tail_by_error` maps an error code to a tail template: the FIRST failure's
+    code picks the tail, and any other code gets `reprompt_tail`. None (Unit A)
+    is `reprompt_tail` always. Only a fixed file is chosen, never the answer.
     """
     response = await complete_once(
         client,
@@ -316,8 +321,9 @@ async def call_model[M: BaseModel](
     )
     try:
         parsed = parse_output(response, schema, label, check=check)
-    except OutputValidationError:
+    except OutputValidationError as rejected:
         _count_call(label, "malformed")
+        tail = _tail_for(rejected.errors, reprompt_tail, tail_by_error)
         if not reprompt:
             _logger.warning(
                 "reprompt_withheld",
@@ -337,7 +343,7 @@ async def call_model[M: BaseModel](
 
     second = await complete_once(
         client,
-        with_tail(prompt, reprompt_tail),
+        with_tail(prompt, tail),
         label,
         scope=scope,
         settings=settings,
@@ -354,6 +360,17 @@ async def call_model[M: BaseModel](
         raise MalformedOutputError() from None
     _count_call(label, "ok")
     return parsed, second
+
+
+def _tail_for(
+    errors: tuple[tuple[str, str], ...],
+    default: str,
+    tail_by_error: Mapping[str, str] | None,
+) -> str:
+    """The tail template for a reprompt: the first error code's, else default."""
+    if not tail_by_error or not errors:
+        return default
+    return tail_by_error.get(errors[0][1], default)
 
 
 def _count_call(label: str, outcome: str) -> None:

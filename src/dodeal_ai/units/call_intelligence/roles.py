@@ -46,6 +46,7 @@ from dodeal_ai.units.call_intelligence.prompts import (
     CLIENT,
     ENGINE_LABEL,
     REPROMPT_TAIL_TEMPLATE,
+    REPROMPT_TAILS,
     ROLES_TEMPLATE,
     build_call_prompt,
     clock,
@@ -169,6 +170,7 @@ async def ask_roles(
         ),
         check=check_roles(call),
         reprompt_tail=REPROMPT_TAIL_TEMPLATE,
+        tail_by_error=REPROMPT_TAILS,
     )
 
 

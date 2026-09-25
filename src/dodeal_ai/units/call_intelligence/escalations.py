@@ -39,6 +39,7 @@ from dodeal_ai.units.call_intelligence.prompts import (
     AGENT,
     ESCALATIONS_TEMPLATE,
     REPROMPT_TAIL_TEMPLATE,
+    REPROMPT_TAILS,
     build_call_prompt,
     role_of,
 )
@@ -132,6 +133,7 @@ async def find_flags(
         ),
         check=check_flags(call),
         reprompt_tail=REPROMPT_TAIL_TEMPLATE,
+        tail_by_error=REPROMPT_TAILS,
     )
 
 
