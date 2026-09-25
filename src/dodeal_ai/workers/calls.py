@@ -58,10 +58,19 @@ from dodeal_ai.core.logging_config import configure_logging, warn_if_demo_audio
 from dodeal_ai.core.prompting import clear_templates, preload_templates
 from dodeal_ai.core.redis import redis_url
 from dodeal_ai.core.safety import check_production_safety
+from dodeal_ai.core.tenant_config import (
+    clear_tenant_configs,
+    load_tenant_configs,
+    register_section_parsers,
+)
 from dodeal_ai.units.call_intelligence.audio import (
     AudioTools,
     FfmpegMissing,
     ensure_ffmpeg,
+)
+from dodeal_ai.units.call_intelligence.config import (
+    UNIT_B_SECTION,
+    parse_unit_b_section,
 )
 from dodeal_ai.units.call_intelligence.delivery import (
     deliver_callback,
@@ -86,12 +95,24 @@ from dodeal_ai.units.call_intelligence.transcriber import (
 )
 from dodeal_ai.units.call_intelligence.translation import translate_call
 from dodeal_ai.units.call_intelligence.worker import process_call
+from dodeal_ai.units.structured_intelligence.config import (
+    UNIT_A_SECTION,
+    parse_unit_a_section,
+)
 
 QUEUES = {
     "priority": PRIORITY_QUEUE,
     "normal": NORMAL_QUEUE,
     "overnight": OVERNIGHT_QUEUE,
     "stage2": STAGE2_QUEUE,
+}
+
+# The same sections and parsers the API registers (main.TENANT_CONFIG_SECTIONS;
+# a test holds the two equal). Without them the override store parses nothing
+# here, and every company reads as its default: calls off.
+TENANT_CONFIG_SECTIONS = {
+    UNIT_A_SECTION: parse_unit_a_section,
+    UNIT_B_SECTION: parse_unit_b_section,
 }
 
 
@@ -113,6 +134,9 @@ def worker_settings(
         # Production refuses the demo's shortcuts before anything opens.
         check_production_safety(settings)
         warn_if_demo_audio(settings)
+        register_section_parsers(TENANT_CONFIG_SECTIONS)
+        if settings.tenant_config_dir is not None:
+            load_tenant_configs(settings.tenant_config_dir, TENANT_CONFIG_SECTIONS)
         if queue != STAGE2_QUEUE:
             # Speech-to-text's own pool; the SDK's timeout is set per request.
             stt_http = httpx.AsyncClient()
@@ -153,6 +177,7 @@ def worker_settings(
             if client is not None:
                 await client.aclose()
         clear_templates()
+        clear_tenant_configs()
 
     sweeps = (
         [cron(sweep_stuck_jobs, minute=_every(SWEEP_INTERVAL_SECONDS))]

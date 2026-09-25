@@ -225,10 +225,14 @@ def report(body: dict[str, Any], outcomes: list[dict[str, Any]]) -> list[str]:
         "",
         "=== TRANSCRIPT ===",
         f"language profile: {find(body, 'language_profile')}",
-        f"uncertain: {find(body, 'uncertain')}  "
-        f"reasons: {find(body, 'uncertain_reasons')}",
-        f"segments: {len(find(body, 'segments') or [])}  "
-        f"engine: {find(body, 'provider')} / {find(body, 'model')}",
+        (
+            f"uncertain: {find(body, 'uncertain')}  "
+            f"reasons: {find(body, 'uncertain_reasons')}"
+        ),
+        (
+            f"segments: {len(find(body, 'segments') or [])}  "
+            f"engine: {find(body, 'provider')} / {find(body, 'model')}"
+        ),
         f"roles: {short(find(body, 'roles'))}",
         "",
         "=== WAVE 1 ===",
@@ -303,12 +307,14 @@ def run(args: argparse.Namespace) -> int:
         raise fail("refused: DODEAL_ENVIRONMENT is production")
     provider = plain(getattr(settings, "call_stt_provider", "fake"))
     if provider == "fake" and not args.stt_profile:
-        raise fail("the fake STT is refused: set DODEAL_CALL_STT_PROVIDER or use --stt-profile")
+        raise fail(
+            "the fake STT is refused: set DODEAL_CALL_STT_PROVIDER or use --stt-profile"
+        )
     try:
         redis_url = plain(settings.redis_operational_url)
         redis.Redis.from_url(redis_url, socket_connect_timeout=2).ping()
     except (redis.RedisError, AttributeError, ValueError):
-        raise fail('Redis did not answer. Run: docker compose up -d redis') from None
+        raise fail("Redis did not answer. Run: docker compose up -d redis") from None
 
     key = env_file_values(DEMO_ENV).get("DODEAL_SERVICE_JWT_SIGNING_KEY")
     if not key:
@@ -323,6 +329,7 @@ def run(args: argparse.Namespace) -> int:
     env = {**env_file_values(DOT_ENV), **os.environ}
     env.update(
         {
+            "DODEAL_TENANT_CONFIG_CACHE_SECONDS": "1",
             "DODEAL_CALL_DEMO_ALLOW_LOCAL_AUDIO": "true",
             "DODEAL_CALL_CALLBACK_SECRETS": json.dumps({args.tenant: callback_secret}),
             "DODEAL_SERVICE_JWT_ALGORITHM": "HS256",
@@ -352,11 +359,21 @@ def run(args: argparse.Namespace) -> int:
     try:
         children.start(
             "api",
-            [python, "-m", "uvicorn", "dodeal_ai.main:app", "--host", "127.0.0.1",
-             "--port", str(api_port)],
+            [
+                python,
+                "-m",
+                "uvicorn",
+                "dodeal_ai.main:app",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(api_port),
+            ],
         )
         worker_logs = [
-            children.start("worker-normal", [python, "-m", "dodeal_ai.workers.calls", "normal"])
+            children.start(
+                "worker-normal", [python, "-m", "dodeal_ai.workers.calls", "normal"]
+            )
         ]
         if not args.no_stage2:
             worker_logs.append(
@@ -366,9 +383,20 @@ def run(args: argparse.Namespace) -> int:
             )
         demo_log = children.start(
             "demo",
-            [python, str(REPO_ROOT / "scripts" / "call_demo.py"), "--port", str(demo_port),
-             "--tenant", args.tenant, "--secret", callback_secret, "--audio", str(audio),
-             "--base-url", api],
+            [
+                python,
+                str(REPO_ROOT / "scripts" / "call_demo.py"),
+                "--port",
+                str(demo_port),
+                "--tenant",
+                args.tenant,
+                "--secret",
+                callback_secret,
+                "--audio",
+                str(audio),
+                "--base-url",
+                api,
+            ],
         )
 
         if wait_for_http(f"{api}/health", 60) is None:
@@ -400,7 +428,7 @@ def run(args: argparse.Namespace) -> int:
             print(f"unit_b settings: {put.status_code}")
             if put.status_code >= 300:
                 raise fail(f"the settings PUT failed: {short(put.text)}")
-
+            time.sleep(3)
             now = datetime.now(UTC)
             push = {
                 "call_id": int(time.time()) % 1_000_000_000,
@@ -417,7 +445,9 @@ def run(args: argparse.Namespace) -> int:
             started = time.monotonic()
             pushed = client.post("/api/v1/calls/jobs", json=push, headers=headers())
             if pushed.status_code != 202:
-                raise fail(f"the push failed: {pushed.status_code} {short(pushed.text)}")
+                raise fail(
+                    f"the push failed: {pushed.status_code} {short(pushed.text)}"
+                )
             job_id = pushed.json()["job_id"]
             print(f"pushed call, job {job_id} ({round(seconds)} s of audio)")
 
@@ -428,7 +458,11 @@ def run(args: argparse.Namespace) -> int:
                 got = client.get(f"/api/v1/calls/jobs/{job_id}", headers=headers())
                 if got.status_code == 200:
                     body = got.json()
-                    state = (body.get("status"), body.get("delivery"), body.get("stage2"))
+                    state = (
+                        body.get("status"),
+                        body.get("delivery"),
+                        body.get("stage2"),
+                    )
                     if state != seen:
                         elapsed = round(time.monotonic() - started, 1)
                         print(
@@ -437,7 +471,9 @@ def run(args: argparse.Namespace) -> int:
                         )
                         seen = state
                     if finished(body, not args.no_stage2):
-                        code = EXIT_DONE if body.get("status") == "done" else EXIT_FAILED
+                        code = (
+                            EXIT_DONE if body.get("status") == "done" else EXIT_FAILED
+                        )
                         break
                 if children.dead():
                     print(f"a child exited: {children.dead()}; see {out / 'logs'}")
@@ -460,7 +496,9 @@ def run(args: argparse.Namespace) -> int:
         )
         callbacks = [
             line
-            for line in demo_log.read_text(encoding="utf-8", errors="replace").splitlines()
+            for line in demo_log.read_text(
+                encoding="utf-8", errors="replace"
+            ).splitlines()
             if "call." in line
         ]
         text = "\n".join(
