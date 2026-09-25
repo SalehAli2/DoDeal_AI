@@ -162,6 +162,28 @@ def find(node: Any, key: str) -> Any:
     return None
 
 
+def at(node: Any, *keys: str) -> Any:
+    """The value at an exact path of dict keys, else None."""
+    for key in keys:
+        if not isinstance(node, dict):
+            return None
+        node = node.get(key)
+    return node
+
+
+def whole(value: object) -> str:
+    """A value in full, never cut: indented JSON for a dict or a list."""
+    if isinstance(value, dict | list):
+        return json.dumps(value, ensure_ascii=False, indent=2)
+    return str(value)
+
+
+def part_reasons(outcomes: list[dict[str, Any]]) -> Any:
+    """part_reasons from the last call_stage2_outcome line, else None."""
+    lines = [r for r in outcomes if r.get("message") == "call_stage2_outcome"]
+    return lines[-1].get("part_reasons") if lines else None
+
+
 def short(value: object) -> str:
     text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
     return text if len(text) <= TEXT_LIMIT else text[:TEXT_LIMIT] + " ..."
@@ -254,6 +276,9 @@ def report(body: dict[str, Any], outcomes: list[dict[str, Any]]) -> list[str]:
         "=== CALL ===",
         f"status: {body.get('status')}  reason: {body.get('reason')}",
         f"delivery: {body.get('delivery')}  stage2: {body.get('stage2')}",
+        f"analysis_reason: {at(body, 'result', 'analysis_reason')}",
+        f"part_reasons: {whole(part_reasons(outcomes))}",
+        f"stage2_result.reasons: {whole(at(body, 'stage2_result', 'reasons'))}",
         "",
         "=== TRANSCRIPT ===",
         f"language profile: {find(body, 'language_profile')}",
@@ -295,7 +320,16 @@ def report(body: dict[str, Any], outcomes: list[dict[str, Any]]) -> list[str]:
         f"score (LOCAL TEST, never for a person): {short(find(body, 'score'))}",
         f"coaching: {short(find(body, 'observations'))}",
         f"plan: {short(find(body, 'plan'))}",
-        f"whatsapp: {short(find(body, 'whatsapp'))}",
+        "",
+        "=== EXTRAS ===",
+    ]
+    extras = at(body, "stage2_result", "extras")
+    if isinstance(extras, dict):
+        for name in ("whatsapp_suggestion", "seriousness", "tags", "keywords"):
+            lines.append(f"{name}: {whole(extras.get(name))}")
+    else:
+        lines.append(f"extras: {extras}")
+    lines += [
         "",
         "=== TOKENS AND COST ===",
     ]
