@@ -3,7 +3,9 @@ queues, read from arq's health-check keys on a fakeredis client."""
 
 from __future__ import annotations
 
+import copy
 import json
+from html.parser import HTMLParser
 
 import fakeredis
 import pytest
@@ -169,3 +171,102 @@ def test_the_report_names_a_missing_extras_part_and_no_stage2_line() -> None:
     assert "extras: None" in lines
     assert "part_reasons: None" in lines
     assert "stage2_result.reasons: None" in lines
+
+
+# --- the page --------------------------------------------------------------------
+
+
+class _Page(HTMLParser):
+    """Collects the tags, the attributes and the embedded status JSON."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.tags: list[str] = []
+        self.attrs: list[str] = []
+        self.embedded = ""
+        self._in_json = False
+
+    def handle_starttag(self, tag: str, attrs: list) -> None:
+        self.tags.append(tag)
+        self.attrs += [name for name, _ in attrs]
+        self._in_json = ("id", "status-json") in attrs
+
+    def handle_endtag(self, tag: str) -> None:
+        self._in_json = False
+
+    def handle_data(self, data: str) -> None:
+        if self._in_json:
+            self.embedded += data
+
+
+def _parsed(page: str) -> _Page:
+    parser = _Page()
+    parser.feed(page)
+    parser.close()
+    return parser
+
+
+def test_the_page_renders_a_sample_payload() -> None:
+    """The guard: every section, the score marked LOCAL TEST, the transcript
+    as bubbles, and the status JSON embedded so that it parses back."""
+    page = call_e2e.report_html(SAMPLE, OUTCOMES)
+    parsed = _parsed(page)
+
+    assert json.loads(parsed.embedded) == SAMPLE
+    for title in (
+        "Status",
+        "Reasons",
+        "Summary",
+        "Details",
+        "Signals",
+        "Roles",
+        "Objections",
+        "Score",
+        "Coaching",
+        "Extras",
+        "Transcript",
+    ):
+        assert f"<h2>{title}</h2>" in page
+    assert "LOCAL TEST" in page
+    assert page.count('class="bubble agent"') == 1
+    assert page.count('class="bubble client"') == 1
+    assert '<span class="state">stated</span>' in page
+    assert "See you on Tuesday at four." in page
+    assert "too_short" in page
+
+
+def test_the_page_escapes_the_call_and_asks_the_network_for_nothing() -> None:
+    page = call_e2e.report_html(SAMPLE, OUTCOMES)
+    parsed = _parsed(page)
+
+    assert "&lt;b&gt;viewing&lt;/b&gt;" in page
+    assert "b" not in parsed.tags
+    assert not {"src", "href"} & set(parsed.attrs)
+    assert "url(" not in page and "@import" not in page
+    assert set(parsed.tags) <= {
+        "html", "head", "meta", "title", "style", "body", "main", "h1", "h2",
+        "section", "p", "dl", "dt", "dd", "ul", "li", "span", "table", "tr",
+        "th", "td", "div", "details", "summary", "pre", "script",
+    }  # fmt: skip
+
+
+def test_a_closing_script_tag_in_the_call_cannot_end_the_embedded_json() -> None:
+    body = copy.deepcopy(SAMPLE)
+    body["result"]["transcript"]["segments"][0]["text"] = "</script><script>x()"
+    parsed = _parsed(call_e2e.report_html(body, []))
+    assert json.loads(parsed.embedded) == body
+    assert parsed.tags.count("script") == 1
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {},
+        {"status": "failed", "result": None, "stage2_result": None},
+        {"result": {"transcript": {"segments": ["loose"]}, "analysis": []}},
+        {"result": {"analysis": {"details": {"budget": "flat"}}}},
+    ],
+)
+def test_the_page_renders_a_partial_or_odd_payload(body: dict) -> None:
+    parsed = _parsed(call_e2e.report_html(body, []))
+    assert json.loads(parsed.embedded) == body

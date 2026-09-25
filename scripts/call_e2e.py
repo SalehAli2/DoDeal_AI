@@ -17,6 +17,7 @@ speech-to-text provider: use only calls the audio-governance answer allows.
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import os
 import re
@@ -344,6 +345,167 @@ def report(body: dict[str, Any], outcomes: list[dict[str, Any]]) -> list[str]:
     return lines
 
 
+# --- the page --------------------------------------------------------------------
+
+# Inline only: the page makes no network request, so it opens anywhere offline.
+PAGE_STYLE = """
+:root { --bg: #f6f7f9; --card: #ffffff; --ink: #1c2330; --muted: #5d6778;
+  --line: #dde1e8; --agent: #dcecff; --client: #eef0f3; --other: #f4ecdf;
+  --warn: #9a3412; --warn-bg: #ffedd5; --tag: #e7ecf3; }
+@media (prefers-color-scheme: dark) { :root { --bg: #11151b; --card: #1a2029;
+  --ink: #e6e9ef; --muted: #9aa4b5; --line: #2c3440; --agent: #1f3a5c;
+  --client: #262d38; --other: #3a3122; --warn: #fdba74; --warn-bg: #3b2414;
+  --tag: #262f3b; } }
+* { box-sizing: border-box; }
+body { margin: 0; padding: 16px; background: var(--bg); color: var(--ink);
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 960px; margin: 0 auto; }
+section { background: var(--card); border: 1px solid var(--line);
+  border-radius: 10px; padding: 12px 16px; margin: 0 0 12px; overflow-wrap: anywhere; }
+h1 { font-size: 20px; margin: 0 0 12px; }
+h2 { font-size: 16px; margin: 0 0 8px; }
+dl { margin: 0; display: grid; grid-template-columns: minmax(8em, max-content) 1fr;
+  gap: 2px 12px; }
+dt { color: var(--muted); }
+dd { margin: 0; min-width: 0; }
+ul { margin: 0; padding-left: 20px; }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: 4px 6px; border-top: 1px solid var(--line);
+  vertical-align: top; }
+.state { display: inline-block; padding: 0 8px; border-radius: 99px;
+  background: var(--tag); font-size: 13px; }
+.warn { background: var(--warn-bg); color: var(--warn); font-weight: 600;
+  padding: 6px 10px; border-radius: 6px; margin: 0 0 8px; }
+.null { color: var(--muted); font-style: italic; }
+.chat { display: flex; flex-direction: column; gap: 6px; }
+.bubble { max-width: 80%; padding: 6px 10px; border-radius: 12px;
+  background: var(--other); }
+.bubble.agent { align-self: flex-end; background: var(--agent); }
+.bubble.client { align-self: flex-start; background: var(--client); }
+.meta { color: var(--muted); font-size: 12px; }
+pre { overflow-x: auto; font-size: 12px; margin: 0; }
+"""
+
+
+def esc(value: object) -> str:
+    """Any value as escaped text; the payload is model output and a call."""
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+    return html.escape(text)
+
+
+def tree(value: Any) -> str:
+    """A JSON value as nested HTML lists, every leaf escaped."""
+    if value is None:
+        return '<span class="null">null</span>'
+    if isinstance(value, dict):
+        if not value:
+            return '<span class="null">{}</span>'
+        rows = "".join(f"<dt>{esc(k)}</dt><dd>{tree(v)}</dd>" for k, v in value.items())
+        return f"<dl>{rows}</dl>"
+    if isinstance(value, list):
+        if not value:
+            return '<span class="null">[]</span>'
+        return "<ul>" + "".join(f"<li>{tree(v)}</li>" for v in value) + "</ul>"
+    return f'<span dir="auto">{esc(value)}</span>'
+
+
+def card(title: str, body: str, warn: str | None = None) -> str:
+    top = "" if warn is None else f'<p class="warn">{esc(warn)}</p>'
+    return f"<section><h2>{esc(title)}</h2>{top}{body}</section>"
+
+
+def details_table(details: Any) -> str:
+    """Each detail on one row: its value, its state, and the quote behind it."""
+    if not isinstance(details, dict) or not details:
+        return tree(details)
+    rows = []
+    for name, detail in details.items():
+        got = detail if isinstance(detail, dict) else {"value": detail}
+        rows.append(
+            f"<tr><td>{esc(name)}</td><td>{tree(got.get('value'))}</td>"
+            f'<td><span class="state">{esc(got.get("state"))}</span></td>'
+            f"<td>{tree(got.get('quote'))}</td><td>{esc(got.get('segment'))}</td></tr>"
+        )
+    head = "<tr><th>detail</th><th>value</th><th>state</th><th>quote</th><th>seg</th>"
+    return f"<table>{head}</tr>{''.join(rows)}</table>"
+
+
+def clock(seconds: object) -> str:
+    whole = int(seconds) if isinstance(seconds, int | float) else 0
+    return f"{whole // 60:02d}:{whole % 60:02d}"
+
+
+def bubbles(transcript: Any) -> str:
+    """The transcript as chat bubbles: the agent right, the client left."""
+    segments = at(transcript, "segments")
+    if not isinstance(segments, list) or not segments:
+        return '<span class="null">no transcript</span>'
+    shown = []
+    for n, segment in enumerate(segments, start=1):
+        seg = segment if isinstance(segment, dict) else {"text": segment}
+        speaker = str(seg.get("speaker"))
+        side = speaker if speaker in ("agent", "client") else "other"
+        shown.append(
+            f'<div class="bubble {side}"><div class="meta">s{n} '
+            f"{clock(seg.get('start_s'))} {esc(speaker)}</div>"
+            f'<div dir="auto">{esc(seg.get("text"))}</div></div>'
+        )
+    return f'<div class="chat">{"".join(shown)}</div>'
+
+
+def report_html(body: dict[str, Any], outcomes: list[dict[str, Any]]) -> str:
+    """report.html: one self-contained page of the run, the JSON embedded."""
+    result = at(body, "result")
+    stage2 = at(body, "stage2_result")
+    analysis = at(result, "analysis")
+    status = {k: body.get(k) for k in ("job_id", "status", "reason", "delivery")}
+    status["stage2"] = body.get("stage2")
+    reasons = {
+        "analysis_reason": at(result, "analysis_reason"),
+        "part_reasons": part_reasons(outcomes),
+        "stage2_result.reasons": at(stage2, "reasons"),
+    }
+    summary = {
+        "summary": at(analysis, "summary"),
+        "crm_note": at(analysis, "crm_note"),
+        "mood": at(analysis, "mood"),
+        "elements": at(analysis, "elements"),
+    }
+    pretty = json.dumps(body, ensure_ascii=False, indent=2)
+    # Every "<" escaped keeps the JSON from closing its script tag; it parses back.
+    embedded = pretty.replace("<", "\\u003c")
+    cards = [
+        card("Status", tree(status)),
+        card("Reasons", tree(reasons)),
+        card("Summary", tree(summary)),
+        card("Details", details_table(at(analysis, "details"))),
+        card("Signals", tree(at(result, "signals"))),
+        card("Roles", tree(at(result, "roles"))),
+        card("Objections", tree(at(stage2, "objections"))),
+        card(
+            "Score",
+            tree(at(stage2, "score")),
+            warn="LOCAL TEST: never for judging a person",
+        ),
+        card("Escalations", tree(at(stage2, "escalations"))),
+        card("Coaching", tree(at(stage2, "coaching"))),
+        card("Extras", tree(at(stage2, "extras"))),
+        card("Transcript", bubbles(at(result, "transcript"))),
+        card(
+            "Status JSON",
+            f"<details><summary>show</summary><pre>{esc(pretty)}</pre></details>",
+        ),
+    ]
+    return (
+        '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        f"<title>Call report</title><style>{PAGE_STYLE}</style></head><body><main>"
+        f"<h1>Call report: job {esc(body.get('job_id'))}</h1>{''.join(cards)}"
+        f'<script type="application/json" id="status-json">{embedded}</script>'
+        "</main></body></html>"
+    )
+
+
 # --- the run -------------------------------------------------------------------------
 
 
@@ -576,6 +738,7 @@ def run(args: argparse.Namespace) -> int:
             [*report(body, outcomes), "", "=== CALLBACKS (demo server) ===", *callbacks]
         )
         (out / "report.txt").write_text(text, encoding="utf-8")
+        (out / "report.html").write_text(report_html(body, outcomes), encoding="utf-8")
         print(text)
         print(f"\nsaved to {out}")
         if code == EXIT_TIMEOUT:
