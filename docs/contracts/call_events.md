@@ -70,7 +70,7 @@ Each event then adds its own fields (sections 3 to 5 and 7). A re-analysis job's
       ]
     },
     "signals": {
-      "version": "call_signals_v1",
+      "version": "call_signals_v2",
       "agent": {"talk_share": 0.5, "words_per_minute": 126.0, "interruptions": 0},
       "client": {"talk_share": 0.5, "words_per_minute": 114.0, "interruptions": 0},
       "talk_balance": "balanced",
@@ -113,7 +113,7 @@ Each event then adds its own fields (sections 3 to 5 and 7). A re-analysis job's
     "analysis_reason": null,
     "versions": {
       "prompt": "unit_b_prompts_v2",
-      "signals": "call_signals_v1",
+      "signals": "call_signals_v2",
       "model": "fake-model-pinned",
       "transcriber": "fake/fake-stt-1",
       "alarm_list_digest": "cc460d5af42213b05eb501f7cfe9cc86b7e966d0b430183a6d7097288ea08b4e"

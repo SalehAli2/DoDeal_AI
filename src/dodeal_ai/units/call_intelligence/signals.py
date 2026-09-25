@@ -1,4 +1,4 @@
-"""Call signals (call_signals_v1): numbers read from the segments' timing and
+"""Call signals (call_signals_v2): numbers read from the segments' timing and
 words, per speaker, with no model.
 
   talk_share        the speaker's share of all spoken seconds, 0 to 1
@@ -40,7 +40,9 @@ from dodeal_ai.units.call_intelligence.prompts import (
 )
 from dodeal_ai.units.call_intelligence.transcriber import Segment
 
-SIGNALS_VERSION = "call_signals_v1"
+# v2: talk signals can be null (roles_not_applied), where v1 always gave
+# numbers; a reader keyed on the version sees the change.
+SIGNALS_VERSION = "call_signals_v2"
 
 # A turn starting sooner than this after the other speaker stopped mid-sentence
 # is an interruption (provisional; see the module docstring).

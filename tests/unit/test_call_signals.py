@@ -7,7 +7,6 @@ from __future__ import annotations
 import pytest
 
 from dodeal_ai.units.call_intelligence.signals import (
-    SIGNALS_VERSION,
     call_signals,
     interruptions,
     talk_balance,
@@ -40,7 +39,7 @@ SCRIPT = (
 
 def test_a_scripted_call_gives_the_expected_numbers() -> None:
     assert call_signals(SCRIPT) == {
-        "version": SIGNALS_VERSION,
+        "version": "call_signals_v2",
         "agent": {"talk_share": 0.75, "words_per_minute": 30.0, "interruptions": 1},
         "client": {
             "talk_share": 0.25,
@@ -104,7 +103,7 @@ def test_with_roles_not_applied_every_talk_signal_is_null(
         _say(7.1, 10, second, "wait four five."),
     )
     assert call_signals(script) == {
-        "version": SIGNALS_VERSION,
+        "version": "call_signals_v2",
         "agent": _NO_TALK,
         "client": _NO_TALK,
         "talk_balance": None,

@@ -256,7 +256,7 @@ async def test_a_call_is_analysed_and_delivered_with_its_stage1_payload(
     ]
     assert result["versions"] == {
         "prompt": "unit_b_prompts_v5",
-        "signals": "call_signals_v1",
+        "signals": "call_signals_v2",
         "model": "fake-model-pinned",
         "transcriber": "fake/fake-stt-1",
         "alarm_list_digest": alarm_list_digest([ALARM]),
