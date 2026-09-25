@@ -8,8 +8,9 @@ Starts the API, the normal and stage-2 call workers and call_demo.py's
 file-and-callback server as child processes, switches calls on for the
 tenant, pushes the call as the CRM would, follows the job, prints a readable
 report and saves everything to --out. Demo settings reach the children
-through their environment only; .env is never written. Refuses production
-and any path inside this repository. The recording goes to the configured
+through their environment only; .env is never written. Refuses production,
+any path inside this repository, and a start while other workers already
+consume the call queues (they would take the job with their own settings). The recording goes to the configured
 speech-to-text provider: use only calls the audio-governance answer allows.
 """
 
@@ -31,8 +32,16 @@ from typing import IO, Any
 import httpx
 import jwt
 import redis
+from arq.constants import health_check_key_suffix
 
 from dodeal_ai.core.config import get_settings
+from dodeal_ai.core.redis import redis_url as store_url
+from dodeal_ai.units.call_intelligence.queues import (
+    NORMAL_QUEUE,
+    OVERNIGHT_QUEUE,
+    PRIORITY_QUEUE,
+    STAGE2_QUEUE,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEMO_ENV = REPO_ROOT / ".env.demo"
@@ -45,6 +54,9 @@ TOKEN_LIFETIME_SECONDS = 240
 TEXT_LIMIT = 400
 
 EXIT_DONE, EXIT_FAILED, EXIT_TIMEOUT, EXIT_INTERRUPTED = 0, 1, 2, 130
+
+# Every call queue a running worker could take this run's jobs from.
+CALL_QUEUES = (PRIORITY_QUEUE, NORMAL_QUEUE, OVERNIGHT_QUEUE, STAGE2_QUEUE)
 
 
 # --- small helpers --------------------------------------------------------------
@@ -82,6 +94,26 @@ def env_file_values(path: Path) -> dict[str, str]:
         name, _, value = stripped.partition("=")
         values[name.strip()] = value.strip()
     return values
+
+
+def busy_queues(client: Any) -> list[str]:
+    """The call queues another worker consumes: those whose arq health-check
+    key exists. arq deletes it on a clean stop; a killed worker's expires
+    within its health-check interval plus a second (3601 s by default)."""
+    return [
+        queue for queue in CALL_QUEUES if client.exists(queue + health_check_key_suffix)
+    ]
+
+
+def refuse_other_workers(client: Any) -> None:
+    """Exit, naming them, while other workers consume the call queues."""
+    busy = busy_queues(client)
+    if busy:
+        raise fail(
+            f"refused: other workers are consuming {', '.join(busy)} "
+            "(arq health-check keys present). Stop them first; a killed "
+            "worker's key expires within an hour."
+        )
 
 
 def free_port() -> int:
@@ -315,6 +347,11 @@ def run(args: argparse.Namespace) -> int:
         redis.Redis.from_url(redis_url, socket_connect_timeout=2).ping()
     except (redis.RedisError, AttributeError, ValueError):
         raise fail("Redis did not answer. Run: docker compose up -d redis") from None
+    try:
+        queue = redis.Redis.from_url(store_url("queue"), socket_connect_timeout=2)
+        refuse_other_workers(queue)
+    except (redis.RedisError, ValueError):
+        raise fail("the queue Redis did not answer") from None
 
     key = env_file_values(DEMO_ENV).get("DODEAL_SERVICE_JWT_SIGNING_KEY")
     if not key:
