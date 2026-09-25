@@ -8,16 +8,20 @@ import asyncio
 import os
 import subprocess
 import sys
+import time
 from collections.abc import AsyncIterator, Callable
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
+import redis
 from arq import Retry
 from pydantic import ValidationError
 
+from dodeal_ai.core import tenant_config
 from dodeal_ai.core.config import ConfigError, Settings, get_settings
 from dodeal_ai.core.jobs import (
     RUNNING_JOBS_KEY,
@@ -36,6 +40,7 @@ from dodeal_ai.units.call_intelligence.config import (
     UNIT_B_SECTION,
     new_config_version,
     parse_unit_b_section,
+    resolve_calls_config,
 )
 from dodeal_ai.units.call_intelligence.fake_transcriber import FakeTranscriber
 from dodeal_ai.units.call_intelligence.queues import NORMAL_QUEUE
@@ -503,6 +508,50 @@ async def test_calls_switched_off_after_the_push_fail_the_job(ctx: dict) -> None
     job = await _job()
     assert (job.status, job.reason) == (JobStatus.FAILED, "calls_not_enabled")
     assert ctx["transcriber"].calls == []
+
+
+async def _stale_off_cached() -> None:
+    """Calls on in the store, while this process still holds the "off" it
+    read before another pod switched them back on."""
+    await _calls_on(calls_enabled=False)
+    stale = tenant_config._CACHE["tenant-a"]
+    await _calls_on()
+    tenant_config._CACHE["tenant-a"] = replace(stale, fetched_at=time.monotonic())
+
+
+async def test_a_stale_cached_off_never_ends_a_call_the_store_has_on(
+    ctx: dict,
+) -> None:
+    """The push was admitted with calls on: the store, not the cache, decides."""
+    await _push()
+    await _stale_off_cached()
+    assert not (await resolve_calls_config("tenant-a")).calls_enabled
+
+    await process_call(ctx, "tenant-a", JOB)
+
+    job = await _job()
+    assert (job.status, job.attempts, job.reason) == (JobStatus.DONE, 1, None)
+    assert len(ctx["transcriber"].calls) == 1
+    assert ctx["deliver"].events == [STAGE1]
+
+
+async def test_a_cached_off_with_the_store_unreadable_is_retried_unspent(
+    ctx: dict, monkeypatch
+) -> None:
+    await _push()
+    await _stale_off_cached()
+
+    async def down(tenant: str) -> None:
+        raise redis.ConnectionError("down")
+
+    monkeypatch.setattr(tenant_config, "_read", down)
+    with pytest.raises(Retry):
+        await process_call(ctx, "tenant-a", JOB)
+
+    job = await _job()
+    assert (job.status, job.attempts, job.reason) == (JobStatus.QUEUED, 0, None)
+    assert ctx["transcriber"].calls == []
+    assert ctx["deliver"].events == []
 
 
 async def test_a_failed_job_with_its_call_failed_pending_sends_it_again(

@@ -331,13 +331,16 @@ async def _read(tenant: str) -> str | None:
     return raw
 
 
-async def _entry(tenant: str) -> _Entry | None:
-    """The cached override, re-read once it is older than the cache time. On a
-    store failure, the last one read -- however old -- or None."""
+async def _entry(tenant: str, *, fresh: bool = False) -> _Entry | None:
+    """The cached override, re-read once it is older than the cache time, or
+    at once when `fresh`. On a store failure, the last one read -- however
+    old -- or None; when `fresh`, the failure is raised instead."""
     cached = _CACHE.get(tenant)
     now = time.monotonic()
-    if cached is not None and now - cached.fetched_at < (
-        get_settings().tenant_config_cache_seconds
+    if (
+        not fresh
+        and cached is not None
+        and now - cached.fetched_at < get_settings().tenant_config_cache_seconds
     ):
         return cached
     try:
@@ -351,6 +354,8 @@ async def _entry(tenant: str) -> _Entry | None:
                 **breaker_field(exc),
             },
         )
+        if fresh:
+            raise
         return cached
     record, parsed = _decode(tenant, raw)
     entry = _Entry(fetched_at=now, raw=raw, record=record, parsed=parsed)
@@ -358,10 +363,13 @@ async def _entry(tenant: str) -> _Entry | None:
     return entry
 
 
-async def resolve_section(tenant: str, section: str) -> ResolvedSection:
+async def resolve_section(
+    tenant: str, section: str, *, fresh: bool = False
+) -> ResolvedSection:
     """THE resolution order for one tenant's section: the runtime override,
-    else the startup file, else the unit's default (value None)."""
-    entry = await _entry(tenant)
+    else the startup file, else the unit's default (value None). `fresh`
+    reads the override past the cache and raises RedisError if it cannot."""
+    entry = await _entry(tenant, fresh=fresh)
     if entry is not None and entry.record is not None and section in entry.parsed:
         # This section's own stamps (item 193): another section's PUT never
         # moves them.

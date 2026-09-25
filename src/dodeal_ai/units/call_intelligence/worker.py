@@ -6,7 +6,9 @@ THE ORDER, and what each step may cost:
   1. The job, and the tenant's rules as they are NOW. A job that is gone or
      terminal is left alone, but for its callback when still pending: the last
      run died before it went, so it is sent again. A tenant that switched calls
-     off since the push fails the job (calls_not_enabled) before any spend.
+     off since the push fails the job (calls_not_enabled) before any spend --
+     but only once the store itself says off: the push was admitted with calls
+     on, so a cached "off" is read again, and an unreadable store is a retry.
   2. At CALL_MAX_TRIES attempts the job is dead-lettered with its last reason.
   3. FREE OUTCOMES FIRST (item 36): voicemail, no answer, or shorter than
      min_transcribe_seconds is `done` with that outcome label and no paid call.
@@ -70,6 +72,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import redis
 from arq import Retry
 
 from dodeal_ai.core import metrics
@@ -355,6 +358,16 @@ async def _within_deadline(
         await _expired(ctx, tenant, job_id, run)
 
 
+async def _calls_config_now(tenant: str) -> CallsConfig:
+    """The call rules as the store holds them now, past the process cache: the
+    push was admitted with calls on, so a stale cached "off" never ends a call.
+    An unreadable store runs the job again later, spending nothing."""
+    try:
+        return await resolve_calls_config(tenant, fresh=True)
+    except redis.RedisError:
+        raise Retry(defer=RETRY_DELAY_SECONDS) from None
+
+
 async def _expired(ctx: dict[str, Any], tenant: str, job_id: str, run: CallRun) -> None:
     """The deadline cut a step off: a download or a transcription fails as
     retryable under its own rules; any other running step, or a callback still
@@ -408,6 +421,8 @@ async def _process(
             await _queue_stage2(job)
         return
     config = await resolve_calls_config(tenant)
+    if not config.calls_enabled:
+        config = await _calls_config_now(tenant)
     if not config.calls_enabled:
         await _fail(ctx, job, config, "calls_not_enabled", dead=False, run=run)
         return

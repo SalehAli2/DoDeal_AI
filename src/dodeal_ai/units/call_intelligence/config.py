@@ -213,10 +213,11 @@ def calls_config_of(resolved: ResolvedSection) -> CallsConfig:
     return value if isinstance(value, CallsConfig) else _DEFAULT_CONFIG
 
 
-async def resolve_calls_config(tenant: str) -> CallsConfig:
+async def resolve_calls_config(tenant: str, *, fresh: bool = False) -> CallsConfig:
     """The call rules in force for `tenant`: the runtime override, else the
-    file, else the default (everything off)."""
-    return calls_config_of(await resolve_section(tenant, UNIT_B_SECTION))
+    file, else the default (everything off). `fresh`: past the process cache,
+    RedisError when the store cannot be read."""
+    return calls_config_of(await resolve_section(tenant, UNIT_B_SECTION, fresh=fresh))
 
 
 def new_config_version(body: dict, in_force: object | None) -> str | None:
