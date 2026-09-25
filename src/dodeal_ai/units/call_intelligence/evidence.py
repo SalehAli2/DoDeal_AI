@@ -7,7 +7,7 @@ numbers and emails masked under the tenant's country code (numbers.py) -- its
 speaker's role, the summary language decided in code (language.py), and
 whether the transcript as a whole is uncertain.
 
-THE QUOTE CHECK, in code, on every quote a pass returns: at most 25 words; the
+THE QUOTE CHECK, in code, on every quote a pass returns: at most 40 words; the
 segment it cites exists; and its words, normalised as the alarm matcher
 normalises (alarms.py), appear in that segment in order and unbroken. The
 segment is read as the model read it, so a quote can never carry a number back
@@ -42,7 +42,10 @@ from dodeal_ai.units.call_intelligence.transcriber import (
     Transcript,
 )
 
-MAX_QUOTE_WORDS = 25
+# The most words a quote may carry. 40 leaves headroom above the prompts' 15, so
+# an exact quote a little long is kept, not reprompted. Lower sends true quotes
+# back as quote_length; much higher lets a pasted paragraph pass as a quote.
+MAX_QUOTE_WORDS = 40
 
 # The share of a text's letters, outside quotes, that must be in the script of
 # the language asked for.

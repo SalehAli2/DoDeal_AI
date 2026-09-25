@@ -15,6 +15,7 @@ from dodeal_ai.core.errors import MalformedOutputError
 from dodeal_ai.core.llm.profiles import PROFILE_UNIT_B_EXTRACT, PROFILE_UNIT_B_PROSE
 from dodeal_ai.core.prompting import build_prompt
 from dodeal_ai.units.call_intelligence import passes
+from dodeal_ai.units.call_intelligence.evidence import quote_errors
 from dodeal_ai.units.call_intelligence.passes import (
     NOT_MENTIONED,
     STATED,
@@ -156,7 +157,7 @@ async def test_a_true_quote_passes_whatever_its_case_and_punctuation() -> None:
         (_detail("x", STATED, "My budget", None), "quote_without_segment"),
         (_detail("x", STATED, None, None), "stated_without_quote"),
         (_detail("x", STATED, "My budget", "s9"), "segment_unknown"),
-        (_detail("x", STATED, "budget " * 26, "s2"), "quote_length"),
+        (_detail("x", STATED, "budget " * 41, "s2"), "quote_length"),
         (_detail("x", UNCERTAIN, "...", "s2"), "quote_length"),
         (_detail("x", STATED, "budget is", "s1"), "quote_not_in_segment"),
         (_detail("x", STATED, "call me on 050 123 4567", "s2"), "quote_not_in_segment"),
@@ -169,6 +170,23 @@ def test_every_broken_quote_is_malformed(budget: dict, error: str) -> None:
     with pytest.raises(OutputValidationError) as refused:
         passes.check_extraction(_call())(answer)
     assert ("details.budget", error) in refused.value.errors
+
+
+# One long segment of 41 distinct words, so a quote of its first n is exact.
+_LONG = " ".join(f"word{n}" for n in range(1, 42))
+
+
+@pytest.mark.parametrize(("count", "errors"), [(30, []), (40, [])])
+def test_an_exact_quote_of_up_to_40_words_passes(count: int, errors: list) -> None:
+    """The guard: headroom above the prompts' 15 words keeps a long true quote."""
+    call = _call(_segment(0, "lead", _LONG))
+    quote = " ".join(_LONG.split()[:count])
+    assert quote_errors(call, "here", quote, "s1") == errors
+
+
+def test_an_exact_quote_of_41_words_is_quote_length() -> None:
+    call = _call(_segment(0, "lead", _LONG))
+    assert quote_errors(call, "here", _LONG, "s1") == [("here", "quote_length")]
 
 
 def test_a_masked_number_may_be_quoted_as_masked() -> None:
