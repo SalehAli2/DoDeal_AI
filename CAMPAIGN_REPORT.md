@@ -7465,3 +7465,10 @@ failure modes, then one stress test (sabotage in brackets).
 - worker calls_not_enabled: a stale cached "off" ends a call admitted with calls on; a store outage ends it the same way. Test: cached off plus stored on is done; unreadable store is a Retry, unspent (fresh read off fails 2; raise off fails 1).
 - signals: call_signals_v1 to v2, exact values updated. stt usage: input and audio input tokens beside audio_seconds, null unless every answer reported them. call_e2e: refuses while call-queue health-check keys exist. No sabotage owed.
 - Stress test: a stereo call whose second side fails after the first reported usage: both token fields null, never the first side alone.
+
+## Unit B quote fixes (first real call)
+- prompts: a quoting prompt still asks for 25 words, so long quotes fail the check; a released file is edited in place. Test: every live quoting template carries the 15-word, one-segment rule; the stamp and every pin match (unit_b_prompts_v6, then v7). No sabotage owed.
+- evidence: a true 30-word quote is refused and paid for again; a pasted paragraph passes as a quote. Test: 30 and 40 exact words pass, 41 is quote_length (limit 25 fails 2; limit 41 fails 2).
+- paid (reprompt tail): a quote failure gets the generic tail and fails again; Unit A's reprompt changes by accident. Test: quote_length gets the quote tail, quote_not_in_segment the exact-copy tail, other codes and call_model's default the usual tail (choice off fails 4).
+- call_e2e: the report prints analysis_reason, part_reasons and the whole extras part; report.html is written beside status.json, offline, escaped, with the JSON embedded. No sabotage owed.
+- Stress test: a transcript segment saying "</script><script>x()": the page keeps one script tag and its embedded JSON parses back equal.
