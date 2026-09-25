@@ -7459,3 +7459,9 @@ failure modes, then one stress test (sabotage in brackets).
 - signals (items 1, 2, 5): an unknown speaker saying the company's number sends a false review to a person; unapplied roles report a speaker_N voice's talk as the client's. Test: an unknown speaker saying the company number raises no review; speaker_1/speaker_2 give null talk signals and talk_reason roles_not_applied (old review rule put back fails 4; roles check off fails 3; balance band moved fails 3).
 - docs: call_events.md and README bullets for the speaker, number, uncertainty and talk codes, call.translation retries and ffprobe/FLAC; the stale "not retried" line corrected. No sabotage owed.
 - Stress test: roles failed, an unknown speaker says the lead's, the company's and a third number: exactly one off_channel_contact_review (the third), and every talk signal null.
+
+## Unit B live-run fixes (first real Gemini run)
+- gemini labels: the live API's spk:0 / spk:1 refused, so a paid transcript is thrown away; a label read as speaker_spk:0. Test: the live shape gives speaker_0 and speaker_1, spk_1 still parses (old pattern back fails 1; old label back fails 1).
+- worker calls_not_enabled: a stale cached "off" ends a call admitted with calls on; a store outage ends it the same way. Test: cached off plus stored on is done; unreadable store is a Retry, unspent (fresh read off fails 2; raise off fails 1).
+- signals: call_signals_v1 to v2, exact values updated. stt usage: input and audio input tokens beside audio_seconds, null unless every answer reported them. call_e2e: refuses while call-queue health-check keys exist. No sabotage owed.
+- Stress test: a stereo call whose second side fails after the first reported usage: both token fields null, never the first side alone.
