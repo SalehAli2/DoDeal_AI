@@ -112,7 +112,7 @@ Each event then adds its own fields (sections 3 to 5 and 7). A re-analysis job's
     },
     "analysis_reason": null,
     "versions": {
-      "prompt": "unit_b_prompts_v2",
+      "prompt": "unit_b_prompts_v7",
       "signals": "call_signals_v2",
       "model": "fake-model-pinned",
       "transcriber": "fake/fake-stt-1",
@@ -269,7 +269,7 @@ A **segment id** is `s<n>`, 1-based in `transcript.segments` order: `s3` is the 
     },
     "reasons": {},
     "versions": {
-      "prompt": "unit_b_prompts_v2",
+      "prompt": "unit_b_prompts_v7",
       "objection_list": "objection_list_v1",
       "rubric": "call_rubric_v1",
       "tone_list": "tone_list_v1",
