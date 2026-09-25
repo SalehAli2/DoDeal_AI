@@ -20,8 +20,8 @@ from dodeal_ai.units.call_intelligence.prompts import (
     UNIT_B_TEMPLATES,
 )
 
-PROMPT_SET = "unit_b_prompts_v5"
-PROMPT_SET_DIGEST = "73691756d0f66aa8130db45bffb189f836457730361adb8da742113b422de83a"
+PROMPT_SET = "unit_b_prompts_v6"
+PROMPT_SET_DIGEST = "c85818933e5d882d7b51b7d85392e1b076d7a002f44d502d94c4398cbd9f0f1c"
 
 _HOW_TO_UPDATE = (
     "A Unit B prompt template changed. Bump PROMPT_SET_VERSION in "
@@ -83,6 +83,27 @@ TEMPLATE_DIGESTS = {
     ),
     "call_intelligence/reprompt_tail_v1.txt": (
         "a342aec7b7a3ad284e2d64c636729b935bc6dc87e749408a5009befef3445a66"
+    ),
+    "call_intelligence/roles_v2.txt": (
+        "caaea610c04509315f485e69c48edf0db1810acf99a99cb151332da27dff7dad"
+    ),
+    "call_intelligence/extract_v3.txt": (
+        "08650c7bfd444a27aa973770e7b766197e30a62ffc84566fa628e02efb0e1071"
+    ),
+    "call_intelligence/objections_v2.txt": (
+        "6e06a6b5617d608b4ae599b0832dff7b7ed71a57b087aea1529ec1c7d925f4fc"
+    ),
+    "call_intelligence/score_v2.txt": (
+        "2c67882d82e0ad341308a778c3ba16b7bfe5f5af19be541863a6a1e4fd5d94bb"
+    ),
+    "call_intelligence/escalations_v2.txt": (
+        "4230d6ca499def22e29aa7c2ba380139243f8d85aba176cdfe68a6d141b61744"
+    ),
+    "call_intelligence/coaching_v2.txt": (
+        "564824ec9598d5939981342f85e36a89fb502e64989eb679a96329abf8c0e0cf"
+    ),
+    "call_intelligence/extras_v3.txt": (
+        "69f8c6a9c0805817ea1eee89279be86d886dc38c562d0d7e02673fd1b9cd636e"
     ),
     "call_intelligence/extract_v1.txt": (
         "7ccf78ffa14164c08f5f21b90b73864354559cf9f0d99e1a7e8880ea30ae839a"

@@ -14,8 +14,14 @@ from dodeal_ai.core import prompting
 from dodeal_ai.units.call_intelligence import transcriber
 from dodeal_ai.units.call_intelligence.config import CallsConfig
 from dodeal_ai.units.call_intelligence.prompts import (
+    COACHING_TEMPLATE,
+    ESCALATIONS_TEMPLATE,
     EXTRACT_TEMPLATE,
+    EXTRAS_TEMPLATE,
+    OBJECTIONS_TEMPLATE,
     PROSE_TEMPLATE,
+    ROLES_TEMPLATE,
+    SCORE_TEMPLATE,
     UNIT_B_TEMPLATES,
     build_call_prompt,
     clock,
@@ -128,3 +134,31 @@ def test_no_template_carries_a_long_run_of_digits(template) -> None:
     text = (_PROMPT_DIR / template).read_text(encoding="utf-8")
     found = _DIGIT_RUN.search(text)
     assert found is None, f"{template} carries a digit run: {found and found.group()}"
+
+
+# Every live pass that asks for a quote carries the one quote rule, word for
+# word, so the model is asked for less than the check in code allows.
+_QUOTE_RULE = (
+    "A quote is at most 15 words, copied exactly from ONE segment, same "
+    "spelling, never joined across segments."
+)
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        EXTRACT_TEMPLATE,
+        SCORE_TEMPLATE,
+        COACHING_TEMPLATE,
+        EXTRAS_TEMPLATE,
+        OBJECTIONS_TEMPLATE,
+        ESCALATIONS_TEMPLATE,
+        ROLES_TEMPLATE,
+    ],
+)
+def test_every_quoting_template_asks_for_15_exact_words_from_one_segment(
+    template,
+) -> None:
+    text = prompting._DEFAULT_PROMPTS_DIR.joinpath(template).read_text(encoding="utf-8")
+    assert _QUOTE_RULE in " ".join(text.split())
+    assert "25 words" not in text
