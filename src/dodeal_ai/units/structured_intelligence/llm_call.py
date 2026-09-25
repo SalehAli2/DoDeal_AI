@@ -306,9 +306,9 @@ async def call_model[M: BaseModel](
     with a prompt set of its own (Unit B) passes that set's tail, so a Unit A
     tail edit never changes a prompt stamped with another unit's version.
 
-    `tail_by_error` maps an error code to a tail template: the FIRST failure's
-    code picks the tail, and any other code gets `reprompt_tail`. None (Unit A)
-    is `reprompt_tail` always. Only a fixed file is chosen, never the answer.
+    `tail_by_error` maps an error code to a tail template, in priority order:
+    its first code that ANY failure carries picks the tail, else `reprompt_tail`.
+    None (Unit A) is `reprompt_tail` always. Only a fixed file is chosen.
     """
     response = await complete_once(
         client,
@@ -367,10 +367,14 @@ def _tail_for(
     default: str,
     tail_by_error: Mapping[str, str] | None,
 ) -> str:
-    """The tail template for a reprompt: the first error code's, else default."""
-    if not tail_by_error or not errors:
+    """The tail template for a reprompt: the first code of `tail_by_error`, in
+    its order, that any error carries; else default."""
+    if not tail_by_error:
         return default
-    return tail_by_error.get(errors[0][1], default)
+    codes = {code for _, code in errors}
+    return next(
+        (tail for code, tail in tail_by_error.items() if code in codes), default
+    )
 
 
 def _count_call(label: str, outcome: str) -> None:

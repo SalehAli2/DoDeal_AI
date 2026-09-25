@@ -31,6 +31,7 @@ from dodeal_ai.units.call_intelligence.prompts import (
     QUOTE_EXACT_TAIL_TEMPLATE,
     QUOTE_LENGTH_TAIL_TEMPLATE,
     REPROMPT_TAIL_TEMPLATE,
+    REPROMPT_TAILS,
     build_call_prompt,
 )
 from dodeal_ai.units.call_intelligence.transcriber import Segment, Transcript
@@ -145,7 +146,7 @@ def _tail(template: str) -> str:
         (_detail("x", STATED, None, None), REPROMPT_TAIL_TEMPLATE),
     ],
 )
-async def test_the_reprompt_tail_is_chosen_by_the_first_failures_code(
+async def test_each_quote_code_from_the_extract_pass_picks_its_tail(
     budget: dict, template: str
 ) -> None:
     """The guard: a quote_length failure reprompts with the quote tail, a quote
@@ -159,6 +160,68 @@ async def test_the_reprompt_tail_is_chosen_by_the_first_failures_code(
     assert (first.tail, second.tail) == ("", _tail(template))
     assert (second.stable, second.variable) == (first.stable, first.variable)
     assert "budget budget" not in second.tail + second.variable
+
+
+def _rejects_once(*errors: tuple[str, str]):
+    """A check that refuses the first answer with `errors`, then passes."""
+    from dodeal_ai.core.validation import OutputValidationError
+
+    calls: list[int] = []
+
+    def check(_answer: passes.Extraction) -> None:
+        calls.append(1)
+        if len(calls) == 1:
+            raise OutputValidationError(passes.EXTRACT_LABEL, errors)
+
+    return check
+
+
+async def _reprompted_tail(check) -> str:
+    """The tail call_model sends on the reprompt after `check` refuses."""
+    llm = FakeLLM(json_response(_extraction()), json_response(_extraction()))
+    await llm_call.call_model(
+        llm,
+        build_call_prompt(EXTRACT_TEMPLATE, _call().data()),
+        passes.Extraction,
+        passes.EXTRACT_LABEL,
+        scope=SCOPE,
+        settings=get_settings(),
+        profile=PROFILE_UNIT_B_EXTRACT,
+        max_output_tokens=passes.EXTRACT_MAX_OUTPUT_TOKENS,
+        check=check,
+        reprompt_tail=REPROMPT_TAIL_TEMPLATE,
+        tail_by_error=REPROMPT_TAILS,
+    )
+    return llm.prompts[1].tail
+
+
+@pytest.mark.parametrize(
+    ("errors", "template"),
+    [
+        (
+            (("details.x", "missing_field"), ("details.budget", "quote_length")),
+            QUOTE_LENGTH_TAIL_TEMPLATE,
+        ),
+        (
+            (("wanted", "missing_field"), ("agreed.0", "quote_not_in_segment")),
+            QUOTE_EXACT_TAIL_TEMPLATE,
+        ),
+        (
+            (("agreed.0", "quote_not_in_segment"), ("wanted", "quote_length")),
+            QUOTE_LENGTH_TAIL_TEMPLATE,
+        ),
+        (
+            (("wanted", "missing_field"), ("agreed.0", "segment_unknown")),
+            REPROMPT_TAIL_TEMPLATE,
+        ),
+    ],
+)
+async def test_a_quote_code_anywhere_in_the_errors_picks_the_quote_tail(
+    errors: tuple[tuple[str, str], ...], template: str
+) -> None:
+    """The guard: [missing_field, quote_length] gets the quote-length tail;
+    quote_length wins over quote_not_in_segment wherever each stands."""
+    assert await _reprompted_tail(_rejects_once(*errors)) == _tail(template)
 
 
 async def test_call_model_without_a_tail_map_keeps_its_one_tail() -> None:

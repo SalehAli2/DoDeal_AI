@@ -47,8 +47,9 @@ REPROMPT_TAIL_TEMPLATE = "call_intelligence/reprompt_tail_v1.txt"
 QUOTE_LENGTH_TAIL_TEMPLATE = "call_intelligence/reprompt_tail_quote_length_v1.txt"
 QUOTE_EXACT_TAIL_TEMPLATE = "call_intelligence/reprompt_tail_quote_exact_v1.txt"
 
-# The reprompt tail by the first failure's code; any other code gets
-# REPROMPT_TAIL_TEMPLATE. Fixed files only: the rejected answer is never sent.
+# The reprompt tail by failure code, in priority order: the first code here
+# that any failure carries picks it, else REPROMPT_TAIL_TEMPLATE. Fixed files
+# only: the rejected answer is never sent.
 REPROMPT_TAILS: Mapping[str, str] = MappingProxyType(
     {
         "quote_length": QUOTE_LENGTH_TAIL_TEMPLATE,
