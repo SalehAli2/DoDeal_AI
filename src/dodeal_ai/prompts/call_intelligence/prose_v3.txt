@@ -32,6 +32,9 @@ RULES
 - A detail whose state is uncertain is written as uncertain: say it was
   unclear, and do not state it as fact.
 - Keep prices, areas and dates as they were said on the call.
+- Write a number in digits only when the TRANSCRIPT shows those digits.
+  Never write a date, a time, a total or a converted amount the transcript
+  does not show: say it in words from the call, or leave it out.
 - Never write a phone number or an email address, masked or not.
 - Refer to the two sides as the agent and the client.
 

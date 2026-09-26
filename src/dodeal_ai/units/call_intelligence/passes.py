@@ -27,10 +27,13 @@ segment, and one stated has a value: either broken is malformed, never
 repaired. A detail stated from a segment below the transcript's confidence
 floor is marked uncertain in code, and every detail of a transcript whose
 words are uncertain is (settled()); one doubted only because its roles were
-not applied keeps each detail's own state (A3), the call still uncertain. The CRM note is at most 80 words, and the summary
-and note must be written in the language asked for -- at least 60 % of their
-letters outside quotes in its script (evidence.in_language); both are checked
-here.
+not applied keeps each detail's own state (A3), the call still uncertain.
+The CRM note is at most 80 words, and the summary and note must be written
+in the language asked for -- at least 60 % of their letters outside quotes
+in its script (evidence.in_language) -- and write no number in digits the
+masked transcript the pass read does not show (evidence.numbers_in, A7): a
+masked phone number never, a worked-out date never. All three are checked
+here: one reprompt, then prose_failed.
 
 A DEAD CALL'S LOSS REASON. An ending of dead carries loss_reason, and no
 other ending does: one of the nine objection categories, owed the client's
@@ -49,12 +52,13 @@ minute in the tenant's zone. With no verified when_quote the time is null,
 uncertain, when_missing_quote; out of range the same, when_out_of_range; with
 the call's own time unknown the same, when_no_anchor. Vague timing is null and
 uncertain. when_state is the time's alone: stated for a time kept, whatever
-became of the agreement quote (A3). booked (D-77) needs the model's word and a time it gave, the
-when_quote and the agreement quote both found, said by two different voices
-whose roles are known (prompts.said_by: never on a call whose roles were not
-applied), within MAX_BOOKING_GAP_SEGMENTS of each other; code dropping a time
-out of range or with no anchor never changes it. A booking whose agreement
-quote failed is false with booked_reason agreement_unverified.
+became of the agreement quote (A3). booked (D-77) needs the model's word and
+a time it gave, the when_quote and the agreement quote both found, said by
+two different voices whose roles are known (prompts.said_by: never on a call
+whose roles were not applied), within MAX_BOOKING_GAP_SEGMENTS of each
+other; code dropping a time out of range or with no anchor never changes it.
+A booking whose agreement quote failed is false with booked_reason
+agreement_unverified.
 
 The prose pass reads the transcript and the SETTLED extraction -- validated
 and quote-checked output with every failed quote removed, in the data half
@@ -88,6 +92,7 @@ from dodeal_ai.units.call_intelligence.evidence import (
     found_at,
     in_language,
     mostly_failed,
+    numbers_in,
     quote_errors,
     relocated,
 )
@@ -160,6 +165,9 @@ WHEN_SLACK_SECONDS = 60
 WHEN_MISSING_QUOTE = "when_missing_quote"
 WHEN_OUT_OF_RANGE = "when_out_of_range"
 WHEN_NO_ANCHOR = "when_no_anchor"
+
+# A number the prose wrote that the masked transcript does not show (A7).
+NUMBER_NOT_IN_TRANSCRIPT = "number_not_in_transcript"
 
 # Why code unbooked a next step the model said was booked: its agreement
 # quote failed the quote check.
@@ -518,7 +526,9 @@ def check_extraction(call: CallText) -> Callable[[Extraction], None]:
 
 
 def check_prose(call: CallText) -> Callable[[Prose], None]:
-    """The CRM note's length, and both texts in the language asked for."""
+    """The CRM note's length, and both texts in the language asked for with
+    no number the masked transcript does not show."""
+    said = set().union(*(numbers_in(text) for text in call.shown))
 
     def check(answer: Prose) -> None:
         errors: Errors = []
@@ -527,6 +537,8 @@ def check_prose(call: CallText) -> Callable[[Prose], None]:
         for field, text in (("summary", answer.summary), ("crm_note", answer.crm_note)):
             if not in_language(text, call.language):
                 errors.append((field, "wrong_language"))
+            if numbers_in(text) - said:
+                errors.append((field, NUMBER_NOT_IN_TRANSCRIPT))
         if errors:
             raise output_rejected(PROSE_LABEL, tuple(errors))
 

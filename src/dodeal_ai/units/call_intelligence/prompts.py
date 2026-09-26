@@ -53,6 +53,9 @@ WHATSAPP_TEMPLATE = "call_intelligence/whatsapp_v4.txt"
 REPROMPT_TAIL_TEMPLATE = "call_intelligence/reprompt_tail_v1.txt"
 QUOTE_LENGTH_TAIL_TEMPLATE = "call_intelligence/reprompt_tail_quote_length_v1.txt"
 QUOTE_EXACT_TAIL_TEMPLATE = "call_intelligence/reprompt_tail_quote_exact_v1.txt"
+# The prose pass's tail for a number its summary or note wrote that the
+# transcript does not show (passes.check_prose, A7), unit_b_prompts_v20.
+NUMBERS_TAIL_TEMPLATE = "call_intelligence/reprompt_tail_numbers_v1.txt"
 # The extras pass's tail for a WhatsApp text too long or in the wrong script
 # (extras.EXTRAS_TAILS), unit_b_prompts_v13.
 WHATSAPP_TAIL_TEMPLATE = "call_intelligence/reprompt_tail_whatsapp_v1.txt"
@@ -64,6 +67,7 @@ REPROMPT_TAILS: Mapping[str, str] = MappingProxyType(
     {
         "quote_length": QUOTE_LENGTH_TAIL_TEMPLATE,
         "quote_not_in_segment": QUOTE_EXACT_TAIL_TEMPLATE,
+        "number_not_in_transcript": NUMBERS_TAIL_TEMPLATE,
     }
 )
 
@@ -150,6 +154,7 @@ UNIT_B_TEMPLATES: tuple[str, ...] = (
     QUOTE_LENGTH_TAIL_TEMPLATE,
     QUOTE_EXACT_TAIL_TEMPLATE,
     WHATSAPP_TAIL_TEMPLATE,
+    NUMBERS_TAIL_TEMPLATE,
     *RETIRED_TEMPLATES,
 )
 

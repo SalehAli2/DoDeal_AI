@@ -158,6 +158,17 @@ _QUOTE_FOLDS = str.maketrans(
         **{chr(0x06F0 + digit): str(digit) for digit in range(10)},
     }
 )
+# The Arabic-Indic digits alone as ASCII, for reading a number (numbers_in).
+_DIGITS = str.maketrans(
+    {
+        **{chr(0x0660 + digit): str(digit) for digit in range(10)},
+        **{chr(0x06F0 + digit): str(digit) for digit in range(10)},
+    }
+)
+# A number as written: digits, with , . or the Arabic separators between
+# groups; the separators are dropped, so 1,500,000 and ١٥٠٠٠٠٠ are one.
+_NUMBER = re.compile(r"\d+(?:[.,\u066b\u066c]\d+)*")
+_SEPARATORS = re.compile(r"[.,\u066b\u066c]")
 # A run of letters, digits and the marks normalise() drops: one raw token.
 _TOKEN = re.compile(r"[\w\u064b-\u065f\u0670\u0640]+")
 # The one proclitic a word may carry in the quote or the segment and not the
@@ -185,6 +196,12 @@ def _tokens(text: str) -> list[tuple[str, int, int]]:
         joined.append((word, start, end))
         at += 1
     return joined
+
+
+def numbers_in(text: str) -> set[str]:
+    """Every number written in `text` in digits, as ASCII digits alone."""
+    folded = text.translate(_DIGITS)
+    return {_SEPARATORS.sub("", found) for found in _NUMBER.findall(folded)}
 
 
 def quote_words(text: str) -> list[str]:
