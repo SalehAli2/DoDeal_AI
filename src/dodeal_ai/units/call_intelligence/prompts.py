@@ -34,8 +34,8 @@ from types import MappingProxyType
 from dodeal_ai.core.prompting import AssembledPrompt, build_prompt
 from dodeal_ai.units.call_intelligence.transcriber import Segment
 
-ROLES_TEMPLATE = "call_intelligence/roles_v3.txt"
-EXTRACT_TEMPLATE = "call_intelligence/extract_v5.txt"
+ROLES_TEMPLATE = "call_intelligence/roles_v4.txt"
+EXTRACT_TEMPLATE = "call_intelligence/extract_v6.txt"
 PROSE_TEMPLATE = "call_intelligence/prose_v2.txt"
 OBJECTIONS_TEMPLATE = "call_intelligence/objections_v2.txt"
 SCORE_TEMPLATE = "call_intelligence/score_v2.txt"
@@ -72,8 +72,10 @@ REPROMPT_TAILS: Mapping[str, str] = MappingProxyType(
 # is a name of at most five words) and escalations_v3 (possible_broker),
 # unit_b_prompts_v12, then every template that writes Arabic by one naming
 # the roles in Arabic (unit_b_prompts_v14), then extras_v7 and whatsapp_v2 by
-# the two with example phrasings per Arabic dialect (unit_b_prompts_v15);
-# never sent again.
+# the two with example phrasings per Arabic dialect (unit_b_prompts_v15),
+# then roles_v3 by roles_v4 (each voice's languages from the whole call) and
+# extract_v5 by extract_v6 (quoted topics, short relative times, a clear
+# agreement booking), unit_b_prompts_v16; never sent again.
 RETIRED_TEMPLATES: tuple[str, ...] = (
     "call_intelligence/extract_v1.txt",
     "call_intelligence/extras_v1.txt",
@@ -98,11 +100,13 @@ RETIRED_TEMPLATES: tuple[str, ...] = (
     "call_intelligence/whatsapp_v1.txt",
     "call_intelligence/extras_v7.txt",
     "call_intelligence/whatsapp_v2.txt",
+    "call_intelligence/roles_v3.txt",
+    "call_intelligence/extract_v5.txt",
 )
 
 # The stamp stage 1 carries under versions.prompt. Move it with the digest
 # in the stamp test whenever one of UNIT_B_TEMPLATES changes.
-PROMPT_SET_VERSION = "unit_b_prompts_v15"
+PROMPT_SET_VERSION = "unit_b_prompts_v16"
 
 # Every template Unit B can send, in pass order, then the retired ones; the
 # worker preloads them all.

@@ -16,6 +16,7 @@ from dodeal_ai.core.context import RequestContext
 from dodeal_ai.core.validation import OutputValidationError
 from dodeal_ai.units.call_intelligence.analysis import call_clock
 from dodeal_ai.units.call_intelligence.config import CallsConfig
+from dodeal_ai.units.call_intelligence.evidence import CallText
 from dodeal_ai.units.call_intelligence.passes import (
     NOT_MENTIONED,
     STATED,
@@ -26,6 +27,7 @@ from dodeal_ai.units.call_intelligence.passes import (
     extract,
     settled,
 )
+from dodeal_ai.units.call_intelligence.transcriber import Segment, Transcript
 from tests.helpers.fake_llm import FakeLLM, json_response
 from tests.unit.test_call_passes import _call, _extraction
 
@@ -227,3 +229,77 @@ def test_the_tenants_zone_defaults_to_dubai_and_refuses_an_unknown_one() -> None
     assert CallsConfig().timezone == "Asia/Dubai"
     with pytest.raises(ValidationError):
         CallsConfig(timezone="Mars/Olympus")
+
+
+# --- short relative times and a clear agreement -----------------------------------
+
+
+def _relative_call() -> CallText:
+    """An invented call: the agent will call back in three minutes, the client
+    agrees with one word."""
+    segments = (
+        _ar(0, "agent", "تمام، بتصل عليك بعد 3 دقايق عشان نكمل"),
+        _ar(5, "lead", "اوكي"),
+    )
+    return CallText.of(
+        Transcript.of(segments, provider="fake", model="fake"), country_code="971"
+    )
+
+
+def _ar(start: float, speaker: str, text: str) -> Segment:
+    return Segment(
+        start_s=start,
+        end_s=start + 5,
+        speaker=speaker,
+        text=text,
+        language="ar",
+        confidence=0.9,
+    )
+
+
+async def test_3_minutes_and_the_clients_okay_book_a_time_3_minutes_on() -> None:
+    """The guard: "بعد 3 دقايق" answered by the client's "اوكي" is a when
+    three minutes after recorded_at, in the tenant's zone, and booked."""
+    call = _relative_call()
+    answer = _extraction()
+    answer.update(
+        wanted=None,
+        discussed=[],
+        agreed=[],
+        mood={"value": "positive", "quote": "اوكي", "segment": "s2"},
+        next_step={
+            "action": "Call the client back",
+            "owner": "agent",
+            "due": "بعد 3 دقايق",
+            "quote": "بتصل عليك بعد 3 دقايق",
+            "segment": "s1",
+            "kind": "callback",
+            "when": "2026-09-26T10:03:00+04:00",
+            "booked": True,
+        },
+    )
+    llm = FakeLLM(json_response(answer))
+
+    found, _ = await extract(
+        llm, call, scope=SCOPE, settings=get_settings(), clock=CLOCK
+    )
+
+    step = settled(found, call, CLOCK)["next_step"]
+    assert (step["when"], step["when_state"], step["booked"]) == (
+        "2026-09-26T10:03:00+04:00",
+        STATED,
+        True,
+    )
+    assert "RECORDED AT: 2026-09-26T10:00:00+04:00" in llm.calls[0].prompt.variable
+
+
+def test_the_extract_prompt_counts_short_times_from_recorded_at() -> None:
+    from dodeal_ai.core.prompting import build_prompt
+    from dodeal_ai.units.call_intelligence.prompts import EXTRACT_TEMPLATE
+
+    text = build_prompt(EXTRACT_TEMPLATE, caller_data="").stable
+    for said in ('"in 3 minutes"', '"بعد 5 دقايق"', '"بكرة الساعة 5"'):
+        assert said in text
+    assert "RECORDED AT plus 3 minutes" in text
+    for agreement in ('"اوكي"', '"تمام"'):
+        assert agreement in text
