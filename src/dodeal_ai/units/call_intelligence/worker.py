@@ -967,6 +967,8 @@ def _log_outcome(run: CallRun) -> None:
         "provider": None if transcript is None else transcript.provider,
         "model": None if transcript is None else transcript.model,
         "pass_tokens": run.usage.tokens or None,
+        "evidence_dropped": run.usage.dropped or None,
+        "evidence_unverified": run.usage.unverified or None,
         "analysis_reason": run.analysis_reason,
     }
     spend = current_spend()

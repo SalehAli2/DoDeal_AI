@@ -638,6 +638,31 @@ async def test_the_outcome_line_carries_each_passes_tokens(
     assert outcome.pass_tokens == {"extract": spent, "prose": spent}
     assert isinstance(outcome.analyse_ms, int) and outcome.analysis_reason is None
     assert "1,200,000" not in json.dumps(outcome.__dict__, default=str)
+    assert (outcome.evidence_dropped, outcome.evidence_unverified) == (
+        {"extract": 0},
+        {"extract": 0},
+    )
+
+
+async def test_the_outcome_line_counts_the_extractions_unverified_fields(
+    ctx: dict, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An invented budget quote and an invented agreement: two fields kept
+    unverified, nothing dropped, the words of neither on the line."""
+    invented = copy.deepcopy(EXTRACTION)
+    invented["details"]["budget"]["quote"] = "I can pay two million"
+    invented["agreed"][0]["quote"] = "we sign the contract today"
+    ctx["llm"] = FakeLLM(json_response(invented), json_response(PROSE))
+    await _push()
+    with caplog.at_level(logging.INFO, logger="dodeal_ai.unit_b"):
+        await process_call(ctx, "tenant-a", JOB)
+
+    (outcome,) = [r for r in caplog.records if r.getMessage() == "call_job_outcome"]
+    assert (outcome.evidence_dropped, outcome.evidence_unverified) == (
+        {"extract": 0},
+        {"extract": 2},
+    )
+    assert "two million" not in json.dumps(outcome.__dict__, default=str)
 
 
 async def test_the_extract_pass_reads_the_calls_time_in_the_tenants_zone(

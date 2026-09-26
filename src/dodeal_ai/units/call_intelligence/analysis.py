@@ -56,6 +56,7 @@ from dodeal_ai.units.call_intelligence.passes import (
     Extraction,
     Prose,
     extract,
+    extraction_evidence,
     settled,
     write_prose,
 )
@@ -220,6 +221,8 @@ async def wave1(
                 metered, call, scope=scope, settings=settings, clock=clock
             ),
         )
+        dropped, unverified = extraction_evidence(call, extraction)
+        usage.evidence(EXTRACT, dropped=dropped, unverified=unverified)
         doubted = settled(extraction, call, clock)
         prose, stamps[PROSE] = await run_pass(
             run,

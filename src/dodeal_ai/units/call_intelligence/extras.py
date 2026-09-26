@@ -290,6 +290,14 @@ def extras_quotes(call: CallText, answer: Extras) -> dict[str, Errors]:
     return found
 
 
+def extras_evidence(call: CallText, answer: Extras) -> tuple[int, int]:
+    """(dropped, unverified): the keywords whose quotes failed, dropped, and
+    the seriousness checks and agent dialect kept unverified."""
+    failing = [where for where, errors in extras_quotes(call, answer).items() if errors]
+    dropped = sum(1 for where in failing if where.startswith("keywords."))
+    return dropped, len(failing) - dropped
+
+
 class Attempts:
     """The pass's client, counting the answers received, so the check knows
     when the one reprompt is spent (a WhatsApp text is then kept null)."""

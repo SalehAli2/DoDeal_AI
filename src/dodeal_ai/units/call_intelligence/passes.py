@@ -372,6 +372,13 @@ def _given(detail: AnyDetail) -> tuple[object, ...]:
     return (value, when, detail.quote, detail.segment)
 
 
+def extraction_evidence(call: CallText, answer: Extraction) -> tuple[int, int]:
+    """(dropped, unverified): the extraction drops nothing; every field whose
+    quote failed is kept unverified or uncertain (settled())."""
+    failing = sum(1 for errors in extraction_quotes(call, answer).values() if errors)
+    return 0, failing
+
+
 def _shape_errors(answer: Extraction) -> Errors:
     """What no quote can mend: a detail not mentioned that carries anything, a
     stated one with no value, a handover date with no words for it, a next

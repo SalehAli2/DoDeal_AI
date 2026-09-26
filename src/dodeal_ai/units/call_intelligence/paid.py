@@ -68,11 +68,21 @@ class JobGone(Exception):
 
 @dataclass(slots=True)
 class PassUsage:
-    """Tokens per pass, as the provider reported them, in this run; and the
-    part of each pass's output that was reasoning."""
+    """Tokens per pass, as the provider reported them, in this run; the part
+    of each pass's output that was reasoning; and what each field-level
+    pass's failed quotes dropped or left unverified."""
 
     tokens: dict[str, dict[str, int]] = field(default_factory=dict)
     reasoning: dict[str, int] = field(default_factory=dict)
+    # Per field-level pass (the extraction, the extras): the fields its failed
+    # quotes dropped, and those kept unverified; counts only, never a word.
+    dropped: dict[str, int] = field(default_factory=dict)
+    unverified: dict[str, int] = field(default_factory=dict)
+
+    def evidence(self, name: str, *, dropped: int, unverified: int) -> None:
+        """A field-level pass's count of fields its failed quotes cost."""
+        self.dropped[name] = dropped
+        self.unverified[name] = unverified
 
     def add(self, name: str, response: LLMResponse) -> None:
         spent = self.tokens.setdefault(name, {"input": 0, "output": 0, "calls": 0})

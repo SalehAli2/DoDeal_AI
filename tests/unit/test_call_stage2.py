@@ -250,11 +250,13 @@ async def test_a_deadline_with_stage2_still_owed_re_runs_the_job(ctx: dict) -> N
 NONE_RAISED = {"objections": []}
 
 
-def _stage2_ctx(*answers: object, job_try: int = 1) -> dict[str, Any]:
+def _stage2_ctx(
+    *answers: object, job_try: int = 1, extras: object = None
+) -> dict[str, Any]:
     llm = FakeLLM(*(json_response(a) for a in answers or (NONE_RAISED,)))
     llm.script_for(ESCALATIONS_TEMPLATE, json_response({"escalations": []}))
     llm.script_for(COACHING_TEMPLATE, json_response(coaching_answer(SEGMENTS[0].text)))
-    llm.script_for(EXTRAS_TEMPLATE, json_response(extras_answer()))
+    llm.script_for(EXTRAS_TEMPLATE, json_response(extras or extras_answer()))
     return {"llm": llm, "job_try": job_try}
 
 
@@ -819,3 +821,49 @@ async def test_an_unpriced_model_gives_a_null_cost_never_a_partial_one(
         None,
         get_settings().price_table_version,
     )
+
+
+async def test_three_invented_keyword_quotes_give_evidence_dropped_3(
+    ctx: dict, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The guard: the outcome line counts what the extras' failed quotes cost,
+    per pass -- three keywords dropped, one check kept unverified; four of
+    eight quotes failing is not more than half, so the part is delivered."""
+    await _done_and_pending(ctx)
+    extras = extras_answer()
+    extras["keywords"] = [
+        {"kind": "project", "said": name, "english": None, "segment": "s1"}
+        for name in ("Marina Heights", "Palm Towers", "Creek Vista")
+    ]
+    extras["seriousness"]["budget_stated"].update(
+        answer="yes", quote="money is no object", segment="s1"
+    )
+    others = ("timeline_stated", "decision_maker_named", "next_step_agreed")
+    for name in (*others, "client_engaged"):
+        extras["seriousness"][name].update(
+            answer="yes", quote=SEGMENTS[0].text, segment="s1"
+        )
+    stage2_ctx = _stage2_ctx(extras=extras)
+
+    with caplog.at_level(logging.INFO, logger="dodeal_ai.unit_b"):
+        await analyse_stage2(stage2_ctx, "tenant-a", JOB)
+
+    (line,) = [r for r in caplog.records if r.getMessage() == "call_stage2_outcome"]
+    assert (line.evidence_dropped, line.evidence_unverified) == (
+        {"extras": 3},
+        {"extras": 1},
+    )
+    held = await read_stage2_result("tenant-a", JOB)
+    assert held is not None and held["extras"]["keywords"] == []
+
+
+async def test_a_run_with_no_extras_answer_counts_no_evidence(
+    ctx: dict, caplog: pytest.LogCaptureFixture
+) -> None:
+    await _done_and_pending(ctx)
+    stage2_ctx = _stage2_ctx(extras={"keywords": "not a list"})
+    stage2_ctx["llm"].script_for(EXTRAS_TEMPLATE, json_response({}))
+    with caplog.at_level(logging.INFO, logger="dodeal_ai.unit_b"):
+        await analyse_stage2(stage2_ctx, "tenant-a", JOB)
+    (line,) = [r for r in caplog.records if r.getMessage() == "call_stage2_outcome"]
+    assert (line.evidence_dropped, line.evidence_unverified) == (None, None)

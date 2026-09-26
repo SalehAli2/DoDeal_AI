@@ -56,7 +56,12 @@ from dodeal_ai.units.call_intelligence.evidence import (
     QUOTE_FILLERS_VERSION,
     CallText,
 )
-from dodeal_ai.units.call_intelligence.extras import Extras, extras_part, find_extras
+from dodeal_ai.units.call_intelligence.extras import (
+    Extras,
+    extras_evidence,
+    extras_part,
+    find_extras,
+)
 from dodeal_ai.units.call_intelligence.language import (
     LANGUAGE_NOT_ENABLED,
     UNHEARD,
@@ -205,6 +210,9 @@ async def wave2(
             settings=settings,
         ),
     )
+    if extras is not None:
+        dropped, unverified = extras_evidence(call, extras)
+        run.usage.evidence(EXTRAS, dropped=dropped, unverified=unverified)
     wave.parts[EXTRAS] = (
         None
         if extras is None

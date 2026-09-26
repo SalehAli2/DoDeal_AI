@@ -35,9 +35,10 @@ to do.
 
 The arq job carries only (tenant, job_id); everything else is read from db3.
 Ids, counts and fixed words on its one outcome line -- each pass's tokens and
-reasoning tokens among them, and the run's cost_usd with the
-price_table_version it was priced under; never a word said, never reasoning
-text.
+reasoning tokens among them, the fields the extras' failed quotes dropped or
+left unverified (evidence_dropped, evidence_unverified), and the run's
+cost_usd with the price_table_version it was priced under; never a word said,
+never reasoning text.
 """
 
 from __future__ import annotations
@@ -294,6 +295,8 @@ def _log_outcome(run: Stage2Run) -> None:
             "part_reasons": None if run.wave is None else run.wave.reasons or None,
             "pass_tokens": run.usage.tokens or None,
             "pass_reasoning_tokens": run.usage.reasoning or None,
+            "evidence_dropped": run.usage.dropped or None,
+            "evidence_unverified": run.usage.unverified or None,
             **_spent(),
         },
     )
