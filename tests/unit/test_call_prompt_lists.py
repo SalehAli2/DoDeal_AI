@@ -23,6 +23,7 @@ from dodeal_ai.units.call_intelligence.prompts import (
     EXTRAS_TEMPLATE,
     RETIRED_TEMPLATES,
     UNIT_B_TEMPLATES,
+    WHATSAPP_WRITING_TEMPLATES,
 )
 
 
@@ -95,3 +96,37 @@ def test_every_live_prompt_that_speaks_of_arabic_is_classed() -> None:
     speaks = {name for name in live if "Arabic" in _text(name)}
     assert speaks == set(ARABIC_WRITING_TEMPLATES) | set(ARABIC_READING_ONLY)
     assert all(AGENT_AR not in _text(name) for name in ARABIC_READING_ONLY)
+
+
+# --- the WhatsApp message in its dialect -----------------------------------------
+
+DIALECT_EXAMPLES = {
+    "egyptian_ar": "زي ما اتفقنا، هبعتلك التفاصيل حالاً.",
+    "gulf_ar": "مثل ما اتفقنا، بطرش لك التفاصيل الحين.",
+    "levantine_ar": "متل ما اتفقنا، رح ابعتلك التفاصيل هلق.",
+}
+
+
+@pytest.mark.parametrize("template", WHATSAPP_WRITING_TEMPLATES)
+def test_every_whatsapp_prompt_shows_each_dialect_and_forbids_formal_arabic(
+    template: str,
+) -> None:
+    """The guard: Egyptian, Gulf and Levantine example phrasings, each on its
+    code's line, and the message never in formal Arabic nor copied from them."""
+    text = _text(template)
+    examples = text[text.index("DIALECT EXAMPLES") : text.index("ROLES IN ARABIC")]
+    for code, phrase in DIALECT_EXAMPLES.items():
+        at = examples.index(f"  {code}  ")
+        assert phrase in examples[at : at + 300], code
+    assert "never in formal Arabic (فصحى)" in text
+    assert "never copy them" in text
+
+
+def test_the_whatsapp_prompts_are_the_ones_sent() -> None:
+    from dodeal_ai.units.call_intelligence.prompts import (
+        API_TEMPLATES,
+        WHATSAPP_TEMPLATE,
+    )
+
+    assert set(WHATSAPP_WRITING_TEMPLATES) == {EXTRAS_TEMPLATE, WHATSAPP_TEMPLATE}
+    assert WHATSAPP_TEMPLATE in API_TEMPLATES

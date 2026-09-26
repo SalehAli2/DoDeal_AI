@@ -20,8 +20,8 @@ from dodeal_ai.units.call_intelligence.prompts import (
     UNIT_B_TEMPLATES,
 )
 
-PROMPT_SET = "unit_b_prompts_v14"
-PROMPT_SET_DIGEST = "d3f421204d4c8779a2dca1d8d1ef95aa7669d398e22bc8a51b8a25a8100e9362"
+PROMPT_SET = "unit_b_prompts_v15"
+PROMPT_SET_DIGEST = "b345a86cee7fed7a4d15960b7d7dd676d6567b8dbb459167281c13325d7ee9e1"
 
 _HOW_TO_UPDATE = (
     "A Unit B prompt template changed. Bump PROMPT_SET_VERSION in "
@@ -155,6 +155,12 @@ TEMPLATE_DIGESTS = {
     ),
     "call_intelligence/whatsapp_v2.txt": (
         "0e77762f1cb499df8941620c9869e906a93862b542413bcb57a893780d875f03"
+    ),
+    "call_intelligence/extras_v8.txt": (
+        "b670c3db4c2f13c87777378d2109eca7ed8e1495b4e144bec97ad8b0f57e7e4d"
+    ),
+    "call_intelligence/whatsapp_v3.txt": (
+        "75b8eb8ab388f75e4b0d6ec9303eea8ec4ebb62b6a4b075fd2b600cec4053c3c"
     ),
 }
 

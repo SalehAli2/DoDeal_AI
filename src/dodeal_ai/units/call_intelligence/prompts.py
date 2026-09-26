@@ -41,9 +41,9 @@ OBJECTIONS_TEMPLATE = "call_intelligence/objections_v2.txt"
 SCORE_TEMPLATE = "call_intelligence/score_v2.txt"
 ESCALATIONS_TEMPLATE = "call_intelligence/escalations_v3.txt"
 COACHING_TEMPLATE = "call_intelligence/coaching_v3.txt"
-EXTRAS_TEMPLATE = "call_intelligence/extras_v7.txt"
+EXTRAS_TEMPLATE = "call_intelligence/extras_v8.txt"
 TRANSLATE_TEMPLATE = "call_intelligence/translate_v2.txt"
-WHATSAPP_TEMPLATE = "call_intelligence/whatsapp_v2.txt"
+WHATSAPP_TEMPLATE = "call_intelligence/whatsapp_v3.txt"
 REPROMPT_TAIL_TEMPLATE = "call_intelligence/reprompt_tail_v1.txt"
 QUOTE_LENGTH_TAIL_TEMPLATE = "call_intelligence/reprompt_tail_quote_length_v1.txt"
 QUOTE_EXACT_TAIL_TEMPLATE = "call_intelligence/reprompt_tail_quote_exact_v1.txt"
@@ -71,7 +71,9 @@ REPROMPT_TAILS: Mapping[str, str] = MappingProxyType(
 # booking, the two property details, the loss reason), extras_v6 (a keyword
 # is a name of at most five words) and escalations_v3 (possible_broker),
 # unit_b_prompts_v12, then every template that writes Arabic by one naming
-# the roles in Arabic (unit_b_prompts_v14); never sent again.
+# the roles in Arabic (unit_b_prompts_v14), then extras_v7 and whatsapp_v2 by
+# the two with example phrasings per Arabic dialect (unit_b_prompts_v15);
+# never sent again.
 RETIRED_TEMPLATES: tuple[str, ...] = (
     "call_intelligence/extract_v1.txt",
     "call_intelligence/extras_v1.txt",
@@ -94,11 +96,13 @@ RETIRED_TEMPLATES: tuple[str, ...] = (
     "call_intelligence/extras_v6.txt",
     "call_intelligence/translate_v1.txt",
     "call_intelligence/whatsapp_v1.txt",
+    "call_intelligence/extras_v7.txt",
+    "call_intelligence/whatsapp_v2.txt",
 )
 
 # The stamp stage 1 carries under versions.prompt. Move it with the digest
 # in the stamp test whenever one of UNIT_B_TEMPLATES changes.
-PROMPT_SET_VERSION = "unit_b_prompts_v14"
+PROMPT_SET_VERSION = "unit_b_prompts_v15"
 
 # Every template Unit B can send, in pass order, then the retired ones; the
 # worker preloads them all.
@@ -132,6 +136,11 @@ ARABIC_WRITING_TEMPLATES: tuple[str, ...] = (
     WHATSAPP_TEMPLATE,
 )
 ARABIC_READING_ONLY: tuple[str, ...] = (ROLES_TEMPLATE,)
+
+# The templates that write the WhatsApp message: each shows example phrasings
+# of the Egyptian, Gulf and Levantine dialects, so a message to an Arabic
+# speaker is written in the dialect and not in formal Arabic.
+WHATSAPP_WRITING_TEMPLATES: tuple[str, ...] = (EXTRAS_TEMPLATE, WHATSAPP_TEMPLATE)
 
 # What the API process sends itself (the WhatsApp route, whatsapp.py); the
 # lifespan preloads them beside Unit A's.
