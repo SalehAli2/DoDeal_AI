@@ -30,6 +30,11 @@ and note must be written in the language asked for -- at least 60 % of their
 letters outside quotes in its script (evidence.in_language); both are checked
 here.
 
+A DEAD CALL'S LOSS REASON. An ending of dead carries loss_reason, and no
+other ending does: one of the nine objection categories, owed the client's
+quote, or no_reason_given, quoted when the client said something; a quote
+that fails is kept unverified as an element's is.
+
 THE NEXT STEP'S TIME. An action has a kind (viewing, online_meeting,
 office_visit, callback, send_details, other). Its time is resolved by the
 model from the call's recorded_at and the tenant's zone, both in the data half
@@ -71,7 +76,9 @@ from dodeal_ai.units.call_intelligence.evidence import (
     quote_errors,
     relocated,
 )
+from dodeal_ai.units.call_intelligence.objections import OBJECTION_CATEGORIES
 from dodeal_ai.units.call_intelligence.prompts import (
+    CLIENT,
     EXTRACT_TEMPLATE,
     PROSE_TEMPLATE,
     REPROMPT_TAIL_TEMPLATE,
@@ -99,6 +106,11 @@ MAX_CRM_NOTE_WORDS = 80
 STATED = "stated"
 NOT_MENTIONED = "not_mentioned"
 UNCERTAIN = "uncertain"
+
+DEAD = "dead"
+# A dead call whose client gave no reason: the one loss reason owing no quote.
+NO_REASON_GIVEN = "no_reason_given"
+LOSS_CATEGORIES = (*OBJECTION_CATEGORIES, NO_REASON_GIVEN)
 
 # The share of an extraction's quotes that may fail and the answer still be
 # kept field by field: more than half failing is a model not reading the call.
@@ -257,6 +269,31 @@ class Mood(Strict):
     segment: SegmentId
 
 
+# The nine objection categories (objections.py) and no_reason_given, as one
+# flat list, so the schema a provider is sent is one enum.
+type LossCategory = Literal[
+    "price",
+    "timing",
+    "competitor",
+    "trust",
+    "property_fit",
+    "payment_finance",
+    "location",
+    "third_party_approval",
+    "service_charges_fees",
+    "no_reason_given",
+]
+
+
+class LossReason(Strict):
+    """Why a dead call died: one of the objection categories, or
+    no_reason_given, with the client's quote when there is one."""
+
+    category: LossCategory
+    quote: Quote
+    segment: SegmentId
+
+
 class Extraction(Strict):
     """unit_b.extract's answer, exactly (extract_v2)."""
 
@@ -268,6 +305,8 @@ class Extraction(Strict):
     ending: Literal["moved_forward", "stalled", "needs_follow_up", "dead"]
     details: Details
     mood: Mood
+    # A default, so an answer kept before it existed still reads back.
+    loss_reason: LossReason | None = None
 
 
 class Prose(Strict):
@@ -309,6 +348,13 @@ def extraction_quotes(call: CallText, answer: Extraction) -> dict[str, Errors]:
     if step.action is not None or (step.quote, step.segment) != (None, None):
         check = quote_errors if step.action is None else evidence_errors
         found["next_step"] = check(call, "next_step", step.quote, step.segment)
+    lost = answer.loss_reason
+    given = lost is not None and (lost.quote, lost.segment) != (None, None)
+    if lost is not None and (given or lost.category != NO_REASON_GIVEN):
+        owed = quote_errors if lost.category == NO_REASON_GIVEN else evidence_errors
+        found["loss_reason"] = owed(
+            call, "loss_reason", lost.quote, lost.segment, speaker=CLIENT
+        )
     return found
 
 
@@ -334,6 +380,10 @@ def _shape_errors(answer: Extraction) -> Errors:
     stated one with no value, a handover date with no words for it, a next
     step's kind without its action."""
     errors: Errors = _step_errors(answer.next_step)
+    if answer.ending == DEAD and answer.loss_reason is None:
+        errors.append(("loss_reason", "dead_without_loss_reason"))
+    if answer.ending != DEAD and answer.loss_reason is not None:
+        errors.append(("loss_reason", "loss_reason_without_dead"))
     for name in DETAIL_NAMES:
         detail: AnyDetail = getattr(answer.details, name)
         where = f"details.{name}"
@@ -452,6 +502,11 @@ def settled(
         },
         "next_step": _settled_step(answer.next_step, "next_step" in failed, clock),
         "ending": answer.ending,
+        "loss_reason": (
+            None
+            if answer.loss_reason is None
+            else _settled_item(answer.loss_reason, "loss_reason" in failed)
+        ),
         "details": {
             name: _settled_detail(
                 call, getattr(answer.details, name), f"details.{name}" in failed

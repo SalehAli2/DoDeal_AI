@@ -225,6 +225,7 @@ async def test_a_call_is_analysed_and_delivered_with_its_stage1_payload(
     }
     assert (analysis_["language"], analysis_["summary"]) == ("en", PROSE["summary"])
     assert analysis_["elements"]["ending"] == "moved_forward"
+    assert analysis_["elements"]["loss_reason"] is None
     assert analysis_["elements"]["agreed"] == [
         {**EXTRACTION["agreed"][0], "unverified": False}
     ]

@@ -726,3 +726,32 @@ async def test_the_stage2_worker_builds_a_model_client_and_no_transcriber(
         assert ctx["llm"] is not None
     finally:
         await built["on_shutdown"](ctx)
+
+
+@pytest.mark.parametrize(
+    ("loss_reason", "ask_why"),
+    [
+        ({"category": "no_reason_given", "quote": "not interested"}, True),
+        ({"category": "price", "quote": "too expensive"}, False),
+        (None, False),
+    ],
+    ids=["no-reason", "price", "none"],
+)
+async def test_a_dead_call_with_no_reason_gets_the_ask_why_tip(
+    ctx: dict, loss_reason: dict | None, ask_why: bool
+) -> None:
+    """Stage 1's loss reason, read from its stored analysis, is what decides
+    the coaching's ask_why; the words are code's, in the summary language."""
+    from dodeal_ai.units.call_intelligence.coaching import ASK_WHY
+
+    await _done_and_pending(ctx)
+    result = await read_result("tenant-a", JOB)
+    assert result is not None
+    result["analysis"] = {"elements": {"ending": "dead", "loss_reason": loss_reason}}
+    await store_result("tenant-a", JOB, result, ttl_seconds=600)
+
+    await analyse_stage2(_stage2_ctx(), "tenant-a", JOB)
+
+    held = await read_stage2_result("tenant-a", JOB)
+    assert held is not None
+    assert held["coaching"]["ask_why"] == (ASK_WHY["en"] if ask_why else None)

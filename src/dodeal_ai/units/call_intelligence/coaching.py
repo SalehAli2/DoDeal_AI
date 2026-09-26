@@ -8,6 +8,8 @@
   plan          a development plan of exactly three actions
   stages        opening, rapport, discovery, qualification, presentation,
                 objections and close: each done yes or no, a yes quoted
+  ask_why       code's, not the model's: a fixed tip to ask the client why,
+                when stage 1's loss reason is no_reason_given; else null
 
 THE CHECKS, all in code, any failure a malformed answer (one reprompt, then
 the pass fails and the coaching part is null): every quote under the quote
@@ -93,6 +95,21 @@ HARSH_PHRASES: tuple[str, ...] = (
     "مخزي",
     "غير مقبول",
 )
+
+# The tip stage 2 adds when stage 1 found a dead call with no reason given
+# (passes.py, loss_reason no_reason_given): fixed words in the summary
+# language, never a model's, so they pass the tone list as written.
+NO_REASON_GIVEN = "no_reason_given"
+ASK_WHY: dict[str, str] = {
+    "en": (
+        "The client said no without giving a reason. Before the call ends, "
+        "ask what is holding them back: the answer shapes the next call."
+    ),
+    "ar": (
+        "رفض العميل دون أن يذكر سببا. قبل إنهاء المكالمة، اسأله عما يمنعه: "
+        "جوابه يحدد المكالمة القادمة."
+    ),
+}
 
 STRENGTH = "strength"
 IMPROVEMENT = "improvement"
@@ -245,9 +262,13 @@ async def coach(
     return relocated(call, answer), response
 
 
-def coaching_part(call: CallText, answer: Coaching) -> dict[str, object]:
+def coaching_part(
+    call: CallText, answer: Coaching, loss_reason: str | None = None
+) -> dict[str, object]:
     """Stage 2's coaching part: the answer, each moment timed from its
-    segment in code, and the language it is written in."""
+    segment in code, the language it is written in, and ask_why -- the fixed
+    tip to ask the client why -- when stage 1's `loss_reason` is
+    no_reason_given, else null."""
     moments = []
     for moment in answer.moments:
         index = call.index_of(moment.segment)
@@ -262,4 +283,5 @@ def coaching_part(call: CallText, answer: Coaching) -> dict[str, object]:
         "moments": moments,
         "plan": list(answer.plan),
         "stages": answer.stages.model_dump(),
+        "ask_why": ASK_WHY[call.language] if loss_reason == NO_REASON_GIVEN else None,
     }

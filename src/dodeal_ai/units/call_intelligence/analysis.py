@@ -112,6 +112,7 @@ def _analysis(
                 "agreed",
                 "next_step",
                 "ending",
+                "loss_reason",
             )
         },
         "details": kept["details"],

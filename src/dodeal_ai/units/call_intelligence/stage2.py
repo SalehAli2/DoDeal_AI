@@ -203,6 +203,7 @@ async def _analyse(
             eligible=eligible_for_full_analysis(job, config, transcript),
             stage1_escalations=_stage1_escalations(result),
             spoken=spoken_of(result.get("languages")),
+            loss_reason=_loss_reason(result),
         )
     except JobGone:
         return
@@ -220,6 +221,16 @@ def _stage1_escalations(result: dict[str, object]) -> list[dict[str, object]]:
     signals = result.get("signals")
     found = signals.get("escalations") if isinstance(signals, dict) else None
     return [item for item in found or () if isinstance(item, dict)]
+
+
+def _loss_reason(result: dict[str, object]) -> str | None:
+    """The category of stage 1's loss reason, from its stored analysis; None
+    when the analysis, or its loss reason, is null."""
+    analysis = result.get("analysis")
+    elements = analysis.get("elements") if isinstance(analysis, dict) else None
+    lost = elements.get("loss_reason") if isinstance(elements, dict) else None
+    category = lost.get("category") if isinstance(lost, dict) else None
+    return category if isinstance(category, str) else None
 
 
 async def _again_or_fail(

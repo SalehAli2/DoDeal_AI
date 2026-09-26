@@ -137,11 +137,13 @@ async def wave2(
     eligible: bool,
     stage1_escalations: Sequence[dict[str, object]],
     spoken: Spoken = UNHEARD,
+    loss_reason: str | None = None,
 ) -> Wave2:
     """Wave 2 for one transcript. JobGone when stage 2 stopped under it.
     `eligible` is the call's eligibility for full analysis, as it is now;
     `stage1_escalations` are the ones stage 1 found in code; `spoken` each
-    side's language as stage 1's roles pass heard it."""
+    side's language as stage 1's roles pass heard it; `loss_reason` the
+    category of stage 1's loss reason, None when it gave none."""
     call = CallText.of(
         transcript, country_code=config.phone_country_code, spoken=spoken
     )
@@ -179,7 +181,7 @@ async def wave2(
             lambda metered: coach(metered, call, scope=scope, settings=settings),
         )
         wave.parts[COACHING] = (
-            None if coaching is None else coaching_part(call, coaching)
+            None if coaching is None else coaching_part(call, coaching, loss_reason)
         )
     else:
         wave.parts[COACHING] = None
