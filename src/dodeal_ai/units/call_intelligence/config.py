@@ -35,6 +35,7 @@ from dodeal_ai.units.call_intelligence.language import (
     CoachedLanguage,
 )
 from dodeal_ai.units.call_intelligence.numbers import DEFAULT_COUNTRY_CODE
+from dodeal_ai.units.call_intelligence.score import ENGAGED_SHARE, ENGAGED_TURNS
 from dodeal_ai.units.call_intelligence.transcriber import (
     DEFAULT_STT_PROFILE,
     stt_profile_names,
@@ -131,6 +132,14 @@ class CallsConfig(BaseModel):
     # at five") is resolved in (passes.py). Asia/Dubai: the agencies' market. A
     # wrong one shifts every booked time by the offset; an unknown one is refused.
     timezone: str = DEFAULT_TIMEZONE
+    # The client engaged, so a call may be scored (score.py), at this talk share
+    # or up: 0.15, a quiet buyer still in the talk. Higher leaves real buyers
+    # unscored; lower scores calls the client barely spoke on.
+    engaged_share: float = Field(default=ENGAGED_SHARE, ge=0, le=1)
+    # Or with this many client turns of four words or more: 5, a conversation.
+    # Lower scores a string of short replies; higher leaves a brief but
+    # talkative client unscored.
+    engaged_turns: int = Field(default=ENGAGED_TURNS, ge=1, le=1000)
 
     # The switches, all off: calls_enabled admits jobs at all (403 otherwise);
     # the other five name later passes and are parsed and stored only. A switch

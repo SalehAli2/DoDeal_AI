@@ -24,7 +24,9 @@ below 50. Exact fractions throughout, so 12.5 is 13 and never 12.
 
 A SCORE ONLY when the tenant's scoring_enabled is on, the client's language
 is one it coaches (language.coached), the call is eligible, the client engaged
-(a talk share of at least 0.20), and the objections pass answered; otherwise
+(a talk share of at least ENGAGED_SHARE, 0.15, or at least ENGAGED_TURNS, 5,
+turns of ENGAGED_TURN_WORDS words or more; a tenant may set both numbers in
+unit_b), and the objections pass answered; otherwise
 null, with the reason: scoring_off, language_not_enabled, not_eligible,
 not_engaged or objections_unavailable -- and the pass is not run.
 
@@ -36,7 +38,7 @@ no_over_promise and no_pressure, where it is every no.
 from __future__ import annotations
 
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from fractions import Fraction
 from typing import Literal
@@ -61,7 +63,9 @@ from dodeal_ai.units.call_intelligence.prompts import (
     REPROMPT_TAILS,
     SCORE_TEMPLATE,
     build_call_prompt,
+    role_of,
 )
+from dodeal_ai.units.call_intelligence.transcriber import Segment
 from dodeal_ai.units.structured_intelligence.llm_call import (
     call_model,
     output_rejected,
@@ -77,10 +81,18 @@ SCORE_MAX_OUTPUT_TOKENS = 2500
 # inside the ceiling (register item 116): the ceiling follows the profile.
 SCORE_REASONING_MAX_OUTPUT_TOKENS = 6000
 
-# The client's talk share at which the agent listened more, and below which
-# the client did not engage enough to judge the call.
+# The client's talk share at which the agent listened more.
 LISTENED_MORE_SHARE = 0.40
-ENGAGED_SHARE = 0.20
+# The client engaged, so the call may be judged, at this talk share or up, or
+# with this many turns of ENGAGED_TURN_WORDS words or more: a quiet buyer who
+# still answered in sentences. The defaults of unit_b's engaged_share and
+# engaged_turns (config.py); lower scores calls the client barely spoke on,
+# higher leaves real but brief buyers unscored.
+ENGAGED_SHARE = 0.15
+ENGAGED_TURNS = 5
+# The words a client turn needs to count toward ENGAGED_TURNS: a sentence,
+# not "yes" or "okay thanks". Fixed here, not a tenant setting.
+ENGAGED_TURN_WORDS = 4
 # The most interruptions an agent may make and still not be interrupting.
 MAX_AGENT_INTERRUPTIONS = 2
 
@@ -225,6 +237,37 @@ def band_of(total: int) -> str:
     return next(name for floor, name in BANDS if total >= floor)
 
 
+def substantive_turns(segments: Sequence[Segment], role: str) -> int:
+    """The role's turns of ENGAGED_TURN_WORDS words or more: a turn is a run
+    of the role's segments with no other speaker between, its words the
+    whitespace-separated tokens of them all."""
+    turns = 0
+    words = 0
+    for n, segment in enumerate(segments):
+        if role_of(segment) != role:
+            continue
+        words += len(segment.text.split())
+        ends = n + 1 == len(segments) or role_of(segments[n + 1]) != role
+        if ends:
+            turns += 1 if words >= ENGAGED_TURN_WORDS else 0
+            words = 0
+    return turns
+
+
+def engaged(
+    client_share: float | None,
+    client_turns: int,
+    *,
+    share: float = ENGAGED_SHARE,
+    turns: int = ENGAGED_TURNS,
+) -> bool:
+    """Whether the client engaged: the share reached, or the turns. Never
+    with no share at all: a call with no talk time has nothing to judge."""
+    if client_share is None:
+        return False
+    return client_share >= share or client_turns >= turns
+
+
 def score_gate(
     *,
     scoring_enabled: bool,
@@ -232,15 +275,21 @@ def score_gate(
     eligible: bool,
     client_share: float | None,
     objections_answered: bool,
+    client_turns: int = 0,
+    engaged_share: float = ENGAGED_SHARE,
+    engaged_turns: int = ENGAGED_TURNS,
 ) -> str | None:
-    """Why the call gets no score, or None when it gets one."""
+    """Why the call gets no score, or None when it gets one. `client_turns`
+    is the client's substantive turns; the two thresholds are the tenant's."""
     if not scoring_enabled:
         return SCORING_OFF
     if not language_enabled:
         return LANGUAGE_NOT_ENABLED
     if not eligible:
         return NOT_ELIGIBLE
-    if client_share is None or client_share < ENGAGED_SHARE:
+    if not engaged(
+        client_share, client_turns, share=engaged_share, turns=engaged_turns
+    ):
         return NOT_ENGAGED
     if not objections_answered:
         return OBJECTIONS_UNAVAILABLE

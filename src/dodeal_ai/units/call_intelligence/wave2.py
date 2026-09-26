@@ -92,6 +92,7 @@ from dodeal_ai.units.call_intelligence.score import (
     ask_checks,
     score_call,
     score_gate,
+    substantive_turns,
 )
 from dodeal_ai.units.call_intelligence.signals import interruptions, talk_share
 from dodeal_ai.units.call_intelligence.transcriber import Transcript
@@ -262,6 +263,9 @@ async def _score(
         eligible=eligible,
         client_share=share,
         objections_answered=objections is not None,
+        client_turns=substantive_turns(call.segments, CLIENT),
+        engaged_share=config.engaged_share,
+        engaged_turns=config.engaged_turns,
     )
     if gate is not None:
         wave.parts[SCORE] = None

@@ -33,6 +33,7 @@ from dodeal_ai.units.call_intelligence.score import (
     round_half_up,
     score_call,
     score_gate,
+    substantive_turns,
 )
 from dodeal_ai.units.call_intelligence.transcriber import Segment, Transcript
 from dodeal_ai.units.call_intelligence.wave2 import OBJECTIONS, SCORE, wave2
@@ -298,10 +299,10 @@ def test_the_bands(total: int, band: str) -> None:
         (True, False, True, 0.5, True, "language_not_enabled"),
         (True, False, False, 0.1, False, "language_not_enabled"),
         (True, True, False, 0.5, True, "not_eligible"),
-        (True, True, True, 0.19, True, "not_engaged"),
+        (True, True, True, 0.14, True, "not_engaged"),
         (True, True, True, None, True, "not_engaged"),
-        (True, True, True, 0.20, False, "objections_unavailable"),
-        (True, True, True, 0.20, True, None),
+        (True, True, True, 0.15, False, "objections_unavailable"),
+        (True, True, True, 0.15, True, None),
     ],
 )
 def test_each_null_reason(
@@ -539,3 +540,88 @@ def test_the_score_quote_check_takes_the_match_and_its_neighbours() -> None:
     with pytest.raises(OutputValidationError) as refused:
         check_score(call)(ScoreChecks.model_validate(dropped))
     assert refused.value.errors == (("courteous", "quote_not_in_segment"),)
+
+
+# --- engaged: a share, or turns of substance --------------------------------------
+
+
+def _gate(share: float | None, turns: int, **tenant: Any) -> str | None:
+    return score_gate(
+        scoring_enabled=True,
+        language_enabled=True,
+        eligible=True,
+        client_share=share,
+        objections_answered=True,
+        client_turns=turns,
+        **tenant,
+    )
+
+
+def test_share_019_with_6_substantive_client_turns_is_engaged() -> None:
+    """The guard: engaged at a share of 0.15 or up, or on five turns of four
+    words or more -- both hold here."""
+    assert _gate(0.19, 6) is None
+
+
+@pytest.mark.parametrize(
+    ("share", "turns", "reason"),
+    [
+        (0.15, 0, None),
+        (0.14, 5, None),
+        (0.10, 6, None),
+        (0.14, 4, "not_engaged"),
+        (None, 9, "not_engaged"),
+    ],
+    ids=["share-at-floor", "turns-at-floor", "turns-alone", "neither", "no-share"],
+)
+def test_the_share_or_the_turns_engage(
+    share: float | None, turns: int, reason: str | None
+) -> None:
+    assert _gate(share, turns) == reason
+
+
+def test_a_tenant_may_move_both_numbers() -> None:
+    raised = {"engaged_share": 0.25, "engaged_turns": 7}
+    assert _gate(0.19, 6, **raised) == "not_engaged"
+    assert _gate(0.19, 7, **raised) is None
+    assert _gate(0.25, 0, **raised) is None
+    config = CallsConfig(engaged_share=0.25, engaged_turns=7)
+    assert (config.engaged_share, config.engaged_turns) == (0.25, 7)
+    assert (CallsConfig().engaged_share, CallsConfig().engaged_turns) == (0.15, 5)
+    from pydantic import ValidationError
+
+    for refused in ({"engaged_share": 1.5}, {"engaged_turns": 0}):
+        with pytest.raises(ValidationError):
+            CallsConfig(**refused)
+
+
+def test_a_turn_is_a_run_of_the_clients_segments_of_four_words_or_more() -> None:
+    segments = (
+        _say(0, "agent", "Hello, is this a good time?"),
+        _say(5, "lead", "Yes."),
+        _say(10, "agent", "Great."),
+        _say(15, "lead", "I want a villa"),
+        _say(20, "agent", "Which area?"),
+        _say(25, "lead", "Near the"),
+        _say(30, "lead", "marina, please."),
+        _say(35, "agent", "Budget?"),
+        _say(40, "lead", "Okay thanks"),
+    )
+    assert substantive_turns(segments, "client") == 2
+    assert substantive_turns(segments, "agent") == 1
+
+
+async def test_a_quiet_client_with_six_real_turns_is_scored_in_wave2() -> None:
+    """The client holds 0.10 of the talk but answers in sentences six times:
+    engaged, so the score pass runs."""
+    said = "I would like to see it"
+    quiet = [_say(0, "agent", "Good morning, what budget do you have in mind?", 60)]
+    for n in range(6):
+        quiet += [
+            _say(60 + n * 20, "lead", said, 2),
+            _say(62 + n * 20, "agent", "Understood, let me explain the options.", 18),
+        ]
+    llm = FakeLLM(json_response(NO_OBJECTIONS), json_response(ALL_YES))
+    wave = await _wave2(llm, segments=tuple(quiet))
+    assert wave.reasons.get(SCORE) is None
+    assert PROFILE_UNIT_B_SCORE in llm.profiles
