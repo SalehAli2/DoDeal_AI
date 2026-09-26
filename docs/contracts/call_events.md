@@ -69,6 +69,7 @@ Each event then adds its own fields (sections 3 to 5 and 7). A re-analysis job's
          "text": "Shall we meet on Tuesday? I am happy with that."}
       ]
     },
+    "languages": {"client": null, "agent": null, "profile": "mostly_en", "source": "script"},
     "signals": {
       "version": "call_signals_v2",
       "agent": {"talk_share": 0.5, "words_per_minute": 126.0, "interruptions": 0},
@@ -112,7 +113,7 @@ Each event then adds its own fields (sections 3 to 5 and 7). A re-analysis job's
     },
     "analysis_reason": null,
     "versions": {
-      "prompt": "unit_b_prompts_v7",
+      "prompt": "unit_b_prompts_v11",
       "signals": "call_signals_v2",
       "model": "fake-model-pinned",
       "transcriber": "fake/fake-stt-1",
@@ -163,6 +164,11 @@ A **segment id** is `s<n>`, 1-based in `transcript.segments` order: `s3` is the 
 - **`long_call_no_diarization`.** In `transcript.uncertain_reasons`: a Gemini call over 1800 s is sent without diarization, so every speaker is `unknown` and the transcript is uncertain.
 - **`no_speech`.** A transcript with no segments. It is uncertain, no model is called, and `roles`, `signals`, `analysis` and `versions` are `null`, with `analysis_reason` `no_speech`.
 - **Audio format.** `ffprobe` must decode the start of the file, or the job fails with `audio_format_unknown` before any paid call. Every engine is then sent 16 kHz mono FLAC, converted by `ffmpeg`; a stereo call goes as two, one per side. A file `ffmpeg` cannot convert fails with `audio_unreadable`.
+
+**Languages, in `result`:**
+
+- **`roles.call_languages`.** The roles pass also answers `{client, agent}`, each `{language, quote, segment}`. `language` is one of `gulf_ar`, `egyptian_ar`, `levantine_ar`, `iraqi_ar`, `maghrebi_ar`, `msa_ar`, `en`, `hi`, `ur`, `ru`, `zh`, `fr`, `fa`, `tr` or `other`, judged from the words and not the script: Urdu is `ur`, never Arabic, and French is `fr`, never English. The quote is checked, in code, to come from a voice the answer gives that side's role. A side not heard is all `null`.
+- **`languages`.** `{client, agent, profile, source}`. With the roles applied, `client` and `agent` are the pass's codes, `source` is `model`, and `profile` is read from them: every side Arabic is `mostly_ar`, every side English `mostly_en`, one of each `mixed`, anything else `other`. Otherwise both are `null`, `source` is `script`, and `profile` is the transcript's own. `analysis.language` (the summary language) follows `profile`: `ar` for `mostly_ar`, `en` for `mostly_en` and `other`, and the language with more words for `mixed`. So an Urdu call is summarised in English.
 
 **Masking.** A model reads a masked copy of each segment. Every phone number, email address and any other run of 9 to 19 digits is masked; a price grouped in thousands with commas is kept. So a quote may contain `[PHONE]` or `[EMAIL]` where the transcript has the number. The transcript itself is as said.
 
@@ -253,6 +259,8 @@ A **segment id** is `s<n>`, 1-based in `transcript.segments` order: `s3` is the 
     "extras": {
       "keywords": [{"kind": "topic", "said": "a villa", "english": "villa", "segment": "s2"}],
       "tags": {"outcome": "moved_forward", "stage": "viewing", "client_type": "end_user"},
+      "agent_dialect": {"dialect": "unknown", "quote": null, "segment": null},
+      "whatsapp_dialect": null,
       "whatsapp_suggestion": {"language": "en", "text": "Thank you for your time. See you on Tuesday for the villa viewing."},
       "seriousness": {
         "band": "B",
@@ -269,7 +277,7 @@ A **segment id** is `s<n>`, 1-based in `transcript.segments` order: `s3` is the 
     },
     "reasons": {},
     "versions": {
-      "prompt": "unit_b_prompts_v7",
+      "prompt": "unit_b_prompts_v11",
       "objection_list": "objection_list_v1",
       "rubric": "call_rubric_v1",
       "tone_list": "tone_list_v1",
@@ -285,7 +293,9 @@ A **segment id** is `s<n>`, 1-based in `transcript.segments` order: `s3` is the 
 }
 ```
 
-**`result`, part by part.** Each of the five parts is an object, or `null` with the reason under `reasons`. A pass that failed twice leaves only its own part null, and the other parts are delivered. A reason is `<pass>_malformed_output`, `<pass>_model_unavailable` or `<pass>_pass_interrupted`. The score may also be null by design: `scoring_off` (the tenant's `scoring_enabled` is off), `not_eligible`, `not_engaged` (the client's talk share is under 0.20) or `objections_unavailable`.
+**`result`, part by part.** Each of the five parts is an object, or `null` with the reason under `reasons`. A pass that failed twice leaves only its own part null, and the other parts are delivered. A reason is `<pass>_malformed_output`, `<pass>_model_unavailable` or `<pass>_pass_interrupted`. The score may also be null by design: `scoring_off` (the tenant's `scoring_enabled` is off), `language_not_enabled`, `not_eligible`, `not_engaged` (the client's talk share is under 0.20) or `objections_unavailable`.
+
+**`language_not_enabled`.** A call whose client language is not on the tenant's `coaching_languages` (default `gulf_ar`, `egyptian_ar`, `levantine_ar`, `iraqi_ar` and `en`) gets `coaching: null` and `score: null`, both with `language_not_enabled`, and neither pass is run. The client language is stage 1's `languages.client`; when stage 1 heard none, the transcript's profile decides: `mostly_en` needs `en` listed, `mostly_ar` any Arabic code, `mixed` both, and `other` is never coached. With `scoring_enabled` off, the score's reason stays `scoring_off`.
 
 | Part | What it holds |
 |---|---|
@@ -294,6 +304,9 @@ A **segment id** is `s<n>`, 1-based in `transcript.segments` order: `s3` is the 
 | `escalations` | `items[]` in time order: stage 1's `off_channel_contact` items merged with the model's flags. A model flag has `type`, `issue`, `source: model`, `speaker`, `start_s`, `segment` and `quote`. `issue` is one of `over_promise_or_guarantee`, `wrong_price_or_terms`, `rudeness_or_pressure`, `unprofessional_competitor_talk` or `qualified_no_next_step`; `type` equals `issue`, except that **`wrong_price_or_terms` goes out as `type: claim_to_verify`**, a claim to check and not a finding. |
 | `coaching` | in the summary `language`. 2 or 3 `observations` (at least one `strength` and one `improvement`; an improvement has `say_it_like_this`). Up to 4 `moments`, each with `timestamp` (`mm:ss`) and `start_s` read from its segment in code. A 3-action `plan`. The seven `stages`, each `done` with a quote when yes. |
 | `extras` | `keywords[]`: `kind` (`project`, `community`, `developer` or `topic`), `said` as spoken and checked in its `segment`, and `english` or `null`. `tags`: `outcome` (`moved_forward`, `stalled`, `needs_follow_up`, `dead`), `stage` (`first_contact`, `follow_up`, `viewing`, `negotiation`, `closing`) and `client_type` (`end_user`, `investor`, `broker`, `unknown`). `whatsapp_suggestion`: at most 60 words in `language`. **This service never sends it**; show it to the agent to send or not. `seriousness`: five checks, each with a `reason` and a quote for a yes. The `band` is computed in code from the `yes` count: `A` for 4 or 5, `B` for 2 or 3, `C` for 0 or 1. **`manager_only: true`**: show it to the agent's manager, never to the agent. |
+| `extras.agent_dialect` | `{dialect, quote, segment}`: the agent's Arabic dialect, `gulf_ar`, `egyptian_ar`, `levantine_ar`, `iraqi_ar`, `maghrebi_ar` or `msa_ar`, with a quote checked to come from one of the **agent's** segments; `unknown` with `null` quote and segment when the agent's words do not show it |
+| `extras.whatsapp_suggestion.language` | the language the message is written in, decided in code: the client's (stage 1's `languages.client`), `ar` for any Arabic code; else the summary language. One of `ar`, `en`, `hi`, `ur`, `ru`, `zh`, `fr`, `fa` or `tr`. The text is checked to be in that language's script |
+| `extras.whatsapp_dialect` | the Arabic dialect the message was asked in, decided in code: the agent's `agent_dialect` when known, else the tenant's `whatsapp_default_dialect` (default `gulf_ar`). `null` when the message is not in Arabic |
 | `versions` | the prompt set, the objection list, the rubric, the tone list, the model each pass's answer came from, and `passes`, `{<pass>: {provider, model}}` (a pass that did not answer is absent from both) |
 | `extras.keywords[].canonical` | the company's `keyword_vocabulary` name this keyword is, copied exactly as listed; `null` when it is none, and the keyword is kept as found |
 
@@ -374,3 +387,12 @@ So `+971 50 123 4567`, `00971-50-123-4567`, `050.123.4567` and `(050) 1234567` a
 - The event is signed like every other and retried on the same schedule: one attempt, then after 60, 300, 1800 and 7200 seconds, with a delivery state of its own per target. A retry sends the held translation; the model is never asked again. `GET /api/v1/calls/jobs/{job_id}` shows it under `translations.<target>` while it is held.
 - The pass asks a chunk the model never answered once more. A malformed answer gets one reprompt, then the translation fails. The task itself is never re-run.
 - `result` is `{target, segments, reason, versions}`. Each segment is `{segment, start_s, end_s, speaker, text}`; the id, the times and the speaker are the transcript's, and only the text is translated. Numbers stay masked as `[PHONE]`. `segments` is `null` with `reason` `translate_model_unavailable` or `translate_malformed_output` when the pass failed.
+
+## 8. Writing the WhatsApp suggestion again
+
+`POST /api/v1/calls/jobs/{job_id}/whatsapp {"language": "<code>"}` (service token, counted on the reads counter):
+
+- `language` is one of the twelve: `gulf_ar`, `egyptian_ar`, `levantine_ar`, `iraqi_ar`, `en`, `hi`, `ur`, `ru`, `zh`, `fr`, `fa` or `tr`. Anything else is a 422.
+- The answer is `200 {job_id, language, dialect, text}`, at most 60 words. `dialect` is the Arabic code asked for, or `null`. **This service never sends it**; show it to the agent.
+- It is written from the stored stage-1 transcript by one small model pass, charged to the calls budget of the call's author. The response is `404 call_job_not_found` for no job of this company's, `409 result_expired` once the stage-1 result or its transcript is gone, `409 whatsapp_in_progress` while another request writes the same language, `429 token_budget_exceeded` at the calls budget, and `503 cost_store_unavailable`, `503 model_unavailable` or `503 malformed_output` when it could not be written.
+- One paid pass per language: once written, the same language is answered from the store, without a model call. It is held no longer than the stage-1 result, and `GET /api/v1/calls/jobs/{job_id}` shows it under `whatsapp.<language>` with its `versions`.

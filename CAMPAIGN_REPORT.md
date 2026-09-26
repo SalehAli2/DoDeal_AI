@@ -7473,3 +7473,12 @@ failure modes, then one stress test (sabotage in brackets).
 - paid (any code): a quote failure listed after another error still gets the generic tail; two quote codes pick the tail by position. Test: [missing_field, quote_length] gets the quote-length tail, and quote_length beats quote_not_in_segment either way round (first code only fails 3).
 - call_e2e: the report prints analysis_reason, part_reasons and the whole extras part; report.html is written beside status.json, offline, escaped, with the JSON embedded. No sabotage owed.
 - Stress test: a transcript segment saying "</script><script>x()": the page keeps one script tag and its embedded JSON parses back equal.
+
+## Unit B languages, dialects and the WhatsApp route
+- extras dialect: a client's words pass as the agent's dialect; the message's dialect is taken from a model. Test: a client-quoted agent_dialect is malformed; unknown gives the default (speaker off fails 2; default off fails 4).
+- language: an Urdu call is summarised as Arabic; a quote from the other side sets a language. Test: Urdu is ur, French fr (script rule back fails 3; speaker check off fails 1).
+- extras language: a Russian client gets English; an Arabic client gets no dialect. Test: the message is in the client's language and script (client ignored fails 8).
+- whatsapp route: a language is paid for twice; a suggestion outlives its call. Test: a held language makes no model call; the hold ends with the result (7 sabotages, each caught).
+- coaching languages: an untested language is coached and scored; a heard client is overruled by script. Test: ur, hi, fr, other get language_not_enabled, no pass run (gate off fails 6).
+- call_e2e --vocabulary and --dialect; docs for all. No sabotage owed.
+- Stress test: two requests for one language at once: one pays, one gets 409 whatsapp_in_progress.

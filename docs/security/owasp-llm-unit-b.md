@@ -12,7 +12,7 @@ Scope: `src/dodeal_ai/units/call_intelligence/`, `src/dodeal_ai/api/routes/calls
 
 **Applies now.** A caller controls what is said on a call, so every word of a transcript is attacker-shaped text in the same way a note is for Unit A. Wave 1 puts the transcript into two prompts, and the controls are these:
 
-- **Delimited, and first.** The transcript goes only in the `variable` half, between the fixed BEGIN/END CALLER DATA markers, and renders *before* the instructions (`core/prompting.py`, `AssembledPrompt.data_first`). The instructions come only from versioned files under `prompts/call_intelligence/`, stamped `unit_b_prompts_v7`, with their digest and each file's hash pinned beside the stamp.
+- **Delimited, and first.** The transcript goes only in the `variable` half, between the fixed BEGIN/END CALLER DATA markers, and renders *before* the instructions (`core/prompting.py`, `AssembledPrompt.data_first`). The instructions come only from versioned files under `prompts/call_intelligence/`, stamped `unit_b_prompts_v11`, with their digest and each file's hash pinned beside the stamp.
 - **Neutralised.** `build_prompt` defuses a forged BEGIN or END marker spoken into a segment, as it does for a note. Each segment is one line, `[s<n> mm:ss agent|client] text`, with its whitespace folded (`units/call_intelligence/prompts.py::render_transcript`), so no segment can start a line of its own and pass for another segment or for the LANGUAGE line.
 - **Never a rejected answer.** The reprompt adds only the tail file; the prose pass reads the *settled* extraction, which has already been validated and quote-checked, inside the data half.
 
