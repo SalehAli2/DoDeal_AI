@@ -1,6 +1,6 @@
 """One-command local end-to-end run of a real call (Unit B), for the lead.
 
-    uv run python -m scripts.call_e2e <audio> [--language en|ar|mixed]
+    uv run python -m scripts.call_e2e <audio> [<audio> ...] [--language en|ar|mixed]
         [--tenant tenant-a] [--stt-profile NAME] [--no-stage2]
         [--out DIR] [--timeout 1800] [--vocabulary FILE]
         [--dialect gulf_uae|egyptian|levantine|msa]
@@ -19,6 +19,13 @@ consume the call queues (they would take the job with their own settings);
 at its stop it deletes the arq health-check keys its own workers wrote, so
 the next run is not refused, and never a key another worker wrote. The recording goes to the configured
 speech-to-text provider: use only calls the audio-governance answer allows.
+
+SEVERAL RECORDINGS: one stack starts (the API and the workers once), with one
+file server per recording, the first also taking the callbacks. Every call is
+pushed at once and each job followed; each gets its own report folder under
+--out (default e2e_batch_<stamp> beside the first recording), named
+<n>_<stem>, with the shared logs in logs/ beside them. The stop and the
+cleanup run once, in the finally. One recording runs exactly as before.
 """
 
 from __future__ import annotations
@@ -33,6 +40,7 @@ import socket
 import subprocess
 import sys
 import time
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import IO, Any, get_args
@@ -42,6 +50,7 @@ import jwt
 import redis
 from arq.constants import health_check_key_suffix
 
+from dodeal_ai.core.callbacks import event_id
 from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.redis import redis_url as store_url
 from dodeal_ai.units.call_intelligence.extras import WhatsAppDialect
@@ -381,6 +390,25 @@ def outcome_records(log: Path, name: str) -> list[dict[str, Any]]:
     return found
 
 
+def callbacks_for(text: str, tenant: str, job_id: str) -> list[str]:
+    """The demo server's "call." lines for one job: each callback block (its
+    "callback <event>" line and the header lines under it) whose
+    X-DODEAL-Event-Id is that job's id for that event."""
+    blocks: list[list[str]] = []
+    for line in text.splitlines():
+        if line.startswith("callback "):
+            blocks.append([line])
+        elif blocks and line.startswith("  "):
+            blocks[-1].append(line)
+    found: list[str] = []
+    for block in blocks:
+        event = block[0].removeprefix("callback ").strip()
+        wanted = f"  X-DODEAL-Event-Id: {event_id(tenant, job_id, event)}"
+        if wanted in block:
+            found += [line for line in block if "call." in line]
+    return found
+
+
 def report(body: dict[str, Any], outcomes: list[dict[str, Any]]) -> list[str]:
     """A readable report of the status body and the outcome lines, every
     refused model answer's line among the reasons."""
@@ -696,14 +724,51 @@ def finished(body: dict[str, Any], want_stage2: bool) -> bool:
     return stage2 is None or stage2 in STAGE2_TERMINAL
 
 
+@dataclass(slots=True)
+class Recording:
+    """One recording's run: its file, report folder and job, as followed."""
+
+    audio: Path
+    out: Path
+    seconds: float = 0.0
+    demo_log: Path | None = None
+    audio_url: str | None = None
+    job_id: str | None = None
+    label: str = ""
+    body: dict[str, Any] = field(default_factory=dict)
+    seen: tuple[object, ...] = ()
+    code: int | None = None
+
+
+def recordings(
+    paths: list[Path], out: Path | None, stamp: str
+) -> tuple[list[Recording], Path]:
+    """Each recording with its report folder, and the logs folder: one
+    recording as before (--out, or e2e_<stem>_<stamp> beside it, logs inside);
+    several each under --out or e2e_batch_<stamp> as <n>_<stem>, logs beside."""
+    audios = [outside_repo(path) for path in paths]
+    for audio in audios:
+        if not audio.is_file():
+            raise fail("the recording was not found")
+    if len(audios) == 1:
+        folder = outside_repo(out or audios[0].parent / f"e2e_{audios[0].stem}_{stamp}")
+        return [Recording(audios[0], folder)], folder / "logs"
+    base = outside_repo(out or audios[0].parent / f"e2e_batch_{stamp}")
+    found = [
+        Recording(audio, base / f"{n}_{audio.stem}", label=f"{audio.name}: ")
+        for n, audio in enumerate(audios, start=1)
+    ]
+    return found, base / "logs"
+
+
 def run(args: argparse.Namespace) -> int:
-    audio = outside_repo(args.audio)
-    if not audio.is_file():
-        raise fail("the recording was not found")
-    vocabulary = None if args.vocabulary is None else vocabulary_terms(args.vocabulary)
+    paths: list[Path] = args.audio if isinstance(args.audio, list) else [args.audio]
     stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-    out = outside_repo(args.out or audio.parent / f"e2e_{audio.stem}_{stamp}")
-    (out / "logs").mkdir(parents=True, exist_ok=True)
+    calls, logs = recordings(paths, args.out, stamp)
+    vocabulary = None if args.vocabulary is None else vocabulary_terms(args.vocabulary)
+    logs.mkdir(parents=True, exist_ok=True)
+    for call in calls:
+        call.out.mkdir(parents=True, exist_ok=True)
 
     settings = get_settings()
     environment = os.environ.get("DODEAL_ENVIRONMENT") or plain(
@@ -735,7 +800,8 @@ def run(args: argparse.Namespace) -> int:
     base_domain = plain(getattr(settings, "inbound_base_domain", "dodealcrm.com"))
     host = f"{args.tenant}.{base_domain}"
     callback_secret = secrets.token_hex(16)
-    seconds = audio_seconds(audio)
+    for call in calls:
+        call.seconds = audio_seconds(call.audio)
 
     env = {**env_file_values(DOT_ENV), **os.environ}
     env.update(
@@ -748,10 +814,11 @@ def run(args: argparse.Namespace) -> int:
             "PYTHONUNBUFFERED": "1",
         }
     )
-    api_port, demo_port = free_port(), free_port()
+    api_port = free_port()
+    demo_ports = [free_port() for _ in calls]
     api = f"http://127.0.0.1:{api_port}"
     python = sys.executable
-    children = Children(out / "logs", env)
+    children = Children(logs, env)
     # The started workers by log name, command-line queue and arq queue, and
     # the health-check values they wrote first: what the stop may delete, and
     # nothing else.
@@ -794,41 +861,47 @@ def run(args: argparse.Namespace) -> int:
             children.start(name, [python, "-m", "dodeal_ai.workers.calls", arg])
             for name, arg, _ in owned
         ]
-        demo_log = children.start(
-            "demo",
-            [
-                python,
-                str(REPO_ROOT / "scripts" / "call_demo.py"),
-                "--port",
-                str(demo_port),
-                "--tenant",
-                args.tenant,
-                "--secret",
-                callback_secret,
-                "--audio",
-                str(audio),
-                "--base-url",
-                api,
-            ],
-        )
+        # One file server per recording, "demo" the first: the callbacks' too.
+        for n, (call, port) in enumerate(zip(calls, demo_ports, strict=True)):
+            call.demo_log = children.start(
+                "demo" if n == 0 else f"demo-{n + 1}",
+                [
+                    python,
+                    str(REPO_ROOT / "scripts" / "call_demo.py"),
+                    "--port",
+                    str(port),
+                    "--tenant",
+                    args.tenant,
+                    "--secret",
+                    callback_secret,
+                    "--audio",
+                    str(call.audio),
+                    "--base-url",
+                    api,
+                ],
+            )
+        callback_log = calls[0].demo_log
+        assert callback_log is not None
 
         if wait_for_http(f"{api}/health", 60) is None:
-            raise fail(f"the API did not start; see {out / 'logs' / 'api.log'}")
+            raise fail(f"the API did not start; see {logs / 'api.log'}")
         ready = httpx.get(f"{api}/ready", timeout=5)
         print(f"api ready: {ready.status_code} {short(ready.text)}")
         time.sleep(3)
         if children.dead():
-            raise fail(f"child exited at start: {children.dead()}; see {out / 'logs'}")
+            raise fail(f"child exited at start: {children.dead()}; see {logs}")
         claim_health_keys(
             queue, [arq_queue for _, _, arq_queue in owned], CLAIM_SECONDS, claimed
         )
 
-        audio_url = served_audio_url(demo_log, 20)
-        if audio_url is None:
-            raise fail(f"the demo server printed no audio URL; see {demo_log}")
+        for call in calls:
+            assert call.demo_log is not None
+            call.audio_url = served_audio_url(call.demo_log, 20)
+            if call.audio_url is None:
+                raise fail(f"the demo server printed no audio URL; see {call.demo_log}")
 
         section = unit_b_section(
-            args, f"http://127.0.0.1:{demo_port}/callback", vocabulary
+            args, f"http://127.0.0.1:{demo_ports[0]}/callback", vocabulary
         )
         if vocabulary is not None:
             print(f"vocabulary: {len(vocabulary)} terms")
@@ -841,92 +914,120 @@ def run(args: argparse.Namespace) -> int:
                 raise fail(f"the settings PUT failed: {short(put.text)}")
             time.sleep(3)
             now = datetime.now(UTC)
-            push = {
-                "call_id": int(time.time()) % 1_000_000_000,
-                "lead_id": 1004,
-                "author_id": 7,
-                "duration_seconds": max(1, round(seconds)),
-                "recorded_at": now.isoformat(timespec="seconds"),
-                "audio_url": audio_url,
-                "audio_url_expires_at": (now + timedelta(hours=1)).isoformat(
-                    timespec="seconds"
-                ),
-                "language_hint": args.language,
-            }
             began = time.monotonic()
-            pushed = client.post("/api/v1/calls/jobs", json=push, headers=headers())
-            if pushed.status_code != 202:
-                raise fail(
-                    f"the push failed: {pushed.status_code} {short(pushed.text)}"
-                )
-            job_id = pushed.json()["job_id"]
-            print(f"pushed call, job {job_id} ({round(seconds)} s of audio)")
-
-            body: dict[str, Any] = {}
-            seen: tuple[object, ...] = ()
-            code = EXIT_TIMEOUT
-            while time.monotonic() - began < args.timeout:
-                got = client.get(f"/api/v1/calls/jobs/{job_id}", headers=headers())
-                if got.status_code == 200:
-                    body = got.json()
-                    state = (
-                        body.get("status"),
-                        body.get("delivery"),
-                        body.get("stage2"),
+            for n, call in enumerate(calls):
+                push = {
+                    "call_id": (int(time.time()) + n) % 1_000_000_000,
+                    "lead_id": 1004,
+                    "author_id": 7,
+                    "duration_seconds": max(1, round(call.seconds)),
+                    "recorded_at": now.isoformat(timespec="seconds"),
+                    "audio_url": call.audio_url,
+                    "audio_url_expires_at": (now + timedelta(hours=1)).isoformat(
+                        timespec="seconds"
+                    ),
+                    "language_hint": args.language,
+                }
+                pushed = client.post("/api/v1/calls/jobs", json=push, headers=headers())
+                if pushed.status_code != 202:
+                    raise fail(
+                        f"the push failed: {pushed.status_code} {short(pushed.text)}"
                     )
-                    if state != seen:
+                call.job_id = pushed.json()["job_id"]
+                print(
+                    f"{call.label}pushed call, job {call.job_id} "
+                    f"({round(call.seconds)} s of audio)"
+                )
+
+            following = list(calls)
+            while following and time.monotonic() - began < args.timeout:
+                for call in list(following):
+                    got = client.get(
+                        f"/api/v1/calls/jobs/{call.job_id}", headers=headers()
+                    )
+                    if got.status_code != 200:
+                        continue
+                    call.body = got.json()
+                    state = (
+                        call.body.get("status"),
+                        call.body.get("delivery"),
+                        call.body.get("stage2"),
+                    )
+                    if state != call.seen:
                         elapsed = round(time.monotonic() - began, 1)
                         print(
-                            f"[{elapsed:>7} s] status={state[0]} "
+                            f"[{elapsed:>7} s] {call.label}status={state[0]} "
                             f"delivery={state[1]} stage2={state[2]}"
                         )
-                        seen = state
-                    if finished(body, not args.no_stage2):
-                        code = (
-                            EXIT_DONE if body.get("status") == "done" else EXIT_FAILED
-                        )
-                        break
+                        call.seen = state
+                    if finished(call.body, not args.no_stage2):
+                        done = call.body.get("status") == "done"
+                        call.code = EXIT_DONE if done else EXIT_FAILED
+                        following.remove(call)
+                if not following:
+                    break
                 if children.dead():
-                    print(f"a child exited: {children.dead()}; see {out / 'logs'}")
-                    code = EXIT_FAILED
+                    print(f"a child exited: {children.dead()}; see {logs}")
+                    for call in following:
+                        call.code = EXIT_FAILED
                     break
                 time.sleep(POLL_SECONDS)
 
         time.sleep(2)
-        outcomes = [
+        records = [
             record
             for log in worker_logs
             for name in (*OUTCOME_LINES, REJECTED_LINE)
             for record in outcome_records(log, name)
         ]
-        (out / "status.json").write_text(
-            json.dumps(body, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        (out / "outcomes.json").write_text(
-            json.dumps(outcomes, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        callbacks = [
-            line
-            for line in demo_log.read_text(
-                encoding="utf-8", errors="replace"
-            ).splitlines()
-            if "call." in line
-        ]
-        text = "\n".join(
-            [*report(body, outcomes), "", "=== CALLBACKS (demo server) ===", *callbacks]
-        )
-        (out / "report.txt").write_text(text, encoding="utf-8")
-        (out / "report.html").write_text(report_html(body, outcomes), encoding="utf-8")
-        print(text)
-        print(f"\nsaved to {out}")
-        if code == EXIT_TIMEOUT:
-            print(f"timed out after {args.timeout} s")
-        return code
+        demo_text = callback_log.read_text(encoding="utf-8", errors="replace")
+        for call in calls:
+            assert call.job_id is not None
+            outcomes = (
+                records
+                if len(calls) == 1
+                else [r for r in records if r.get("job_id") == call.job_id]
+            )
+            callbacks = (
+                [line for line in demo_text.splitlines() if "call." in line]
+                if len(calls) == 1
+                else callbacks_for(demo_text, args.tenant, call.job_id)
+            )
+            write_report(call, outcomes, callbacks)
+            if call.code is None:
+                print(f"{call.label}timed out after {args.timeout} s")
+        return max(EXIT_TIMEOUT if c.code is None else c.code for c in calls)
     except KeyboardInterrupt:
         print("interrupted; stopping")
         return EXIT_INTERRUPTED
     finally:
         shut_down(children, queue, claimed, owned)
+
+
+def write_report(
+    call: Recording, outcomes: list[dict[str, Any]], callbacks: list[str]
+) -> None:
+    """One call's status, outcomes and report, text and page, in its folder."""
+    (call.out / "status.json").write_text(
+        json.dumps(call.body, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    (call.out / "outcomes.json").write_text(
+        json.dumps(outcomes, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    text = "\n".join(
+        [
+            *report(call.body, outcomes),
+            "",
+            "=== CALLBACKS (demo server) ===",
+            *callbacks,
+        ]
+    )
+    (call.out / "report.txt").write_text(text, encoding="utf-8")
+    (call.out / "report.html").write_text(
+        report_html(call.body, outcomes), encoding="utf-8"
+    )
+    print(text)
+    print(f"\nsaved to {call.out}")
 
 
 def shut_down(
@@ -967,7 +1068,7 @@ def stop_owned(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("audio", type=Path)
+    parser.add_argument("audio", type=Path, nargs="+")
     parser.add_argument("--language", choices=["en", "ar", "mixed"], default="mixed")
     parser.add_argument("--tenant", default="tenant-a")
     parser.add_argument("--stt-profile", default="")

@@ -118,8 +118,11 @@ class _Children:
         self.client, self.logs = client, logs
         self.interrupt_stop = interrupt_stop
         self.stopped = False
+        self.stops = 0
+        self.started: list[str] = []
 
     def start(self, name: str, argv: list[str]) -> Path:
+        self.started.append(name)
         path = self.logs / f"{name}.log"
         path.write_text("", encoding="utf-8")
         queue = {"worker-normal": NORMAL, "worker-stage2": STAGE2}.get(name)
@@ -132,6 +135,7 @@ class _Children:
 
     def stop(self) -> None:
         self.stopped = True
+        self.stops += 1
         if self.interrupt_stop:
             raise KeyboardInterrupt
 
@@ -145,13 +149,17 @@ def driven(monkeypatch, tmp_path: Path):
     audio = tmp_path / "call.wav"
     audio.write_bytes(b"RIFF")
     made: list[_Children] = []
+    pushes: list[dict] = []
+    polled: list[str] = []
     real_client = httpx.Client
 
     def api(request: httpx.Request) -> httpx.Response:
         if request.method == "PUT":
             return httpx.Response(200, json={})
         if request.method == "POST":
-            return httpx.Response(202, json={"job_id": "job-1"})
+            pushes.append(json.loads(request.content))
+            return httpx.Response(202, json={"job_id": f"job-{len(pushes)}"})
+        polled.append(request.url.path.rsplit("/", 1)[-1])
         return httpx.Response(200, json=SAMPLE)
 
     def children(logs: Path, env: dict) -> _Children:
@@ -179,7 +187,7 @@ def driven(monkeypatch, tmp_path: Path):
     )
     monkeypatch.delenv("DODEAL_ENVIRONMENT", raising=False)
 
-    def run(**raising: BaseException) -> int:
+    def run(*more: Path, **raising: BaseException) -> int:
         if "served" in raising:
             error = raising["served"]
 
@@ -187,10 +195,19 @@ def driven(monkeypatch, tmp_path: Path):
                 raise error
 
             monkeypatch.setattr(call_e2e, "served_audio_url", served)
-        flags = [str(audio), "--stt-profile", "x", "--out", str(tmp_path / "out")]
+        paths = [str(audio), *(str(path) for path in more)]
+        flags = [*paths, "--stt-profile", "x", "--out", str(tmp_path / "out")]
         return call_e2e.main(flags)
 
-    return SimpleNamespace(client=client, made=made, run=run)
+    return SimpleNamespace(
+        client=client,
+        made=made,
+        run=run,
+        pushes=pushes,
+        polled=polled,
+        out=tmp_path / "out",
+        tmp=tmp_path,
+    )
 
 
 def test_a_whole_run_stops_its_workers_and_releases_their_keys(driven, capsys) -> None:
@@ -203,6 +220,86 @@ def test_a_whole_run_stops_its_workers_and_releases_their_keys(driven, capsys) -
     assert capsys.readouterr().out.endswith(
         "health-check keys released: arq:calls:normal, arq:calls:stage2\n"
     )
+
+
+def test_one_recording_keeps_its_report_and_logs_in_out_as_before(driven) -> None:
+    assert driven.run() == call_e2e.EXIT_DONE
+
+    assert (len(driven.pushes), driven.made[0].stops) == (1, 1)
+    assert driven.made[0].started == ["api", "worker-normal", "worker-stage2", "demo"]
+    assert sorted(path.name for path in driven.out.iterdir()) == [
+        "logs",
+        "outcomes.json",
+        "report.html",
+        "report.txt",
+        "status.json",
+    ]
+
+
+def test_two_recordings_are_two_pushes_two_report_folders_and_one_stop(
+    driven, capsys
+) -> None:
+    """One stack, a file server per recording, both calls pushed before
+    either is followed, each report in its own folder, one stop."""
+    second = driven.tmp / "second.wav"
+    second.write_bytes(b"RIFF")
+
+    assert driven.run(second) == call_e2e.EXIT_DONE
+
+    (children,) = driven.made
+    assert children.started == [
+        "api",
+        "worker-normal",
+        "worker-stage2",
+        "demo",
+        "demo-2",
+    ]
+    assert len(driven.pushes) == 2
+    assert driven.pushes[0]["call_id"] != driven.pushes[1]["call_id"]
+    assert driven.polled[:2] == ["job-1", "job-2"]
+    assert children.stops == 1
+    assert call_e2e.busy_queues(driven.client) == []
+    assert sorted(path.name for path in driven.out.iterdir()) == [
+        "1_call",
+        "2_second",
+        "logs",
+    ]
+    for folder in ("1_call", "2_second"):
+        assert (driven.out / folder / "report.txt").is_file()
+        assert (driven.out / folder / "report.html").is_file()
+    out = capsys.readouterr().out
+    assert "call.wav: pushed call, job job-1" in out
+    assert "second.wav: pushed call, job job-2" in out
+    assert out.count("health-check keys released") == 1
+
+
+def test_each_calls_callbacks_are_found_by_its_event_id() -> None:
+    """The demo log holds every job's callbacks; a report shows its own."""
+    from dodeal_ai.core.callbacks import event_id
+
+    def block(job: str, event: str) -> list[str]:
+        return [
+            f"callback {event}",
+            f"  X-DODEAL-Event: {event}",
+            f"  X-DODEAL-Event-Id: {event_id('tenant-a', job, event)}",
+            "  signature: verified  status: 204",
+        ]
+
+    text = "\n".join(
+        ["Serving ...", *block("job-1", "call.stage1"), *block("job-2", "call.stage1")]
+        + block("job-2", "call.stage2")
+    )
+    assert call_e2e.callbacks_for(text, "tenant-a", "job-1") == [
+        "callback call.stage1",
+        "  X-DODEAL-Event: call.stage1",
+    ]
+    assert call_e2e.callbacks_for(text, "tenant-a", "job-2") == [
+        "callback call.stage1",
+        "  X-DODEAL-Event: call.stage1",
+        "callback call.stage2",
+        "  X-DODEAL-Event: call.stage2",
+    ]
+    assert call_e2e.callbacks_for(text, "tenant-b", "job-1") == []
 
 
 def test_an_exception_after_the_start_still_stops_the_workers(driven) -> None:
