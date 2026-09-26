@@ -7528,3 +7528,10 @@ failure modes, then one stress test (sabotage in brackets).
 - D-62 reasoning cost (3, RISK): reasoning reported only in total_tokens is never priced; a reported detail added on top of completion double-charges. Test: a 900-token gap is output and in cost_usd and task_cost_usd_total; a detail inside completion is counted once. Sabotage: 3 of 3 fail.
 - D-63 coaching (4): an Egyptian agent coached with Gulf or formal phrasings; a booked call told to set a next step. Test: the prompt pins both rules; the data carries AGENT DIALECT and NEXT STEP lines. No sabotage owed.
 - Stress test: a call that begins at 23:55 and says "بكرة" at 10:00 in stamps the 27th and keeps the 28th at 17:00.
+
+## Unit B v18 docs, when_no_anchor, D-75 and D-76
+- Docs (1): call_events.md gains when_quote, when_segment, when_reason, minute precision and Q36; OWASP and the examples stamped v18.
+- when_no_anchor (2, RISK): a call with no recorded_at gives a time with no reason; a code-dropped time unbooks a booking the model made. Test: each of when_missing_quote, when_out_of_range and when_no_anchor keeps the model's booked; no time from the model is never booked. Sabotage: 2 of 2 fail.
+- D-75 (3, RISK): an agent's verified over-promise scored as no over-promise; a client's words, or an unverified quote, fail the agent. Test: s16's promise turns no_over_promise no, professionalism 15 to 11, 88 excellent to 82 good; client, unknown, unverified and failed-pass cases change nothing; re-analysis reconciles. Sabotage: 7 of 7 fail.
+- D-76 (4): a lost "ما" hides in WER as one word. Test: "عمري ما زرت" against "عمري زرت" is recall 0 for ما. No sabotage owed.
+- Stress test: an escalation part whose item says agent but whose quote sits in a client segment changes no mark.
