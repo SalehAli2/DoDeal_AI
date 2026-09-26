@@ -3,7 +3,13 @@ English, asked for by the CRM and sent back as call.translation.
 
   POST /api/v1/calls/jobs/{job_id}/translation {target}  202; 409
       result_expired once the stage-1 result is gone, 409 already_in_language
-      for a call mostly in the target language already
+      for a call mostly in the target language already; 429 at the calls
+      budget, 503 when the store that counts it cannot say (M9)
+
+A REPEAT REQUEST ANSWERS FROM THE HELD TRANSLATION (status done, the
+translation beside it) and queues nothing; a held failure is queued again.
+"queued" is answered only when a run will come: the task keeps no arq result
+(workers/calls.py), so a run that held nothing never blocks the next one.
 
 THE PASS, unit_b.translate, runs on the stage-2 queue (translate_call): the
 transcript as every pass reads it -- the prompt copy, numbers masked -- in
@@ -18,11 +24,17 @@ got no answer is sent once more alone, the first answer read back unpaid
 (paid.ask_twice). The task is never re-run (max_tries 1), so no answered
 chunk is paid for twice.
 
+THE CALLS BUDGET is checked before any chunk is paid for, in the request and
+again in the task: over it, or with its store down, the translation fails
+unpaid with translate_<reason>.
+
 THE RESULT is held beside the stage-1 result for the tenant's result hold,
 readable through the status route, and sent signed to the callback as
 call.translation: one attempt inline, then the normal callback schedule
 (delivery.py), on a delivery state of its own per target. The model is never
-asked again for a send that failed: every retry reads the held result.
+asked again for a send that failed: every retry reads the held result. A HOLD
+THAT FAILS still sends call.translation: the failure translate_store_unavailable
+is held in its place when the store takes it, and the event goes either way.
 """
 
 from __future__ import annotations
@@ -36,19 +48,24 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from dodeal_ai.core.config import Settings, get_settings
 from dodeal_ai.core.context import RequestContext, TenantScope
+from dodeal_ai.core.cost.limiter import CallsBudgetPaused, calls_budget_preflight
 from dodeal_ai.core.errors import (
     AlreadyInLanguage,
     CallJobNotFound,
+    CallsBudgetUnavailable,
     JobStoreUnavailableResponse,
     MalformedOutputError,
     ModelUnavailableError,
     ResultExpired,
+    TokenBudgetExceeded,
 )
 from dodeal_ai.core.jobs import (
+    Job,
     JobStoreUnavailable,
     owe_translation_delivery,
     read_job,
     read_result,
+    read_translation,
     store_translation,
 )
 from dodeal_ai.core.llm import LLMClient
@@ -84,6 +101,8 @@ from dodeal_ai.units.structured_intelligence.llm_call import (
 _logger = logging.getLogger("dodeal_ai.unit_b")
 
 TRANSLATE_LABEL = "llm.unit_b.translate"
+# The reason a translation that could not be held is sent with.
+STORE_DOWN = "translate_store_unavailable"
 
 # Each chunk's answer ceiling (the brief): a chunk's translation and its ids.
 TRANSLATE_MAX_OUTPUT_TOKENS = 2500
@@ -110,9 +129,12 @@ class TranslationRequest(BaseModel):
 
 
 class TranslationAccepted(BaseModel):
+    """queued: a run will come. done: the held translation, answered again."""
+
     job_id: str
     target: Target
-    status: Literal["queued"] = "queued"
+    status: Literal["queued", "done"] = "queued"
+    translation: dict[str, object] | None = None
 
 
 class _Line(BaseModel):
@@ -133,10 +155,13 @@ class Translated(BaseModel):
 async def request_translation(
     context: RequestContext, job_id: str, body: TranslationRequest
 ) -> TranslationAccepted:
-    """The translation queued, or 404, or 409 when there is nothing to do."""
+    """The held translation, done; else queued within the calls budget; 404,
+    409 when there is nothing to do, 429 or 503 for the budget."""
+    tenant, target = context.tenant, body.target
     try:
-        job = await read_job(context.tenant, job_id)
-        result = None if job is None else await read_result(context.tenant, job_id)
+        job = await read_job(tenant, job_id)
+        result = None if job is None else await read_result(tenant, job_id)
+        held = None if job is None else await read_translation(tenant, job_id, target)
     except JobStoreUnavailable:
         raise JobStoreUnavailableResponse() from None
     if job is None:
@@ -144,10 +169,20 @@ async def request_translation(
     if result is None or result.get("transcript") is None:
         raise ResultExpired()
     transcript = Transcript.model_validate(result["transcript"])
-    if transcript.language_profile is _ALREADY[body.target]:
+    if transcript.language_profile is _ALREADY[target]:
         raise AlreadyInLanguage()
-    await enqueue_translation(context.tenant, job_id, body.target)
-    return TranslationAccepted(job_id=job_id, target=body.target)
+    if held is not None and held.get("segments") is not None:
+        return TranslationAccepted(
+            job_id=job_id, target=target, status="done", translation=held
+        )
+    try:
+        await calls_budget_preflight(job_scope(job))
+    except CallsBudgetPaused as paused:
+        if paused.reason_code == "cost_store_unavailable":
+            raise CallsBudgetUnavailable() from None
+        raise TokenBudgetExceeded() from None
+    await enqueue_translation(tenant, job_id, target)
+    return TranslationAccepted(job_id=job_id, target=target)
 
 
 def chunks(call: CallText) -> list[list[int]]:
@@ -251,6 +286,7 @@ async def translate_call(
     try:
         if client is None:
             raise ModelUnavailableError()
+        await calls_budget_preflight(job_scope(job))
         lines: list[dict[str, object]] = []
         for run in chunks(call):
             answer = await _chunk(
@@ -267,13 +303,13 @@ async def translate_call(
                 for n, line in zip(run, answer.segments, strict=True)
             ]
         translation["segments"] = lines
+    except CallsBudgetPaused as paused:
+        translation["reason"] = f"translate_{paused.reason_code}"
     except ModelUnavailableError:
         translation["reason"] = "translate_model_unavailable"
     except MalformedOutputError:
         translation["reason"] = "translate_malformed_output"
-    await store_translation(
-        tenant, job_id, target, translation, ttl_seconds=config.result_ttl_seconds
-    )
+    await _hold(job, target, translation, ttl_seconds=config.result_ttl_seconds)
     _logger.info(
         "call_translation_done",
         extra={
@@ -283,9 +319,47 @@ async def translate_call(
             "reason": translation["reason"],
         },
     )
-    if config.callback_url is not None and await owe_translation_delivery(
-        job, target, now=datetime.now(UTC)
-    ):
-        # One attempt now; a failure is left to the schedule (delivery.py).
-        deliver: Deliver = ctx.get("deliver", deliver_nothing)
-        await deliver(job, translation_event(target), config)
+    if config.callback_url is None:
+        return
+    try:
+        if not await owe_translation_delivery(job, target, now=datetime.now(UTC)):
+            return
+    except JobStoreUnavailable:
+        _logger.warning(
+            "call_translation_not_sent",
+            extra={"tenant": tenant, "job_id": job_id, "reason_code": STORE_DOWN},
+        )
+        return
+    # One attempt now; a failure is left to the schedule (delivery.py).
+    deliver: Deliver = ctx.get("deliver", deliver_nothing)
+    await deliver(job, translation_event(target), config)
+
+
+async def _hold(
+    job: Job, target: str, translation: dict[str, object], *, ttl_seconds: int
+) -> None:
+    """Hold the translation; a store that refuses it holds the failure
+    translate_store_unavailable instead when it can, the answer dropped: the
+    event goes either way, and nothing is paid for again."""
+    try:
+        await store_translation(
+            job.tenant, job.job_id, target, translation, ttl_seconds=ttl_seconds
+        )
+        return
+    except JobStoreUnavailable:
+        _logger.warning(
+            "call_translation_hold_failed",
+            extra={
+                "tenant": job.tenant,
+                "job_id": job.job_id,
+                "reason_code": STORE_DOWN,
+            },
+        )
+    translation["segments"], translation["reason"] = None, STORE_DOWN
+    try:
+        await store_translation(
+            job.tenant, job.job_id, target, translation, ttl_seconds=ttl_seconds
+        )
+    except JobStoreUnavailable:
+        # The event still goes; its body reads no translation held.
+        pass

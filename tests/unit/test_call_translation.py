@@ -124,7 +124,12 @@ async def test_an_expired_result_is_409_and_so_is_the_calls_own_language(
     assert (same.status_code, same.json()["reason"]) == (409, "already_in_language")
     queued = await _post(client, "ar")
     assert queued.status_code == 202
-    assert queued.json() == {"job_id": JOB, "target": "ar", "status": "queued"}
+    assert queued.json() == {
+        "job_id": JOB,
+        "target": "ar",
+        "status": "queued",
+        "translation": None,
+    }
 
 
 async def test_a_queue_that_is_down_is_queue_unavailable(monkeypatch) -> None:

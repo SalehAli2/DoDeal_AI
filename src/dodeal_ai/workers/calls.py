@@ -202,8 +202,10 @@ def worker_settings(
     functions = (
         [
             func(analyse_stage2, max_tries=STAGE2_TRIES),
-            # Never re-run: a re-run would pay again for chunks answered.
-            func(translate_call, max_tries=1),
+            # Never re-run: a re-run would pay again for chunks answered. No
+            # arq result kept, so a run that held nothing never makes the next
+            # request's enqueue a no-op answered "queued" (translation.py).
+            func(translate_call, max_tries=1, keep_result=0),
         ]
         if queue == STAGE2_QUEUE
         else [
