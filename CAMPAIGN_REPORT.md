@@ -7511,3 +7511,9 @@ failure modes, then one stress test (sabotage in brackets).
 - score (5): a quiet buyer answering in sentences goes unscored; a call of one-word replies is scored. Test: share 0.10 with 6 turns of 4+ words is engaged, 0.14 with 4 is not (turns rule off fails 4).
 - extras (6): a WhatsApp message to an Egyptian client in formal Arabic; an example copied as the message. Test: each WhatsApp prompt shows the three dialects' phrasings and forbids formal Arabic and copying. No sabotage owed.
 - Stress test: a call with no talk time and nine long client turns stays not_engaged, never a crash in the score.
+
+## Unit B languages from the whole call, quoted topics, short relative times
+- roles (1): a client's dialect heard only after segment 20 is missed, so the call is coached as the wrong language; a late quote cited under a wrong id. Test: s25's Egyptian words are shown under their own id and the client is egyptian_ar (selection off fails 1).
+- extract topics (2): an invented topic lands in the summary; a kept answer with bare topics no longer reads back. Test: an unquoted or invented topic is unverified and absent from the prose prompt; bare topics read back unverified (filter off fails 1).
+- extract times (3): "بعد 3 دقايق" left null; an agreement unbooked. Test: 3 minutes plus the client's "اوكي" gives recorded_at + 3 min, stated and booked. Prompt only; no sabotage owed.
+- Stress test: a 30-segment call where the client speaks one word until s25: roles_data shows s25 and the language check passes on it.
