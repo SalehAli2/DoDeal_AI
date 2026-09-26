@@ -62,6 +62,7 @@ class LLMResponse:
     `cached_input_tokens` is the PART of input_tokens the provider served from
     its prompt cache, and `reasoning_tokens` the PART of output_tokens spent on
     reasoning; 0 when the provider does not say (register item "cost").
+    output_tokens counts reasoning a provider reports only in its total (D-62).
     """
 
     text: str = field(repr=False)

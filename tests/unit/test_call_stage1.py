@@ -639,12 +639,32 @@ async def test_the_outcome_line_carries_each_passes_tokens(
     (outcome,) = [r for r in caplog.records if r.getMessage() == "call_job_outcome"]
     spent = {"input": 100, "output": 20, "calls": 1}
     assert outcome.pass_tokens == {"extract": spent, "prose": spent}
+    assert outcome.pass_reasoning_tokens == {"extract": 0, "prose": 0}
     assert isinstance(outcome.analyse_ms, int) and outcome.analysis_reason is None
     assert "1,200,000" not in json.dumps(outcome.__dict__, default=str)
     assert (outcome.evidence_dropped, outcome.evidence_unverified) == (
         {"extract": 0},
         {"extract": 0},
     )
+
+
+async def test_the_outcome_line_carries_each_passes_reasoning_tokens(
+    ctx: dict, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The reasoning count each answer carries (the adapter's, D-62) per pass
+    beside the pass's tokens, and in the line's reasoning_tokens."""
+    ctx["llm"] = FakeLLM(
+        json_response(EXTRACTION, output_tokens=929, reasoning_tokens=900),
+        json_response(PROSE),
+    )
+    await _push()
+    with caplog.at_level(logging.INFO, logger="dodeal_ai.unit_b"):
+        await process_call(ctx, "tenant-a", JOB)
+
+    (outcome,) = [r for r in caplog.records if r.getMessage() == "call_job_outcome"]
+    assert outcome.pass_reasoning_tokens == {"extract": 900, "prose": 0}
+    assert outcome.pass_tokens["extract"] == {"input": 100, "output": 929, "calls": 1}
+    assert (outcome.output_tokens, outcome.reasoning_tokens) == (949, 900)
 
 
 async def test_the_outcome_line_counts_the_extractions_unverified_fields(

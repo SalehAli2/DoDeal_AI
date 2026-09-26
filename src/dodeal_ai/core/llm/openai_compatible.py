@@ -23,6 +23,11 @@ WHAT THIS MODULE PROMISES, and what each promise is worth:
     reasoning_effort (temperature is then left out, and the ceiling goes as
     max_completion_tokens, which counts the reasoning), json_schema, and seed.
     Reasoning text a provider returns beside the answer is never read.
+  - REASONING TOKENS OUTSIDE completion_tokens ARE STILL PAID (D-62). Some
+    providers report hidden reasoning only as total_tokens above prompt plus
+    completion; that gap is priced as output, and is the reasoning count when
+    no reasoning_tokens detail is reported. A reported detail is already
+    inside completion_tokens and is never added on top (_usage_counts).
   - NO RETRY, ever. A model call is paid and may have completed on the
     provider's side even when we saw a failure. One attempt per complete(); the
     watchdog wraps this with retry=False and a test asserts the transport is
@@ -405,10 +410,11 @@ class OpenAICompatibleClient:
                 # A null content is what a tool call or a refusal looks like on
                 # this API. Nothing to validate, so it is not a reply.
                 raise TypeError("content_not_text")
+            prompt, output, reasoning = _usage_counts(usage)
             return LLMResponse(
                 text=text,
-                input_tokens=int(usage["prompt_tokens"]),
-                output_tokens=int(usage["completion_tokens"]),
+                input_tokens=prompt,
+                output_tokens=output,
                 # What the provider says RAN, not what we asked for: it becomes
                 # model_version on the stored judgement.
                 model=str(body["model"]),
@@ -419,9 +425,7 @@ class OpenAICompatibleClient:
                 cached_input_tokens=_detail(
                     usage, "prompt_tokens_details", "cached_tokens"
                 ),
-                reasoning_tokens=_detail(
-                    usage, "completion_tokens_details", "reasoning_tokens"
-                ),
+                reasoning_tokens=reasoning,
                 provider=self._provider,
             )
         except (KeyError, IndexError, TypeError, ValueError):
@@ -517,15 +521,37 @@ def _response_format(
     }
 
 
-def _detail(usage: dict[str, Any], section: str, name: str) -> int:
-    """A count from usage's optional details, or 0. Missing, null, or not a
-    whole non-negative number all read 0: an optional detail never turns an
-    answered call into a failure."""
-    details = usage.get(section)
-    value = details.get(name) if isinstance(details, dict) else None
+def _count(value: object) -> int | None:
+    """A whole non-negative token count, or None for anything else."""
     if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
         return value
-    return 0
+    return None
+
+
+def _reported(usage: dict[str, Any], section: str, name: str) -> int | None:
+    """A count from usage's optional details, or None when it is missing,
+    null, or not a whole non-negative number."""
+    details = usage.get(section)
+    return _count(details.get(name) if isinstance(details, dict) else None)
+
+
+def _detail(usage: dict[str, Any], section: str, name: str) -> int:
+    """A count from usage's optional details, or 0: an optional detail never
+    turns an answered call into a failure."""
+    return _reported(usage, section, name) or 0
+
+
+def _usage_counts(usage: dict[str, Any]) -> tuple[int, int, int]:
+    """(input, priced output, reasoning) from a usage block. The gap is
+    total_tokens above prompt plus completion, never below 0, and 0 when total
+    is missing or not a count. Output is completion plus the gap only;
+    reasoning is the reported detail when there is one, else the gap."""
+    prompt = int(usage["prompt_tokens"])
+    completion = int(usage["completion_tokens"])
+    total = _count(usage.get("total_tokens"))
+    gap = 0 if total is None else max(0, total - prompt - completion)
+    reported = _reported(usage, "completion_tokens_details", "reasoning_tokens")
+    return prompt, completion + gap, gap if reported is None else reported
 
 
 def _request_id(response: httpx.Response, body: dict[str, Any]) -> str | None:

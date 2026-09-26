@@ -71,6 +71,7 @@ OUTCOME_FIELDS = {
     "provider",
     "model",
     "pass_tokens",
+    "pass_reasoning_tokens",
 }
 
 
@@ -181,6 +182,7 @@ async def test_the_outcome_line_is_complete_and_carries_no_content(
         None,
         "llm_not_configured",
     )
+    assert outcome["pass_reasoning_tokens"] is None
     text = lines.getvalue()
     for secret in ["SIGNED-LINK", HOST, PHONE, *(s.text for s in DEFAULT_SEGMENTS)]:
         assert secret not in text

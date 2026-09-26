@@ -19,6 +19,7 @@ import httpx
 import pytest
 from pydantic import SecretStr
 
+from dodeal_ai.core import metrics
 from dodeal_ai.core.breaker import BreakerState
 from dodeal_ai.core.config import (
     ConfigError,
@@ -26,6 +27,7 @@ from dodeal_ai.core.config import (
     Settings,
     _build_settings,
 )
+from dodeal_ai.core.cost.spend import Spend
 from dodeal_ai.core.llm import build_llm_client
 from dodeal_ai.core.llm.client import (
     FinishReason,
@@ -1208,6 +1210,93 @@ async def test_cached_and_reasoning_tokens_come_from_usage_details(
         cached,
         reasoning,
     )
+
+
+# --- D-62: reasoning outside completion_tokens is counted and paid -------------------
+
+
+@pytest.mark.parametrize(
+    ("usage", "output", "reasoning"),
+    [
+        ({"completion_tokens": 29, "total_tokens": 1340}, 929, 900),
+        (
+            {
+                "completion_tokens": 929,
+                "total_tokens": 1340,
+                "completion_tokens_details": {"reasoning_tokens": 900},
+            },
+            929,
+            900,
+        ),
+        (
+            {
+                "completion_tokens": 29,
+                "total_tokens": 540,
+                "completion_tokens_details": {"reasoning_tokens": 10},
+            },
+            129,
+            10,
+        ),
+        ({"completion_tokens": 29, "total_tokens": 400}, 29, 0),
+        ({"completion_tokens": 29}, 29, 0),
+        ({"completion_tokens": 29, "total_tokens": "1340"}, 29, 0),
+    ],
+    ids=[
+        "gap-only",
+        "reported-inside-completion",
+        "reported-and-a-gap",
+        "negative-gap",
+        "no-total",
+        "garbled-total",
+    ],
+)
+async def test_the_gap_above_prompt_plus_completion_is_output_and_reasoning(
+    monkeypatch, usage: dict, output: int, reasoning: int
+) -> None:
+    """The guard: total_tokens above prompt plus completion is priced output
+    and, with no reasoning detail, the reasoning count; a reported detail is
+    inside completion and never added on top; a negative gap is 0, and so is
+    the gap with no total."""
+    body = _ok_body()
+    body["usage"] = {"prompt_tokens": 411, **usage}
+    recorder = Recorder(httpx.Response(200, json=body))
+    response = await _call(_settings(monkeypatch), GROQ_BASE_URL, recorder)
+    assert isinstance(response, LLMResponse)
+    assert (response.input_tokens, response.output_tokens) == (411, output)
+    assert response.reasoning_tokens == reasoning
+
+
+async def test_the_gap_is_in_the_tasks_cost_and_its_cost_metric(monkeypatch) -> None:
+    """The guard, priced: 900 reasoning tokens reported only in total_tokens
+    cost as output on the outcome line's cost_usd and task_cost_usd_total."""
+    monkeypatch.setenv(
+        "DODEAL_MODEL_PRICES",
+        json.dumps(
+            {REPORTED_MODEL: {"input": 1.0, "cached_input": 0.5, "output": 2.0}}
+        ),
+    )
+    body = _ok_body()
+    body["usage"] = {
+        "prompt_tokens": 411,
+        "completion_tokens": 29,
+        "total_tokens": 1340,
+    }
+    recorder = Recorder(httpx.Response(200, json=body))
+    response = await _call(_settings(monkeypatch), GROQ_BASE_URL, recorder)
+    assert isinstance(response, LLMResponse)
+    labels = {"unit": "unit_b", "outcome": "d62"}
+    before = metrics.REGISTRY.get_sample_value("task_cost_usd_total", labels) or 0.0
+
+    spend = Spend(unit="unit_b")
+    spend.record_call(response)
+    spend.count("d62")
+
+    cost = (411 * 1.0 + 929 * 2.0) / 1e6
+    fields = spend.fields()
+    assert (fields["output_tokens"], fields["reasoning_tokens"]) == (929, 900)
+    assert fields["cost_usd"] == pytest.approx(cost)
+    after = metrics.REGISTRY.get_sample_value("task_cost_usd_total", labels)
+    assert after == pytest.approx(before + cost)
 
 
 async def test_a_reasoning_models_thoughts_never_cross_the_seam(monkeypatch) -> None:
