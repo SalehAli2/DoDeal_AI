@@ -151,6 +151,22 @@ def test_three_voices_never_infer_a_role() -> None:
     assert block["reasons"] == ["speakers_over_two", "roles_unclear"]
 
 
+def test_a_quote_with_no_words_is_quote_length_on_three_voices() -> None:
+    crowded = Transcript.of(
+        (*OPENING.segments, _say(20, "speaker_3", "Hello, I am the brother.")),
+        provider="recorded",
+        model="recorded-stt-1",
+    )
+    answer = _answer(
+        _role("speaker_1", "client", "?!", "s3"),
+        _role("speaker_2", "agent", "this is Nada from the company", "s2"),
+        _role("speaker_3", "client", "I am the brother", "s4"),
+    )
+    with pytest.raises(OutputValidationError) as refused:
+        check_roles(opening(crowded, country_code="971"))(answer)
+    assert refused.value.errors == (("speakers.0", "quote_length"),)
+
+
 def test_a_failed_language_quote_keeps_the_mapping_and_falls_back_to_script() -> None:
     """The guard (A1): the languages are judged apart. The client's language
     quoted from the agent's voice is dropped, never a malformed answer; the

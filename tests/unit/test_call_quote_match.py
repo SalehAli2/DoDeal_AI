@@ -368,3 +368,10 @@ def test_a_missing_quote_on_an_item_or_wanted_is_unverified_not_refused() -> Non
     assert kept["concerns"] == [
         {"text": "price", "quote": None, "segment": None, "unverified": True}
     ]
+
+
+def test_no_words_are_stored_for_a_quote_the_segment_does_not_hold() -> None:
+    call = _one("السعر عالي جدا")
+    assert evidence.own_words(call, "السعر عالي", 0) == "السعر عالي"
+    assert evidence.own_words(call, "السعر رخيص", 0) is None
+    assert evidence.own_words(call, " ".join(["السعر"] * 41), 0) is None
