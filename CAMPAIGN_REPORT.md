@@ -7505,3 +7505,9 @@ failure modes, then one stress test (sabotage in brackets).
 - evidence counts (3): silent drops; words on the line. Test: 3 invented keyword quotes give evidence_dropped {extras: 3}, counts only. No sabotage owed.
 - call_e2e keys (4): the next run refused by our own stale keys; another worker's key deleted. Test: two runs back to back both start; an overwritten key is kept (compare off fails 2).
 - Stress test: a foreign worker overwrites the normal queue's key a second before our stop: the watched delete leaves it and the next run is refused.
+
+## Unit B Arabic roles, engaged clients and dialect examples
+- prompts (4): an Arabic summary calls the client "الوكيل"; a new Arabic-writing template ships without the terms. Test: every Arabic-writing template holds both terms and "never the reverse", and every live template naming Arabic is classed. No sabotage owed.
+- score (5): a quiet buyer answering in sentences goes unscored; a call of one-word replies is scored. Test: share 0.10 with 6 turns of 4+ words is engaged, 0.14 with 4 is not (turns rule off fails 4).
+- extras (6): a WhatsApp message to an Egyptian client in formal Arabic; an example copied as the message. Test: each WhatsApp prompt shows the three dialects' phrasings and forbids formal Arabic and copying. No sabotage owed.
+- Stress test: a call with no talk time and nine long client turns stays not_engaged, never a crash in the score.
