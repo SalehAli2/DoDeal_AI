@@ -8,8 +8,10 @@ import copy
 import json
 from html.parser import HTMLParser
 from pathlib import Path
+from types import SimpleNamespace
 
 import fakeredis
+import httpx
 import pytest
 import redis
 
@@ -103,6 +105,150 @@ def test_a_queue_store_down_at_the_stop_is_said_not_raised(capsys) -> None:
 
     call_e2e.stop_owned(_Down(), {NORMAL: b"x"}, OURS, set())
     assert "not released: the queue Redis did not answer" in capsys.readouterr().out
+
+
+# --- the stop, as run() calls it -----------------------------------------------------
+
+
+class _Children:
+    """The child processes, faked: a worker writes its health-check key as it
+    starts, as arq's does; `stop` records that it ran, and may be interrupted."""
+
+    def __init__(self, client, logs: Path, interrupt_stop: bool = False) -> None:
+        self.client, self.logs = client, logs
+        self.interrupt_stop = interrupt_stop
+        self.stopped = False
+
+    def start(self, name: str, argv: list[str]) -> Path:
+        path = self.logs / f"{name}.log"
+        path.write_text("", encoding="utf-8")
+        queue = {"worker-normal": NORMAL, "worker-stage2": STAGE2}.get(name)
+        if queue is not None:
+            self.client.set(f"{queue}:health-check", f"{name} j_complete=0")
+        return path
+
+    def dead(self) -> list[str]:
+        return []
+
+    def stop(self) -> None:
+        self.stopped = True
+        if self.interrupt_stop:
+            raise KeyboardInterrupt
+
+
+@pytest.fixture
+def driven(monkeypatch, tmp_path: Path):
+    """run() on fakes: the queue store a fakeredis, the children faked, the
+    API a mock transport answering the PUT, the push and a done job; .env and
+    .env.demo never read. Returns the store, the children and the audio."""
+    client = fakeredis.FakeRedis()
+    audio = tmp_path / "call.wav"
+    audio.write_bytes(b"RIFF")
+    made: list[_Children] = []
+    real_client = httpx.Client
+
+    def api(request: httpx.Request) -> httpx.Response:
+        if request.method == "PUT":
+            return httpx.Response(200, json={})
+        if request.method == "POST":
+            return httpx.Response(202, json={"job_id": "job-1"})
+        return httpx.Response(200, json=SAMPLE)
+
+    def children(logs: Path, env: dict) -> _Children:
+        made.append(_Children(client, logs))
+        return made[-1]
+
+    monkeypatch.setattr(redis.Redis, "from_url", lambda *args, **kwargs: client)
+    monkeypatch.setattr(
+        call_e2e,
+        "env_file_values",
+        lambda path: {"DODEAL_SERVICE_JWT_SIGNING_KEY": "k" * 32},
+    )
+    monkeypatch.setattr(call_e2e, "audio_seconds", lambda path: 20.0)
+    monkeypatch.setattr(call_e2e, "Children", children)
+    monkeypatch.setattr(call_e2e, "wait_for_http", lambda url, s: httpx.Response(200))
+    monkeypatch.setattr(httpx, "get", lambda url, **kw: httpx.Response(200, text="ok"))
+    monkeypatch.setattr(
+        httpx,
+        "Client",
+        lambda **kw: real_client(**kw, transport=httpx.MockTransport(api)),
+    )
+    monkeypatch.setattr(call_e2e.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(
+        call_e2e, "served_audio_url", lambda log, s: "http://127.0.0.1:1/call.wav"
+    )
+    monkeypatch.delenv("DODEAL_ENVIRONMENT", raising=False)
+
+    def run(**raising: BaseException) -> int:
+        if "served" in raising:
+            error = raising["served"]
+
+            def served(log: Path, seconds: float) -> str:
+                raise error
+
+            monkeypatch.setattr(call_e2e, "served_audio_url", served)
+        flags = [str(audio), "--stt-profile", "x", "--out", str(tmp_path / "out")]
+        return call_e2e.main(flags)
+
+    return SimpleNamespace(client=client, made=made, run=run)
+
+
+def test_a_whole_run_stops_its_workers_and_releases_their_keys(driven, capsys) -> None:
+    """The guard: run() hands stop_owned the list of started workers, never
+    the poll timer, so a run that finished releases both keys."""
+    assert driven.run() == call_e2e.EXIT_DONE
+
+    assert driven.made[0].stopped is True
+    assert call_e2e.busy_queues(driven.client) == []
+    assert capsys.readouterr().out.endswith(
+        "health-check keys released: arq:calls:normal, arq:calls:stage2\n"
+    )
+
+
+def test_an_exception_after_the_start_still_stops_the_workers(driven) -> None:
+    """The guard's other side: the stop and the release run in the finally."""
+    with pytest.raises(RuntimeError):
+        driven.run(served=RuntimeError("boom"))
+
+    assert driven.made[0].stopped is True
+    assert call_e2e.busy_queues(driven.client) == []
+
+
+def test_ctrl_c_after_the_start_stops_the_workers_and_says_so(driven, capsys) -> None:
+    assert driven.run(served=KeyboardInterrupt()) == call_e2e.EXIT_INTERRUPTED
+
+    assert driven.made[0].stopped is True
+    assert call_e2e.busy_queues(driven.client) == []
+    assert "interrupted; stopping" in capsys.readouterr().out
+
+
+def test_ctrl_c_while_the_children_stop_still_releases_our_keys(tmp_path) -> None:
+    client = fakeredis.FakeRedis()
+    children = _Children(client, tmp_path, interrupt_stop=True)
+    for name, _, _ in OURS:
+        children.start(name, [])
+    claimed = call_e2e.claim_health_keys(client, [NORMAL, STAGE2], 0)
+
+    with pytest.raises(KeyboardInterrupt):
+        call_e2e.shut_down(children, client, claimed, OURS)
+
+    assert call_e2e.busy_queues(client) == []
+
+
+def test_ctrl_c_inside_the_claim_keeps_what_was_claimed_so_far() -> None:
+    client = fakeredis.FakeRedis()
+    client.set(f"{NORMAL}:health-check", "Sep-26 10:00:00 j_complete=0 queued=0")
+
+    class _Interrupted:
+        def get(self, key: str) -> bytes | None:
+            if key.startswith(STAGE2):
+                raise KeyboardInterrupt
+            return client.get(key)
+
+    claimed: dict[str, bytes] = {}
+    with pytest.raises(KeyboardInterrupt):
+        call_e2e.claim_health_keys(_Interrupted(), [NORMAL, STAGE2], 30, claimed)
+    assert claimed == {NORMAL: b"Sep-26 10:00:00 j_complete=0 queued=0"}
 
 
 def test_every_call_queue_is_watched() -> None:
@@ -273,6 +419,27 @@ def test_the_reasons_print_every_output_validation_failed_line() -> None:
     assert "output_validation_failed: none" in call_e2e.report(SAMPLE, OUTCOMES)
     page = call_e2e.report_html(SAMPLE, logged)
     assert REFUSED in page
+
+
+def test_each_pass_prints_its_reasoning_beside_input_and_output() -> None:
+    outcomes = [
+        {
+            "message": "call_job_outcome",
+            "pass_tokens": {"extract": {"input": 900, "output": 300, "calls": 1}},
+            "pass_reasoning_tokens": {"extract": 120},
+        },
+        {
+            "message": "call_stage2_outcome",
+            "pass_tokens": {"score": {"input": 800, "output": 200, "calls": 2}},
+        },
+    ]
+
+    lines = call_e2e.report(SAMPLE, outcomes)
+
+    first = lines.index("    extract: input 900  output 300  reasoning 120  calls 1")
+    assert lines[first - 1].startswith("  call_job_outcome: ")
+    second = lines.index("    score: input 800  output 200  reasoning n/a  calls 2")
+    assert lines[second - 1].startswith("  call_stage2_outcome: ")
 
 
 def test_talk_languages_and_the_next_step_are_read_where_they_are() -> None:

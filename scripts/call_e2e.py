@@ -159,13 +159,17 @@ def busy_queues(client: Any) -> list[str]:
 
 
 def claim_health_keys(
-    client: Any, queues: list[str], seconds: float
+    client: Any,
+    queues: list[str],
+    seconds: float,
+    claimed: dict[str, bytes] | None = None,
 ) -> dict[str, bytes]:
     """The health-check value each started worker wrote first, by queue. The
     keys were absent at the start (refuse_other_workers), so the first value
     seen is taken as the started worker's; a key that never appears is not
-    claimed, and so never deleted."""
-    claimed: dict[str, bytes] = {}
+    claimed, and so never deleted. `claimed` is filled as each is seen, so a
+    Ctrl+C inside the wait still leaves the stop what was claimed so far."""
+    claimed = {} if claimed is None else claimed
     end = time.monotonic() + seconds
     while True:
         for queue in queues:
@@ -473,12 +477,33 @@ def report(body: dict[str, Any], outcomes: list[dict[str, Any]]) -> list[str]:
             continue
         spend = {k: v for k, v in record.items() if "token" in k or "cost" in k}
         lines.append(f"  {record.get('message', record.get('event'))}: {short(spend)}")
+        lines += pass_lines(record)
     stages = [stage_cost(outcomes, name) for name in OUTCOME_LINES]
     lines += [
         f"stage 1 cost_usd: {stages[0]}",
         f"stage 2 cost_usd: {stages[1]}",
         f"total cost_usd: {summed(stages)}",
     ]
+    return lines
+
+
+def pass_lines(record: dict[str, Any]) -> list[str]:
+    """One line per pass of an outcome line: its input, output and reasoning
+    tokens side by side, and its calls; reasoning n/a where none was logged."""
+    tokens = record.get("pass_tokens")
+    reasoning = record.get("pass_reasoning_tokens")
+    if not isinstance(tokens, dict):
+        return []
+    lines = []
+    for name, spent in tokens.items():
+        if not isinstance(spent, dict):
+            continue
+        thought = reasoning.get(name) if isinstance(reasoning, dict) else None
+        lines.append(
+            f"    {name}: input {spent.get('input')}  output {spent.get('output')}  "
+            f"reasoning {'n/a' if thought is None else thought}  "
+            f"calls {spent.get('calls')}"
+        )
     return lines
 
 
@@ -727,9 +752,10 @@ def run(args: argparse.Namespace) -> int:
     api = f"http://127.0.0.1:{api_port}"
     python = sys.executable
     children = Children(out / "logs", env)
-    # The started workers by log name and queue, and the health-check values
-    # they wrote first: what the stop may delete, and nothing else.
-    started = [
+    # The started workers by log name, command-line queue and arq queue, and
+    # the health-check values they wrote first: what the stop may delete, and
+    # nothing else.
+    owned = [
         (name, arg, arq_queue)
         for name, arg, arq_queue in OWN_WORKERS
         if not (args.no_stage2 and arq_queue == STAGE2_QUEUE)
@@ -766,7 +792,7 @@ def run(args: argparse.Namespace) -> int:
         )
         worker_logs = [
             children.start(name, [python, "-m", "dodeal_ai.workers.calls", arg])
-            for name, arg, _ in started
+            for name, arg, _ in owned
         ]
         demo_log = children.start(
             "demo",
@@ -793,8 +819,8 @@ def run(args: argparse.Namespace) -> int:
         time.sleep(3)
         if children.dead():
             raise fail(f"child exited at start: {children.dead()}; see {out / 'logs'}")
-        claimed = claim_health_keys(
-            queue, [arq_queue for _, _, arq_queue in started], CLAIM_SECONDS
+        claim_health_keys(
+            queue, [arq_queue for _, _, arq_queue in owned], CLAIM_SECONDS, claimed
         )
 
         audio_url = served_audio_url(demo_log, 20)
@@ -827,7 +853,7 @@ def run(args: argparse.Namespace) -> int:
                 ),
                 "language_hint": args.language,
             }
-            started = time.monotonic()
+            began = time.monotonic()
             pushed = client.post("/api/v1/calls/jobs", json=push, headers=headers())
             if pushed.status_code != 202:
                 raise fail(
@@ -839,7 +865,7 @@ def run(args: argparse.Namespace) -> int:
             body: dict[str, Any] = {}
             seen: tuple[object, ...] = ()
             code = EXIT_TIMEOUT
-            while time.monotonic() - started < args.timeout:
+            while time.monotonic() - began < args.timeout:
                 got = client.get(f"/api/v1/calls/jobs/{job_id}", headers=headers())
                 if got.status_code == 200:
                     body = got.json()
@@ -849,7 +875,7 @@ def run(args: argparse.Namespace) -> int:
                         body.get("stage2"),
                     )
                     if state != seen:
-                        elapsed = round(time.monotonic() - started, 1)
+                        elapsed = round(time.monotonic() - began, 1)
                         print(
                             f"[{elapsed:>7} s] status={state[0]} "
                             f"delivery={state[1]} stage2={state[2]}"
@@ -900,21 +926,35 @@ def run(args: argparse.Namespace) -> int:
         print("interrupted; stopping")
         return EXIT_INTERRUPTED
     finally:
-        died = set(children.dead())
+        shut_down(children, queue, claimed, owned)
+
+
+def shut_down(
+    children: Children,
+    client: Any,
+    claimed: dict[str, bytes],
+    owned: list[tuple[str, str, str]],
+) -> None:
+    """Stop every child, then release our workers' health-check keys; the
+    release runs even when stopping the children is itself interrupted."""
+    died = set(children.dead())
+    try:
         children.stop()
-        stop_owned(queue, claimed, started, died)
+    finally:
+        stop_owned(client, claimed, owned, died)
 
 
 def stop_owned(
     client: Any,
     claimed: dict[str, bytes],
-    started: list[tuple[str, str, str]],
+    owned: list[tuple[str, str, str]],
     died: set[str],
 ) -> None:
     """Release the health-check keys of the workers this run started and
-    stopped itself; never one whose worker exited on its own (its key may not
-    be its own), never another worker's. Says which, or why not."""
-    ours = {arq_queue for name, _, arq_queue in started if name not in died}
+    stopped itself, `owned` as (log name, command-line queue, arq queue);
+    never one whose worker exited on its own (its key may not be its own),
+    never another worker's. Says which, or why not."""
+    ours = {arq_queue for name, _, arq_queue in owned if name not in died}
     try:
         released = release_health_keys(
             client, {q: v for q, v in claimed.items() if q in ours}
