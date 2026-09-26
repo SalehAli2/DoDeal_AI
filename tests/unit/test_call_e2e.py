@@ -164,11 +164,16 @@ def test_the_report_prints_the_reasons_and_the_whole_extras_part() -> None:
     shown = json.dumps({"score": "too_short"}, indent=2)
     assert f"part_reasons: {shown}" in lines
     assert f"stage2_result.reasons: {shown}" in lines
-    names = ("whatsapp_suggestion", "agent_dialect", "seriousness", "tags", "keywords")
+    names = ("agent_dialect", "seriousness", "tags", "keywords")
     for name in names:
         whole = json.dumps(_EXTRAS[name], ensure_ascii=False, indent=2)
         assert f"{name}: {whole}" in lines
-    assert "whatsapp_dialect: None" in lines
+    suggestion = _EXTRAS["whatsapp_suggestion"]
+    at = lines.index(f"whatsapp language: {suggestion['language']}")
+    assert lines[at + 1 : at + 3] == [
+        "whatsapp dialect: None",
+        f"whatsapp text: {suggestion['text']}",
+    ]
 
 
 REFUSED = (
@@ -187,7 +192,11 @@ def test_the_reasons_print_every_output_validation_failed_line() -> None:
     at = lines.index("output_validation_failed: 1")
     assert lines[at + 1] == f"  {REFUSED}"
     assert lines[at - 1].startswith("stage2_result.reasons:")
-    costs = lines[lines.index("=== TOKENS AND COST ===") + 1 : -1]
+    costs = lines[
+        lines.index("=== TOKENS AND COST ===") + 1 : lines.index(
+            "stage 1 cost_usd: None"
+        )
+    ]
     assert [line.split(":")[0] for line in costs] == [
         "  call_job_outcome",
         "  call_stage2_outcome",
@@ -195,6 +204,72 @@ def test_the_reasons_print_every_output_validation_failed_line() -> None:
     assert "output_validation_failed: none" in call_e2e.report(SAMPLE, OUTCOMES)
     page = call_e2e.report_html(SAMPLE, logged)
     assert REFUSED in page
+
+
+def test_talk_languages_and_the_next_step_are_read_where_they_are() -> None:
+    """The talk signals from signals.agent and signals.client, never the
+    first "agent" key found elsewhere; the languages and the next step on
+    lines of their own."""
+    body = copy.deepcopy(SAMPLE)
+    result = body["result"]
+    result["languages"] = {"client": "gulf_ar", "agent": "egyptian_ar"}
+    result["roles"]["call_languages"] = {
+        "client": {"language": "gulf_ar", "quote": "هلا", "segment": "s2"},
+        "agent": {"language": "egyptian_ar", "quote": "ازيك", "segment": "s1"},
+    }
+    agent = {"talk_share": 0.6, "words_per_minute": 130.0, "interruptions": 1}
+    client = {"talk_share": 0.4, "words_per_minute": 110.0, "interruptions": 0}
+    result["signals"].update(agent=agent, client=client, talk_reason=None)
+    result["analysis"]["elements"]["next_step"] = {
+        "action": "Viewing",
+        "kind": "viewing",
+        "when": "2026-09-27T17:00:00+04:00",
+        "when_state": "stated",
+        "booked": True,
+    }
+
+    lines = call_e2e.report(body, OUTCOMES)
+
+    assert "talk balance: balanced  reason: None" in lines
+    assert f"agent talk: {json.dumps(agent)}" in lines
+    assert f"client talk: {json.dumps(client)}" in lines
+    assert (
+        'call_languages.client: {"language": "gulf_ar", "quote": "هلا", '
+        '"segment": "s2"}'
+    ) in lines
+    assert any(line.startswith("call_languages.agent: {") for line in lines)
+    at = lines.index("next step: Viewing")
+    assert lines[at + 1 : at + 4] == [
+        "  kind: viewing",
+        "  when: 2026-09-27T17:00:00+04:00 [stated]",
+        "  booked: True",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("costs", "stage1", "stage2", "total"),
+    [
+        ((0.01, 0.002, 0.003), 0.01, 0.005, 0.015),
+        ((0.01, None, 0.003), 0.01, None, None),
+        ((0.01,), 0.01, 0.0, 0.01),
+    ],
+    ids=["both-stages", "one-unpriced-run", "no-stage2"],
+)
+def test_the_total_cost_sums_both_stages(
+    costs: tuple, stage1: float, stage2: float | None, total: float | None
+) -> None:
+    """Every run of both stages, summed; a run with no price makes its stage
+    and the total null, never a partial sum."""
+    first, *rest = costs
+    outcomes = [{"message": "call_job_outcome", "cost_usd": first}] + [
+        {"message": "call_stage2_outcome", "cost_usd": cost} for cost in rest
+    ]
+    lines = call_e2e.report(SAMPLE, outcomes)
+    assert lines[-3:] == [
+        f"stage 1 cost_usd: {stage1}",
+        f"stage 2 cost_usd: {stage2}",
+        f"total cost_usd: {total}",
+    ]
 
 
 def test_the_refused_lines_are_read_from_the_worker_log(tmp_path: Path) -> None:

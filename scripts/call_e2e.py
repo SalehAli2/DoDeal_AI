@@ -327,6 +327,10 @@ def report(body: dict[str, Any], outcomes: list[dict[str, Any]]) -> list[str]:
     """A readable report of the status body and the outcome lines, every
     refused model answer's line among the reasons."""
     refused = validation_failures(outcomes)
+    result = at(body, "result")
+    signals = at(result, "signals")
+    languages = at(result, "roles", "call_languages")
+    step = at(result, "analysis", "elements", "next_step")
     lines = [
         "=== CALL ===",
         f"status: {body.get('status')}  reason: {body.get('reason')}",
@@ -348,10 +352,17 @@ def report(body: dict[str, Any], outcomes: list[dict[str, Any]]) -> list[str]:
             f"engine: {find(body, 'provider')} / {find(body, 'model')}"
         ),
         f"roles: {short(find(body, 'roles'))}",
+        f"languages: {short(at(result, 'languages'))}",
+        f"call_languages.client: {short(at(languages, 'client'))}",
+        f"call_languages.agent: {short(at(languages, 'agent'))}",
         "",
         "=== WAVE 1 ===",
         f"summary: {short(find(body, 'summary'))}",
         f"crm note: {short(find(body, 'crm_note'))}",
+        f"next step: {short(at(step, 'action'))}",
+        f"  kind: {at(step, 'kind')}",
+        f"  when: {at(step, 'when')} [{at(step, 'when_state')}]",
+        f"  booked: {at(step, 'booked')}",
     ]
     details = find(body, "details") or {}
     if isinstance(details, dict):
@@ -364,13 +375,16 @@ def report(body: dict[str, Any], outcomes: list[dict[str, Any]]) -> list[str]:
         f"mood: {short(find(body, 'mood'))}",
         "",
         "=== SIGNALS ===",
-        f"talk balance: {find(body, 'talk_balance')}",
-        f"agent: {short(find(body, 'agent'))}",
-        f"client: {short(find(body, 'client'))}",
-        f"numbers: {short(find(body, 'numbers'))}",
-        f"alarms: {short(find(body, 'alarms'))}",
-        f"escalations: {short(find(body, 'escalations'))}",
-        f"keywords: {short(find(body, 'keywords'))}",
+        (
+            f"talk balance: {at(signals, 'talk_balance')}  "
+            f"reason: {at(signals, 'talk_reason')}"
+        ),
+        f"agent talk: {short(at(signals, 'agent'))}",
+        f"client talk: {short(at(signals, 'client'))}",
+        f"numbers: {short(at(signals, 'numbers'))}",
+        f"alarms: {short(at(signals, 'alarms'))}",
+        f"escalations: {short(at(signals, 'escalations'))}",
+        f"keywords: {short(at(signals, 'keywords'))}",
         "",
         "=== WAVE 2 ===",
         f"objections: {short(find(body, 'objections'))}",
@@ -382,9 +396,12 @@ def report(body: dict[str, Any], outcomes: list[dict[str, Any]]) -> list[str]:
     ]
     extras = at(body, "stage2_result", "extras")
     if isinstance(extras, dict):
+        lines += [
+            f"whatsapp language: {at(extras, 'whatsapp_suggestion', 'language')}",
+            f"whatsapp dialect: {extras.get('whatsapp_dialect')}",
+            f"whatsapp text: {at(extras, 'whatsapp_suggestion', 'text')}",
+        ]
         for name in (
-            "whatsapp_suggestion",
-            "whatsapp_dialect",
             "agent_dialect",
             "seriousness",
             "tags",
@@ -397,17 +414,32 @@ def report(body: dict[str, Any], outcomes: list[dict[str, Any]]) -> list[str]:
         "",
         "=== TOKENS AND COST ===",
     ]
-    total = 0.0
     for record in outcomes:
         if record.get("message") not in OUTCOME_LINES:
             continue
-        cost = record.get("cost_usd")
-        if isinstance(cost, int | float):
-            total += float(cost)
         spend = {k: v for k, v in record.items() if "token" in k or "cost" in k}
         lines.append(f"  {record.get('message', record.get('event'))}: {short(spend)}")
-    lines.append(f"total cost_usd: {round(total, 6)}")
+    stages = [stage_cost(outcomes, name) for name in OUTCOME_LINES]
+    lines += [
+        f"stage 1 cost_usd: {stages[0]}",
+        f"stage 2 cost_usd: {stages[1]}",
+        f"total cost_usd: {summed(stages)}",
+    ]
     return lines
+
+
+def stage_cost(outcomes: list[dict[str, Any]], name: str) -> float | None:
+    """The cost of every run of one stage, summed; None when a run had no
+    price (its cost_usd null), never a partial sum that reads as the whole."""
+    costs = [r.get("cost_usd") for r in outcomes if r.get("message") == name]
+    return summed(costs)
+
+
+def summed(costs: list[Any]) -> float | None:
+    """The sum of the costs, 0 for none; None when any is not a number."""
+    if not all(isinstance(cost, int | float) for cost in costs):
+        return None
+    return round(sum((float(cost) for cost in costs), 0.0), 6)
 
 
 # --- the page --------------------------------------------------------------------
