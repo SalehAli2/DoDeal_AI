@@ -14,6 +14,7 @@ import httpx
 import pytest
 from arq import Retry
 
+from dodeal_ai.core import metrics
 from dodeal_ai.core.callbacks import CALL_FAILED, CALL_STAGE2
 from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.errors import QueueUnavailable
@@ -776,6 +777,35 @@ async def test_the_stage2_outcome_line_carries_its_cost_and_price_table(
     (line,) = [r for r in caplog.records if r.getMessage() == "call_stage2_outcome"]
     assert line.cost_usd == pytest.approx(4 * (100 * 1.0 + 20 * 2.0) / 1e6)
     assert (line.price_table_version, line.model_calls) == ("prices-2026-09", 4)
+
+
+def _stage2_cost(outcome: str) -> float:
+    labels = {"unit": "unit_b", "outcome": outcome}
+    return metrics.REGISTRY.get_sample_value("task_cost_usd_total", labels) or 0.0
+
+
+async def test_stage2_cost_is_counted_in_the_task_cost_metric(
+    ctx: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The metric covers the whole call: stage 2's priced cost is added under
+    stage2_done, beside stage 1's under its own status."""
+    prices = {"fake-model-pinned": {"input": 1.0, "cached_input": 0.5, "output": 2.0}}
+    monkeypatch.setenv("DODEAL_MODEL_PRICES", json.dumps(prices))
+    get_settings.cache_clear()
+    await _done_and_pending(ctx)
+    before = _stage2_cost("stage2_done")
+
+    await analyse_stage2(_stage2_ctx(), "tenant-a", JOB)
+
+    after = _stage2_cost("stage2_done")
+    assert after - before == pytest.approx(4 * (100 * 1.0 + 20 * 2.0) / 1e6)
+
+
+async def test_an_unpriced_stage2_adds_nothing_to_the_metric(ctx: dict) -> None:
+    await _done_and_pending(ctx)
+    before = _stage2_cost("stage2_done")
+    await analyse_stage2(_stage2_ctx(), "tenant-a", JOB)
+    assert _stage2_cost("stage2_done") == before
 
 
 async def test_an_unpriced_model_gives_a_null_cost_never_a_partial_one(

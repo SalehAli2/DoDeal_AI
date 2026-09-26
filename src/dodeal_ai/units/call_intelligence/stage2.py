@@ -132,6 +132,7 @@ async def analyse_stage2(ctx: dict[str, Any], tenant: str, job_id: str) -> None:
         finally:
             if run.job is not None:
                 _log_outcome(run)
+                _count_cost(run)
 
 
 async def _within_deadline(
@@ -303,3 +304,12 @@ def _spent() -> dict[str, object]:
     price_table_version it was priced under -- as stage 1's line carries."""
     spend = current_spend()
     return {} if spend is None else spend.fields()
+
+
+def _count_cost(run: Stage2Run) -> None:
+    """The run's priced cost into task_cost_usd_total{unit_b}, as stage 1's
+    is, under stage2_<state> (stage2_unsettled for a run that settled
+    nothing), so the metric covers the whole call and each stage apart."""
+    spend = current_spend()
+    if spend is not None:
+        spend.count(f"stage2_{run.state or 'unsettled'}")
