@@ -73,6 +73,25 @@ class JobContextFilter(logging.Filter):
         return True
 
 
+class ArqLineFilter(logging.Filter):
+    """arq's own lines (M10): its failure line puts the exception itself among
+    the message's arguments, so str(exc) -- a foreign message, often the data
+    that failed -- would be the log text. An exception argument is logged as
+    its class name, and arq's `extra` copied from the exception is dropped;
+    the frames still come through exc_info (JsonFormatter)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.name != "arq" and not record.name.startswith("arq."):
+            return True
+        if isinstance(record.args, tuple):
+            record.args = tuple(
+                type(arg).__name__ if isinstance(arg, BaseException) else arg
+                for arg in record.args
+            )
+        record.__dict__.pop("extra", None)
+        return True
+
+
 class JsonFormatter(logging.Formatter):
     """One JSON object per line.
 
@@ -180,6 +199,8 @@ def configure_logging() -> None:
     handler.setFormatter(JsonFormatter())
     # Register item 54: a worker line names its job wherever it was logged.
     handler.addFilter(JobContextFilter())
+    # M10: arq's failure line never carries the exception's message.
+    handler.addFilter(ArqLineFilter())
 
     root = logging.getLogger()
     root.setLevel(logging.WARNING)
