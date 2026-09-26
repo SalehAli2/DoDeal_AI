@@ -523,8 +523,8 @@ class Settings(BaseSettings):
 
     # --- Where this runs (core/safety.py) ----------------------------------
     # development, staging or production. development by default, so a laptop
-    # and the demo start as ever; production refuses the demo's shortcuts at
-    # start, and left at development in production those shortcuts all pass.
+    # and the demo start as ever; production and staging refuse the demo's
+    # shortcuts at start, and left at development there those all pass.
     environment: Literal["development", "staging", "production"] = "development"
 
     # --- Logging (core/logging_config.py) ------------------------------
