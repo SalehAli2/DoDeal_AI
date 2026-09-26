@@ -27,6 +27,13 @@ share of the reference's speech time whose voice the engine told apart (each
 engine label read as the reference speaker it overlaps most); agreement, one
 less the WER against each other profile's text, averaged. Words and letters
 are normalised as the alarm matcher normalises them.
+
+NEGATION RECALL (D-76): after the minimum-edit alignment of the reference's
+words to the engine's (alignment), the share of the reference's negations
+(NEGATIONS) the engine heard as the same word at the aligned position:
+negation_recall overall, negation_by_word as "word found/said" for each one
+said. A lost negation flips a sentence ("عمري ما زرت" heard "عمري زرت"), so it
+counts beyond its one word of WER. The ALL rows pool the counts.
 """
 
 from __future__ import annotations
@@ -38,7 +45,7 @@ import sys
 import time
 from collections import defaultdict
 from collections.abc import Callable, Sequence
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 import httpx
@@ -57,6 +64,38 @@ from dodeal_ai.units.call_intelligence.transcriber import (
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ALL = "ALL"
+
+# The negations whose loss reverses what was said, Arabic then English. Each
+# is matched as its normalised words in a row, so "don't" is don, t; a word
+# with a proclitic ("وما") is not one of them.
+NEGATIONS = (
+    "ما",
+    "مش",
+    "مو",
+    "مب",
+    "لا",
+    "ليس",
+    "لم",
+    "لن",
+    "مافي",
+    "مفيش",
+    "not",
+    "never",
+    "no",
+    "don't",
+    "doesn't",
+    "didn't",
+    "won't",
+    "can't",
+)
+_NEGATION_WORDS = {negation: tuple(words(negation)) for negation in NEGATIONS}
+
+# The alignment's moves back from a cell: a reference word paired with an
+# engine word (a match or a substitution), deleted, or an engine word inserted.
+_PAIR, _DELETE, _INSERT = 0, 1, 2
+
+# Per negation: (heard at its aligned position, said in the reference).
+type Negations = dict[str, tuple[int, int]]
 
 
 class RepoPathRefused(ValueError):
@@ -110,6 +149,16 @@ class Row:
     speaker_accuracy: float | None = None
     agreement: float | None = None
     error: str | None = None
+    negation_recall: float | None = None
+    negation_by_word: str | None = None
+    # The counts behind the two columns above, pooled into the ALL rows.
+    negations: Negations = field(default_factory=dict, metadata={"csv": False})
+
+    def counted(self, negations: Negations) -> None:
+        """The row's negation counts, and the two columns written from them."""
+        self.negations = negations
+        self.negation_recall = negation_recall(negations)
+        self.negation_by_word = negation_by_word(negations)
 
 
 def outside_repo(path: Path) -> Path:
@@ -131,6 +180,82 @@ def edit_distance(reference: Sequence[str], hypothesis: Sequence[str]) -> int:
             )
         before = now
     return before[-1]
+
+
+def alignment(reference: Sequence[str], hypothesis: Sequence[str]) -> list[int | None]:
+    """For each reference word, the position of the hypothesis word a
+    minimum-edit alignment pairs it with (a match or a substitution), or None
+    where it was deleted. A tie goes to the pairing, then to the deletion."""
+    before = list(range(len(hypothesis) + 1))
+    moves: list[bytearray] = []
+    for i, wanted in enumerate(reference, start=1):
+        now = [i]
+        row = bytearray([_DELETE]) * (len(hypothesis) + 1)
+        for j, heard in enumerate(hypothesis, start=1):
+            paired = before[j - 1] + (wanted != heard)
+            best = min(paired, before[j] + 1, now[j - 1] + 1)
+            now.append(best)
+            if best == paired:
+                row[j] = _PAIR
+            elif best != before[j] + 1:
+                row[j] = _INSERT
+        moves.append(row)
+        before = now
+    aligned: list[int | None] = [None] * len(reference)
+    i, j = len(reference), len(hypothesis)
+    while i > 0:
+        move = moves[i - 1][j]
+        if move == _PAIR:
+            aligned[i - 1] = j - 1
+        if move != _INSERT:
+            i -= 1
+        if move != _DELETE:
+            j -= 1
+    return aligned
+
+
+def negations_heard(reference: str, hypothesis: str) -> Negations:
+    """Each negation the reference says (NEGATIONS, over normalised words):
+    how often, and how often the hypothesis has the same word at the aligned
+    position -- every word of a contraction."""
+    wanted, heard = words(reference), words(hypothesis)
+    aligned = alignment(wanted, heard)
+    counts: Negations = {}
+    for at in range(len(wanted)):
+        for negation, run in _NEGATION_WORDS.items():
+            if tuple(wanted[at : at + len(run)]) != run:
+                continue
+            kept = all(
+                (paired := aligned[at + k]) is not None and heard[paired] == word
+                for k, word in enumerate(run)
+            )
+            found, said = counts.get(negation, (0, 0))
+            counts[negation] = (found + kept, said + 1)
+    return counts
+
+
+def negation_recall(negations: Negations) -> float | None:
+    """The share of the negations said that were heard; None with none said."""
+    said = sum(count for _, count in negations.values())
+    return sum(found for found, _ in negations.values()) / said if said else None
+
+
+def negation_by_word(negations: Negations) -> str | None:
+    """ "word found/said" for each negation said, in NEGATIONS order."""
+    shown = [
+        f"{n} {negations[n][0]}/{negations[n][1]}" for n in NEGATIONS if n in negations
+    ]
+    return "; ".join(shown) or None
+
+
+def _pooled(rows: Sequence[Row]) -> Negations:
+    """The rows' negation counts, added up word by word."""
+    pooled: Negations = {}
+    for row in rows:
+        for negation, (found, said) in row.negations.items():
+            before = pooled.get(negation, (0, 0))
+            pooled[negation] = (before[0] + found, before[1] + said)
+    return pooled
 
 
 def wer(reference: str, hypothesis: str) -> float | None:
@@ -236,6 +361,7 @@ async def evaluate(
                 heard = " ".join(segment.text for segment in transcript.segments)
                 texts[name] = heard
                 row.wer = wer(marked, heard)
+                row.counted(negations_heard(marked, heard))
                 row.cer = cer(marked, heard) if _arabic(marked) else None
                 row.speaker_accuracy = speaker_accuracy(reference, transcript.segments)
             row.seconds_taken = round(clock() - started, 3)
@@ -262,8 +388,9 @@ def summarise(rows: list[Row]) -> list[Row]:
     groups: dict[tuple[str, str], list[Row]] = defaultdict(list)
     for row in rows:
         groups[(row.profile, row.language_profile)].append(row)
-    return [
-        Row(
+    summary = []
+    for (profile, language), group in sorted(groups.items()):
+        row = Row(
             ALL,
             profile,
             group[0].provider,
@@ -277,13 +404,15 @@ def summarise(rows: list[Row]) -> list[Row]:
             _mean([row.agreement for row in group]),
             f"{sum(1 for row in group if row.error)} failed",
         )
-        for (profile, language), group in sorted(groups.items())
-    ]
+        row.counted(_pooled(group))
+        summary.append(row)
+    return summary
 
 
 def write_csv(path: Path, rows: list[Row]) -> None:
     with outside_repo(path).open("w", encoding="utf-8", newline="") as out:
-        writer = csv.DictWriter(out, [field.name for field in fields(Row)])
+        columns = [f.name for f in fields(Row) if f.metadata.get("csv", True)]
+        writer = csv.DictWriter(out, columns, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(asdict(row) for row in rows)
 

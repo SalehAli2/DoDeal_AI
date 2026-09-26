@@ -95,3 +95,95 @@ def test_each_call_goes_once_to_each_profile_until_the_cap(
     assert (first["wer"], first["speaker_accuracy"]) == ("0.0", "1.0")
     assert (first["language_profile"], first["cer"]) == ("mostly_en", "")
     assert (failed["error"], failed["wer"]) == ("stt_unavailable", "")
+    assert "negations" not in rows[0]
+    assert (first["negation_recall"], first["negation_by_word"]) == ("", "")
+
+
+# --- negation recall (D-76) ----------------------------------------------------------
+
+
+def test_a_lost_ma_is_recall_0_for_ma() -> None:
+    """The guard: "I never visited" heard as "I visited" is one word of WER
+    but the meaning reversed; the aligned position shows it lost."""
+    heard = stt_eval.negations_heard("عمري ما زرت", "عمري زرت")
+    assert heard == {"ما": (0, 1)}
+    assert stt_eval.negation_recall(heard) == 0
+    assert stt_eval.negation_by_word(heard) == "ما 0/1"
+
+
+def test_the_alignment_pairs_each_reference_word_or_marks_it_deleted() -> None:
+    assert stt_eval.alignment(["عمري", "ما", "زرت"], ["عمري", "زرت"]) == [0, None, 1]
+    assert stt_eval.alignment(["a", "b"], ["x", "a", "c"]) == [1, 2]
+    assert stt_eval.alignment([], ["a"]) == []
+    assert stt_eval.alignment(["a"], []) == [None]
+
+
+def test_a_negation_counts_only_as_the_same_word_where_it_was_said() -> None:
+    """Heard, substituted, and moved: only the first is recall."""
+    reference = "لا ما أبي شقة، مش الحين"
+    heard = stt_eval.negations_heard(reference, "لا ما ابي شقه مو الحين")
+    assert heard == {"لا": (1, 1), "ما": (1, 1), "مش": (0, 1)}
+    assert stt_eval.negation_recall(heard) == 2 / 3
+    assert stt_eval.negation_by_word(heard) == "ما 1/1; مش 0/1; لا 1/1"
+    moved = stt_eval.negations_heard("I do not want it", "not I do want it")
+    assert moved == {"not": (0, 1)}
+
+
+def test_a_contraction_is_heard_only_whole() -> None:
+    assert stt_eval.negations_heard("I don't want it", "I don't want it") == {
+        "don't": (1, 1)
+    }
+    assert stt_eval.negations_heard("I don't want it", "I don want it") == {
+        "don't": (0, 1)
+    }
+    assert stt_eval.negations_heard("I won the villa", "I won the villa") == {}
+
+
+def test_no_negation_said_is_no_recall() -> None:
+    heard = stt_eval.negations_heard("I want a villa", "I want a villa")
+    assert (heard, stt_eval.negation_recall(heard)) == ({}, None)
+    assert stt_eval.negation_by_word(heard) is None
+
+
+def test_every_negation_is_one_run_of_normalised_words() -> None:
+    assert stt_eval.NEGATIONS[:10] == (
+        "ما",
+        "مش",
+        "مو",
+        "مب",
+        "لا",
+        "ليس",
+        "لم",
+        "لن",
+        "مافي",
+        "مفيش",
+    )
+    assert stt_eval.NEGATIONS[10:] == (
+        "not",
+        "never",
+        "no",
+        "don't",
+        "doesn't",
+        "didn't",
+        "won't",
+        "can't",
+    )
+    for negation in stt_eval.NEGATIONS:
+        assert stt_eval.negations_heard(negation, negation) == {negation: (1, 1)}
+
+
+def test_the_all_rows_pool_the_counts_word_by_word() -> None:
+    rows = []
+    for call, (reference, hypothesis) in enumerate(
+        [("ما زرت", "زرت"), ("ما زرت ولا شفت لا", "ما زرت ولا شفت لا")]
+    ):
+        row = stt_eval.Row(f"c{call}", "g1", "gemini", "m", "mostly_ar", 1, 0)
+        row.counted(stt_eval.negations_heard(reference, hypothesis))
+        rows.append(row)
+    assert [row.negation_recall for row in rows] == [0, 1]
+    (pooled,) = stt_eval.summarise(rows)
+    assert pooled.negations == {"ما": (1, 2), "لا": (1, 1)}
+    assert (pooled.negation_recall, pooled.negation_by_word) == (
+        2 / 3,
+        "ما 1/2; لا 1/1",
+    )
