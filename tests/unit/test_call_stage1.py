@@ -230,7 +230,11 @@ async def test_a_call_is_analysed_and_delivered_with_its_stage1_payload(
     assert analysis_["elements"]["ending"] == "moved_forward"
     assert analysis_["elements"]["loss_reason"] is None
     assert analysis_["elements"]["agreed"] == [
-        {**EXTRACTION["agreed"][0], "unverified": False}
+        {
+            **EXTRACTION["agreed"][0],
+            "quote": "Shall we meet on Tuesday",
+            "unverified": False,
+        }
     ]
     assert analysis_["elements"]["next_step"]["segment"] == "s4"
     step = analysis_["elements"]["next_step"]
@@ -272,7 +276,7 @@ async def test_a_call_is_analysed_and_delivered_with_its_stage1_payload(
     ]
     assert result["versions"] == {
         "prompt": "unit_b_prompts_v20",
-        "quote_fillers": "quote_fillers_v1",
+        "quote_fillers": "quote_fillers_v2",
         "signals": "call_signals_v2",
         "model": "fake-model-pinned",
         "transcriber": "fake/fake-stt-1",

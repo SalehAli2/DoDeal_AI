@@ -518,21 +518,33 @@ def test_no_next_action_needs_no_quote_but_a_given_one_is_checked() -> None:
 
 
 @pytest.mark.parametrize(
-    "item",
+    ("item", "error"),
     [
-        {"text": "a viewing", "quote": None, "segment": "s4"},
-        {"text": "a viewing", "quote": "Yes, Tuesday works", "segment": None},
-        "a viewing on Tuesday",
+        ({"text": "a viewing", "quote": None, "segment": "s4"}, "quote_without_segment"),
+        ({"text": "a viewing", "quote": "Yes, Tuesday works", "segment": None}, "quote_without_segment"),
+        ({"text": "a viewing", "quote": None, "segment": None}, "quote_missing"),
     ],
-    ids=["no-quote", "no-segment", "bare-string"],
-)
-def test_an_agreement_without_its_evidence_is_refused_by_the_schema(
-    item: object,
+    ids=["no-quote", "no-segment", "neither"],
+)  # fmt: skip
+def test_an_agreement_without_its_evidence_is_kept_unverified(
+    item: dict[str, Any], error: str
 ) -> None:
+    """A4: an agreement missing its quote is unverified, not a schema error."""
+    answer = {**_extraction(), "agreed": [item]}
+    assert _failures(answer) == [("agreed.0", error)]
+    kept = settled(passes.Extraction.model_validate(answer), _call())
+    assert kept["agreed"] == [
+        {**item, "quote": None, "segment": None, "unverified": True}
+    ]
+
+
+def test_a_bare_agreement_is_still_refused_by_the_schema() -> None:
     from pydantic import ValidationError
 
     with pytest.raises(ValidationError):
-        passes.Extraction.model_validate({**_extraction(), "agreed": [item]})
+        passes.Extraction.model_validate(
+            {**_extraction(), "agreed": ["a viewing on Tuesday"]}
+        )
 
 
 def test_a_mood_quote_is_checked_too() -> None:
@@ -565,7 +577,10 @@ async def test_a_detail_citing_a_low_confidence_segment_is_uncertain() -> None:
     kept = settled(answer, call)
     budget = kept["details"]["budget"]
     assert (budget["state"], budget["value"]) == (UNCERTAIN, "1,200,000 AED")
-    assert (budget["quote"], budget["evidence_failed"]) == (BUDGET["quote"], False)
+    assert (budget["quote"], budget["evidence_failed"]) == (
+        "My budget is 1,200,000 AED",
+        False,
+    )
     assert kept["mood"]["uncertain"] is False
 
 

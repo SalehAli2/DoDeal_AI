@@ -53,7 +53,6 @@ from dodeal_ai.core.config import Settings
 from dodeal_ai.core.context import TenantScope
 from dodeal_ai.core.llm import LLMClient, LLMResponse
 from dodeal_ai.core.llm.profiles import PROFILE_UNIT_B_ROLES, task_ceiling
-from dodeal_ai.units.call_intelligence.alarms import words
 from dodeal_ai.units.call_intelligence.evidence import (
     MAX_QUOTE_WORDS,
     CallText,
@@ -63,7 +62,9 @@ from dodeal_ai.units.call_intelligence.evidence import (
     Strict,
     found_at,
     holds,
+    own_words,
     quote_errors,
+    quote_words,
     relocated,
 )
 from dodeal_ai.units.call_intelligence.language import (
@@ -234,6 +235,11 @@ def _own(call: CallText, found: SpeakerRole) -> int | None:
     return next((n for n in order if holds(call, found.quote, n)), None)
 
 
+def _said(call: CallText, found: SpeakerRole, at: int) -> str | None:
+    """The transcript's own words a verified voice's quote matched at `at`."""
+    return None if found.quote is None else own_words(call, found.quote, at)
+
+
 def _own_errors(call: CallText, where: str, found: SpeakerRole) -> Errors:
     """Why an agent's or a client's quote is not verified; an unclear one's
     quote, when given, under the plain quote check."""
@@ -243,7 +249,7 @@ def _own_errors(call: CallText, where: str, found: SpeakerRole) -> Errors:
         return [(where, "quote_missing")]
     if _own(call, found) is not None:
         return []
-    quoted = words(found.quote)
+    quoted = quote_words(found.quote)
     if not quoted or len(quoted) > MAX_QUOTE_WORDS:
         return [(where, "quote_length")]
     elsewhere = any(holds(call, found.quote, n) for n in range(len(call.segments)))
@@ -317,7 +323,7 @@ def judge(view: RolesView, answer: Roles) -> Judged:
         speaker.model_copy(
             update={
                 "role": role,
-                "quote": None if at is None else speaker.quote,
+                "quote": None if at is None else _said(call, speaker, at),
                 "segment": None if at is None else segment_id(at),
             }
         )
@@ -339,15 +345,17 @@ def check_roles(view: RolesView) -> Callable[[Roles], None]:
 
 
 def stored(view: RolesView, answer: Roles) -> Roles:
-    """The answer as kept: a verified voice's segment the one its quote is
-    found in, each language quote's the one the quote check found; nothing
-    else changes, so judging it again gives the same word."""
+    """The answer as kept: a verified voice's quote the transcript's own words
+    at the segment it is found in, each language quote's likewise (relocated);
+    nothing else changes, so judging it again gives the same word."""
     call = view.call
     speakers = []
     for speaker in answer.speakers:
         at = _own(call, speaker)
-        moved = {"segment": segment_id(at)} if at is not None else {}
-        speakers.append(speaker.model_copy(update=moved))
+        if at is not None:
+            moved = {"segment": segment_id(at), "quote": _said(call, speaker, at)}
+            speaker = speaker.model_copy(update=moved)
+        speakers.append(speaker)
     languages = relocated(call, answer.call_languages)
     return answer.model_copy(update={"speakers": speakers, "call_languages": languages})
 

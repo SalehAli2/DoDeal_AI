@@ -10,12 +10,18 @@ whole is uncertain, and whether its words are: a transcript doubted only
 because its roles were not applied (ROLES_NOT_APPLIED) has its words as heard.
 
 THE QUOTE CHECK, in code, on every quote a pass returns: at most 40 words (the
-prompts ask for 15); the segment it cites exists; and its words, normalised as
-the alarm matcher normalises (alarms.py), appear in that segment in order.
-Between two of them the segment may hold only words that repeat the word
-before them ("عمري عمري") or are on QUOTE_FILLERS; a negation never is one.
+prompts ask for 15); the segment it cites exists; and its words appear in that
+segment in order (A4). Words are normalised as the alarm matcher normalises
+(alarms.py), then every hamza seat (أ إ آ ؤ ئ) is folded to its base letter
+and every Arabic-Indic digit to ASCII (quote_words); a detached و is joined to
+the word after it. Two words are the same when equal, or when neither is a
+negation and one is the other with one leading و, ف, ب or ل (the rest at
+least two letters). Between two quote words the segment may hold only words
+that repeat the word before them ("عمري عمري") or are on QUOTE_FILLERS; a
+negation is never skipped, never added and never matched to another word.
 Not in the cited segment, the quote is looked for in the one just before, then
-the one just after, and where found there that segment is stored (relocated).
+the one just after; where found, the segment it is in and the transcript's own
+words, first matched to last, are stored as the quote (relocated).
 The segment is read as the model read it, so a quote can never carry a number
 back out. Where a pass names who must have said it, the segment it is found in
 is that speaker's: a voice no role mapping named (prompts.said_by) is no one's,
@@ -52,6 +58,7 @@ from dodeal_ai.units.call_intelligence.language import (
 from dodeal_ai.units.call_intelligence.numbers import prompt_copy
 from dodeal_ai.units.call_intelligence.prompts import (
     UNKNOWN,
+    one_line,
     render_transcript,
     said_by,
     segment_id,
@@ -81,7 +88,7 @@ MAX_FAILED_QUOTE_SHARE = 0.5
 # The hesitations a quote may leave out of its segment, Arabic and English:
 # sounds that carry no meaning. Versioned: a change is a new version. A word
 # that carries meaning here lets a quote drop it and still pass as exact.
-QUOTE_FILLERS_VERSION = "quote_fillers_v1"
+QUOTE_FILLERS_VERSION = "quote_fillers_v2"
 QUOTE_FILLERS: tuple[str, ...] = (
     "يعني",
     "اه",
@@ -101,6 +108,9 @@ QUOTE_FILLERS: tuple[str, ...] = (
     "hmm",
     "mm",
     "ah",
+    # quote_fillers_v2: the Egyptian hesitations "ده" and "بقى".
+    "ده",
+    "بقى",
 )
 # The negations, Arabic and English, never skipped whatever QUOTE_FILLERS
 # says: a quote that drops one says the opposite of the call.
@@ -134,8 +144,56 @@ NEGATIONS: tuple[str, ...] = (
     "wasn't",
     "weren't",
 )
-_NEGATION_WORDS = frozenset(words(" ".join(NEGATIONS)))
-_FILLER_WORDS = frozenset(words(" ".join(QUOTE_FILLERS))) - _NEGATION_WORDS
+# The hamza seats and the Arabic-Indic digits (both forms), folded after the
+# alarm matcher's normalisation for quotes only: the model writes a seat or a
+# digit one way where the engine wrote the other.
+_QUOTE_FOLDS = str.maketrans(
+    {
+        "أ": "ا",
+        "إ": "ا",
+        "آ": "ا",
+        "ؤ": "و",
+        "ئ": "ي",
+        **{chr(0x0660 + digit): str(digit) for digit in range(10)},
+        **{chr(0x06F0 + digit): str(digit) for digit in range(10)},
+    }
+)
+# A run of letters, digits and the marks normalise() drops: one raw token.
+_TOKEN = re.compile(r"[\w\u064b-\u065f\u0670\u0640]+")
+# The one proclitic a word may carry in the quote or the segment and not the
+# other, and the least the rest may be: a single letter is no word to match.
+_PROCLITICS = frozenset("وفبل")
+_MIN_BASE_LETTERS = 2
+_DETACHED_AND = "و"
+
+
+def _tokens(text: str) -> list[tuple[str, int, int]]:
+    """Each quote word of `text` (module docstring) with the span of `text` it
+    came from; a detached و joined to the word after it, spanning both."""
+    found = [
+        (word.translate(_QUOTE_FOLDS), token.start(), token.end())
+        for token in _TOKEN.finditer(text)
+        for word in words(token.group())
+    ]
+    joined: list[tuple[str, int, int]] = []
+    at = 0
+    while at < len(found):
+        word, start, end = found[at]
+        if word == _DETACHED_AND and at + 1 < len(found):
+            following, _, end = found[at + 1]
+            word, at = word + following, at + 1
+        joined.append((word, start, end))
+        at += 1
+    return joined
+
+
+def quote_words(text: str) -> list[str]:
+    """The words a quote and a segment are matched by (module docstring)."""
+    return [word for word, _, _ in _tokens(text)]
+
+
+_NEGATION_WORDS = frozenset(quote_words(" ".join(NEGATIONS)))
+_FILLER_WORDS = frozenset(quote_words(" ".join(QUOTE_FILLERS))) - _NEGATION_WORDS
 
 # The reasons that doubt only who spoke, never what was said: the roles pass
 # failed, or its mapping was not clear (roles.py).
@@ -268,8 +326,24 @@ def script_language(text: str, hint: str | None) -> str:
 
 def _skippable(said: Sequence[str], at: int) -> bool:
     """Whether the word at `at` may sit between two of a quote's words: it
-    repeats the word before it, or it is a filler (never a negation)."""
+    repeats the word before it, or it is a filler (never a negation). A
+    repeated negation follows its own matched copy, so none is ever lost."""
     return said[at] in _FILLER_WORDS or (at > 0 and said[at - 1] == said[at])
+
+
+def _same(said: str, quoted: str) -> bool:
+    """Whether a segment's word stands for a quote's: equal, or, neither a
+    negation, one is the other with one proclitic in front."""
+    if said == quoted:
+        return True
+    if said in _NEGATION_WORDS or quoted in _NEGATION_WORDS:
+        return False
+    longer, shorter = (said, quoted) if len(said) > len(quoted) else (quoted, said)
+    return (
+        len(shorter) >= _MIN_BASE_LETTERS
+        and longer[0] in _PROCLITICS
+        and longer[1:] == shorter
+    )
 
 
 def _reachable(said: Sequence[str], start: int) -> Iterator[int]:
@@ -283,36 +357,60 @@ def _reachable(said: Sequence[str], start: int) -> Iterator[int]:
         at += 1
 
 
-def _matches(said: Sequence[str], quote: Sequence[str]) -> bool:
-    """Whether the quote's words stand in `said` in order, nothing between two
-    of them but skippable words (module docstring)."""
-    ends = {at + 1 for at, word in enumerate(said) if word == quote[0]}
+def _span(said: Sequence[str], quote: Sequence[str]) -> tuple[int, int] | None:
+    """The first and last positions of the earliest match of the quote's words
+    in `said`, in order, nothing between two of them but skippable words
+    (module docstring); None when there is none."""
+    paths = {(at, at + 1) for at, word in enumerate(said) if _same(word, quote[0])}
     for wanted in quote[1:]:
-        ends = {
-            at + 1
-            for start in ends
+        paths = {
+            (first, at + 1)
+            for first, start in paths
             for at in _reachable(said, start)
-            if said[at] == wanted
+            if _same(said[at], wanted)
         }
-    return bool(ends)
+    if not paths:
+        return None
+    first, end = min(paths)
+    return first, end - 1
+
+
+def _matches(said: Sequence[str], quote: Sequence[str]) -> bool:
+    """Whether the quote's words stand in `said` (_span)."""
+    return _span(said, quote) is not None
 
 
 def _found_at(call: CallText, quoted: Sequence[str], index: int) -> int | None:
     """The segment the quote's words are in: the cited one, else the one just
     before, else the one just after; None when none holds them."""
     for at in (index, *(index + step for step in _NEIGHBOURS)):
-        if 0 <= at < len(call.shown) and _matches(words(call.shown[at]), quoted):
+        if 0 <= at < len(call.shown) and _matches(quote_words(call.shown[at]), quoted):
             return at
     return None
+
+
+def _measured(quote: str) -> list[str] | None:
+    """The quote's words, or None when there are none or too many."""
+    quoted = quote_words(quote)
+    return quoted if quoted and len(quoted) <= MAX_QUOTE_WORDS else None
 
 
 def holds(call: CallText, quote: str, index: int) -> bool:
     """Whether the segment at `index` holds the quote, under the quote check's
     length rule and matcher; no other segment is looked at."""
-    quoted = words(quote)
-    if not quoted or len(quoted) > MAX_QUOTE_WORDS:
-        return False
-    return _matches(words(call.shown[index]), quoted)
+    quoted = _measured(quote)
+    return quoted is not None and _matches(quote_words(call.shown[index]), quoted)
+
+
+def own_words(call: CallText, quote: str, index: int) -> str | None:
+    """The segment's own words the quote matched at `index`, first to last,
+    as the prompt showed them; None when it does not hold the quote."""
+    quoted = _measured(quote)
+    tokens = _tokens(call.shown[index])
+    span = None if quoted is None else _span([t[0] for t in tokens], quoted)
+    if span is None:
+        return None
+    return one_line(call.shown[index][tokens[span[0]][1] : tokens[span[1]][2]])
 
 
 def found_at(call: CallText, quote: str, segment: str) -> int | None:
@@ -320,8 +418,8 @@ def found_at(call: CallText, quote: str, segment: str) -> int | None:
     when the cited id is unknown, the quote's length is wrong or no segment
     holds it."""
     index = call.index_of(segment)
-    quoted = words(quote)
-    if index is None or not quoted or len(quoted) > MAX_QUOTE_WORDS:
+    quoted = _measured(quote)
+    if index is None or quoted is None:
         return None
     return _found_at(call, quoted, index)
 
@@ -333,9 +431,10 @@ def locate(call: CallText, quote: str, segment: str) -> str | None:
 
 
 def relocated[M: BaseModel](call: CallText, answer: M) -> M:
-    """The answer with every quote's segment the one the quote is found in:
-    a quote found in a neighbour of the segment it cites is stored with the
-    neighbour's id. Nothing else changes, and a failing quote stays as it is."""
+    """The answer with every quote at the segment it is found in -- a quote
+    found in a neighbour of the segment it cites is stored with the
+    neighbour's id -- and as the transcript's own words it matched
+    (own_words). Nothing else changes, and a failing quote stays as it is."""
     update: dict[str, object] = {}
     for name in type(answer).model_fields:
         value = getattr(answer, name)
@@ -354,9 +453,14 @@ def relocated[M: BaseModel](call: CallText, answer: M) -> M:
         quote = getattr(answer, quote_field, None)
         segment = getattr(answer, segment_field, None)
         if isinstance(quote, str) and isinstance(segment, str):
-            found = locate(call, quote, segment)
-            if found is not None and found != segment:
-                update[segment_field] = found
+            found = found_at(call, quote, segment)
+            if found is None:
+                continue
+            if segment_id(found) != segment:
+                update[segment_field] = segment_id(found)
+            said = own_words(call, quote, found)
+            if said is not None and said != quote:
+                update[quote_field] = said
     return answer.model_copy(update=update) if update else answer
 
 
@@ -378,8 +482,8 @@ def quote_errors(
     index = call.index_of(segment)
     if index is None:
         return [(where, "segment_unknown")]
-    quoted = words(quote)
-    if not quoted or len(quoted) > MAX_QUOTE_WORDS:
+    quoted = _measured(quote)
+    if quoted is None:
         return [(where, "quote_length")]
     found = _found_at(call, quoted, index)
     if found is None:

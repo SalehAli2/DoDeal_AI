@@ -11,7 +11,8 @@ and a fixed output ceiling sized for a non-reasoning model.
   unit_b.prose    a summary and a CRM note, in the language decided in code
 
 EVIDENCE FOR EVERY ELEMENT (extract_v2). What the client wanted, each concern
-and each agreement carry the quote and segment they rest on, and so does the
+and each agreement owe the quote and segment they rest on -- one given
+without them is kept unverified, never a schema error (A4) -- and so does the
 next step whenever it names an action; a stated detail owes one. Each other
 detail and the mood may cite one. Every quote goes through the quote check
 (evidence.py), FIELD BY FIELD: a detail whose quote fails is kept uncertain,
@@ -77,7 +78,6 @@ from dodeal_ai.core.llm import LLMClient, LLMResponse
 from dodeal_ai.core.llm.profiles import PROFILE_UNIT_B_EXTRACT, PROFILE_UNIT_B_PROSE
 from dodeal_ai.units.call_intelligence.evidence import (
     CallText,
-    Cited,
     Errors,
     Quote,
     Said,
@@ -243,11 +243,12 @@ class Details(Strict):
 
 
 class Item(Strict):
-    """A concern or an agreement, and the quote it rests on."""
+    """A concern or an agreement, and the quote it rests on; one with no
+    quote is kept unverified (settled()), never refused by the schema."""
 
     text: _Item
-    quote: Said
-    segment: Cited
+    quote: Quote
+    segment: SegmentId
 
 
 class Discussed(Strict):
@@ -269,11 +270,12 @@ class Discussed(Strict):
 
 
 class Wanted(Strict):
-    """What the client wants, in one sentence, and the quote it rests on."""
+    """What the client wants, in one sentence, and the quote it rests on; one
+    with no quote is kept unverified (settled())."""
 
     text: Said
-    quote: Said
-    segment: Cited
+    quote: Quote
+    segment: SegmentId
 
 
 type NextKind = Literal[
@@ -425,7 +427,7 @@ def extraction_quotes(call: CallText, answer: Extraction) -> dict[str, Errors]:
         found["mood"] = quote_errors(call, "mood", mood.quote, mood.segment)
     if answer.wanted is not None:
         wanted = answer.wanted
-        found["wanted"] = quote_errors(call, "wanted", wanted.quote, wanted.segment)
+        found["wanted"] = evidence_errors(call, "wanted", wanted.quote, wanted.segment)
     for n, topic in enumerate(answer.discussed):
         where = f"discussed.{n}"
         found[where] = evidence_errors(call, where, topic.quote, topic.segment)
@@ -433,7 +435,7 @@ def extraction_quotes(call: CallText, answer: Extraction) -> dict[str, Errors]:
         items: list[Item] = getattr(answer, field)
         for n, item in enumerate(items):
             where = f"{field}.{n}"
-            found[where] = quote_errors(call, where, item.quote, item.segment)
+            found[where] = evidence_errors(call, where, item.quote, item.segment)
     step = answer.next_step
     if step.action is not None or (step.quote, step.segment) != (None, None):
         check = quote_errors if step.action is None else evidence_errors

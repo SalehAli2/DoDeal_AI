@@ -18,7 +18,7 @@ from dodeal_ai.units.call_intelligence.evidence import (
     quote_errors,
     relocated,
 )
-from dodeal_ai.units.call_intelligence.passes import Extraction, extract
+from dodeal_ai.units.call_intelligence.passes import Extraction, extract, settled
 from dodeal_ai.units.call_intelligence.prompts import AGENT, CLIENT
 from dodeal_ai.units.call_intelligence.roles import Roles, judge, opening
 from dodeal_ai.units.call_intelligence.transcriber import Segment, Transcript
@@ -249,6 +249,122 @@ def test_the_filler_list_is_pinned_to_its_version() -> None:
     """A change to the list without a new version fails here."""
     digest = hashlib.sha256("\n".join(evidence.QUOTE_FILLERS).encode()).hexdigest()
     assert (evidence.QUOTE_FILLERS_VERSION, digest) == (
-        "quote_fillers_v1",
-        "cb64d02b4da1cd83c8fc09388c506401847821c68f03d78cb35419c2669ef84f",
+        "quote_fillers_v2",
+        "eeb894bcb5ad3588f5c4d2a927d7bfb0824fea79fab4ba04ca835f9f7897b977",
     )
+
+
+# --- A4: folds, proclitics, negations, the stored words ----------------------------
+
+MISSED = [("here", "quote_not_in_segment")]
+
+
+@pytest.mark.parametrize(
+    ("quote", "said"),
+    [
+        ("المسؤول عن المشروع", "المسوول عن المشروع"),
+        ("جئت امس", "جيت امس"),
+        ("إنت فين", "انت فين"),
+        ("عندي ٣ غرف", "عندي 3 غرف"),
+        ("السعر 1,500,000 درهم", "السعر ١٬٥٠٠٬٠٠٠ درهم"),
+        ("رقم ۷", "رقم 7"),
+    ],
+)
+def test_hamza_seats_and_arabic_indic_digits_are_folded(quote: str, said: str) -> None:
+    """The guard (A4): a seat or a digit written the other way still matches."""
+    assert _check(quote, said) == []
+    assert _check(said, quote) == []
+
+
+@pytest.mark.parametrize(
+    ("quote", "said"),
+    [
+        ("البيت حلو", "والبيت حلو"),
+        ("بالتقسيط", "التقسيط"),
+        ("فالسعر عالي", "السعر عالي"),
+        ("للبيع", "لبيع"),
+        ("والسعر عالي", "و السعر عالي"),
+        ("و السعر عالي", "والسعر عالي"),
+        ("السعر عالي", "و السعر عالي"),
+    ],
+)
+def test_one_proclitic_and_a_detached_and_are_allowed(quote: str, said: str) -> None:
+    assert _check(quote, said) == []
+
+
+@pytest.mark.parametrize(
+    ("quote", "said"),
+    [
+        ("لما وصلت", "ما وصلت"),
+        ("ما وصلت", "بما وصلت"),
+        ("لا اريد", "ولا اريد"),
+        ("فلا اريد", "لا اريد"),
+        ("يس عندي", "ليس عندي"),
+        ("ما اريد", "و ما اريد"),
+        ("و", "و ب"),
+    ],
+)
+def test_a_proclitic_never_turns_a_negation_into_another_word(
+    quote: str, said: str
+) -> None:
+    """The guard (A4): a negation is matched only by itself, never with a
+    proclitic taken off or put on, and a one-letter rest is no word."""
+    assert _check(quote, said) == MISSED
+
+
+@pytest.mark.parametrize(
+    ("quote", "said"),
+    [
+        ("انا عايز الشقة", "انا مش عايز الشقة"),
+        ("انا اريد", "انا لا اريد"),
+        ("i want it", "i do not want it"),
+    ],
+)
+def test_a_negation_is_never_skipped(quote: str, said: str) -> None:
+    assert _check(quote, said) == MISSED
+
+
+def test_the_egyptian_fillers_of_list_v2_are_skipped() -> None:
+    assert _check("الشقة حلوة خالص", "الشقة ده حلوة بقى خالص") == []
+
+
+def test_the_transcripts_own_words_are_stored_as_the_quote() -> None:
+    """A4: a quote found is stored as the segment's own words, first matched
+    to last, as the prompt showed them, fillers between included."""
+    call = CallText.of(
+        Transcript.of(
+            (
+                _say(0, "agent", "Hello, the villa is ready."),
+                _say(5, "lead", "و السعر يعني عالي جدا، honestly."),
+            ),
+            provider="f",
+            model="f",
+        ),
+        country_code="971",
+    )
+    answer = Extraction.model_validate(
+        {
+            **_extraction(),
+            "concerns": [
+                {"text": "price", "quote": "والسعر عالي", "segment": "s1"},
+                {"text": "villa", "quote": "the Villa is ready.", "segment": "s1"},
+            ],
+        }
+    )
+    kept = relocated(call, answer).concerns
+    assert [(c.quote, c.segment) for c in kept] == [
+        ("و السعر يعني عالي", "s2"),
+        ("the villa is ready", "s1"),
+    ]
+
+
+def test_a_missing_quote_on_an_item_or_wanted_is_unverified_not_refused() -> None:
+    raw = _extraction()
+    raw["wanted"] = {"text": "A villa.", "quote": None, "segment": None}
+    raw["concerns"] = [{"text": "price", "quote": None, "segment": None}]
+    answer = Extraction.model_validate(raw)
+    kept = settled(answer, _one("hello"))
+    assert kept["wanted"]["unverified"] is True
+    assert kept["concerns"] == [
+        {"text": "price", "quote": None, "segment": None, "unverified": True}
+    ]
