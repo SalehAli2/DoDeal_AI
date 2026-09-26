@@ -271,7 +271,7 @@ async def test_a_call_is_analysed_and_delivered_with_its_stage1_payload(
         ("alarm_phrase", "s3"),
     ]
     assert result["versions"] == {
-        "prompt": "unit_b_prompts_v18",
+        "prompt": "unit_b_prompts_v19",
         "quote_fillers": "quote_fillers_v1",
         "signals": "call_signals_v2",
         "model": "fake-model-pinned",
@@ -693,7 +693,8 @@ async def test_the_extract_pass_reads_the_calls_time_in_the_tenants_zone(
 ) -> None:
     """The push's recorded_at (08:00 UTC) and the tenant's zone reach the data
     half, each segment stamped in that zone, and a next step's time, quoted,
-    is delivered in that zone."""
+    is delivered in that zone. The client both names the time and is quoted
+    agreeing to it, one voice: not booked (D-77)."""
     booked = copy.deepcopy(EXTRACTION)
     booked["next_step"].update(
         when="2026-09-24T14:00:00Z",
@@ -717,5 +718,5 @@ async def test_the_extract_pass_reads_the_calls_time_in_the_tenants_zone(
     assert (step["when"], step["when_state"], step["booked"]) == (
         "2026-09-24T17:00:00+03:00",
         "stated",
-        True,
+        False,
     )

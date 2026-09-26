@@ -46,8 +46,10 @@ time from WHEN_SLACK_SECONDS before it to MAX_NEXT_STEP_DAYS after it, to the
 minute in the tenant's zone. With no verified when_quote the time is null,
 uncertain, when_missing_quote; out of range the same, when_out_of_range; with
 the call's own time unknown the same, when_no_anchor. Vague timing is null and
-uncertain. booked rests on the agreement quote and a time the model gave;
-code dropping that time never changes it.
+uncertain. booked (D-77) needs the model's word and a time it gave, the
+when_quote and the agreement quote both found, said by two different known
+voices, within MAX_BOOKING_GAP_SEGMENTS of each other; code dropping a time
+out of range or with no anchor never changes it.
 
 The prose pass reads the transcript and the SETTLED extraction -- validated
 and quote-checked output with every failed quote removed, in the data half
@@ -92,6 +94,7 @@ from dodeal_ai.units.call_intelligence.prompts import (
     PROSE_TEMPLATE,
     REPROMPT_TAIL_TEMPLATE,
     REPROMPT_TAILS,
+    UNKNOWN,
     build_call_prompt,
 )
 from dodeal_ai.units.call_intelligence.transcriber import Segment
@@ -152,6 +155,12 @@ WHEN_SLACK_SECONDS = 60
 WHEN_MISSING_QUOTE = "when_missing_quote"
 WHEN_OUT_OF_RANGE = "when_out_of_range"
 WHEN_NO_ANCHOR = "when_no_anchor"
+
+# The furthest apart, in segments either way, the agreement quote and the
+# words naming the time may be found and still book it: an assent answers
+# what was just said. Wider books an "ok" said to something else; narrower
+# misses a reply after a short aside.
+MAX_BOOKING_GAP_SEGMENTS = 3
 
 # The weekday on a said-at stamp, in English whatever the process's locale.
 _WEEKDAYS = (
@@ -564,6 +573,32 @@ def _held_when(
     return when, None if when is not None else WHEN_OUT_OF_RANGE
 
 
+def _found(call: CallText, quote: str | None, segment: str | None) -> int | None:
+    """Where a quote is found (found_at), or None when it is absent or not
+    found: the quote check's own matcher, so found means verified."""
+    if quote is None or segment is None:
+        return None
+    return found_at(call, quote, segment)
+
+
+def _booked(call: CallText, step: NextStep) -> bool:
+    """D-77: booked only when the model said so and gave a time, the words
+    naming the time and the agreement both found, in segments of two
+    different voices, neither unknown, at most MAX_BOOKING_GAP_SEGMENTS
+    apart. Code dropping a time out of range or with no anchor never
+    unbooks it; a when_quote not found does."""
+    if not step.booked or step.when is None:
+        return False
+    agreed = _found(call, step.quote, step.segment)
+    named = _found(call, step.when_quote, step.when_segment)
+    if agreed is None or named is None:
+        return False
+    voices = (call.segments[agreed].speaker, call.segments[named].speaker)
+    if UNKNOWN in voices or voices[0] == voices[1]:
+        return False
+    return abs(agreed - named) <= MAX_BOOKING_GAP_SEGMENTS
+
+
 def _settled_step(
     call: CallText,
     step: NextStep,
@@ -575,9 +610,8 @@ def _settled_step(
     said (_held_when), with when_reason when code dropped a time given;
     when_state stated for a held time on a verified agreement, uncertain for
     a time said but vague, dropped or unverified, else not_mentioned. booked
-    rests on the verified agreement and a time the MODEL gave (step.when, never
-    the held one): code dropping the time, whatever its when_reason, never
-    changes it. A failed when_quote is removed, as every failed quote is."""
+    is _booked's, on the time the MODEL gave (step.when, never the held one).
+    A failed when_quote is removed, as every failed quote is."""
     kept = _settled_item(step, failed)
     if when_failed:
         kept.update(when_quote=None, when_segment=None)
@@ -591,7 +625,7 @@ def _settled_step(
         "when": None if when is None else when.isoformat(),
         "when_state": state,
         "when_reason": reason,
-        "booked": step.booked and not failed and step.when is not None,
+        "booked": _booked(call, step),
     }
 
 

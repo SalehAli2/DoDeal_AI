@@ -19,6 +19,7 @@ from dodeal_ai.units.call_intelligence.analysis import call_clock
 from dodeal_ai.units.call_intelligence.config import CallsConfig
 from dodeal_ai.units.call_intelligence.evidence import CallText
 from dodeal_ai.units.call_intelligence.passes import (
+    MAX_BOOKING_GAP_SEGMENTS,
     NOT_MENTIONED,
     STATED,
     UNCERTAIN,
@@ -48,6 +49,8 @@ CLOCK = CallClock(RECORDED, "Asia/Dubai")
 
 # The default call's time words: s3, said 10 s in, so at 10:00:10 Dubai.
 TUESDAY = {"when_quote": "Tuesday at four", "when_segment": "s3"}
+# The client's assent to them, the next segment (D-77).
+ASSENT = {"quote": "Yes, Tuesday works", "segment": "s4"}
 
 
 def _step(**given: Any) -> dict[str, Any]:
@@ -57,8 +60,9 @@ def _step(**given: Any) -> dict[str, Any]:
 
 
 def _timed(when: str, **given: Any) -> dict[str, Any]:
-    """A step with a time, quoting the words that name it (TUESDAY)."""
-    return _step(when=when, **{**TUESDAY, **given})
+    """A step with a time, quoting the words that name it (TUESDAY, the
+    agent's) and the client's assent to them (ASSENT)."""
+    return _step(when=when, **{**TUESDAY, **ASSENT, **given})
 
 
 def _kept(answer: dict[str, Any], clock: CallClock = CLOCK) -> dict[str, Any]:
@@ -180,17 +184,19 @@ def test_seconds_are_dropped_to_the_minute() -> None:
     ],
     ids=["no-quote", "no-segment", "not-said", "not-in-segment-or-neighbour"],
 )
-def test_a_time_without_a_verified_when_quote_is_dropped_booked_unchanged(
+def test_a_time_without_a_verified_when_quote_is_dropped_and_not_booked(
     given: dict[str, Any],
 ) -> None:
-    """The guard: the model's time stands only on the words that name it."""
-    kept = _kept(_step(when="2026-09-27T17:00:00+04:00", booked=True, **given))
+    """The guard: the model's time stands only on the words that name it,
+    and so does a booking (D-77), whatever the client's assent."""
+    answer = _step(when="2026-09-27T17:00:00+04:00", booked=True, **ASSENT, **given)
+    kept = _kept(answer)
     assert (kept["when"], kept["when_state"], kept["when_reason"]) == (
         None,
         UNCERTAIN,
         WHEN_MISSING_QUOTE,
     )
-    assert (kept["booked"], kept["unverified"]) == (True, False)
+    assert (kept["booked"], kept["unverified"]) == (False, False)
     assert (kept["when_quote"], kept["when_segment"]) == (None, None)
 
 
@@ -248,9 +254,10 @@ async def test_with_the_calls_time_unknown_no_stamp_is_written_nor_time_held() -
 
 
 def test_an_unknown_call_time_is_no_anchor_even_without_a_when_quote() -> None:
-    """recorded_at unknown decides the reason before the time's quote does."""
+    """recorded_at unknown decides the reason before the time's quote does;
+    with no when_quote there is no booking (D-77)."""
     kept = _kept(
-        _step(when="2026-09-27T17:00:00+04:00", booked=True),
+        _step(when="2026-09-27T17:00:00+04:00", booked=True, **ASSENT),
         CallClock(None, "Asia/Dubai"),
     )
     assert (kept["when"], kept["when_state"], kept["when_reason"]) == (
@@ -258,32 +265,43 @@ def test_an_unknown_call_time_is_no_anchor_even_without_a_when_quote() -> None:
         UNCERTAIN,
         WHEN_NO_ANCHOR,
     )
-    assert kept["booked"] is True
+    assert kept["booked"] is False
 
 
 @pytest.mark.parametrize(
-    ("answer", "clock", "reason"),
+    ("answer", "clock", "reason", "kept_booking"),
     [
-        (_step(when="2026-09-27T17:00:00+04:00"), CLOCK, WHEN_MISSING_QUOTE),
-        (_timed("2026-09-20T17:00:00+04:00"), CLOCK, WHEN_OUT_OF_RANGE),
+        (
+            _step(when="2026-09-27T17:00:00+04:00", **ASSENT),
+            CLOCK,
+            WHEN_MISSING_QUOTE,
+            False,
+        ),
+        (_timed("2026-09-20T17:00:00+04:00"), CLOCK, WHEN_OUT_OF_RANGE, True),
         (
             _timed("2026-09-27T17:00:00+04:00"),
             CallClock(None, "Asia/Dubai"),
             WHEN_NO_ANCHOR,
+            True,
         ),
     ],
     ids=["missing-quote", "out-of-range", "no-anchor"],
 )
 @pytest.mark.parametrize("model_booked", [True, False])
 def test_a_time_code_dropped_leaves_booked_as_the_model_gave_it(
-    answer: dict[str, Any], clock: CallClock, reason: str, model_booked: bool
+    answer: dict[str, Any],
+    clock: CallClock,
+    reason: str,
+    kept_booking: bool,
+    model_booked: bool,
 ) -> None:
     """The guard: booked follows the model's own time, never code's held one;
-    each reason code drops a time for leaves the model's booked as it was."""
+    out of range or with no anchor the model's booked stands. With no
+    verified when_quote there is nothing the assent answered: not booked."""
     answer = {**answer, "next_step": {**answer["next_step"], "booked": model_booked}}
     kept = _kept(answer, clock)
     assert (kept["when"], kept["when_reason"]) == (None, reason)
-    assert kept["booked"] is model_booked
+    assert kept["booked"] is (model_booked and kept_booking)
 
 
 def test_no_time_from_the_model_is_never_booked_whatever_the_clock() -> None:
@@ -483,7 +501,9 @@ async def test_a_recap_quoting_the_agreement_still_anchors_on_05_00(
     recap_s: int,
 ) -> None:
     """The guard: the agreement quote sits in a later recap; the anchor is
-    where the time was named (05:00), never the agreement's segment."""
+    where the time was named (05:00), never the agreement's segment. The
+    recap is the agent's own, the voice that named the time, and 4 or more
+    segments on: no booking (D-77)."""
     recap = _ar(recap_s, "agent", "زي ما اتفقنا، اوكي، بكلمك")
     call = _arabic_call(GREETING, IN_3_MINUTES, OKAY, recap)
     answer = _callback(
@@ -495,7 +515,7 @@ async def test_a_recap_quoting_the_agreement_still_anchors_on_05_00(
     assert (step["when"], step["when_state"], step["booked"]) == (
         "2026-09-26T10:08:00+04:00",
         STATED,
-        True,
+        False,
     )
 
 
@@ -588,3 +608,157 @@ def test_the_extract_prompt_resolves_a_time_from_the_said_at_stamp() -> None:
     assert "A when without a when_quote is dropped." in text
     for agreement in ('"اوكي"', '"تمام"'):
         assert agreement in text
+
+
+# --- D-77: a booking is two voices, near the time ---------------------------------
+
+
+def _turns(**said: tuple[str, str]) -> CallText:
+    """An invented 64-segment Arabic call, the lead and the agent in turn (s1
+    the lead's), 5 s each from 10:00 Dubai; `said` replaces a segment by id:
+    s56=("agent", "...")."""
+    segments = []
+    for n in range(64):
+        default = ("agent" if n % 2 else "lead", f"كلام عن الشقة رقم {n + 1}")
+        speaker, text = said.get(f"s{n + 1}", default)
+        segments.append(_ar(5 * n, speaker, text))
+    return _arabic_call(*segments)
+
+
+def _booking(named: str, agreed: str, assent: str = "اوكي") -> dict[str, Any]:
+    """A callback booked for tomorrow at 17:00: its time's words "بكرة الساعة
+    5" quoted at `named`, the assent `assent` at `agreed`."""
+    answer = _extraction()
+    answer.update(
+        wanted=None,
+        discussed=[],
+        agreed=[],
+        mood={"value": "neutral", "quote": None, "segment": None},
+        next_step={
+            "action": "Call the client back",
+            "owner": "agent",
+            "due": "بكرة الساعة 5",
+            "quote": assent,
+            "segment": agreed,
+            "kind": "callback",
+            "when": "2026-09-27T17:00:00+04:00",
+            "booked": True,
+            "when_quote": "بكرة الساعة 5",
+            "when_segment": named,
+        },
+    )
+    return answer
+
+
+def _booked(call: CallText, answer: dict[str, Any]) -> dict[str, Any]:
+    return settled(Extraction.model_validate(answer), call, CLOCK)["next_step"]
+
+
+TIME = "تمام، بكلمك بكرة الساعة 5"
+
+
+def test_call1s_pattern_the_agent_names_the_time_the_client_says_okay() -> None:
+    """The guard: the agent's time at s56 and the client's one-word "اوكي"
+    at s57 are a booking."""
+    call = _turns(s56=("agent", TIME), s57=("lead", "اوكي"))
+    kept = _booked(call, _booking("s56", "s57"))
+    assert (kept["when"], kept["when_state"], kept["booked"]) == (
+        "2026-09-27T17:00:00+04:00",
+        STATED,
+        True,
+    )
+    assert (kept["quote"], kept["segment"], kept["unverified"]) == (
+        "اوكي",
+        "s57",
+        False,
+    )
+
+
+def test_both_quotes_from_the_agent_are_not_a_booking() -> None:
+    """The guard: an agent agreeing with themself books nothing."""
+    call = _turns(s56=("agent", TIME), s58=("agent", "تمام"))
+    assert _booked(call, _booking("s56", "s58", "تمام"))["booked"] is False
+    same = _booked(call, _booking("s56", "s56", "تمام، بكلمك"))
+    assert (same["unverified"], same["booked"]) == (False, False)
+
+
+@pytest.mark.parametrize(
+    ("agreed", "booked"),
+    [("s57", True), ("s59", True), ("s53", True), ("s61", False), ("s51", False)],
+    ids=["next", "3-after", "3-before", "5-after", "5-before"],
+)
+def test_the_agreement_must_be_within_3_segments_of_the_time(
+    agreed: str, booked: bool
+) -> None:
+    """The guard: an "ok" 5 segments away answered something else."""
+    assert MAX_BOOKING_GAP_SEGMENTS == 3
+    call = _turns(s56=("agent", TIME), **{agreed: ("lead", "اوكي")})
+    assert _booked(call, _booking("s56", agreed))["booked"] is booked
+
+
+def test_the_client_names_the_time_and_the_agent_agrees() -> None:
+    call = _turns(s56=("lead", "كلمني بكرة الساعة 5"), s57=("agent", "ماشي"))
+    assert _booked(call, _booking("s56", "s57", "ماشي"))["booked"] is True
+
+
+@pytest.mark.parametrize(
+    ("assent", "agreed"),
+    [("موافق", "s57"), ("اوكي", "s62")],
+    ids=["not-said", "cited-where-no-segment-near-says-it"],
+)
+def test_an_unverified_agreement_is_not_a_booking(assent: str, agreed: str) -> None:
+    """The guard: an assent code cannot find where it is cited is none."""
+    call = _turns(s56=("agent", TIME), s57=("lead", "اوكي"))
+    kept = _booked(call, _booking("s56", agreed, assent))
+    assert (kept["unverified"], kept["booked"]) == (True, False)
+
+
+@pytest.mark.parametrize(
+    ("assent", "cited", "booked"),
+    [("اوكي", "s58", True), ("تمام", "s57", False)],
+    ids=["found-in-the-clients-s57", "found-in-the-agents-own-s56"],
+)
+def test_the_segment_an_assent_is_found_in_decides(
+    assent: str, cited: str, booked: bool
+) -> None:
+    """Cited one segment off, the quote is found next door and verified: the
+    voice and distance of the segment it is FOUND in decide. "تمام" cited at
+    s57 is found only in s56, the agent's own time: no booking."""
+    call = _turns(s56=("agent", TIME), s57=("lead", "اوكي"))
+    kept = _booked(call, _booking("s56", cited, assent))
+    assert (kept["unverified"], kept["booked"]) == (False, booked)
+
+
+@pytest.mark.parametrize(
+    ("namer", "agreer", "booked"),
+    [
+        ("speaker_1", "speaker_2", True),
+        ("speaker_1", "speaker_1", False),
+        ("agent", "unknown", False),
+        ("unknown", "unknown", False),
+    ],
+    ids=["two-engine-voices", "one-engine-voice", "an-unknown-voice", "both-unknown"],
+)
+def test_two_known_voices_are_needed(namer: str, agreer: str, booked: bool) -> None:
+    """Roles not applied, the engine's two labels are still two voices; a
+    voice nobody named may be either side, so it books nothing."""
+    call = _turns(s56=(namer, TIME), s57=(agreer, "اوكي"))
+    assert _booked(call, _booking("s56", "s57"))["booked"] is booked
+
+
+def test_the_extract_prompt_asks_for_the_other_speakers_short_assent() -> None:
+    from dodeal_ai.core.prompting import build_prompt
+    from dodeal_ai.units.call_intelligence.prompts import (
+        EXTRACT_TEMPLATE,
+        PROMPT_SET_VERSION,
+    )
+
+    assert (EXTRACT_TEMPLATE, PROMPT_SET_VERSION) == (
+        "call_intelligence/extract_v9.txt",
+        "unit_b_prompts_v19",
+    )
+    text = " ".join(build_prompt(EXTRACT_TEMPLATE, caller_data="").stable.split())
+    assert "the other speaker's own short assent" in text
+    assert "from ONE segment of the speaker who did NOT say the when_quote" in text
+    assert "within three segments of the when_segment, before or after" in text
+    assert "It may be one word." in text

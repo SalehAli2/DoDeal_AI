@@ -39,7 +39,7 @@ from dodeal_ai.core.prompting import AssembledPrompt, build_prompt
 from dodeal_ai.units.call_intelligence.transcriber import Segment
 
 ROLES_TEMPLATE = "call_intelligence/roles_v4.txt"
-EXTRACT_TEMPLATE = "call_intelligence/extract_v8.txt"
+EXTRACT_TEMPLATE = "call_intelligence/extract_v9.txt"
 PROSE_TEMPLATE = "call_intelligence/prose_v2.txt"
 OBJECTIONS_TEMPLATE = "call_intelligence/objections_v2.txt"
 SCORE_TEMPLATE = "call_intelligence/score_v2.txt"
@@ -84,7 +84,9 @@ REPROMPT_TAILS: Mapping[str, str] = MappingProxyType(
 # extract_v7 by extract_v8 (each segment's said-at stamp written in code, and
 # the words that name the time quoted) and coaching_v3 by coaching_v4 (a "say
 # it like this" in the agent's dialect, and no next step advised once one is
-# booked), unit_b_prompts_v18; never sent again.
+# booked), unit_b_prompts_v18, then extract_v8 by extract_v9 (the agreement
+# quoted as the other speaker's short assent near the time, D-77),
+# unit_b_prompts_v19; never sent again.
 RETIRED_TEMPLATES: tuple[str, ...] = (
     "call_intelligence/extract_v1.txt",
     "call_intelligence/extras_v1.txt",
@@ -114,11 +116,12 @@ RETIRED_TEMPLATES: tuple[str, ...] = (
     "call_intelligence/extract_v6.txt",
     "call_intelligence/extract_v7.txt",
     "call_intelligence/coaching_v3.txt",
+    "call_intelligence/extract_v8.txt",
 )
 
 # The stamp stage 1 carries under versions.prompt. Move it with the digest
 # in the stamp test whenever one of UNIT_B_TEMPLATES changes.
-PROMPT_SET_VERSION = "unit_b_prompts_v18"
+PROMPT_SET_VERSION = "unit_b_prompts_v19"
 
 # Every template Unit B can send, in pass order, then the retired ones; the
 # worker preloads them all.
