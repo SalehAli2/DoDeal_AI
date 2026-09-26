@@ -20,8 +20,8 @@ from dodeal_ai.units.call_intelligence.prompts import (
     UNIT_B_TEMPLATES,
 )
 
-PROMPT_SET = "unit_b_prompts_v13"
-PROMPT_SET_DIGEST = "bf96d09356d25c2aab98b55a64f8d84dc35da11ca5bc591b0b442bcab6f0e57f"
+PROMPT_SET = "unit_b_prompts_v14"
+PROMPT_SET_DIGEST = "d3f421204d4c8779a2dca1d8d1ef95aa7669d398e22bc8a51b8a25a8100e9362"
 
 _HOW_TO_UPDATE = (
     "A Unit B prompt template changed. Bump PROMPT_SET_VERSION in "
@@ -137,6 +137,24 @@ TEMPLATE_DIGESTS = {
     ),
     "call_intelligence/reprompt_tail_whatsapp_v1.txt": (
         "f8e13525109bc6bbd15c334d91d2be41ef5e353661534d561319e52a294c1dac"
+    ),
+    "call_intelligence/extract_v5.txt": (
+        "3d48dcc519d5aadf60c87e6229e4dd72ee818ada8be44fdac312319a7fb967e5"
+    ),
+    "call_intelligence/prose_v2.txt": (
+        "bfc562e70fd548dacefb9300f9cd85ba88cb58c2cc27658bf14c6a63fe80fc9c"
+    ),
+    "call_intelligence/coaching_v3.txt": (
+        "1b0920399e47cde5f7d98dd2bd2b23d9f3863bc03a70132f4a0a31b2637d34b9"
+    ),
+    "call_intelligence/extras_v7.txt": (
+        "436916459b3c24238ae86819d48d5d0f21daadd720fd9e69112c67d509d94ce4"
+    ),
+    "call_intelligence/translate_v2.txt": (
+        "66848e3e57eb62107ca80caa889ede23e17f94b9ede45618180145ca9c286e60"
+    ),
+    "call_intelligence/whatsapp_v2.txt": (
+        "0e77762f1cb499df8941620c9869e906a93862b542413bcb57a893780d875f03"
     ),
 }
 

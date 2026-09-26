@@ -16,9 +16,13 @@ from dodeal_ai.units.call_intelligence.passes import (
     StatusDetail,
 )
 from dodeal_ai.units.call_intelligence.prompts import (
+    ARABIC_READING_ONLY,
+    ARABIC_WRITING_TEMPLATES,
     ESCALATIONS_TEMPLATE,
     EXTRACT_TEMPLATE,
     EXTRAS_TEMPLATE,
+    RETIRED_TEMPLATES,
+    UNIT_B_TEMPLATES,
 )
 
 
@@ -63,3 +67,31 @@ def test_the_extract_prompt_names_the_time_lines_it_is_given() -> None:
     text = _text(EXTRACT_TEMPLATE)
     assert "RECORDED AT" in text and "TIMEZONE" in text
     assert "2026-09-27T17:00:00+04:00" in text
+
+
+# --- the roles in Arabic ---------------------------------------------------------
+
+AGENT_AR = 'the agent is "الوكيل" (or "مندوب المبيعات")'
+CLIENT_AR = 'the client is "العميل"'
+NEVER = 'never call the client "الوكيل"'
+
+
+@pytest.mark.parametrize("template", ARABIC_WRITING_TEMPLATES)
+def test_every_arabic_writing_prompt_names_the_roles_in_arabic(template: str) -> None:
+    """The guard: the agent is الوكيل (or مندوب المبيعات), the client العميل,
+    never the reverse, in every template whose answer may be Arabic."""
+    text = _text(template)
+    assert (AGENT_AR in text, CLIENT_AR in text, NEVER in text) == (True, True, True)
+
+
+def test_every_live_prompt_that_speaks_of_arabic_is_classed() -> None:
+    """A new template that mentions Arabic must be named a writer, and so
+    carry the roles, or be named as reading it only."""
+    live = [
+        name
+        for name in UNIT_B_TEMPLATES
+        if name not in RETIRED_TEMPLATES and "reprompt_tail" not in name
+    ]
+    speaks = {name for name in live if "Arabic" in _text(name)}
+    assert speaks == set(ARABIC_WRITING_TEMPLATES) | set(ARABIC_READING_ONLY)
+    assert all(AGENT_AR not in _text(name) for name in ARABIC_READING_ONLY)
