@@ -376,6 +376,7 @@ async def test_stage2_is_held_and_delivered_as_call_stage2(
     assert held["reasons"] == {"score": "scoring_off"}
     assert held["versions"] == {
         "prompt": "unit_b_prompts_v12",
+        "quote_fillers": "quote_fillers_v1",
         "objection_list": "objection_list_v1",
         "rubric": "call_rubric_v1",
         "tone_list": "tone_list_v1",

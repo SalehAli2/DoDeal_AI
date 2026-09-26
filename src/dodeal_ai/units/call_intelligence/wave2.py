@@ -24,8 +24,9 @@ languages stage 1 heard, else the script.
 
 THE STAGE-2 RESULT (stage2_result), held in db3 and delivered as call.stage2:
 each pass's part, null where the pass failed or did not run, the reason for
-each null, and the versions -- the prompt set, the objection list, the rubric,
-the tone list, and the model each pass's answer came from.
+each null, and the versions -- the prompt set, the quote filler list, the
+objection list, the rubric, the tone list, and the model each pass's answer
+came from.
 """
 
 from __future__ import annotations
@@ -51,7 +52,10 @@ from dodeal_ai.units.call_intelligence.escalations import (
     escalations_part,
     find_flags,
 )
-from dodeal_ai.units.call_intelligence.evidence import CallText
+from dodeal_ai.units.call_intelligence.evidence import (
+    QUOTE_FILLERS_VERSION,
+    CallText,
+)
 from dodeal_ai.units.call_intelligence.extras import Extras, extras_part, find_extras
 from dodeal_ai.units.call_intelligence.language import (
     LANGUAGE_NOT_ENABLED,
@@ -115,6 +119,7 @@ def stage2_result(job: Job, wave: Wave2) -> dict[str, object]:
         "reasons": dict(wave.reasons),
         "versions": {
             "prompt": PROMPT_SET_VERSION,
+            "quote_fillers": QUOTE_FILLERS_VERSION,
             "objection_list": OBJECTION_LIST_VERSION,
             "rubric": RUBRIC_VERSION,
             "tone_list": TONE_LIST_VERSION,

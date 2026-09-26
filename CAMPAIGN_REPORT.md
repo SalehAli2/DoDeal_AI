@@ -7492,3 +7492,9 @@ failure modes, then one stress test (sabotage in brackets).
 - details (7): a stated "unknown" status passes; a date with no words. loss_reason (8): the agent's words become the client's reason; dead with no reason. Tests: shape and speaker (status fold off fails 3; speaker off fails 2).
 - possible_broker (9): the agent's words flag the client; an investor flagged. Test: client quotes only (speaker off fails 1). call_e2e reasons (5), prompts v12 and docs: no sabotage owed.
 - Stress test: the client says "انا عمري ما زرت دبي" and the model quotes "انا عمري زرت دبي" citing the segment before: no neighbour holds it, so the detail is uncertain and never the opposite.
+
+## Unit B follow-up from the real-call run
+- language (1): an agent coached in a language nobody tested; a Moroccan client left unscored. Test: Egyptian agent + Moroccan client coached, a Hindi client or agent not (agent side dropped fails 4).
+- extras (2): one bad keyword quote throws away the tags and the message; an unverified yes lifts the band. Test: one bad keyword leaves the rest delivered, 4 of 6 failing is malformed (old strictness fails 5; drop off fails 2; unverified counted fails 1).
+- stage2 cost (3), call_e2e report (4), versions.quote_fillers, README timezone and coaching_languages (5): low risk, no sabotage owed.
+- Stress test: a stage-2 run with one unpriced model: its line, its stage and the report total are null, never a partial sum.

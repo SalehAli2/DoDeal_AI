@@ -35,6 +35,7 @@ from dodeal_ai.core.jobs import Job, start_pass
 from dodeal_ai.core.llm import LLMClient
 from dodeal_ai.units.call_intelligence.alarms import alarms_if_enabled
 from dodeal_ai.units.call_intelligence.config import CallsConfig
+from dodeal_ai.units.call_intelligence.evidence import QUOTE_FILLERS_VERSION
 from dodeal_ai.units.call_intelligence.keywords import spot_keywords
 from dodeal_ai.units.call_intelligence.language import (
     UNHEARD,
@@ -201,6 +202,7 @@ async def wave1(
     clock = call_clock(job, config)
     versions: dict[str, object] = {
         "prompt": PROMPT_SET_VERSION,
+        "quote_fillers": QUOTE_FILLERS_VERSION,
         "signals": SIGNALS_VERSION,
         "model": None,
         "transcriber": f"{transcript.provider}/{transcript.model}",
