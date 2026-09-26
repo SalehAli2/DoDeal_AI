@@ -173,6 +173,7 @@ def test_every_negation_is_one_run_of_normalised_words() -> None:
 
 
 def test_the_all_rows_pool_the_counts_word_by_word() -> None:
+    """ "ولا" counts as لا once its و is taken off."""
     rows = []
     for call, (reference, hypothesis) in enumerate(
         [("ما زرت", "زرت"), ("ما زرت ولا شفت لا", "ما زرت ولا شفت لا")]
@@ -182,8 +183,56 @@ def test_the_all_rows_pool_the_counts_word_by_word() -> None:
         rows.append(row)
     assert [row.negation_recall for row in rows] == [0, 1]
     (pooled,) = stt_eval.summarise(rows)
-    assert pooled.negations == {"ما": (1, 2), "لا": (1, 1)}
+    assert pooled.negations == {"ما": (1, 2), "لا": (2, 2)}
     assert (pooled.negation_recall, pooled.negation_by_word) == (
-        2 / 3,
-        "ما 1/2; لا 1/1",
+        3 / 4,
+        "ما 1/2; لا 2/2",
     )
+
+
+# --- prefixes and fused forms (D-76) --------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("reference", "hypothesis", "heard"),
+    [
+        ("عمري وما زرت", "عمري وما زرت", {"ما": (1, 1)}),
+        ("عمري وما زرت", "عمري ما زرت", {"ما": (1, 1)}),
+        ("عمري وما زرت", "عمري زرت", {"ما": (0, 1)}),
+        ("فلا تقلق", "فلا تقلق", {"لا": (1, 1)}),
+        ("ومش هيك", "مش هيك", {"مش": (1, 1)}),
+    ],
+    ids=["wa-ma-heard", "wa-ma-heard-bare", "wa-ma-lost", "fa-la", "wa-mish"],
+)
+def test_one_leading_wa_or_fa_is_taken_off_first(
+    reference: str, hypothesis: str, heard: dict[str, tuple[int, int]]
+) -> None:
+    assert stt_eval.negations_heard(reference, hypothesis) == heard
+
+
+@pytest.mark.parametrize(
+    ("reference", "hypothesis", "heard"),
+    [
+        ("انا ماعرفتش", "انا ماعرفتش", (1, 1)),
+        ("انا ماعرفتش", "انا عرفت", (0, 1)),
+        ("هم مبيبقوش هنا", "هم مبيبقوش هنا", (1, 1)),
+        ("وماكنتش هناك", "ماكنتش هناك", (1, 1)),
+    ],
+    ids=["heard", "lost", "mb-prefix", "with-wa"],
+)
+def test_an_egyptian_fused_negation_counts(
+    reference: str, hypothesis: str, heard: tuple[int, int]
+) -> None:
+    counted = stt_eval.negations_heard(reference, hypothesis)
+    assert counted == {stt_eval.FUSED: heard}
+    assert stt_eval.negation_by_word(counted) == f"م…ش {heard[0]}/{heard[1]}"
+
+
+@pytest.mark.parametrize(
+    "reference",
+    ["مشروع جديد", "وقت الشغل", "في مشروعهم", "مش"],
+    ids=["mashrou", "waqt", "fi", "mish-is-listed-not-fused"],
+)
+def test_a_word_that_only_looks_like_one_is_not_fused(reference: str) -> None:
+    counted = stt_eval.negations_heard(reference, reference)
+    assert stt_eval.FUSED not in counted

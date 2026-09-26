@@ -33,7 +33,10 @@ words to the engine's (alignment), the share of the reference's negations
 (NEGATIONS) the engine heard as the same word at the aligned position:
 negation_recall overall, negation_by_word as "word found/said" for each one
 said. A lost negation flips a sentence ("عمري ما زرت" heard "عمري زرت"), so it
-counts beyond its one word of WER. The ALL rows pool the counts.
+counts beyond its one word of WER. The ALL rows pool the counts. One leading
+و or ف is taken off a word first ("وما" is ما), and an Egyptian negation fused
+into its verb, ما or م then the verb then ش ("ماعرفتش", "مبيبقوش"), counts
+under FUSED, heard only as the same word.
 """
 
 from __future__ import annotations
@@ -66,8 +69,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 ALL = "ALL"
 
 # The negations whose loss reverses what was said, Arabic then English. Each
-# is matched as its normalised words in a row, so "don't" is don, t; a word
-# with a proclitic ("وما") is not one of them.
+# is matched as its normalised words in a row, so "don't" is don, t; one
+# leading و or ف is taken off a word first (_bare), so "وما" is ما.
 NEGATIONS = (
     "ما",
     "مش",
@@ -89,6 +92,11 @@ NEGATIONS = (
     "can't",
 )
 _NEGATION_WORDS = {negation: tuple(words(negation)) for negation in NEGATIONS}
+# The Egyptian negation fused into its verb, ما or م, the verb, then ش
+# ("ماعرفتش", "مبيبقوش"): counted under this one key, not word by word.
+FUSED = "م…ش"
+# The conjunctions a word may carry in front ("وما", "فلا"): one is taken off.
+_CONJUNCTIONS = ("و", "ف")
 
 # The alignment's moves back from a cell: a reference word paired with an
 # engine word (a match or a substitution), deleted, or an engine word inserted.
@@ -214,23 +222,44 @@ def alignment(reference: Sequence[str], hypothesis: Sequence[str]) -> list[int |
     return aligned
 
 
+def _bare(word: str) -> str:
+    """`word` with one leading و or ف taken off, when a letter is left."""
+    return word[1:] if len(word) > 1 and word.startswith(_CONJUNCTIONS) else word
+
+
+def _fused(word: str) -> bool:
+    """A bare word that is ما or م, a verb, then ش ("ماعرفتش"); "مش" itself
+    is listed."""
+    return len(word) > 2 and word.startswith("م") and word.endswith("ش")
+
+
 def negations_heard(reference: str, hypothesis: str) -> Negations:
-    """Each negation the reference says (NEGATIONS, over normalised words):
-    how often, and how often the hypothesis has the same word at the aligned
-    position -- every word of a contraction."""
-    wanted, heard = words(reference), words(hypothesis)
+    """Each negation the reference says (NEGATIONS, then FUSED, over
+    normalised bare words): how often, and how often the hypothesis has the
+    same bare word at the aligned position -- every word of a contraction."""
+    wanted = [_bare(word) for word in words(reference)]
+    heard = [_bare(word) for word in words(hypothesis)]
     aligned = alignment(wanted, heard)
     counts: Negations = {}
+
+    def count(negation: str, run: Sequence[str], at: int) -> None:
+        kept = all(
+            (paired := aligned[at + k]) is not None and heard[paired] == word
+            for k, word in enumerate(run)
+        )
+        found, said = counts.get(negation, (0, 0))
+        counts[negation] = (found + kept, said + 1)
+
     for at in range(len(wanted)):
-        for negation, run in _NEGATION_WORDS.items():
-            if tuple(wanted[at : at + len(run)]) != run:
-                continue
-            kept = all(
-                (paired := aligned[at + k]) is not None and heard[paired] == word
-                for k, word in enumerate(run)
-            )
-            found, said = counts.get(negation, (0, 0))
-            counts[negation] = (found + kept, said + 1)
+        listed = [
+            (negation, run)
+            for negation, run in _NEGATION_WORDS.items()
+            if tuple(wanted[at : at + len(run)]) == run
+        ]
+        for negation, run in listed:
+            count(negation, run, at)
+        if not listed and _fused(wanted[at]):
+            count(FUSED, (wanted[at],), at)
     return counts
 
 
@@ -241,9 +270,12 @@ def negation_recall(negations: Negations) -> float | None:
 
 
 def negation_by_word(negations: Negations) -> str | None:
-    """ "word found/said" for each negation said, in NEGATIONS order."""
+    """ "word found/said" for each negation said, in NEGATIONS order, then
+    FUSED."""
     shown = [
-        f"{n} {negations[n][0]}/{negations[n][1]}" for n in NEGATIONS if n in negations
+        f"{n} {negations[n][0]}/{negations[n][1]}"
+        for n in (*NEGATIONS, FUSED)
+        if n in negations
     ]
     return "; ".join(shown) or None
 
