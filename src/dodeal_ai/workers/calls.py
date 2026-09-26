@@ -17,6 +17,10 @@ arq's own try count is CALL_MAX_TRIES + 1, one more than the job's: the job's
 attempts in db3 decide, and the extra run is the one that dead-letters a job
 whose last attempt crashed. Each run is cut off at CALL_JOB_TIMEOUT_SECONDS.
 
+A STOPPING WORKER TAKES NO NEW JOB and lets the running ones finish for up to
+CALL_JOB_COMPLETION_WAIT_SECONDS before arq cancels them; each queue runs at
+most its own CALL_MAX_JOBS_<QUEUE> jobs at once.
+
 THE NORMAL QUEUE'S WORKER ALSO SWEEPS, every 300 s: a job stuck in a running
 status with no run is re-enqueued once (units/call_intelligence/sweep.py).
 arq runs a cron once per slot however many normal workers there are.
@@ -107,6 +111,7 @@ QUEUES = {
     "stage2": STAGE2_QUEUE,
 }
 
+
 # The same sections and parsers the API registers (main.TENANT_CONFIG_SECTIONS;
 # a test holds the two equal). Without them the override store parses nothing
 # here, and every company reads as its default: calls off.
@@ -120,6 +125,16 @@ def redis_settings() -> RedisSettings:
     """arq's Redis settings, parsed from the queue URL (read through
     core/redis.py's one read of it); opens nothing."""
     return RedisSettings.from_dsn(redis_url("queue"))
+
+
+def max_jobs(settings: Settings, queue: str) -> int:
+    """How many jobs one worker on `queue` runs at once."""
+    return {
+        PRIORITY_QUEUE: settings.call_max_jobs_priority,
+        NORMAL_QUEUE: settings.call_max_jobs_normal,
+        OVERNIGHT_QUEUE: settings.call_max_jobs_overnight,
+        STAGE2_QUEUE: settings.call_max_jobs_stage2,
+    }[queue]
 
 
 def worker_settings(
@@ -202,6 +217,8 @@ def worker_settings(
         "functions": functions,
         "queue_name": queue,
         "job_timeout": settings.call_job_timeout_seconds,
+        "job_completion_wait": settings.call_job_completion_wait_seconds,
+        "max_jobs": max_jobs(settings, queue),
         "redis_settings": redis_settings(),
         "on_startup": startup,
         "on_shutdown": shutdown,

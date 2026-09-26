@@ -260,6 +260,26 @@ class Settings(BaseSettings):
     # sooner (worker.py), so under 120 is refused. 1800 s holds a long call's
     # transcription; too low kills paid work mid-flight, too high holds a slot.
     call_job_timeout_seconds: int = Field(default=1800, ge=120)
+    # How long a call worker told to stop lets its running jobs finish before
+    # arq cancels them. 660 s outlasts one STT request (600 s) with a minute to
+    # record it; too low cancels paid work mid-flight, to be paid for again.
+    call_job_completion_wait_seconds: int = Field(default=660, ge=0)
+    # Jobs one priority-queue worker runs at once. 4 keeps a paying tenant's
+    # calls moving on a small box; too high runs out of memory and provider
+    # headroom (429s), too low leaves the queue waiting behind a long call.
+    call_max_jobs_priority: int = Field(default=4, ge=1)
+    # Jobs one normal-queue worker runs at once. 4, as priority: each holds a
+    # recording and a transcription in flight; too high exhausts memory and the
+    # provider's rate, too low lets the backlog grow behind long calls.
+    call_max_jobs_normal: int = Field(default=4, ge=1)
+    # Jobs one overnight-queue worker runs at once. 2: the batch has all night
+    # and must leave the daytime queues their provider headroom; too high
+    # starves them (429s), too low may not finish the batch by morning.
+    call_max_jobs_overnight: int = Field(default=2, ge=1)
+    # Jobs one stage-2 worker runs at once. 8: model passes only, no audio in
+    # memory, mostly waiting on the provider; too high meets its rate limit
+    # (429s), too low lets finished transcripts wait for their analysis.
+    call_max_jobs_stage2: int = Field(default=8, ge=1)
     # How long a call job's record lives after its last transition (core/jobs.py):
     # a week outlives any retry and pause, so nothing is stranded forever. Too
     # low loses a paused job's record; too high keeps a dead job's link longer.
