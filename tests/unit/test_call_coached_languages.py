@@ -51,7 +51,13 @@ SEGMENTS = (
 TRANSCRIPT = Transcript.of(SEGMENTS, provider="fake", model="fake")
 
 
-async def _wave2(config: CallsConfig, spoken: Spoken, *, eligible: bool = False):
+async def _wave2(
+    config: CallsConfig,
+    spoken: Spoken,
+    *,
+    eligible: bool = False,
+    coaching: dict | None = None,
+):
     await create_job(
         "tenant-a",
         7,
@@ -69,7 +75,10 @@ async def _wave2(config: CallsConfig, spoken: Spoken, *, eligible: bool = False)
     llm = FakeLLM()
     llm.script_for(OBJECTIONS_TEMPLATE, json_response({"objections": []}))
     llm.script_for(ESCALATIONS_TEMPLATE, json_response({"escalations": []}))
-    llm.script_for(COACHING_TEMPLATE, json_response(coaching_answer(SEGMENTS[0].text)))
+    llm.script_for(
+        COACHING_TEMPLATE,
+        json_response(coaching or coaching_answer(SEGMENTS[0].text)),
+    )
     llm.script_for(EXTRAS_TEMPLATE, json_response(extras_answer()))
     wave = await wave2(
         llm,
@@ -95,12 +104,74 @@ def _gated(wave) -> dict[str, str | None]:
 # --- the guard ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("client", ["ur", "hi", "fr", "other", "maghrebi_ar"])
-async def test_an_unlisted_client_language_gets_no_coaching_and_no_score(
-    client: str,
+def _arabic_coaching() -> dict:
+    """The coaching answer written in Arabic, for a call summarised in Arabic."""
+    answer = coaching_answer(SEGMENTS[0].text)
+    answer["observations"][0]["text"] = "افتتح المكالمة بلطف."
+    answer["observations"][1]["text"] = "كان يمكنه أن يسأل عن احتياجات العميل أبكر."
+    answer["observations"][1]["say_it_like_this"] = "ما الأهم عندك في البيت الجديد؟"
+    answer["plan"] = [
+        "اسأل عن الميزانية مبكرا.",
+        "اعرض موعدين للمعاينة.",
+        "أكد الخطوة التالية بصوت واضح.",
+    ]
+    return answer
+
+
+async def test_an_egyptian_agent_with_a_moroccan_client_is_coached() -> None:
+    """The guard: both sides' languages are listed by default."""
+    llm, wave = await _wave2(
+        CallsConfig(scoring_enabled=True),
+        Spoken(client="maghrebi_ar", agent="egyptian_ar"),
+        coaching=_arabic_coaching(),
+    )
+    assert wave.parts[COACHING] is not None
+    assert wave.parts[COACHING]["language"] == "ar"
+    assert _gated(wave) == {COACHING: None, SCORE: "not_eligible"}
+    assert "unit_b.coaching" in llm.profiles
+
+
+async def test_a_hindi_client_is_not_coached_whoever_the_agent_is() -> None:
+    """The guard: a listed agent does not carry an unlisted client."""
+    llm, wave = await _wave2(
+        CallsConfig(scoring_enabled=True), Spoken(client="hi", agent="egyptian_ar")
+    )
+    assert (wave.parts[COACHING], wave.parts[SCORE]) == (None, None)
+    assert _gated(wave) == {
+        COACHING: "language_not_enabled",
+        SCORE: "language_not_enabled",
+    }
+    assert "unit_b.coaching" not in llm.profiles
+
+
+@pytest.mark.parametrize(
+    ("client", "agent"),
+    [
+        ("ur", "en"),
+        ("hi", "en"),
+        ("fr", "en"),
+        ("other", "en"),
+        ("en", "hi"),
+        ("gulf_ar", "other"),
+        ("gulf_ar", None),
+        (None, "en"),
+    ],
+    ids=[
+        "ur-client",
+        "hi-client",
+        "fr-client",
+        "other-client",
+        "hi-agent",
+        "other-agent",
+        "agent-unheard",
+        "client-unheard",
+    ],
+)
+async def test_an_unlisted_or_unheard_side_gets_no_coaching_and_no_score(
+    client: str | None, agent: str | None
 ) -> None:
     llm, wave = await _wave2(
-        CallsConfig(scoring_enabled=True), Spoken(client=client, agent="en")
+        CallsConfig(scoring_enabled=True), Spoken(client=client, agent=agent)
     )
     assert (wave.parts[COACHING], wave.parts[SCORE]) == (None, None)
     assert _gated(wave) == {
@@ -111,7 +182,9 @@ async def test_an_unlisted_client_language_gets_no_coaching_and_no_score(
     assert "unit_b.score" not in llm.profiles
 
 
-@pytest.mark.parametrize("client", ["gulf_ar", "iraqi_ar", "en"])
+@pytest.mark.parametrize(
+    "client", ["gulf_ar", "iraqi_ar", "maghrebi_ar", "msa_ar", "en"]
+)
 async def test_a_listed_client_language_is_coached_and_gated_as_before(
     client: str,
 ) -> None:
@@ -124,7 +197,7 @@ async def test_a_listed_client_language_is_coached_and_gated_as_before(
 
 
 async def test_a_language_the_tenant_lists_is_coached() -> None:
-    config = CallsConfig(coaching_languages=frozenset({"ur"}))
+    config = CallsConfig(coaching_languages=frozenset({"ur", "en"}))
     _, wave = await _wave2(config, Spoken(client="ur", agent="en"))
     assert wave.parts[COACHING] is not None
     assert _gated(wave) == {COACHING: None, SCORE: "scoring_off"}
@@ -163,18 +236,29 @@ def test_unheard_the_script_profile_decides(
     assert coached(UNHEARD, _profile(*languages), frozenset(enabled)) is expected
 
 
-def test_a_heard_client_decides_whatever_the_script() -> None:
+def test_heard_sides_decide_whatever_the_script() -> None:
     arabic = _profile("ar", "ar")
-    assert coached(Spoken(client="ur"), arabic, frozenset({"gulf_ar"})) is False
-    assert coached(Spoken(client="ur"), arabic, frozenset({"ur"})) is True
+    heard = Spoken(client="ur", agent="gulf_ar")
+    assert coached(heard, arabic, frozenset({"gulf_ar"})) is False
+    assert coached(heard, arabic, frozenset({"ur"})) is False
+    assert coached(heard, arabic, frozenset({"ur", "gulf_ar"})) is True
+    assert coached(Spoken(client="ur"), arabic, frozenset({"ur"})) is False
 
 
 # --- the setting -------------------------------------------------------------------------
 
 
-def test_the_default_is_the_four_arabic_dialects_and_english() -> None:
+def test_the_default_is_every_arabic_code_and_english() -> None:
     assert CallsConfig().coaching_languages == frozenset(
-        {"gulf_ar", "egyptian_ar", "levantine_ar", "iraqi_ar", "en"}
+        {
+            "gulf_ar",
+            "egyptian_ar",
+            "levantine_ar",
+            "iraqi_ar",
+            "maghrebi_ar",
+            "msa_ar",
+            "en",
+        }
     )
     parsed = parse_unit_b_section({"coaching_languages": ["ur", "en"]})
     assert parsed.coaching_languages == frozenset({"ur", "en"})

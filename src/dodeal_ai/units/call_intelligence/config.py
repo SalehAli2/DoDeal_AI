@@ -123,8 +123,8 @@ class CallsConfig(BaseModel):
     # when the agent's is unknown (extras.py): gulf_ar, the agencies' market. A
     # wrong one reads foreign to the client; a code not of the four is refused.
     whatsapp_default_dialect: WhatsAppDialect = DEFAULT_WHATSAPP_DIALECT
-    # The client languages a call is coached and scored in (BRD B1): the four
-    # Arabic dialects and English, the ones tested. One listed untested judges
+    # The languages a call is coached and scored in (BRD B1), the agent's and the
+    # client's both: every Arabic code and English. One listed untested judges
     # agents on a pass nobody checked; one left off leaves its calls unscored.
     coaching_languages: frozenset[CoachedLanguage] = DEFAULT_COACHING_LANGUAGES
     # The tenant's IANA time zone, which a next step said on a call ("tomorrow

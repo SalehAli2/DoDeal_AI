@@ -27,11 +27,13 @@ THE SUMMARY LANGUAGE from the profile:
 Only a mixed call looks further, at words, because time favours whoever speaks
 slowly. A word is a whitespace-separated token of a segment's text.
 
-COACHED LANGUAGES (BRD B1): a call is coached and scored only when its
-client's language is on the tenant's coaching_languages, until each language
-is tested; otherwise both are null with language_not_enabled (wave2.py). The
-client's language as heard decides; unheard, the script fallback's profile:
-mostly_en needs en listed, mostly_ar an Arabic code, mixed both, other never.
+COACHED LANGUAGES (BRD B1): a call is coached and scored only when BOTH its
+agent's and its client's languages are on the tenant's coaching_languages,
+until each language is tested; otherwise both are null with
+language_not_enabled (wave2.py). With either side heard, both must be heard
+and listed: a side not heard is not a listed one. With neither heard, the
+script fallback's profile decides: mostly_en needs en listed, mostly_ar an
+Arabic code, mixed both, other never.
 """
 
 from __future__ import annotations
@@ -107,10 +109,17 @@ type CoachedLanguage = Literal[
     "fa",
     "tr",
 ]
-# The languages tested so far: the four Arabic dialects of the product and
-# English.
+# The languages coached by default: every Arabic code and English.
 DEFAULT_COACHING_LANGUAGES: frozenset[CoachedLanguage] = frozenset(
-    {"gulf_ar", "egyptian_ar", "levantine_ar", "iraqi_ar", "en"}
+    {
+        "gulf_ar",
+        "egyptian_ar",
+        "levantine_ar",
+        "iraqi_ar",
+        "maghrebi_ar",
+        "msa_ar",
+        "en",
+    }
 )
 # Why a call gets no coaching and no score (BRD B1).
 LANGUAGE_NOT_ENABLED = "language_not_enabled"
@@ -190,8 +199,8 @@ def coached(
     spoken: Spoken, segments: tuple[Segment, ...], enabled: frozenset[str]
 ) -> bool:
     """Whether the call is coached and scored (the module docstring's rule)."""
-    if spoken.client is not None:
-        return spoken.client in enabled
+    if spoken.heard:
+        return spoken.client in enabled and spoken.agent in enabled
     profile = profile_of(segments)
     arabic = bool(enabled & ARABIC_LANGUAGES)
     if profile is LanguageProfile.MOSTLY_AR:
