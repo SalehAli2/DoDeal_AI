@@ -14,7 +14,9 @@ most twice (paid.py).
 
 ROLES FIRST: a transcript the engine labelled (speaker_N) goes through the
 roles pass before anything reads agent or client (roles.py); everything after
-it, stage 1's transcript included, reads the transcript it returns.
+it, stage 1's transcript included, reads the transcript it returns, and the
+summary language follows the languages it heard, else the script
+(language.py). Stage 1's languages block says which.
 
 A PASS THAT FAILS still lets stage 1 go: analysis is null and analysis_reason
 says which pass and why (`extract_model_unavailable`, `prose_malformed_output`,
@@ -33,6 +35,11 @@ from dodeal_ai.core.llm import LLMClient
 from dodeal_ai.units.call_intelligence.alarms import alarms_if_enabled
 from dodeal_ai.units.call_intelligence.config import CallsConfig
 from dodeal_ai.units.call_intelligence.keywords import spot_keywords
+from dodeal_ai.units.call_intelligence.language import (
+    UNHEARD,
+    Spoken,
+    languages_block,
+)
 from dodeal_ai.units.call_intelligence.numbers import numbers_if_enabled
 from dodeal_ai.units.call_intelligence.paid import (
     PassFailed,
@@ -59,6 +66,7 @@ from dodeal_ai.units.call_intelligence.roles import (
     needs_roles,
     opening,
     single_voice,
+    spoken,
 )
 from dodeal_ai.units.call_intelligence.signals import SIGNALS_VERSION, call_signals
 from dodeal_ai.units.call_intelligence.transcriber import Transcript
@@ -73,7 +81,8 @@ NO_CLIENT = "llm_not_configured"
 class Wave1:
     """Stage 1's analysis, or null with the reason; the signals block found in
     code, never null; the versions both ran on; the transcript as the roles
-    left it, and the roles block (None when no voice needed one)."""
+    left it, the roles block (None when no voice needed one), and the
+    languages block (language.languages_block)."""
 
     analysis: dict[str, object] | None
     reason: str | None
@@ -81,6 +90,7 @@ class Wave1:
     signals: dict[str, object]
     transcript: Transcript
     roles: dict[str, object] | None
+    languages: dict[str, object]
 
 
 def _analysis(
@@ -174,10 +184,11 @@ async def wave1(
         else PassRun(job, work, config.result_ttl_seconds, client, usage, start_pass)
     )
     seconds = int(str(job.metadata["duration_seconds"]))
-    transcript, roles = await _roles(
+    transcript, roles, heard = await _roles(
         run, transcript, seconds, config, scope, settings, stamps
     )
-    call = CallText.of(transcript, country_code=config.phone_country_code)
+    languages = languages_block(transcript, heard)
+    call = CallText.of(transcript, country_code=config.phone_country_code, spoken=heard)
     code, digest = _found_in_code(transcript, config, job)
     versions: dict[str, object] = {
         "prompt": PROMPT_SET_VERSION,
@@ -188,7 +199,7 @@ async def wave1(
         "passes": {},
     }
     if run is None:
-        return Wave1(None, NO_CLIENT, versions, code, transcript, roles)
+        return Wave1(None, NO_CLIENT, versions, code, transcript, roles, languages)
     try:
         extraction, stamps[EXTRACT] = await run_pass(
             run,
@@ -207,10 +218,10 @@ async def wave1(
         )
     except PassFailed as failed:
         _stamp(versions, stamps)
-        return Wave1(None, str(failed), versions, code, transcript, roles)
+        return Wave1(None, str(failed), versions, code, transcript, roles, languages)
     _stamp(versions, stamps)
     analysis = _analysis(call, extraction, prose)
-    return Wave1(analysis, None, versions, code, transcript, roles)
+    return Wave1(analysis, None, versions, code, transcript, roles, languages)
 
 
 async def _roles(
@@ -221,12 +232,13 @@ async def _roles(
     scope: TenantScope,
     settings: Settings,
     stamps: dict[str, Stamp],
-) -> tuple[Transcript, dict[str, object] | None]:
-    """The transcript with its voices' roles, and the roles block; as it
-    came, and None, when no voice carries the engine's label -- doubted
-    even then when one voice is all a long call has."""
+) -> tuple[Transcript, dict[str, object] | None, Spoken]:
+    """The transcript with its voices' roles, the roles block, and each side's
+    language as heard; as it came, None and unheard, when no voice carries the
+    engine's label -- doubted even then when one voice is all a long call has."""
     if not needs_roles(transcript):
-        return transcript.doubted(*single_voice(transcript, call_seconds)), None
+        doubted = transcript.doubted(*single_voice(transcript, call_seconds))
+        return doubted, None, UNHEARD
     answer: Roles | None = None
     if run is not None:
         head = opening(transcript, country_code=config.phone_country_code)
@@ -241,7 +253,8 @@ async def _roles(
             )
         except PassFailed:
             answer = None
-    return apply_roles(transcript, answer, call_seconds=call_seconds)
+    relabelled, block = apply_roles(transcript, answer, call_seconds=call_seconds)
+    return relabelled, block, spoken(answer, applied=block["applied"] is True)
 
 
 def _stamp(versions: dict[str, object], stamps: dict[str, Stamp]) -> None:

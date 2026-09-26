@@ -19,7 +19,8 @@ run. Every pass is kept, counted and started at most twice (paid.py), so a
 re-run of stage 2 pays for nothing it already received.
 
 The transcript is read as wave 1 read it: the prompt copy, masked under the
-tenant's country code, the summary language decided in code.
+tenant's country code, the summary language decided in code from the
+languages stage 1 heard, else the script.
 
 THE STAGE-2 RESULT (stage2_result), held in db3 and delivered as call.stage2:
 each pass's part, null where the pass failed or did not run, the reason for
@@ -52,6 +53,7 @@ from dodeal_ai.units.call_intelligence.escalations import (
 )
 from dodeal_ai.units.call_intelligence.evidence import CallText
 from dodeal_ai.units.call_intelligence.extras import Extras, extras_part, find_extras
+from dodeal_ai.units.call_intelligence.language import UNHEARD, Spoken
 from dodeal_ai.units.call_intelligence.objections import (
     OBJECTION_LIST_VERSION,
     Objections,
@@ -129,11 +131,15 @@ async def wave2(
     usage: PassUsage,
     eligible: bool,
     stage1_escalations: Sequence[dict[str, object]],
+    spoken: Spoken = UNHEARD,
 ) -> Wave2:
     """Wave 2 for one transcript. JobGone when stage 2 stopped under it.
     `eligible` is the call's eligibility for full analysis, as it is now;
-    `stage1_escalations` are the ones stage 1 found in code."""
-    call = CallText.of(transcript, country_code=config.phone_country_code)
+    `stage1_escalations` are the ones stage 1 found in code; `spoken` each
+    side's language as stage 1's roles pass heard it."""
+    call = CallText.of(
+        transcript, country_code=config.phone_country_code, spoken=spoken
+    )
     run = PassRun(
         job, work, config.result_ttl_seconds, client, usage, start_stage2_pass
     )

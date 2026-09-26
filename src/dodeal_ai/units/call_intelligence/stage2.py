@@ -67,6 +67,7 @@ from dodeal_ai.core.jobs import (
 from dodeal_ai.core.logging_config import job_log_context
 from dodeal_ai.units.call_intelligence.analysis import NO_CLIENT
 from dodeal_ai.units.call_intelligence.config import resolve_calls_config
+from dodeal_ai.units.call_intelligence.language import spoken_of
 from dodeal_ai.units.call_intelligence.paid import JobGone, PassUsage
 from dodeal_ai.units.call_intelligence.transcriber import Transcript
 from dodeal_ai.units.call_intelligence.wave2 import Wave2, stage2_result, wave2
@@ -201,6 +202,7 @@ async def _analyse(
             usage=run.usage,
             eligible=eligible_for_full_analysis(job, config, transcript),
             stage1_escalations=_stage1_escalations(result),
+            spoken=spoken_of(result.get("languages")),
         )
     except JobGone:
         return

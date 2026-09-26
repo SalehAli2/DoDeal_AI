@@ -1,20 +1,27 @@
-"""unit_b.roles (stage 1, before wave 1): which diarized voice is the agent.
+"""unit_b.roles (stage 1, before wave 1): which diarized voice is the agent,
+and which language each side speaks.
 
 A transcript labelled by the engine (speaker_N) names no one, and every label
 but "agent" reads as the client (prompts.role_of). This pass reads the first
 ROLE_SEGMENTS segments as the engine labelled them and answers each label's
-role -- agent, client or unclear -- quoting one of that voice's own segments.
+role -- agent, client or unclear -- quoting one of that voice's own segments;
+and call_languages: the client's and the agent's language, one code each
+(language.CALL_LANGUAGES), judged from the words, not the script.
 
 THE CHECKS, in code, any failure a malformed answer (one reprompt, then the
 pass fails): every label in those segments named once and no other; an agent
-or a client quoted, under the quote check, from that voice's own segment.
+or a client quoted, under the quote check, from that voice's own segment; a
+side's language quoted, under the quote check, from a segment of a voice the
+answer gives that side's role -- the client's from a client, the agent's from
+the agent; a side not heard is null, and any quote it gives is checked alike.
 
 CODE DECIDES what the answer is worth. The mapping is applied -- each label
 becomes agent or client, a voice first heard later a client -- only when it is
 clear: exactly one agent, at least one client and no unclear. Otherwise, or
 when the pass failed, the labels stay and the transcript is uncertain; more
 than two voices make it uncertain too, mapped or not. Stage 1 carries the
-answer and what became of it.
+answer and what became of it. The languages are used only with the mapping
+applied (spoken); otherwise the language falls back to script (language.py).
 
 ONE VOICE on a call of SINGLE_VOICE_MIN_SECONDS or more is uncertain
 (single_voice), whoever labelled it: the engine or a stereo channel. A sales
@@ -40,6 +47,11 @@ from dodeal_ai.units.call_intelligence.evidence import (
     Strict,
     evidence_errors,
     quote_errors,
+)
+from dodeal_ai.units.call_intelligence.language import (
+    UNHEARD,
+    CallLanguage,
+    Spoken,
 )
 from dodeal_ai.units.call_intelligence.prompts import (
     AGENT,
@@ -94,10 +106,36 @@ class SpeakerRole(Strict):
     segment: SegmentId
 
 
+class SideLanguage(Strict):
+    """One side's language, and that side's words in it; null when unheard."""
+
+    language: CallLanguage | None
+    quote: Quote
+    segment: SegmentId
+
+
+_NOT_HEARD = SideLanguage(language=None, quote=None, segment=None)
+
+
+class CallLanguages(Strict):
+    """The client's language and the agent's."""
+
+    client: SideLanguage
+    agent: SideLanguage
+
+
+# An answer kept before the languages existed reads back as neither heard.
+_NONE_HEARD = CallLanguages(client=_NOT_HEARD, agent=_NOT_HEARD)
+
+# The two sides, as call_languages names them and as a voice's role.
+SIDES = (CLIENT, AGENT)
+
+
 class Roles(Strict):
     """unit_b.roles' answer, exactly."""
 
     speakers: Annotated[list[SpeakerRole], Field(min_length=1, max_length=MAX_SPEAKERS)]
+    call_languages: CallLanguages = _NONE_HEARD
 
 
 def needs_roles(transcript: Transcript) -> bool:
@@ -143,10 +181,40 @@ def check_roles(call: CallText) -> Callable[[Roles], None]:
             wrong = index is not None and call.segments[index].speaker != found.speaker
             if not owed and wrong:
                 errors.append((where, "quote_wrong_speaker"))
+        errors += _language_errors(call, answer)
         if errors:
             raise output_rejected(ROLES_LABEL, tuple(errors))
 
     return check
+
+
+def _language_errors(call: CallText, answer: Roles) -> Errors:
+    """Each side's language quoted from a voice the answer gives that role; a
+    known language owes its quote."""
+    errors: Errors = []
+    for side in SIDES:
+        found: SideLanguage = getattr(answer.call_languages, side)
+        where = f"call_languages.{side}"
+        owed = quote_errors if found.language is None else evidence_errors
+        checked = owed(call, where, found.quote, found.segment)
+        errors += checked
+        if checked or found.segment is None:
+            continue
+        voices = {s.speaker for s in answer.speakers if s.role == side}
+        index = call.index_of(found.segment)
+        if index is not None and call.segments[index].speaker not in voices:
+            errors.append((where, "quote_wrong_speaker"))
+    return errors
+
+
+def spoken(answer: Roles | None, *, applied: bool) -> Spoken:
+    """Each side's language, only from an answer whose mapping was applied."""
+    if answer is None or not applied:
+        return UNHEARD
+    return Spoken(
+        client=answer.call_languages.client.language,
+        agent=answer.call_languages.agent.language,
+    )
 
 
 async def ask_roles(
@@ -215,5 +283,8 @@ def apply_roles(
         else [found.model_dump() for found in answer.speakers],
         "applied": clear,
         "reasons": reasons,
+        "call_languages": None
+        if answer is None
+        else answer.call_languages.model_dump(),
     }
     return relabelled, block

@@ -4,8 +4,9 @@ types every pass's answer is built from.
 
 THE TRANSCRIPT AS A PASS SEES IT (CallText): each segment's prompt copy --
 numbers and emails masked under the tenant's country code (numbers.py) -- its
-speaker's role, the summary language decided in code (language.py), and
-whether the transcript as a whole is uncertain.
+speaker's role, each side's language as the roles pass heard it, the summary
+language decided in code from them (language.py), and whether the transcript
+as a whole is uncertain.
 
 THE QUOTE CHECK, in code, on every quote a pass returns: at most 40 words; the
 segment it cites exists; and its words, normalised as the alarm matcher
@@ -31,6 +32,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from dodeal_ai.units.call_intelligence.alarms import words
 from dodeal_ai.units.call_intelligence.language import (
+    UNHEARD,
+    Spoken,
     SummaryLanguage,
     summary_language,
 )
@@ -83,24 +86,30 @@ class Strict(BaseModel):
 @dataclass(frozen=True, slots=True)
 class CallText:
     """The transcript as every pass sees it: each segment's prompt copy and
-    role, the summary language, and whether the whole is uncertain."""
+    role, the summary language, whether the whole is uncertain, and each
+    side's language as the roles pass heard it."""
 
     segments: tuple[Segment, ...]
     shown: tuple[str, ...]
     language: SummaryLanguage
     uncertain: bool
+    spoken: Spoken = UNHEARD
 
     @classmethod
-    def of(cls, transcript: Transcript, *, country_code: str) -> CallText:
-        """`country_code` is the tenant's, which a local number is masked under."""
+    def of(
+        cls, transcript: Transcript, *, country_code: str, spoken: Spoken = UNHEARD
+    ) -> CallText:
+        """`country_code` is the tenant's, which a local number is masked under;
+        `spoken` the roles pass's languages, unheard when it gave none."""
         return cls(
             segments=transcript.segments,
             shown=tuple(
                 prompt_copy(segment.text, country_code=country_code)
                 for segment in transcript.segments
             ),
-            language=summary_language(transcript),
+            language=summary_language(transcript, spoken),
             uncertain=transcript.uncertain,
+            spoken=spoken,
         )
 
     def data(self) -> str:

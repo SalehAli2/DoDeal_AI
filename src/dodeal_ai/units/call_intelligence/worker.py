@@ -249,8 +249,8 @@ def stage1_result(
     audio: AudioQuality | None = None,
 ) -> dict[str, object]:
     """The stage-1 result, held in db3 and delivered as call.stage1: the
-    transcript, the audio's numbers, the signals block, wave 1's analysis (or
-    null and why) and the versions. No wave 1 -- no transcript, or one with no
+    transcript, the audio's numbers, the roles and languages blocks, the
+    signals block, wave 1's analysis (or null and why) and the versions. No wave 1 -- no transcript, or one with no
     speech -- and the signals and versions are null too; audio is null when
     the recording was not inspected."""
     duration = int(str(job.metadata["duration_seconds"]))
@@ -267,6 +267,7 @@ def stage1_result(
         else transcript.model_dump(mode="json"),
         "audio": None if audio is None else audio.to_dict(),
         "roles": None if wave is None else wave.roles,
+        "languages": None if wave is None else wave.languages,
         "signals": None if wave is None else wave.signals,
         "analysis": None if wave is None else wave.analysis,
         "analysis_reason": _unanalysed(transcript) if wave is None else wave.reason,
