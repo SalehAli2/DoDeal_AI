@@ -1,6 +1,7 @@
 """unit_b.extras (extras.py): keywords checked in their segment, the three tags,
-a WhatsApp suggestion of at most 60 words in the summary language and never
-sent by us, and seriousness banded in code and marked manager_only."""
+the agent's dialect quoted from the agent, a WhatsApp suggestion of at most 60
+words in the summary language, in the dialect code names, and never sent by
+us, and seriousness banded in code and marked manager_only."""
 
 from __future__ import annotations
 
@@ -26,6 +27,7 @@ from dodeal_ai.units.call_intelligence.extras import (
     SERIOUSNESS_CHECKS,
     Extras,
     check_extras,
+    extras_data,
     extras_part,
     find_extras,
     seriousness_band,
@@ -112,6 +114,33 @@ def _refused(answer: dict[str, Any], call: CallText | None = None):
     return refused.value.errors
 
 
+# An invented Arabic call: the agent speaks Gulf Arabic, the client answers.
+AGENT_WORDS = "نبي نرتب معاينة يوم السبت"
+CLIENT_WORDS = "السبت يناسبني إن شاء الله"
+AR_SEGMENTS = (
+    _say(0, "agent", f"هلا، شلونك؟ {AGENT_WORDS}", "ar"),
+    _say(5, "lead", f"هلا، {CLIENT_WORDS}", "ar"),
+)
+AR_WHATSAPP = "شكرا لوقتك، نشوفك يوم السبت."
+DEFAULTS = ["gulf_uae", "egyptian", "levantine", "msa"]
+
+
+def _dialect(
+    dialect: str = "unknown", quote: str | None = None, segment: str | None = None
+) -> dict[str, Any]:
+    return {"dialect": dialect, "quote": quote, "segment": segment}
+
+
+def _arabic(agent_dialect: dict[str, Any]) -> dict[str, Any]:
+    """An answer to the Arabic call that quotes nothing but the dialect."""
+    return _answer(
+        keywords=[],
+        seriousness=_with_yes(0),
+        whatsapp=AR_WHATSAPP,
+        agent_dialect=agent_dialect,
+    )
+
+
 def _with_yes(count: int) -> dict[str, Any]:
     """Seriousness with the first `count` checks yes, each truly quoted."""
     quotes = [
@@ -156,6 +185,89 @@ async def test_a_long_whatsapp_suggestion_is_reprompted_once_then_fails() -> Non
     assert llm.call_count == 2
 
 
+# --- the guard: the agent's dialect and the dialect of the message --------------------
+
+
+def test_an_agent_dialect_quoted_from_a_client_segment_is_malformed() -> None:
+    call = _call(*AR_SEGMENTS)
+    client = _arabic(_dialect("gulf", CLIENT_WORDS, "s2"))
+    assert _refused(client, call) == (("agent_dialect", "quote_wrong_speaker"),)
+    unknown = _arabic(_dialect("unknown", CLIENT_WORDS, "s2"))
+    assert _refused(unknown, call) == (("agent_dialect", "quote_wrong_speaker"),)
+    check_extras(call)(
+        Extras.model_validate(_arabic(_dialect("gulf", AGENT_WORDS, "s1")))
+    )
+
+
+def test_a_known_agent_dialect_is_owed_a_true_quote() -> None:
+    call = _call(*AR_SEGMENTS)
+    assert _refused(_arabic(_dialect("gulf")), call) == (
+        ("agent_dialect", "quote_missing"),
+    )
+    assert _refused(_arabic(_dialect("gulf", "وين الفيلا", "s1")), call) == (
+        ("agent_dialect", "quote_not_in_segment"),
+    )
+
+
+async def test_a_client_quoted_dialect_is_reprompted_once_then_fails() -> None:
+    client = json_response(_arabic(_dialect("gulf", CLIENT_WORDS, "s2")))
+    llm = FakeLLM(client, client)
+    with pytest.raises(MalformedOutputError):
+        await find_extras(
+            llm, _call(*AR_SEGMENTS), scope=SCOPE, settings=get_settings()
+        )
+    assert llm.call_count == 2
+
+
+@pytest.mark.parametrize("default", DEFAULTS)
+def test_an_unknown_agent_dialect_gives_the_company_default(default: str) -> None:
+    call = _call(*AR_SEGMENTS)
+    answer = Extras.model_validate(_arabic(_dialect()))
+    check_extras(call)(answer)
+    part = extras_part(call, answer, default)
+    assert (part["agent_dialect"], part["whatsapp_dialect"]) == (_dialect(), default)
+    assert part["whatsapp_suggestion"] == {"language": "ar", "text": AR_WHATSAPP}
+
+
+@pytest.mark.parametrize("default", DEFAULTS)
+def test_a_known_agent_dialect_is_the_dialect_of_the_message(default: str) -> None:
+    call = _call(*AR_SEGMENTS)
+    heard = _dialect("gulf", AGENT_WORDS, "s1")
+    answer = Extras.model_validate(_arabic(heard))
+    check_extras(call)(answer)
+    part = extras_part(call, answer, default)
+    assert (part["agent_dialect"], part["whatsapp_dialect"]) == (heard, "gulf")
+
+
+@pytest.mark.parametrize("default", DEFAULTS)
+def test_an_english_call_gives_an_english_message(default: str) -> None:
+    call = _call()
+    assert call.language == "en"
+    assert _refused(_answer(whatsapp=AR_WHATSAPP), call) == (
+        ("whatsapp", "wrong_language"),
+    )
+    answer = Extras.model_validate(ANSWER)
+    check_extras(call)(answer)
+    part = extras_part(call, answer, default)
+    assert part["whatsapp_dialect"] is None
+    assert part["whatsapp_suggestion"] == {"language": "en", "text": ANSWER["whatsapp"]}
+
+
+def test_the_prompt_names_the_default_dialect_after_the_vocabulary() -> None:
+    data = extras_data(_call(), ["Palm Grove Residences"], "levantine")
+    assert data.endswith(
+        "VOCABULARY:\n- Palm Grove Residences\n\nDEFAULT DIALECT: levantine"
+    )
+    assert extras_data(_call(), []).endswith(
+        "VOCABULARY: none\n\nDEFAULT DIALECT: gulf_uae"
+    )
+
+
+def test_an_answer_kept_before_the_dialect_reads_back_as_unknown() -> None:
+    kept = Extras.model_validate(ANSWER)
+    assert kept.agent_dialect.model_dump() == _dialect()
+
+
 # --- the rest of the rules --------------------------------------------------------------
 
 
@@ -167,6 +279,7 @@ def test_a_true_answer_passes_and_is_marked_manager_only() -> None:
         {**keyword, "canonical": None} for keyword in ANSWER["keywords"]
     ]
     assert part["tags"] == ANSWER["tags"]
+    assert (part["agent_dialect"], part["whatsapp_dialect"]) == (_dialect(), None)
     assert part["whatsapp_suggestion"] == {"language": "en", "text": ANSWER["whatsapp"]}
     seriousness = part["seriousness"]
     assert (seriousness["band"], seriousness["manager_only"]) == ("A", True)
@@ -249,7 +362,7 @@ def test_the_whatsapp_suggestion_has_no_way_out_but_the_callback() -> None:
 # --- in wave 2 -----------------------------------------------------------------------------
 
 
-async def _wave2(*extras_answers: Any):
+async def _wave2(*extras_answers: Any, config: CallsConfig | None = None):
     await create_job(
         "tenant-a",
         7,
@@ -272,7 +385,7 @@ async def _wave2(*extras_answers: Any):
     wave = await wave2(
         llm,
         await read_job("tenant-a", "job-1"),
-        CallsConfig(),
+        config or CallsConfig(),
         TRANSCRIPT,
         work={},
         scope=SCOPE,
@@ -301,3 +414,12 @@ async def test_a_failed_extras_pass_is_null_and_the_rest_stands() -> None:
     )
     assert wave.parts["coaching"] is not None
     assert wave.parts["objections"] is not None
+
+
+async def test_wave2_sends_the_tenant_default_dialect_to_the_extras_pass() -> None:
+    config = CallsConfig(whatsapp_default_dialect="egyptian")
+    llm, wave = await _wave2(json_response(ANSWER), config=config)
+    assert "\n\nDEFAULT DIALECT: egyptian\n" in llm.calls[-1].prompt.variable
+    part = wave.parts[EXTRAS]
+    assert part is not None
+    assert (part["agent_dialect"], part["whatsapp_dialect"]) == (_dialect(), None)

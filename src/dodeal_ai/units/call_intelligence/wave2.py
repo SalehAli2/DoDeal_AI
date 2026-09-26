@@ -174,11 +174,16 @@ async def wave2(
             metered,
             call,
             vocabulary=config.keyword_vocabulary,
+            default_dialect=config.whatsapp_default_dialect,
             scope=scope,
             settings=settings,
         ),
     )
-    wave.parts[EXTRAS] = None if extras is None else extras_part(call, extras)
+    wave.parts[EXTRAS] = (
+        None
+        if extras is None
+        else extras_part(call, extras, config.whatsapp_default_dialect)
+    )
     return wave
 
 

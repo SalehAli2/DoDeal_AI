@@ -24,6 +24,10 @@ from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.llm import DEFAULT_ROUTE, route_names
 from dodeal_ai.core.tenant_config import ResolvedSection, resolve_section
 from dodeal_ai.units.call_intelligence.alarms import words
+from dodeal_ai.units.call_intelligence.extras import (
+    DEFAULT_WHATSAPP_DIALECT,
+    WhatsAppDialect,
+)
 from dodeal_ai.units.call_intelligence.keywords import MAX_KEYWORD_TERMS
 from dodeal_ai.units.call_intelligence.numbers import DEFAULT_COUNTRY_CODE
 from dodeal_ai.units.call_intelligence.transcriber import (
@@ -106,6 +110,10 @@ class CallsConfig(BaseModel):
     # DODEAL_LLM_* / DODEAL_CALL_STT_* pair. Policy, like every unit_b field.
     model_route: str = DEFAULT_ROUTE
     stt_profile: str = DEFAULT_STT_PROFILE
+    # The Arabic dialect a WhatsApp suggestion is written in when the agent's is
+    # unknown (extras.py): gulf_uae, the agencies' market. A wrong one makes the
+    # suggestion read foreign to the client; an unlisted name is refused.
+    whatsapp_default_dialect: WhatsAppDialect = DEFAULT_WHATSAPP_DIALECT
 
     # The switches, all off: calls_enabled admits jobs at all (403 otherwise);
     # the other five name later passes and are parsed and stored only. A switch

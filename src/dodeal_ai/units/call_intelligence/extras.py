@@ -9,10 +9,14 @@ could send next, and how serious the client is.
   tags         outcome (moved_forward, stalled, needs_follow_up, dead), stage
                (first_contact, follow_up, viewing, negotiation, closing) and
                client_type (end_user, investor, broker, unknown)
+  dialect      the agent's Arabic dialect (egyptian, levantine, gulf, maghrebi,
+               msa or unknown), a known one quoted from an AGENT segment
   whatsapp     a follow-up the agent may send, in the summary language, at most
-               60 words. A SUGGESTION ONLY: this service sends nothing to
-               anyone but the tenant's callback (core/callbacks.py); the text
-               goes back to the CRM inside call.stage2 and nowhere else.
+               60 words: in Arabic, in the agent's dialect when known, else in
+               the tenant's whatsapp_default_dialect; in English on an English
+               call. A SUGGESTION ONLY: this service sends nothing to anyone
+               but the tenant's callback (core/callbacks.py); the text goes
+               back to the CRM inside call.stage2 and nowhere else.
   seriousness  five yes-or-no checks -- budget_stated, timeline_stated,
                decision_maker_named, next_step_agreed, client_engaged -- each
                with a short reason and every yes quoted. The band is code's:
@@ -22,8 +26,11 @@ could send next, and how serious the client is.
 THE CHECKS, in code, any failure a malformed answer (one reprompt, then the
 pass fails and the extras part is null): every keyword's words in the segment
 it cites, and its canonical name, if any, exactly one on the list; every
-quote given under the quote check, and every yes quoted; the WhatsApp text
-within 60 words and in the summary language's script (evidence.in_language).
+quote given under the quote check, and every yes quoted; a known agent
+dialect quoted, and any dialect quote from a segment of the agent's; the
+WhatsApp text within 60 words and in the summary language's script
+(evidence.in_language). The dialect the text was asked in (whatsapp_dialect)
+is code's, from the checked agent dialect, the default and the language.
 """
 
 from __future__ import annotations
@@ -50,6 +57,7 @@ from dodeal_ai.units.call_intelligence.evidence import (
     quote_errors,
 )
 from dodeal_ai.units.call_intelligence.prompts import (
+    AGENT,
     EXTRAS_TEMPLATE,
     REPROMPT_TAIL_TEMPLATE,
     REPROMPT_TAILS,
@@ -78,6 +86,16 @@ MAX_KEYWORDS = 15
 WHATSAPP_MAX_WORDS = 60
 
 YES = "yes"
+
+# The dialects the agent may be heard in, and the dialects a tenant may write
+# its messages in; msa is Modern Standard Arabic.
+type AgentDialectName = Literal[
+    "egyptian", "levantine", "gulf", "maghrebi", "msa", "unknown"
+]
+type WhatsAppDialect = Literal["gulf_uae", "egyptian", "levantine", "msa"]
+UNKNOWN_DIALECT = "unknown"
+# The tenant default when unit_b sets none: the UAE, where the agencies are.
+DEFAULT_WHATSAPP_DIALECT: WhatsAppDialect = "gulf_uae"
 
 # The seriousness checks, and the bands from the top: the first whose floor
 # the count of yes answers reaches.
@@ -134,11 +152,25 @@ class Seriousness(Strict):
     client_engaged: SeriousCheck
 
 
+class AgentDialect(Strict):
+    """The agent's dialect and the agent's words that show it; unknown with
+    none."""
+
+    dialect: AgentDialectName
+    quote: Quote
+    segment: SegmentId
+
+
+# An answer kept before the dialect existed reads back as unknown.
+_NO_DIALECT = AgentDialect(dialect=UNKNOWN_DIALECT, quote=None, segment=None)
+
+
 class Extras(Strict):
     """unit_b.extras' answer, exactly."""
 
     keywords: Annotated[list[Keyword], Field(max_length=MAX_KEYWORDS)]
     tags: Tags
+    agent_dialect: AgentDialect = _NO_DIALECT
     whatsapp: Annotated[str, Field(min_length=1, max_length=_WHATSAPP_CHARS)]
     seriousness: Seriousness
 
@@ -146,6 +178,22 @@ class Extras(Strict):
 def seriousness_band(yes: int) -> str:
     """The band a count of yes answers falls in."""
     return next(band for floor, band in SERIOUSNESS_BANDS if yes >= floor)
+
+
+def whatsapp_dialect(
+    call: CallText, agent: AgentDialect, default: WhatsAppDialect
+) -> str | None:
+    """The dialect the suggestion was asked in: none on an English call, the
+    agent's when known, else the tenant's default."""
+    if call.language == "en":
+        return None
+    return default if agent.dialect == UNKNOWN_DIALECT else agent.dialect
+
+
+def _dialect_errors(call: CallText, agent: AgentDialect) -> Errors:
+    """A known dialect is owed a quote; any quote is the agent's own."""
+    owed = quote_errors if agent.dialect == UNKNOWN_DIALECT else evidence_errors
+    return owed(call, "agent_dialect", agent.quote, agent.segment, speaker=AGENT)
 
 
 def _whatsapp_errors(call: CallText, text: str) -> Errors:
@@ -157,11 +205,16 @@ def _whatsapp_errors(call: CallText, text: str) -> Errors:
     return errors
 
 
-def extras_data(call: CallText, vocabulary: Iterable[str]) -> str:
-    """The call's data, then the tenant's vocabulary, one name per line."""
+def extras_data(
+    call: CallText,
+    vocabulary: Iterable[str],
+    default_dialect: WhatsAppDialect = DEFAULT_WHATSAPP_DIALECT,
+) -> str:
+    """The call's data, then the tenant's vocabulary, one name per line, then
+    its default dialect."""
     listed = [f"- {one_line(term)}" for term in sorted(vocabulary)]
     shown = "\n".join(["VOCABULARY:", *listed]) if listed else "VOCABULARY: none"
-    return f"{call.data()}\n\n{shown}"
+    return f"{call.data()}\n\n{shown}\n\nDEFAULT DIALECT: {default_dialect}"
 
 
 def check_extras(
@@ -181,6 +234,7 @@ def check_extras(
             found: SeriousCheck = getattr(answer.seriousness, name)
             owed = evidence_errors if found.answer == YES else quote_errors
             errors += owed(call, f"seriousness.{name}", found.quote, found.segment)
+        errors += _dialect_errors(call, answer.agent_dialect)
         errors += _whatsapp_errors(call, answer.whatsapp)
         if errors:
             raise output_rejected(EXTRAS_LABEL, tuple(errors))
@@ -195,12 +249,16 @@ async def find_extras(
     scope: TenantScope,
     settings: Settings,
     vocabulary: frozenset[str] = frozenset(),
+    default_dialect: WhatsAppDialect = DEFAULT_WHATSAPP_DIALECT,
 ) -> tuple[Extras, LLMResponse]:
     """unit_b.extras: one call, or two when the first answer is malformed;
-    `vocabulary` is the tenant's keyword_vocabulary."""
+    `vocabulary` is the tenant's keyword_vocabulary, `default_dialect` its
+    whatsapp_default_dialect."""
     return await call_model(
         client,
-        build_call_prompt(EXTRAS_TEMPLATE, extras_data(call, vocabulary)),
+        build_call_prompt(
+            EXTRAS_TEMPLATE, extras_data(call, vocabulary, default_dialect)
+        ),
         Extras,
         EXTRAS_LABEL,
         scope=scope,
@@ -219,9 +277,14 @@ async def find_extras(
     )
 
 
-def extras_part(call: CallText, answer: Extras) -> dict[str, object]:
-    """Stage 2's extras part: the keywords, the tags, the WhatsApp suggestion
-    in its language, and the seriousness checks with the band code gives."""
+def extras_part(
+    call: CallText,
+    answer: Extras,
+    default_dialect: WhatsAppDialect = DEFAULT_WHATSAPP_DIALECT,
+) -> dict[str, object]:
+    """Stage 2's extras part: the keywords, the tags, the agent's dialect, the
+    WhatsApp suggestion in its language and the dialect code says it was asked
+    in, and the seriousness checks with the band code gives."""
     checks = {
         name: getattr(answer.seriousness, name).model_dump()
         for name in SERIOUSNESS_CHECKS
@@ -230,6 +293,10 @@ def extras_part(call: CallText, answer: Extras) -> dict[str, object]:
     return {
         "keywords": [keyword.model_dump() for keyword in answer.keywords],
         "tags": answer.tags.model_dump(),
+        "agent_dialect": answer.agent_dialect.model_dump(),
+        "whatsapp_dialect": whatsapp_dialect(
+            call, answer.agent_dialect, default_dialect
+        ),
         "whatsapp_suggestion": {"language": call.language, "text": answer.whatsapp},
         "seriousness": {
             "band": seriousness_band(yes),
