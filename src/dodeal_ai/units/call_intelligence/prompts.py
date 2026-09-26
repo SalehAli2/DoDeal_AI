@@ -47,6 +47,9 @@ WHATSAPP_TEMPLATE = "call_intelligence/whatsapp_v1.txt"
 REPROMPT_TAIL_TEMPLATE = "call_intelligence/reprompt_tail_v1.txt"
 QUOTE_LENGTH_TAIL_TEMPLATE = "call_intelligence/reprompt_tail_quote_length_v1.txt"
 QUOTE_EXACT_TAIL_TEMPLATE = "call_intelligence/reprompt_tail_quote_exact_v1.txt"
+# The extras pass's tail for a WhatsApp text too long or in the wrong script
+# (extras.EXTRAS_TAILS), unit_b_prompts_v13.
+WHATSAPP_TAIL_TEMPLATE = "call_intelligence/reprompt_tail_whatsapp_v1.txt"
 
 # The reprompt tail by failure code, in priority order: the first code here
 # that any failure carries picks it, else REPROMPT_TAIL_TEMPLATE. Fixed files
@@ -88,7 +91,7 @@ RETIRED_TEMPLATES: tuple[str, ...] = (
 
 # The stamp stage 1 carries under versions.prompt. Move it with the digest
 # in the stamp test whenever one of UNIT_B_TEMPLATES changes.
-PROMPT_SET_VERSION = "unit_b_prompts_v12"
+PROMPT_SET_VERSION = "unit_b_prompts_v13"
 
 # Every template Unit B can send, in pass order, then the retired ones; the
 # worker preloads them all.
@@ -106,6 +109,7 @@ UNIT_B_TEMPLATES: tuple[str, ...] = (
     REPROMPT_TAIL_TEMPLATE,
     QUOTE_LENGTH_TAIL_TEMPLATE,
     QUOTE_EXACT_TAIL_TEMPLATE,
+    WHATSAPP_TAIL_TEMPLATE,
     *RETIRED_TEMPLATES,
 )
 

@@ -121,7 +121,7 @@ Each event then adds its own fields (sections 3 to 5 and 7). A re-analysis job's
     },
     "analysis_reason": null,
     "versions": {
-      "prompt": "unit_b_prompts_v12",
+      "prompt": "unit_b_prompts_v13",
       "quote_fillers": "quote_fillers_v1",
       "signals": "call_signals_v2",
       "model": "fake-model-pinned",
@@ -277,6 +277,7 @@ A **segment id** is `s<n>`, 1-based in `transcript.segments` order: `s3` is the 
       "agent_dialect": {"dialect": "unknown", "quote": null, "segment": null, "unverified": false},
       "whatsapp_dialect": null,
       "whatsapp_suggestion": {"language": "en", "text": "Thank you for your time. See you on Tuesday for the villa viewing."},
+      "whatsapp_reason": null,
       "seriousness": {
         "band": "B",
         "yes": 3,
@@ -295,7 +296,7 @@ A **segment id** is `s<n>`, 1-based in `transcript.segments` order: `s3` is the 
     },
     "reasons": {},
     "versions": {
-      "prompt": "unit_b_prompts_v12",
+      "prompt": "unit_b_prompts_v13",
       "quote_fillers": "quote_fillers_v1",
       "objection_list": "objection_list_v1",
       "rubric": "call_rubric_v1",
@@ -323,12 +324,12 @@ A **segment id** is `s<n>`, 1-based in `transcript.segments` order: `s3` is the 
 | `escalations` | `items[]` in time order: stage 1's `off_channel_contact` items merged with the model's flags. A model flag has `type`, `issue`, `source: model`, `speaker`, `start_s`, `segment` and `quote`. `issue` is one of `over_promise_or_guarantee`, `wrong_price_or_terms`, `rudeness_or_pressure`, `unprofessional_competitor_talk`, `qualified_no_next_step` or `possible_broker`; `type` equals `issue`, except that **`wrong_price_or_terms` goes out as `type: claim_to_verify`**, a claim to check and not a finding. |
 | `escalations`: `possible_broker` | a manager escalation beside the others: the client presents as a buyer but talks like a broker (asks about commission, says "my client(s)", asks for several units for others). One item per quote, each the **client's** own words from a client segment (`speaker: client`). A client buying several units for themselves is an investor and is not flagged. |
 | `coaching` | in the summary `language`. 2 or 3 `observations` (at least one `strength` and one `improvement`; an improvement has `say_it_like_this`). Up to 4 `moments`, each with `timestamp` (`mm:ss`) and `start_s` read from its segment in code. A 3-action `plan`. The seven `stages`, each `done` with a quote when yes. **`ask_why`**: a fixed tip, written in code and not by the model, in the summary language, to ask the client why they said no; set when stage 1's `loss_reason` is `no_reason_given`, else `null`. |
-| `extras` | `keywords[]`: `kind` (`project`, `community`, `developer` or `topic`), `said` as spoken, a name of at most five words (a longer one is malformed), checked in its `segment`, and `english` or `null`. `tags`: `outcome` (`moved_forward`, `stalled`, `needs_follow_up`, `dead`), `stage` (`first_contact`, `follow_up`, `viewing`, `negotiation`, `closing`) and `client_type` (`end_user`, `investor`, `broker`, `unknown`). `whatsapp_suggestion`: at most 60 words in `language`. **This service never sends it**; show it to the agent to send or not. `seriousness`: five checks, each with a `reason` and a quote for a yes. The `band` is computed in code from the `yes` count, verified yes answers only: `A` for 4 or 5, `B` for 2 or 3, `C` for 0 or 1. **Field by field**: a keyword whose quote fails is dropped; a check whose quote fails is kept with `unverified: true` and its `quote` and `segment` `null`, and an unverified yes is not counted; the tags and the WhatsApp suggestion are always kept. **`manager_only: true`**: show it to the agent's manager, never to the agent. |
+| `extras` | `keywords[]`: `kind` (`project`, `community`, `developer` or `topic`), `said` as spoken, a name of at most five words (a longer one is dropped), checked in its `segment`, and `english` or `null`. `tags`: `outcome` (`moved_forward`, `stalled`, `needs_follow_up`, `dead`), `stage` (`first_contact`, `follow_up`, `viewing`, `negotiation`, `closing`) and `client_type` (`end_user`, `investor`, `broker`, `unknown`). `whatsapp_suggestion`: at most 60 words in `language`; a text over 60 words or in the wrong script is asked for once more, and failing again is `null` with `whatsapp_reason` (`too_long` or `wrong_language`), the rest of the extras delivered. **This service never sends it**; show it to the agent to send or not. `seriousness`: five checks, each with a `reason` and a quote for a yes. The `band` is computed in code from the `yes` count, verified yes answers only: `A` for 4 or 5, `B` for 2 or 3, `C` for 0 or 1. **Field by field**: a keyword whose quote fails is dropped; a check whose quote fails is kept with `unverified: true` and its `quote` and `segment` `null`, and an unverified yes is not counted; the tags and the WhatsApp suggestion are always kept. **`manager_only: true`**: show it to the agent's manager, never to the agent. |
 | `extras.agent_dialect` | `{dialect, quote, segment, unverified}`: the agent's Arabic dialect, `gulf_ar`, `egyptian_ar`, `levantine_ar`, `iraqi_ar`, `maghrebi_ar` or `msa_ar`, with a quote checked to come from one of the **agent's** segments; `unknown` with `null` quote and segment when the agent's words do not show it. A dialect whose quote fails is kept with `unverified: true` and no quote. |
 | `extras.whatsapp_suggestion.language` | the language the message is written in, decided in code: the client's (stage 1's `languages.client`), `ar` for any Arabic code; else the summary language. One of `ar`, `en`, `hi`, `ur`, `ru`, `zh`, `fr`, `fa` or `tr`. The text is checked to be in that language's script |
 | `extras.whatsapp_dialect` | the Arabic dialect the message was asked in, decided in code: the agent's `agent_dialect` when known, else the tenant's `whatsapp_default_dialect` (default `gulf_ar`). `null` when the message is not in Arabic |
 | `versions` | the prompt set, `quote_fillers`, the objection list, the rubric, the tone list, the model each pass's answer came from, and `passes`, `{<pass>: {provider, model}}` (a pass that did not answer is absent from both) |
-| `extras.keywords[].canonical` | the company's `keyword_vocabulary` name this keyword is, copied exactly as listed; `null` when it is none, and the keyword is kept as found |
+| `extras.keywords[].canonical` | the company's `keyword_vocabulary` name this keyword is, copied exactly as listed; `null` when it is none, or when the model named one not on the list, and the keyword is kept as found |
 
 **The quote rule, in every part.** Each quote is asked for at most 15 words, and the check in code allows up to 40. Its words, normalised (case, Arabic letter forms and marks), must appear in the segment it cites in the same order. Between two of them the segment may hold only a word that repeats the word before it ("عمري عمري") or a filler of the versioned list `quote_fillers_v1` (يعني، اه، ايوه، um, uh and the like); a negation (ما، مش، لا، لم، لن، مو، ليس, not, no, never, don't and the like) is never a filler. A quote not in the segment it cites is looked for in the segment just before, then just after, and is delivered with the `segment` it was found in. It comes from the right speaker where that matters, read at the segment the quote was found in. Quotes read the masked copy, so they may contain `[PHONE]` or `[EMAIL]`. The stage-1 extraction and the stage-2 extras are kept field by field, malformed only on a broken shape or when more than half of their quotes fail. Every other stage-2 pass, the score first, stays strict: any failing quote makes it malformed (one reprompt, then the part is `null`).
 

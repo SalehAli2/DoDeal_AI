@@ -20,6 +20,7 @@ from dodeal_ai.core.context import RequestContext
 from dodeal_ai.core.errors import MalformedOutputError
 from dodeal_ai.core.jobs import JobStatus, Stage2State, create_job, read_job, transition
 from dodeal_ai.core.llm.profiles import PROFILE_UNIT_B_EXTRAS
+from dodeal_ai.core.prompting import build_prompt
 from dodeal_ai.core.validation import OutputValidationError
 from dodeal_ai.units.call_intelligence.config import CallsConfig
 from dodeal_ai.units.call_intelligence.evidence import CallText
@@ -40,6 +41,7 @@ from dodeal_ai.units.call_intelligence.prompts import (
     ESCALATIONS_TEMPLATE,
     EXTRAS_TEMPLATE,
     OBJECTIONS_TEMPLATE,
+    WHATSAPP_TAIL_TEMPLATE,
 )
 from dodeal_ai.units.call_intelligence.transcriber import Segment, Transcript
 from dodeal_ai.units.call_intelligence.wave2 import EXTRAS, wave2
@@ -179,11 +181,47 @@ def test_a_whatsapp_suggestion_over_60_words_is_malformed() -> None:
     assert _refused(_answer(whatsapp=f"{sixty} more")) == (("whatsapp", "too_long"),)
 
 
-async def test_a_long_whatsapp_suggestion_is_reprompted_once_then_fails() -> None:
-    long = _answer(whatsapp=" ".join(["word"] * 61))
+async def test_a_70_word_message_leaves_keywords_tags_and_seriousness() -> None:
+    """The guard: a message too long is reprompted once with the WhatsApp
+    tail; too long again, it is null with its reason and the rest of the
+    extras are delivered."""
+    long = _answer(whatsapp=" ".join(["word"] * 70))
     llm = FakeLLM(json_response(long), json_response(long))
-    with pytest.raises(MalformedOutputError):
-        await find_extras(llm, _call(), scope=SCOPE, settings=get_settings())
+
+    found, _ = await find_extras(llm, _call(), scope=SCOPE, settings=get_settings())
+
+    assert llm.call_count == 2
+    tail = build_prompt(WHATSAPP_TAIL_TEMPLATE, caller_data="").stable
+    assert (llm.prompts[0].tail, llm.prompts[1].tail) == ("", tail)
+    part = extras_part(_call(), found)
+    assert (part["whatsapp_suggestion"], part["whatsapp_reason"]) == (None, "too_long")
+    assert part["keywords"] == [
+        {**keyword, "canonical": None} for keyword in ANSWER["keywords"]
+    ]
+    assert part["tags"] == ANSWER["tags"]
+    assert part["seriousness"]["band"] == "A"
+
+
+async def test_a_message_mended_by_the_reprompt_is_delivered() -> None:
+    long = _answer(whatsapp=" ".join(["word"] * 70))
+    llm = FakeLLM(json_response(long), json_response(ANSWER))
+    found, _ = await find_extras(llm, _call(), scope=SCOPE, settings=get_settings())
+    part = extras_part(_call(), found)
+    assert part["whatsapp_suggestion"] == {"language": "en", "text": ANSWER["whatsapp"]}
+    assert part["whatsapp_reason"] is None
+
+
+async def test_a_message_in_the_wrong_script_twice_is_null_with_its_reason() -> None:
+    call = _call(*AR_SEGMENTS)
+    english = _arabic(_dialect())
+    english["whatsapp"] = "Thank you for your time, see you on Saturday."
+    llm = FakeLLM(json_response(english), json_response(english))
+    found, _ = await find_extras(llm, call, scope=SCOPE, settings=get_settings())
+    part = extras_part(call, found)
+    assert (part["whatsapp_suggestion"], part["whatsapp_reason"]) == (
+        None,
+        "wrong_language",
+    )
     assert llm.call_count == 2
 
 
@@ -426,27 +464,36 @@ async def test_more_than_half_of_the_quotes_failing_is_malformed() -> None:
     check_extras(_call())(Extras.model_validate(answer))
 
 
-def test_a_seven_word_said_is_rejected_and_five_are_a_name() -> None:
-    """The guard: a keyword is a name, never a sentence -- a seven-word said is
-    malformed even when its words are in the segment it cites."""
+def test_a_seven_word_said_is_dropped_and_five_are_a_name() -> None:
+    """A keyword is a name, never a sentence: a seven-word said is dropped
+    even when its words are in the segment it cites; five are kept."""
     answer = _answer()
     answer["keywords"][0]["said"] = "My budget is about two million, and"
     answer["keywords"][0]["segment"] = "s2"
-    assert _refused(answer) == (("keywords.0", "keyword_too_long"),)
+    found = Extras.model_validate(answer)
+    check_extras(_call())(found)
+    assert extras_part(_call(), found)["keywords"] == [
+        {**ANSWER["keywords"][1], "canonical": None}
+    ]
     answer["keywords"][0]["said"] = "My budget is about two"
-    check_extras(_call())(Extras.model_validate(answer))
+    kept = extras_part(_call(), Extras.model_validate(answer))["keywords"]
+    assert [keyword["said"] for keyword in kept] == [
+        "My budget is about two",
+        "a garden",
+    ]
 
 
-async def test_a_seven_word_said_is_reprompted_once_then_fails() -> None:
+async def test_a_seven_word_said_costs_no_reprompt() -> None:
     answer = _answer()
     answer["keywords"][0].update(
         said="My budget is about two million, and", segment="s2"
     )
-    llm = FakeLLM(json_response(answer), json_response(answer))
+    llm = FakeLLM(json_response(answer))
 
-    with pytest.raises(MalformedOutputError):
-        await find_extras(llm, _call(), scope=SCOPE, settings=get_settings())
-    assert llm.call_count == 2
+    found, _ = await find_extras(llm, _call(), scope=SCOPE, settings=get_settings())
+
+    assert llm.call_count == 1
+    assert len(extras_part(_call(), found)["keywords"]) == 1
 
 
 def test_every_seriousness_quote_is_checked_and_a_yes_is_owed_one() -> None:

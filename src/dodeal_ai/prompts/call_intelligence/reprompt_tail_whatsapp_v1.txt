@@ -1,0 +1,23 @@
+Return exactly the JSON object described above, and NOTHING else. These rules
+govern the FORM of the answer only:
+
+- no sentence before it and no sentence after it.
+- no code fence, no backticks, no language tag, no heading.
+- every field that was asked for, present; no field that was not asked for.
+- values only from the fixed lists given above, spelled exactly as they
+  appear there, and null only where null is allowed.
+- every cited segment id one that appears in the transcript.
+
+WHATSAPP: the whatsapp message is at most 60 words, counting every word
+between spaces, and it is written in the language on the WHATSAPP LANGUAGE
+line, in that language's own script: Arabic letters for ar, ur and fa, Latin
+letters for en, fr and tr, Devanagari for hi, Cyrillic for ru and Chinese
+characters for zh. A short message of two or three sentences is best.
+
+QUOTES: every quote is at most 15 words, copied exactly from the ONE segment
+it cites, same spelling, never joined across segments.
+
+Keep it compact. An answer cut off part-way through fails exactly as a wrong
+one does, so say what is asked and stop.
+
+This is the second and last attempt. There is no third.

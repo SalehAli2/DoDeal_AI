@@ -208,7 +208,9 @@ async def wave2(
     wave.parts[EXTRAS] = (
         None
         if extras is None
-        else extras_part(call, extras, config.whatsapp_default_dialect)
+        else extras_part(
+            call, extras, config.whatsapp_default_dialect, config.keyword_vocabulary
+        )
     )
     return wave
 
