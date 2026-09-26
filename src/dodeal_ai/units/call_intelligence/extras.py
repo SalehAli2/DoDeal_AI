@@ -9,14 +9,16 @@ could send next, and how serious the client is.
   tags         outcome (moved_forward, stalled, needs_follow_up, dead), stage
                (first_contact, follow_up, viewing, negotiation, closing) and
                client_type (end_user, investor, broker, unknown)
-  dialect      the agent's Arabic dialect (egyptian, levantine, gulf, maghrebi,
-               msa or unknown), a known one quoted from an AGENT segment
-  whatsapp     a follow-up the agent may send, in the summary language, at most
-               60 words: in Arabic, in the agent's dialect when known, else in
-               the tenant's whatsapp_default_dialect; in English on an English
-               call. A SUGGESTION ONLY: this service sends nothing to anyone
-               but the tenant's callback (core/callbacks.py); the text goes
-               back to the CRM inside call.stage2 and nowhere else.
+  dialect      the agent's Arabic dialect (gulf_ar, egyptian_ar, levantine_ar,
+               iraqi_ar, maghrebi_ar, msa_ar or unknown), a known one quoted
+               from an AGENT segment
+  whatsapp     a follow-up the agent may send, at most 60 words, in the
+               CLIENT's language as the roles pass heard it (language.py),
+               else the summary language: to an Arabic speaker in the agent's
+               dialect when known, else the tenant's whatsapp_default_dialect.
+               A SUGGESTION ONLY: this service sends nothing to anyone but the
+               tenant's callback (core/callbacks.py); the text goes back to
+               the CRM inside call.stage2 and nowhere else.
   seriousness  five yes-or-no checks -- budget_stated, timeline_stated,
                decision_maker_named, next_step_agreed, client_engaged -- each
                with a short reason and every yes quoted. The band is code's:
@@ -28,9 +30,10 @@ pass fails and the extras part is null): every keyword's words in the segment
 it cites, and its canonical name, if any, exactly one on the list; every
 quote given under the quote check, and every yes quoted; a known agent
 dialect quoted, and any dialect quote from a segment of the agent's; the
-WhatsApp text within 60 words and in the summary language's script
-(evidence.in_language). The dialect the text was asked in (whatsapp_dialect)
-is code's, from the checked agent dialect, the default and the language.
+WhatsApp text within 60 words and in its language's script
+(evidence.written_in). The language and dialect the text was asked in
+(whatsapp_suggestion.language, whatsapp_dialect) are code's, from the client's
+language, the checked agent dialect and the default.
 """
 
 from __future__ import annotations
@@ -53,9 +56,10 @@ from dodeal_ai.units.call_intelligence.evidence import (
     SegmentId,
     Strict,
     evidence_errors,
-    in_language,
     quote_errors,
+    written_in,
 )
+from dodeal_ai.units.call_intelligence.language import message_language
 from dodeal_ai.units.call_intelligence.prompts import (
     AGENT,
     EXTRAS_TEMPLATE,
@@ -87,15 +91,22 @@ WHATSAPP_MAX_WORDS = 60
 
 YES = "yes"
 
-# The dialects the agent may be heard in, and the dialects a tenant may write
-# its messages in; msa is Modern Standard Arabic.
+# The dialects the agent may be heard in (language.CALL_LANGUAGES' Arabic
+# codes), and the four a tenant may write its messages in.
 type AgentDialectName = Literal[
-    "egyptian", "levantine", "gulf", "maghrebi", "msa", "unknown"
+    "gulf_ar",
+    "egyptian_ar",
+    "levantine_ar",
+    "iraqi_ar",
+    "maghrebi_ar",
+    "msa_ar",
+    "unknown",
 ]
-type WhatsAppDialect = Literal["gulf_uae", "egyptian", "levantine", "msa"]
+type WhatsAppDialect = Literal["gulf_ar", "egyptian_ar", "levantine_ar", "iraqi_ar"]
 UNKNOWN_DIALECT = "unknown"
-# The tenant default when unit_b sets none: the UAE, where the agencies are.
-DEFAULT_WHATSAPP_DIALECT: WhatsAppDialect = "gulf_uae"
+ARABIC = "ar"
+# The tenant default when unit_b sets none: the Gulf, where the agencies are.
+DEFAULT_WHATSAPP_DIALECT: WhatsAppDialect = "gulf_ar"
 
 # The seriousness checks, and the bands from the top: the first whose floor
 # the count of yes answers reaches.
@@ -180,12 +191,17 @@ def seriousness_band(yes: int) -> str:
     return next(band for floor, band in SERIOUSNESS_BANDS if yes >= floor)
 
 
+def whatsapp_language(call: CallText) -> str:
+    """The language the suggestion is written in: the client's."""
+    return message_language(call.spoken.client, call.language)
+
+
 def whatsapp_dialect(
     call: CallText, agent: AgentDialect, default: WhatsAppDialect
 ) -> str | None:
-    """The dialect the suggestion was asked in: none on an English call, the
-    agent's when known, else the tenant's default."""
-    if call.language == "en":
+    """The dialect the suggestion was asked in: none unless it is in Arabic;
+    then the agent's when known, else the tenant's default."""
+    if whatsapp_language(call) != ARABIC:
         return None
     return default if agent.dialect == UNKNOWN_DIALECT else agent.dialect
 
@@ -200,7 +216,7 @@ def _whatsapp_errors(call: CallText, text: str) -> Errors:
     errors: Errors = []
     if len(text.split()) > WHATSAPP_MAX_WORDS:
         errors.append(("whatsapp", "too_long"))
-    if not in_language(text, call.language):
+    if not written_in(text, whatsapp_language(call)):
         errors.append(("whatsapp", "wrong_language"))
     return errors
 
@@ -211,10 +227,14 @@ def extras_data(
     default_dialect: WhatsAppDialect = DEFAULT_WHATSAPP_DIALECT,
 ) -> str:
     """The call's data, then the tenant's vocabulary, one name per line, then
-    its default dialect."""
+    the client's language to write in and the default dialect."""
     listed = [f"- {one_line(term)}" for term in sorted(vocabulary)]
     shown = "\n".join(["VOCABULARY:", *listed]) if listed else "VOCABULARY: none"
-    return f"{call.data()}\n\n{shown}\n\nDEFAULT DIALECT: {default_dialect}"
+    return (
+        f"{call.data()}\n\n{shown}\n\n"
+        f"WHATSAPP LANGUAGE: {whatsapp_language(call)}\n"
+        f"DEFAULT DIALECT: {default_dialect}"
+    )
 
 
 def check_extras(
@@ -283,7 +303,7 @@ def extras_part(
     default_dialect: WhatsAppDialect = DEFAULT_WHATSAPP_DIALECT,
 ) -> dict[str, object]:
     """Stage 2's extras part: the keywords, the tags, the agent's dialect, the
-    WhatsApp suggestion in its language and the dialect code says it was asked
+    WhatsApp suggestion in the language and dialect code says it was asked
     in, and the seriousness checks with the band code gives."""
     checks = {
         name: getattr(answer.seriousness, name).model_dump()
@@ -297,7 +317,10 @@ def extras_part(
         "whatsapp_dialect": whatsapp_dialect(
             call, answer.agent_dialect, default_dialect
         ),
-        "whatsapp_suggestion": {"language": call.language, "text": answer.whatsapp},
+        "whatsapp_suggestion": {
+            "language": whatsapp_language(call),
+            "text": answer.whatsapp,
+        },
         "seriousness": {
             "band": seriousness_band(yes),
             "yes": yes,

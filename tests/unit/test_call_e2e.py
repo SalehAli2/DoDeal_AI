@@ -320,8 +320,8 @@ def test_a_vocabulary_inside_the_repo_or_not_utf8_is_refused(tmp_path: Path) -> 
 
 
 def test_the_dialect_flag_sets_the_default_dialect_for_the_run(parse) -> None:
-    section = call_e2e.unit_b_section(parse("--dialect", "egyptian"), CALLBACK, None)
-    assert section["whatsapp_default_dialect"] == "egyptian"
+    section = call_e2e.unit_b_section(parse("--dialect", "egyptian_ar"), CALLBACK, None)
+    assert section["whatsapp_default_dialect"] == "egyptian_ar"
     assert "keyword_vocabulary" not in section
     with pytest.raises(SystemExit):
         parse("--dialect", "gulf")

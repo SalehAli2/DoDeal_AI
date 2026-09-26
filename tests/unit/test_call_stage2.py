@@ -25,10 +25,12 @@ from dodeal_ai.core.jobs import (
     create_job,
     job_key,
     read_job,
+    read_result,
     read_stage2_result,
     result_key,
     settle_stage2,
     stage2_result_key,
+    store_result,
 )
 from dodeal_ai.core.tenant_config import set_override
 from dodeal_ai.units.call_intelligence import queues, stage2, sweep, worker
@@ -284,6 +286,26 @@ async def test_stage2_settles_done_on_the_stage1_transcript(
     assert (line.stage2, line.reason, line.levelno) == ("done", None, logging.INFO)
 
 
+async def test_stage2_writes_the_message_in_the_language_stage1_heard(
+    ctx: dict,
+) -> None:
+    """Stage 1's languages block is what stage 2's extras pass is told."""
+    await _done_and_pending(ctx)
+    result = await read_result("tenant-a", JOB)
+    assert result is not None
+    result["languages"] = {
+        "client": "ur",
+        "agent": "en",
+        "profile": "other",
+        "source": "model",
+    }
+    await store_result("tenant-a", JOB, result, ttl_seconds=600)
+    stage2_ctx = _stage2_ctx()
+    await analyse_stage2(stage2_ctx, "tenant-a", JOB)
+    extras = stage2_ctx["llm"].calls[-1].prompt.variable
+    assert "\nWHATSAPP LANGUAGE: ur\n" in extras
+
+
 async def test_stage2_whose_stage1_result_expired_fails_with_its_reason(
     ctx: dict, redis_fakes: RedisFakes, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -352,7 +374,7 @@ async def test_stage2_is_held_and_delivered_as_call_stage2(
     assert all(held[name] is not None for name in parts if name != "score")
     assert held["reasons"] == {"score": "scoring_off"}
     assert held["versions"] == {
-        "prompt": "unit_b_prompts_v9",
+        "prompt": "unit_b_prompts_v10",
         "objection_list": "objection_list_v1",
         "rubric": "call_rubric_v1",
         "tone_list": "tone_list_v1",

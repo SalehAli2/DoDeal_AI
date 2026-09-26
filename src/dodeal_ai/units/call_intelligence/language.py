@@ -123,6 +123,15 @@ def summary_language(
     return "en" if words["en"] > words["ar"] else "ar"
 
 
+def message_language(code: str | None, fallback: SummaryLanguage) -> str:
+    """The language a message to a side who speaks `code` is written in: ar
+    for any Arabic dialect, the code itself for another language the product
+    covers, and `fallback` for other or unheard."""
+    if code is None or code == OTHER:
+        return fallback
+    return "ar" if code in ARABIC_LANGUAGES else code
+
+
 def languages_block(transcript: Transcript, spoken: Spoken) -> dict[str, object]:
     """Stage 1's languages block: each side's code, the profile, and whether
     they came from the model or the script fallback."""

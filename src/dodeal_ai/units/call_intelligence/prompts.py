@@ -41,7 +41,7 @@ OBJECTIONS_TEMPLATE = "call_intelligence/objections_v2.txt"
 SCORE_TEMPLATE = "call_intelligence/score_v2.txt"
 ESCALATIONS_TEMPLATE = "call_intelligence/escalations_v2.txt"
 COACHING_TEMPLATE = "call_intelligence/coaching_v2.txt"
-EXTRAS_TEMPLATE = "call_intelligence/extras_v4.txt"
+EXTRAS_TEMPLATE = "call_intelligence/extras_v5.txt"
 TRANSLATE_TEMPLATE = "call_intelligence/translate_v1.txt"
 REPROMPT_TAIL_TEMPLATE = "call_intelligence/reprompt_tail_v1.txt"
 QUOTE_LENGTH_TAIL_TEMPLATE = "call_intelligence/reprompt_tail_quote_length_v1.txt"
@@ -61,7 +61,8 @@ REPROMPT_TAILS: Mapping[str, str] = MappingProxyType(
 # keyword vocabulary), then every quoting template by its successor with the
 # 15-word, one-segment quote rule (unit_b_prompts_v6), then extras_v3 by
 # extras_v4 (the agent's dialect, unit_b_prompts_v8), then roles_v2 by roles_v3
-# (each side's language, unit_b_prompts_v9); never sent again.
+# (each side's language, unit_b_prompts_v9), then extras_v4 by extras_v5 (the
+# message in the client's language, unit_b_prompts_v10); never sent again.
 RETIRED_TEMPLATES: tuple[str, ...] = (
     "call_intelligence/extract_v1.txt",
     "call_intelligence/extras_v1.txt",
@@ -74,11 +75,12 @@ RETIRED_TEMPLATES: tuple[str, ...] = (
     "call_intelligence/extras_v2.txt",
     "call_intelligence/extras_v3.txt",
     "call_intelligence/roles_v2.txt",
+    "call_intelligence/extras_v4.txt",
 )
 
 # The stamp stage 1 carries under versions.prompt. Move it with the digest
 # in the stamp test whenever one of UNIT_B_TEMPLATES changes.
-PROMPT_SET_VERSION = "unit_b_prompts_v9"
+PROMPT_SET_VERSION = "unit_b_prompts_v10"
 
 # Every template Unit B can send, in pass order, then the retired ones; the
 # worker preloads them all.

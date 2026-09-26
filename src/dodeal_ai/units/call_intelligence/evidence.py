@@ -18,7 +18,10 @@ Any failure is a malformed answer: the pass is reprompted once, then fails.
 THE LANGUAGE SHARE: a text is in the language asked for when at least 60 % of
 its letters are in that language's script, counting none inside quotation
 marks -- so a quoted phrase or one foreign name neither passes nor fails it.
-A text with no letters outside quotes is in no language.
+A text with no letters outside quotes is in no language. A message may be in
+any of MESSAGE_LANGUAGES, each held to its script (written_in): Arabic letters
+for ar, ur and fa, Latin for en, fr and tr, Devanagari for hi, Cyrillic for ru
+and Han for zh -- so French passes as Latin, never as not-English.
 """
 
 from __future__ import annotations
@@ -62,6 +65,20 @@ _SCRIPTS: dict[SummaryLanguage, re.Pattern[str]] = {
     ),
     "en": re.compile(r"[A-Za-z\u00c0-\u024f]"),
 }
+
+# The script each language a message may be written in is held to.
+_MESSAGE_SCRIPTS: dict[str, re.Pattern[str]] = {
+    "ar": _SCRIPTS["ar"],
+    "ur": _SCRIPTS["ar"],
+    "fa": _SCRIPTS["ar"],
+    "en": _SCRIPTS["en"],
+    "fr": _SCRIPTS["en"],
+    "tr": _SCRIPTS["en"],
+    "hi": re.compile(r"[\u0900-\u097f]"),
+    "ru": re.compile(r"[\u0400-\u04ff]"),
+    "zh": re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]"),
+}
+MESSAGE_LANGUAGES: tuple[str, ...] = tuple(_MESSAGE_SCRIPTS)
 
 type Errors = list[tuple[str, str]]
 
@@ -193,9 +210,14 @@ def evidence_errors(
 
 def in_language(text: str, language: SummaryLanguage) -> bool:
     """At least MIN_SCRIPT_SHARE of the letters outside quotes in the script."""
+    return written_in(text, language)
+
+
+def written_in(text: str, language: str) -> bool:
+    """in_language for any of MESSAGE_LANGUAGES, by its script."""
     letters = [char for char in _QUOTED.sub(" ", text) if char.isalpha()]
     if not letters:
         return False
-    script = _SCRIPTS[language]
+    script = _MESSAGE_SCRIPTS[language]
     asked = sum(1 for char in letters if script.match(char))
     return asked / len(letters) >= MIN_SCRIPT_SHARE

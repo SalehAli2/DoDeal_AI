@@ -240,13 +240,15 @@ def test_a_unit_b_put_keeps_config_version(client: TestClient) -> None:
     assert got[UNIT_B_SECTION]["config_version"] == first["version"]
 
 
-@pytest.mark.parametrize("dialect", ["gulf_uae", "egyptian", "levantine", "msa"])
+@pytest.mark.parametrize(
+    "dialect", ["gulf_ar", "egyptian_ar", "levantine_ar", "iraqi_ar"]
+)
 def test_the_whatsapp_default_dialect_is_one_of_four(dialect: str) -> None:
-    """gulf_uae unless set; an agent-only or unlisted name is refused."""
-    assert CallsConfig().whatsapp_default_dialect == "gulf_uae"
+    """gulf_ar unless set; an agent-only, unlisted or non-Arabic code refused."""
+    assert CallsConfig().whatsapp_default_dialect == "gulf_ar"
     parsed = parse_unit_b_section({"whatsapp_default_dialect": dialect})
     assert parsed.whatsapp_default_dialect == dialect
-    for refused in ("gulf", "maghrebi", "unknown", "GULF_UAE", ""):
+    for refused in ("gulf", "maghrebi_ar", "msa_ar", "en", "GULF_AR", ""):
         with pytest.raises(ValidationError):
             parse_unit_b_section({"whatsapp_default_dialect": refused})
 
@@ -254,12 +256,12 @@ def test_the_whatsapp_default_dialect_is_one_of_four(dialect: str) -> None:
 def test_a_whatsapp_dialect_put_moves_policy_version_only(client: TestClient) -> None:
     """The dialect is policy: config_version stays, policy_version moves."""
     first = client.put(CALLS_URL, json=ON, headers=_headers()).json()
-    changed = {**ON, "whatsapp_default_dialect": "levantine"}
+    changed = {**ON, "whatsapp_default_dialect": "levantine_ar"}
     second = client.put(CALLS_URL, json=changed, headers=_headers()).json()
     assert second["version"] == first["version"]
     assert second["policy_version"] != first["policy_version"]
     got = client.get(CALLS_URL, headers=_headers()).json()
-    assert got[UNIT_B_SECTION]["whatsapp_default_dialect"] == "levantine"
+    assert got[UNIT_B_SECTION]["whatsapp_default_dialect"] == "levantine_ar"
 
 
 def test_get_with_nothing_set_is_the_default_all_off(client: TestClient) -> None:

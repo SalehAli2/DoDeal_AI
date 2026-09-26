@@ -110,9 +110,9 @@ class CallsConfig(BaseModel):
     # DODEAL_LLM_* / DODEAL_CALL_STT_* pair. Policy, like every unit_b field.
     model_route: str = DEFAULT_ROUTE
     stt_profile: str = DEFAULT_STT_PROFILE
-    # The Arabic dialect a WhatsApp suggestion is written in when the agent's is
-    # unknown (extras.py): gulf_uae, the agencies' market. A wrong one makes the
-    # suggestion read foreign to the client; an unlisted name is refused.
+    # The Arabic dialect a WhatsApp suggestion to an Arabic speaker is written in
+    # when the agent's is unknown (extras.py): gulf_ar, the agencies' market. A
+    # wrong one reads foreign to the client; a code not of the four is refused.
     whatsapp_default_dialect: WhatsAppDialect = DEFAULT_WHATSAPP_DIALECT
 
     # The switches, all off: calls_enabled admits jobs at all (403 otherwise);
