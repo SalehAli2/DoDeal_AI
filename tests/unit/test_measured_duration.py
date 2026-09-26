@@ -30,12 +30,10 @@ def _processed() -> float:
 
 
 def _spent(caplog: pytest.LogCaptureFixture) -> list[object]:
-    """The audio seconds each outcome line put on the spend."""
-    return [
-        r.__dict__["audio_seconds"]
-        for r in caplog.records
-        if "audio_seconds" in r.__dict__
-    ]
+    """The audio seconds each outcome line put on the spend; a record seen
+    twice (a handler an earlier test left on the tree) counted once."""
+    lines = {id(r): r for r in caplog.records if r.getMessage() == "call_job_outcome"}
+    return [r.__dict__["audio_seconds"] for r in lines.values()]
 
 
 @pytest.mark.parametrize(
