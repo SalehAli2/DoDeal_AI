@@ -1,4 +1,4 @@
-"""unit_b.score (wave 2) and call_rubric_v1: the model answers yes-or-no checks
+"""unit_b.score (wave 2) and call_rubric_v2: the model answers yes-or-no checks
 with quotes; code computes every mark, the total and the band.
 
 THE RUBRIC, the BRD's weights, each component's checks:
@@ -33,6 +33,13 @@ not_engaged or objections_unavailable -- and the pass is not run.
 THE EVIDENCE: each check's quote goes through the quote check; one is owed
 wherever the answer says something was said -- every yes, but for
 no_over_promise and no_pressure, where it is every no.
+
+THE ESCALATIONS AGREE (D-75, call_rubric_v2). Once wave 2 has both parts, a
+verified escalation the agent said answers the professionalism check it is an
+exact match for (ESCALATION_CHECKS) no, source code, with its quote and
+segment, and code marks the component, the total and the band again
+(reconciled). Nothing changes for one the client or an unknown voice said,
+one unverified, or with the escalations pass failed: the score stays strict.
 """
 
 from __future__ import annotations
@@ -41,12 +48,13 @@ import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from fractions import Fraction
-from typing import Literal
+from typing import Literal, cast
 
 from dodeal_ai.core.config import Settings
 from dodeal_ai.core.context import TenantScope
 from dodeal_ai.core.llm import LLMClient, LLMResponse
 from dodeal_ai.core.llm.profiles import PROFILE_UNIT_B_SCORE, task_ceiling
+from dodeal_ai.units.call_intelligence.escalations import OVER_PROMISE
 from dodeal_ai.units.call_intelligence.evidence import (
     CallText,
     Errors,
@@ -59,6 +67,7 @@ from dodeal_ai.units.call_intelligence.evidence import (
 )
 from dodeal_ai.units.call_intelligence.language import LANGUAGE_NOT_ENABLED
 from dodeal_ai.units.call_intelligence.prompts import (
+    AGENT,
     REPROMPT_TAIL_TEMPLATE,
     REPROMPT_TAILS,
     SCORE_TEMPLATE,
@@ -72,7 +81,7 @@ from dodeal_ai.units.structured_intelligence.llm_call import (
 )
 
 SCORE_LABEL = "llm.unit_b.score"
-RUBRIC_VERSION = "call_rubric_v1"
+RUBRIC_VERSION = "call_rubric_v2"
 
 # What the answer may cost (register item 15): thirteen checks with a quote
 # each, sized against an Arabic call on a non-reasoning model.
@@ -114,6 +123,11 @@ BANDS = ((85, "excellent"), (70, "good"), (50, "needs_work"), (0, "coaching_requ
 
 # The checks whose quote is owed on a no: the promise, or the pressure.
 _EVIDENCE_ON_NO = frozenset({"no_over_promise", "no_pressure"})
+
+# The professionalism check each escalation type fails, exact matches only
+# (D-75). rudeness_or_pressure is left out: it may be rudeness alone, which
+# no_pressure does not judge, or pressure alone, which courteous does not.
+ESCALATION_CHECKS = {OVER_PROMISE: "no_over_promise"}
 
 
 class Check(Strict):
@@ -301,6 +315,19 @@ def _decided(answer: str) -> dict[str, object]:
     return {"answer": answer, "source": "code"}
 
 
+def _marked(
+    component: Component, shown: dict[str, dict[str, object]]
+) -> dict[str, object]:
+    """A component marked on the checks shown: its weight over its checks,
+    times the yes answers."""
+    passed = sum(1 for check in shown.values() if check["answer"] == YES)
+    return {
+        "weight": component.weight,
+        "mark": mark(component.weight, passed, len(component.checks)),
+        "checks": shown,
+    }
+
+
 def _checked(
     component: Component, checks: ScoreChecks, code: dict[str, dict[str, object]]
 ) -> dict[str, object]:
@@ -312,11 +339,21 @@ def _checked(
             if name in code
             else getattr(checks, name).model_dump(mode="json")
         )
-    passed = sum(1 for check in shown.values() if check["answer"] == YES)
+    return _marked(component, shown)
+
+
+def _totalled(components: dict[str, dict[str, object]]) -> dict[str, object]:
+    """The total over the applicable weight, its band, the raw sum and that
+    weight, from the components' marks (a suppressed one left out)."""
+    marked = [c for c in components.values() if c["mark"] is not None]
+    applicable = sum(int(str(c["weight"])) for c in marked)
+    raw = sum(int(str(c["mark"])) for c in marked)
+    total = round_half_up(Fraction(raw * 100, applicable))
     return {
-        "weight": component.weight,
-        "mark": mark(component.weight, passed, len(component.checks)),
-        "checks": shown,
+        "total": total,
+        "band": band_of(total),
+        "raw": raw,
+        "applicable_weight": applicable,
     }
 
 
@@ -369,15 +406,63 @@ def score_call(
         PROFESSIONALISM.name: _checked(PROFESSIONALISM, checks, code),
         PRODUCT_KNOWLEDGE.name: product,
     }
-    marked = [c for c in components.values() if c["mark"] is not None]
-    applicable = sum(int(str(c["weight"])) for c in marked)
-    raw = sum(int(str(c["mark"])) for c in marked)
-    total = round_half_up(Fraction(raw * 100, applicable))
     return {
-        "total": total,
-        "band": band_of(total),
-        "raw": raw,
-        "applicable_weight": applicable,
+        **_totalled(components),
         "product_question_asked": checks.product_question_asked.model_dump(mode="json"),
         "components": components,
     }
+
+
+def _agents_verified(call: CallText, item: dict[str, object]) -> bool:
+    """Whether an escalation rests on the agent's own words: said by the
+    agent, not kept unverified, and its quote found again, in code, in an
+    agent segment of this call."""
+    quote, segment = item.get("quote"), item.get("segment")
+    if item.get("speaker") != AGENT or item.get("unverified") is True:
+        return False
+    if not isinstance(quote, str) or not isinstance(segment, str):
+        return False
+    return not evidence_errors(call, "escalations", quote, segment, speaker=AGENT)
+
+
+def escalated_checks(
+    call: CallText, items: Sequence[dict[str, object]]
+) -> dict[str, dict[str, object]]:
+    """Each check an escalation answers (ESCALATION_CHECKS), decided no in
+    code with the quote and segment of the first such escalation in time
+    that is the agent's and verified (_agents_verified)."""
+    answers: dict[str, dict[str, object]] = {}
+    for item in items:
+        check = ESCALATION_CHECKS.get(str(item.get("type")))
+        if check is None or check in answers or not _agents_verified(call, item):
+            continue
+        answers[check] = {
+            "answer": NO,
+            "source": "code",
+            "quote": item["quote"],
+            "segment": item["segment"],
+        }
+    return answers
+
+
+def reconciled(
+    call: CallText,
+    score: dict[str, object] | None,
+    escalations: dict[str, object] | None,
+) -> dict[str, object] | None:
+    """The score part once the escalations part agrees with it (D-75): each
+    check an escalation answers set no (escalated_checks), and the
+    professionalism mark, the total and the band marked again in code. The
+    score as it was with either part null, or nothing to set."""
+    if score is None or escalations is None:
+        return score
+    # escalations_part's and score_call's own parts, built in this process.
+    items = cast(list[dict[str, object]], escalations["items"])
+    answers = escalated_checks(call, items)
+    if not answers:
+        return score
+    components = dict(cast(dict[str, dict[str, object]], score["components"]))
+    kept = components[PROFESSIONALISM.name]
+    shown = {**cast(dict[str, dict[str, object]], kept["checks"]), **answers}
+    components[PROFESSIONALISM.name] = {**kept, **_marked(PROFESSIONALISM, shown)}
+    return {**score, **_totalled(components), "components": components}

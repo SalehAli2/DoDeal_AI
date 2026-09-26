@@ -3,7 +3,9 @@ another, each on its own profile.
 
   objections  unit_b.objections  the client's objections (objections.py)
   score       unit_b.score       yes-or-no checks, marked in code (score.py);
-                                 not run at all when the call gets no score
+                                 not run at all when the call gets no score;
+                                 marked again once the escalations answer
+                                 (score.reconciled, D-75)
   escalations unit_b.escalations the five BRD issues, merged with stage 1's
                                  off_channel_contact (escalations.py)
   coaching    unit_b.coaching    observations, moments, a plan and the call's
@@ -92,6 +94,7 @@ from dodeal_ai.units.call_intelligence.score import (
     RUBRIC_VERSION,
     ScoreChecks,
     ask_checks,
+    reconciled,
     score_call,
     score_gate,
     substantive_turns,
@@ -187,6 +190,9 @@ async def wave2(
     wave.parts[ESCALATIONS] = (
         None if flags is None else escalations_part(call, flags, stage1_escalations)
     )
+    # D-75: an agent's verified over-promise fails no_over_promise in code,
+    # whatever the score pass said; nothing with either part null.
+    wave.parts[SCORE] = reconciled(call, wave.parts[SCORE], wave.parts[ESCALATIONS])
     if language_on:
         coaching = await _part(
             run,

@@ -19,6 +19,7 @@ from dodeal_ai.core.jobs import (
     clear_work,
     read_job,
     read_result,
+    read_stage2_result,
 )
 from dodeal_ai.core.tenant_config import set_override
 from dodeal_ai.main import app
@@ -29,14 +30,22 @@ from dodeal_ai.units.call_intelligence.config import (
 )
 from dodeal_ai.units.call_intelligence.delivery import event_body
 from dodeal_ai.units.call_intelligence.fake_transcriber import FakeTranscriber
+from dodeal_ai.units.call_intelligence.prompts import (
+    COACHING_TEMPLATE,
+    ESCALATIONS_TEMPLATE,
+    EXTRAS_TEMPLATE,
+)
 from dodeal_ai.units.call_intelligence.queues import OVERNIGHT_QUEUE
 from dodeal_ai.units.call_intelligence.reanalysis import admit_reanalysis
 from dodeal_ai.units.call_intelligence.schemas import ReanalysisRequest
+from dodeal_ai.units.call_intelligence.stage2 import analyse_stage2
 from dodeal_ai.units.call_intelligence.transcriber import Transcript
 from dodeal_ai.units.call_intelligence.worker import STAGE1, process_call
 from tests.conftest import RedisFakes
 from tests.helpers import tokens
 from tests.helpers.fake_llm import FakeLLM, json_response
+from tests.helpers.wave2_answers import coaching_answer, extras_answer
+from tests.unit.test_call_score import _checks
 from tests.unit.test_call_stage1 import (
     EXTRACTION,
     ON,
@@ -44,6 +53,7 @@ from tests.unit.test_call_stage1 import (
     SEGMENTS,
     _Deliveries,
     _resolve,
+    _say,
 )
 
 URL = "/api/v1/calls/reanalysis"
@@ -181,3 +191,52 @@ async def test_stage_2_alone_skips_stage_1s_passes_and_no_transcript_fails(
     assert failed is not None and failed.status is JobStatus.FAILED
     assert failed.reason == "reanalysis_transcript_missing"
     assert ctx["transcriber"].calls == []
+
+
+async def test_a_reanalysis_marks_the_score_again_once_the_escalations_answer(
+    ctx: dict[str, Any], redis_fakes: RedisFakes
+) -> None:
+    """D-75 on the same path: stage 2 of a re-analysis fails no_over_promise
+    on the agent's verified promise, and stamps call_rubric_v2."""
+    await set_override(
+        "tenant-a",
+        UNIT_B_SECTION,
+        {**ON, "scoring_enabled": True},
+        now=datetime.now(UTC),
+        keep_version=new_config_version,
+    )
+    promise = "I guarantee this villa doubles in value within a year."
+    said = (*SEGMENTS[:2], _say(10, "agent", promise), SEGMENTS[3])
+    stored = Transcript.of(said, provider="gemini", model="gemini-3.5-transcribe")
+    body = _body(stages=[2], transcript=stored.model_dump(mode="json"))
+    accepted = await admit_reanalysis(
+        SCOPE, ReanalysisRequest.model_validate(body), CONFIG, now=datetime.now(UTC)
+    )
+    await process_call(ctx, "tenant-a", accepted.job_id)
+    flag = {
+        "issue": "over_promise_or_guarantee",
+        "quote": "I guarantee this villa doubles in value",
+        "segment": "s3",
+    }
+    llm = FakeLLM(
+        json_response({"objections": []}),
+        json_response(_checks(courteous="Good morning")),
+    )
+    llm.script_for(ESCALATIONS_TEMPLATE, json_response({"escalations": [flag]}))
+    llm.script_for(COACHING_TEMPLATE, json_response(coaching_answer(said[0].text)))
+    llm.script_for(EXTRAS_TEMPLATE, json_response(extras_answer()))
+
+    await analyse_stage2({"llm": llm}, "tenant-a", accepted.job_id)
+
+    held = await read_stage2_result("tenant-a", accepted.job_id)
+    assert held is not None and held["versions"]["rubric"] == "call_rubric_v2"
+    professionalism = held["score"]["components"]["professionalism"]
+    assert professionalism["checks"]["no_over_promise"] == {
+        "answer": "no",
+        "source": "code",
+        **{name: flag[name] for name in ("quote", "segment")},
+    }
+    # Understanding 5 (listened_more alone), professionalism 11 of 15: 16 of 60.
+    assert professionalism["mark"] == 11
+    assert (held["score"]["raw"], held["score"]["total"]) == (16, 27)
+    assert held["score"]["band"] == "coaching_required"

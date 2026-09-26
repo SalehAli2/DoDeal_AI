@@ -70,11 +70,14 @@ MAX_FLAGS = 10
 
 WRONG_PRICE = "wrong_price_or_terms"
 CLAIM_TO_VERIFY = "claim_to_verify"
+# An agent's promise nobody can keep: it also answers the score's
+# no_over_promise (score.py, D-75).
+OVER_PROMISE = "over_promise_or_guarantee"
 
 # The issues only the agent can commit, so only an agent segment can show.
 AGENT_ISSUES = frozenset(
     {
-        "over_promise_or_guarantee",
+        OVER_PROMISE,
         WRONG_PRICE,
         "rudeness_or_pressure",
         "unprofessional_competitor_talk",

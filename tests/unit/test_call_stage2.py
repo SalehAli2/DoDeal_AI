@@ -381,7 +381,7 @@ async def test_stage2_is_held_and_delivered_as_call_stage2(
         "prompt": "unit_b_prompts_v18",
         "quote_fillers": "quote_fillers_v1",
         "objection_list": "objection_list_v1",
-        "rubric": "call_rubric_v1",
+        "rubric": "call_rubric_v2",
         "tone_list": "tone_list_v1",
         "model": dict.fromkeys(
             ("objections", "escalations", "coaching", "extras"), "fake-model-pinned"
