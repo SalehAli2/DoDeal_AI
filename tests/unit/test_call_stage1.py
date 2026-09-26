@@ -223,11 +223,14 @@ async def test_a_call_is_analysed_and_delivered_with_its_stage1_payload(
     }
     assert (analysis_["language"], analysis_["summary"]) == ("en", PROSE["summary"])
     assert analysis_["elements"]["ending"] == "moved_forward"
-    assert analysis_["elements"]["agreed"] == EXTRACTION["agreed"]
+    assert analysis_["elements"]["agreed"] == [
+        {**EXTRACTION["agreed"][0], "unverified": False}
+    ]
     assert analysis_["elements"]["next_step"]["segment"] == "s4"
     assert analysis_["details"]["budget"]["state"] == "stated"
-    assert analysis_["details"]["area"] == _detail()
+    assert analysis_["details"]["area"] == {**_detail(), "evidence_failed": False}
     assert analysis_["mood"]["uncertain"] is False
+    assert analysis_["mood"]["evidence_failed"] is False
     signals = result["signals"]
     assert set(signals) == {
         "version",

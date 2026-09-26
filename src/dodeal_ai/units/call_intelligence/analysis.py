@@ -49,12 +49,10 @@ from dodeal_ai.units.call_intelligence.paid import (
     run_pass,
 )
 from dodeal_ai.units.call_intelligence.passes import (
-    DETAIL_NAMES,
     CallText,
     Extraction,
     Prose,
     extract,
-    mood_uncertain,
     settled,
     write_prose,
 )
@@ -96,31 +94,26 @@ class Wave1:
 def _analysis(
     call: CallText, extraction: Extraction, prose: Prose
 ) -> dict[str, object]:
-    """The analysis block: the passes' answers with code's word on certainty."""
+    """The analysis block: the passes' answers with code's word on evidence and
+    certainty (passes.settled)."""
     kept = settled(extraction, call)
     return {
         "language": call.language,
         "uncertain": call.uncertain,
         "summary": prose.summary,
-        "elements": kept.model_dump(
-            mode="json",
-            include={
+        "elements": {
+            name: kept[name]
+            for name in (
                 "wanted",
                 "discussed",
                 "concerns",
                 "agreed",
                 "next_step",
                 "ending",
-            },
-        ),
-        "details": {
-            name: getattr(kept.details, name).model_dump(mode="json")
-            for name in DETAIL_NAMES
+            )
         },
-        "mood": {
-            **kept.mood.model_dump(mode="json"),
-            "uncertain": mood_uncertain(extraction, call),
-        },
+        "details": kept["details"],
+        "mood": kept["mood"],
         "crm_note": prose.crm_note,
     }
 

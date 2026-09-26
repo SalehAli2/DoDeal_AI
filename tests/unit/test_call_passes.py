@@ -22,7 +22,7 @@ from dodeal_ai.units.call_intelligence.passes import (
     UNCERTAIN,
     CallText,
     extract,
-    mood_uncertain,
+    extraction_quotes,
     settled,
     write_prose,
 )
@@ -117,10 +117,54 @@ async def _extract(llm: FakeLLM, call: CallText | None = None):
 # --- the guard -------------------------------------------------------------------
 
 
-async def test_an_invented_quote_reprompts_then_fails_the_pass() -> None:
+async def test_one_bad_detail_quote_keeps_the_pass_and_that_detail_uncertain() -> None:
+    """The guard: an invented budget quote costs the budget its evidence, not
+    the pass its answer; nothing is reprompted."""
     invented = _detail("2,000,000 AED", STATED, "I can pay two million", "s2")
-    answer = json_response(_extraction(budget=invented))
-    llm = FakeLLM(answer, answer)
+    llm = FakeLLM(json_response(_extraction(budget=invented)))
+
+    answer, _ = await _extract(llm)
+
+    assert llm.call_count == 1
+    assert settled(answer, _call())["details"]["budget"] == {
+        "value": "2,000,000 AED",
+        "state": UNCERTAIN,
+        "quote": None,
+        "segment": None,
+        "evidence_failed": True,
+    }
+
+
+def _ten_quotes(failing: int) -> dict[str, Any]:
+    """An answer with ten quotes -- wanted, four concerns, four agreements and
+    the next step -- the first `failing` of them invented."""
+    answer = _extraction()
+    answer["concerns"] = [
+        _said("the price", "My budget is 1,200,000 AED", "s2") for _ in range(4)
+    ]
+    answer["agreed"] = [
+        _said("a viewing", "Yes, Tuesday works", "s4") for _ in range(4)
+    ]
+    answer["mood"] = {"value": "neutral", "quote": None, "segment": None}
+    places = [
+        answer["wanted"],
+        *answer["concerns"],
+        *answer["agreed"],
+        answer["next_step"],
+    ]
+    for place in places[:failing]:
+        place["quote"] = "words nobody said"
+    return answer
+
+
+async def test_six_of_ten_quotes_failing_is_malformed() -> None:
+    """The guard: more than half invented is a model not reading the call --
+    one reprompt, then the pass fails; five of ten is kept field by field."""
+    answer = _ten_quotes(6)
+    assert (
+        len(extraction_quotes(_call(), passes.Extraction.model_validate(answer))) == 10
+    )
+    llm = FakeLLM(json_response(answer), json_response(answer))
 
     with pytest.raises(MalformedOutputError):
         await _extract(llm)
@@ -129,10 +173,29 @@ async def test_an_invented_quote_reprompts_then_fails_the_pass() -> None:
     tail = build_prompt(QUOTE_EXACT_TAIL_TEMPLATE, caller_data="").stable
     assert (llm.prompts[0].tail, llm.prompts[1].tail) == ("", tail)
     assert llm.prompts[1].variable == llm.prompts[0].variable
+    assert len(_refused(answer)) == 6
+
+    half = FakeLLM(json_response(_ten_quotes(5)))
+    kept, _ = await _extract(half)
+    assert half.call_count == 1
+    elements = settled(kept, _call())
+    unverified = [item["unverified"] for item in elements["concerns"]]
+    assert unverified == [True, True, True, True]
+    assert elements["wanted"]["unverified"] is True
+    assert elements["agreed"][0]["unverified"] is False
 
 
 def _tail(template: str) -> str:
     return build_prompt(template, caller_data="").stable
+
+
+def _broken(budget: dict[str, Any]) -> dict[str, Any]:
+    """The budget as given, and the wanted and agreed quotes citing no segment:
+    three of five quotes failing when the budget's does."""
+    answer = _extraction(budget=budget)
+    answer["wanted"]["segment"] = "s9"
+    answer["agreed"][0]["segment"] = "s9"
+    return answer
 
 
 @pytest.mark.parametrize(
@@ -143,7 +206,7 @@ def _tail(template: str) -> str:
             _detail("x", STATED, "I can pay two million", "s2"),
             QUOTE_EXACT_TAIL_TEMPLATE,
         ),
-        (_detail("x", STATED, None, None), REPROMPT_TAIL_TEMPLATE),
+        (_detail(None, STATED, "My budget", "s2"), REPROMPT_TAIL_TEMPLATE),
     ],
 )
 async def test_each_quote_code_from_the_extract_pass_picks_its_tail(
@@ -151,7 +214,11 @@ async def test_each_quote_code_from_the_extract_pass_picks_its_tail(
 ) -> None:
     """The guard: a quote_length failure reprompts with the quote tail, a quote
     not in its segment with the exact-copy tail, anything else with the usual."""
-    rejected = _extraction(budget=budget)
+    rejected = (
+        _extraction(budget=budget)
+        if template == REPROMPT_TAIL_TEMPLATE
+        else _broken(budget)
+    )
     llm = FakeLLM(json_response(rejected), json_response(_extraction()))
 
     await _extract(llm)
@@ -226,7 +293,7 @@ async def test_a_quote_code_anywhere_in_the_errors_picks_the_quote_tail(
 
 async def test_call_model_without_a_tail_map_keeps_its_one_tail() -> None:
     """Unit A's default: a quote_length failure still gets reprompt_tail."""
-    rejected = _extraction(budget=_detail("x", STATED, "budget " * 41, "s2"))
+    rejected = _broken(_detail("x", STATED, "budget " * 41, "s2"))
     llm = FakeLLM(json_response(rejected), json_response(_extraction()))
 
     await llm_call.call_model(
@@ -248,8 +315,14 @@ async def test_a_not_mentioned_budget_stays_null() -> None:
     llm = FakeLLM(json_response(_extraction()))
     answer, _ = await _extract(llm)
 
-    budget = settled(answer, _call()).details.budget
-    assert (budget.value, budget.state, budget.quote) == (None, NOT_MENTIONED, None)
+    budget = settled(answer, _call())["details"]["budget"]
+    assert budget == {
+        "value": None,
+        "state": NOT_MENTIONED,
+        "quote": None,
+        "segment": None,
+        "evidence_failed": False,
+    }
 
 
 async def test_a_not_mentioned_detail_with_a_value_is_malformed() -> None:
@@ -276,7 +349,7 @@ async def test_a_true_quote_passes_whatever_its_case_and_punctuation() -> None:
     ("budget", "error"),
     [
         (_detail("x", STATED, "My budget", None), "quote_without_segment"),
-        (_detail("x", STATED, None, None), "stated_without_quote"),
+        (_detail("x", STATED, None, None), "quote_missing"),
         (_detail("x", STATED, "My budget", "s9"), "segment_unknown"),
         (_detail("x", STATED, "budget " * 41, "s2"), "quote_length"),
         (_detail("x", UNCERTAIN, "...", "s2"), "quote_length"),
@@ -284,13 +357,29 @@ async def test_a_true_quote_passes_whatever_its_case_and_punctuation() -> None:
         (_detail("x", STATED, "call me on 050 123 4567", "s2"), "quote_not_in_segment"),
     ],
 )
-def test_every_broken_quote_is_malformed(budget: dict, error: str) -> None:
-    from dodeal_ai.core.validation import OutputValidationError
-
+def test_every_broken_detail_quote_is_that_details_evidence_failed(
+    budget: dict, error: str
+) -> None:
     answer = passes.Extraction.model_validate(_extraction(budget=budget))
-    with pytest.raises(OutputValidationError) as refused:
-        passes.check_extraction(_call())(answer)
-    assert ("details.budget", error) in refused.value.errors
+    passes.check_extraction(_call())(answer)
+
+    assert extraction_quotes(_call(), answer)["details.budget"] == [
+        ("details.budget", error)
+    ]
+    kept = settled(answer, _call())["details"]["budget"]
+    assert (kept["state"], kept["quote"], kept["segment"]) == (UNCERTAIN, None, None)
+    assert (kept["value"], kept["evidence_failed"]) == ("x", True)
+
+
+@pytest.mark.parametrize(
+    ("budget", "error"),
+    [
+        (_detail("x", NOT_MENTIONED), "not_mentioned_with_value"),
+        (_detail(None, STATED, "My budget", "s2"), "stated_without_value"),
+    ],
+)
+def test_a_broken_detail_shape_is_malformed(budget: dict, error: str) -> None:
+    assert _refused(_extraction(budget=budget)) == (("details.budget", error),)
 
 
 # One long segment of 41 distinct words, so a quote of its first n is exact.
@@ -324,16 +413,32 @@ def _refused(answer: dict[str, Any]) -> tuple[tuple[str, str], ...]:
     return refused.value.errors
 
 
-async def test_an_agreed_item_without_a_real_quote_reprompts_then_fails() -> None:
-    """The guard: every element's evidence goes through the quote check."""
+async def test_an_agreed_item_without_a_real_quote_is_kept_unverified() -> None:
+    """The guard: every element's evidence goes through the quote check, and
+    one that fails is kept with unverified true and no quote."""
     answer = _extraction()
     answer["agreed"] = [_said("a discount of ten percent", "I give you 10%", "s3")]
-    llm = FakeLLM(json_response(answer), json_response(answer))
+    llm = FakeLLM(json_response(answer))
 
-    with pytest.raises(MalformedOutputError):
-        await _extract(llm)
-    assert llm.call_count == 2
-    assert _refused(answer) == (("agreed.0", "quote_not_in_segment"),)
+    found, _ = await _extract(llm)
+
+    assert llm.call_count == 1
+    assert extraction_quotes(_call(), found)["agreed.0"] == [
+        ("agreed.0", "quote_not_in_segment")
+    ]
+    assert settled(found, _call())["agreed"] == [
+        {
+            "text": "a discount of ten percent",
+            "quote": None,
+            "segment": None,
+            "unverified": True,
+        }
+    ]
+
+
+def _failures(answer: dict[str, Any]) -> list[tuple[str, str]]:
+    found = extraction_quotes(_call(), passes.Extraction.model_validate(answer))
+    return [error for errors in found.values() for error in errors]
 
 
 @pytest.mark.parametrize(
@@ -357,7 +462,7 @@ async def test_an_agreed_item_without_a_real_quote_reprompts_then_fails() -> Non
 def test_every_elements_evidence_is_quote_checked(
     change: dict[str, Any], error: tuple[str, str]
 ) -> None:
-    assert _refused({**_extraction(), **change}) == (error,)
+    assert _failures({**_extraction(), **change}) == [error]
 
 
 @pytest.mark.parametrize(
@@ -373,7 +478,13 @@ def test_a_next_step_with_an_action_needs_its_quote(
 ) -> None:
     answer = _extraction()
     answer["next_step"].update(quote=quote, segment=segment)
-    assert _refused(answer) == (("next_step", error),)
+    assert _failures(answer) == [("next_step", error)]
+    kept = settled(passes.Extraction.model_validate(answer), _call())["next_step"]
+    assert (kept["action"], kept["quote"], kept["unverified"]) == (
+        "Viewing",
+        None,
+        True,
+    )
 
 
 def test_no_next_action_needs_no_quote_but_a_given_one_is_checked() -> None:
@@ -386,9 +497,9 @@ def test_no_next_action_needs_no_quote_but_a_given_one_is_checked() -> None:
         "segment": None,
     }
     answer["wanted"] = None
-    passes.check_extraction(_call())(passes.Extraction.model_validate(answer))
+    assert _failures(answer) == []
     answer["next_step"].update(quote="nothing was said", segment="s1")
-    assert _refused(answer) == (("next_step", "quote_not_in_segment"),)
+    assert _failures(answer) == [("next_step", "quote_not_in_segment")]
 
 
 @pytest.mark.parametrize(
@@ -410,13 +521,17 @@ def test_an_agreement_without_its_evidence_is_refused_by_the_schema(
 
 
 def test_a_mood_quote_is_checked_too() -> None:
-    from dodeal_ai.core.validation import OutputValidationError
-
     answer = _extraction()
     answer["mood"]["quote"] = "I am thrilled"
-    with pytest.raises(OutputValidationError) as refused:
-        passes.check_extraction(_call())(passes.Extraction.model_validate(answer))
-    assert refused.value.errors == (("mood", "quote_not_in_segment"),)
+    assert _failures(answer) == [("mood", "quote_not_in_segment")]
+    kept = settled(passes.Extraction.model_validate(answer), _call())
+    assert kept["mood"] == {
+        "value": "positive",
+        "quote": None,
+        "segment": None,
+        "uncertain": True,
+        "evidence_failed": True,
+    }
 
 
 # --- certainty, in code ----------------------------------------------------------
@@ -433,11 +548,10 @@ async def test_a_detail_citing_a_low_confidence_segment_is_uncertain() -> None:
     answer, _ = await _extract(FakeLLM(json_response(_extraction(budget=BUDGET))), call)
 
     kept = settled(answer, call)
-    assert (kept.details.budget.state, kept.details.budget.value) == (
-        UNCERTAIN,
-        "1,200,000 AED",
-    )
-    assert not mood_uncertain(answer, call)
+    budget = kept["details"]["budget"]
+    assert (budget["state"], budget["value"]) == (UNCERTAIN, "1,200,000 AED")
+    assert (budget["quote"], budget["evidence_failed"]) == (BUDGET["quote"], False)
+    assert kept["mood"]["uncertain"] is False
 
 
 async def test_an_uncertain_transcript_makes_every_field_uncertain() -> None:
@@ -446,10 +560,10 @@ async def test_an_uncertain_transcript_makes_every_field_uncertain() -> None:
     answer, _ = await _extract(FakeLLM(json_response(_extraction(budget=BUDGET))), call)
 
     kept = settled(answer, call)
-    details = [getattr(kept.details, name) for name in passes.DETAIL_NAMES]
-    assert {detail.state for detail in details} == {UNCERTAIN}
-    assert kept.details.area.value is None
-    assert mood_uncertain(answer, call)
+    details = [kept["details"][name] for name in passes.DETAIL_NAMES]
+    assert {detail["state"] for detail in details} == {UNCERTAIN}
+    assert kept["details"]["area"]["value"] is None
+    assert kept["mood"]["uncertain"] is True
 
 
 # --- what is sent ----------------------------------------------------------------
@@ -476,12 +590,15 @@ async def test_the_prose_pass_reads_the_settled_extraction() -> None:
     llm = FakeLLM(json_response(PROSE))
 
     prose, _ = await write_prose(
-        llm, call, extraction, scope=SCOPE, settings=get_settings()
+        llm, call, settled(extraction, call), scope=SCOPE, settings=get_settings()
     )
 
     (sent,) = llm.calls
     assert (sent.profile, sent.max_output_tokens) == (PROFILE_UNIT_B_PROSE, 1500)
-    assert '"budget": {"quote": "my budget is 1,200,000 AED"' in sent.prompt.variable
+    assert (
+        '"budget": {"evidence_failed": false, "quote": "my budget is 1,200,000 AED"'
+        in sent.prompt.variable
+    )
     assert sent.prompt.variable.index("TRANSCRIPT:") < sent.prompt.variable.index(
         "EXTRACTION:"
     )

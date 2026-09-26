@@ -8,12 +8,17 @@ and a fixed output ceiling sized for a non-reasoning model.
 
 EVIDENCE FOR EVERY ELEMENT (extract_v2). What the client wanted, each concern
 and each agreement carry the quote and segment they rest on, and so does the
-next step whenever it names an action. Each detail and the mood may cite one.
-Every quote goes through the quote check (evidence.py); a missing or failing
-quote is a malformed answer: the pass is reprompted once, then fails.
+next step whenever it names an action; a stated detail owes one. Each other
+detail and the mood may cite one. Every quote goes through the quote check
+(evidence.py), FIELD BY FIELD: a detail whose quote fails is kept uncertain,
+its quote and segment null and evidence_failed true; an element whose quote
+fails is kept unverified, its quote and segment null; a mood whose quote fails
+is kept uncertain the same way (settled()). The answer is malformed -- one
+reprompt, then the pass fails -- only on a broken shape, or when more than
+half of the quotes it gives or owes fail.
 
 WHAT THE MODEL MAY NOT DECIDE. A detail not mentioned has no value, quote or
-segment, and one stated has all three: either broken is malformed, never
+segment, and one stated has a value: either broken is malformed, never
 repaired. A detail stated from a segment below the transcript's confidence
 floor is marked uncertain in code, and every detail of an uncertain
 transcript is (settled()). The CRM note is at most 80 words, and the summary
@@ -22,17 +27,17 @@ letters outside quotes in its script (evidence.in_language); both are checked
 here.
 
 The prose pass reads the transcript and the SETTLED extraction -- validated
-and quote-checked output, in the data half and neutralised like the
-transcript -- never a rejected answer.
+and quote-checked output with every failed quote removed, in the data half
+and neutralised like the transcript -- never a rejected answer.
 """
 
 from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 from dodeal_ai.core.config import Settings
 from dodeal_ai.core.context import TenantScope
@@ -78,6 +83,11 @@ MAX_CRM_NOTE_WORDS = 80
 STATED = "stated"
 NOT_MENTIONED = "not_mentioned"
 UNCERTAIN = "uncertain"
+
+# The share of an extraction's quotes that may fail and the answer still be
+# kept field by field: more than half failing is a model not reading the call.
+# Lower reprompts answers with one slip; higher keeps answers mostly invented.
+MAX_FAILED_QUOTE_SHARE = 0.5
 
 DETAIL_NAMES = (
     "budget",
@@ -167,41 +177,67 @@ class Prose(Strict):
     crm_note: Annotated[str, Field(min_length=1, max_length=_NOTE_CHARS)]
 
 
-def _element_errors(call: CallText, answer: Extraction) -> Errors:
-    """The quote check on each summary element's evidence."""
-    errors: Errors = []
+def _detail_quote(call: CallText, where: str, detail: Detail) -> Errors | None:
+    """A detail's quote check; None when it neither gives nor owes one."""
+    if detail.state == STATED:
+        return evidence_errors(call, where, detail.quote, detail.segment)
+    if detail.state == UNCERTAIN and (detail.quote, detail.segment) != (None, None):
+        return quote_errors(call, where, detail.quote, detail.segment)
+    return None
+
+
+def extraction_quotes(call: CallText, answer: Extraction) -> dict[str, Errors]:
+    """Every quote the extraction gives or owes, by where it is, with the quote
+    check's failures ([] for one that passes)."""
+    found: dict[str, Errors] = {}
+    for name in DETAIL_NAMES:
+        checked = _detail_quote(call, f"details.{name}", getattr(answer.details, name))
+        if checked is not None:
+            found[f"details.{name}"] = checked
+    mood = answer.mood
+    if (mood.quote, mood.segment) != (None, None):
+        found["mood"] = quote_errors(call, "mood", mood.quote, mood.segment)
     if answer.wanted is not None:
-        errors += quote_errors(
-            call, "wanted", answer.wanted.quote, answer.wanted.segment
-        )
+        wanted = answer.wanted
+        found["wanted"] = quote_errors(call, "wanted", wanted.quote, wanted.segment)
     for field in ("concerns", "agreed"):
         items: list[Item] = getattr(answer, field)
         for n, item in enumerate(items):
-            errors += quote_errors(call, f"{field}.{n}", item.quote, item.segment)
+            where = f"{field}.{n}"
+            found[where] = quote_errors(call, where, item.quote, item.segment)
     step = answer.next_step
-    check = quote_errors if step.action is None else evidence_errors
-    errors += check(call, "next_step", step.quote, step.segment)
+    if step.action is not None or (step.quote, step.segment) != (None, None):
+        check = quote_errors if step.action is None else evidence_errors
+        found["next_step"] = check(call, "next_step", step.quote, step.segment)
+    return found
+
+
+def _shape_errors(answer: Extraction) -> Errors:
+    """What no quote can mend: a detail not mentioned that carries anything, a
+    stated one with no value."""
+    errors: Errors = []
+    for name in DETAIL_NAMES:
+        detail: Detail = getattr(answer.details, name)
+        where = f"details.{name}"
+        given = (detail.value, detail.quote, detail.segment)
+        if detail.state == NOT_MENTIONED and given != (None, None, None):
+            errors.append((where, "not_mentioned_with_value"))
+        if detail.state == STATED and detail.value is None:
+            errors.append((where, "stated_without_value"))
     return errors
 
 
 def check_extraction(call: CallText) -> Callable[[Extraction], None]:
-    """The rules the schema cannot hold (module docstring), for call_model."""
+    """The rules the schema cannot hold (module docstring), for call_model:
+    malformed on a broken shape or when more than half of the quotes fail."""
 
     def check(answer: Extraction) -> None:
-        errors: Errors = []
-        for name in DETAIL_NAMES:
-            detail: Detail = getattr(answer.details, name)
-            where = f"details.{name}"
-            given = (detail.value, detail.quote, detail.segment)
-            if detail.state == NOT_MENTIONED and given != (None, None, None):
-                errors.append((where, "not_mentioned_with_value"))
-            if detail.state == STATED and None in given:
-                errors.append((where, "stated_without_quote"))
-            errors += quote_errors(call, where, detail.quote, detail.segment)
-        errors += quote_errors(call, "mood", answer.mood.quote, answer.mood.segment)
-        errors += _element_errors(call, answer)
-        if errors:
-            raise output_rejected(EXTRACT_LABEL, tuple(errors))
+        quotes = extraction_quotes(call, answer)
+        failed = [error for errors in quotes.values() for error in errors]
+        failing = sum(1 for errors in quotes.values() if errors)
+        shape = _shape_errors(answer)
+        if shape or failing > MAX_FAILED_QUOTE_SHARE * len(quotes):
+            raise output_rejected(EXTRACT_LABEL, tuple(shape + failed))
 
     return check
 
@@ -222,25 +258,70 @@ def check_prose(call: CallText) -> Callable[[Prose], None]:
     return check
 
 
-def settled(answer: Extraction, call: CallText) -> Extraction:
-    """The extraction with code's word on certainty: every detail uncertain on
-    an uncertain transcript, and a stated one citing a low-confidence segment
-    uncertain. Values are never touched: a detail not mentioned stays null."""
-    changed = {}
-    for name in DETAIL_NAMES:
-        detail: Detail = getattr(answer.details, name)
-        doubtful = call.uncertain or (
-            detail.state == STATED and call.low_confidence(detail.segment)
-        )
-        if doubtful and detail.state != UNCERTAIN:
-            changed[name] = detail.model_copy(update={"state": UNCERTAIN})
-    details = answer.details.model_copy(update=changed)
-    return answer.model_copy(update={"details": details})
+def _settled_detail(call: CallText, detail: Detail, failed: bool) -> dict[str, object]:
+    """A detail as delivered: a failed quote removed and the detail uncertain;
+    uncertain too on an uncertain transcript or a low-confidence segment."""
+    kept = detail.model_dump(mode="json")
+    doubtful = call.uncertain or (
+        detail.state == STATED and call.low_confidence(detail.segment)
+    )
+    if failed:
+        kept.update(quote=None, segment=None)
+    if failed or doubtful:
+        kept["state"] = UNCERTAIN
+    return {**kept, "evidence_failed": failed}
 
 
-def mood_uncertain(answer: Extraction, call: CallText) -> bool:
-    """The mood is uncertain on an uncertain transcript or a doubtful segment."""
-    return call.uncertain or call.low_confidence(answer.mood.segment)
+def _settled_item(item: BaseModel, failed: bool) -> dict[str, object]:
+    """An element as delivered: kept with unverified true and no quote when its
+    quote failed."""
+    kept = item.model_dump(mode="json")
+    if failed:
+        kept.update(quote=None, segment=None)
+    return {**kept, "unverified": failed}
+
+
+def settled(answer: Extraction, call: CallText) -> dict[str, Any]:
+    """The extraction as stage 1 delivers it and the prose pass reads it, with
+    code's word on evidence and certainty (module docstring). Values are never
+    touched: a detail not mentioned stays null."""
+    failed = {
+        where for where, errors in extraction_quotes(call, answer).items() if errors
+    }
+    mood = answer.mood
+    mood_failed = "mood" in failed
+    return {
+        "wanted": (
+            None
+            if answer.wanted is None
+            else _settled_item(answer.wanted, "wanted" in failed)
+        ),
+        "discussed": list(answer.discussed),
+        **{
+            field: [
+                _settled_item(item, f"{field}.{n}" in failed)
+                for n, item in enumerate(getattr(answer, field))
+            ]
+            for field in ("concerns", "agreed")
+        },
+        "next_step": _settled_item(answer.next_step, "next_step" in failed),
+        "ending": answer.ending,
+        "details": {
+            name: _settled_detail(
+                call, getattr(answer.details, name), f"details.{name}" in failed
+            )
+            for name in DETAIL_NAMES
+        },
+        "mood": {
+            "value": mood.value,
+            "quote": None if mood_failed else mood.quote,
+            "segment": None if mood_failed else mood.segment,
+            "uncertain": (
+                mood_failed or call.uncertain or call.low_confidence(mood.segment)
+            ),
+            "evidence_failed": mood_failed,
+        },
+    }
 
 
 async def extract(
@@ -266,15 +347,13 @@ async def extract(
 async def write_prose(
     client: LLMClient,
     call: CallText,
-    extraction: Extraction,
+    extraction: dict[str, Any],
     *,
     scope: TenantScope,
     settings: Settings,
 ) -> tuple[Prose, LLMResponse]:
     """unit_b.prose from the transcript and the settled extraction."""
-    shown = json.dumps(
-        extraction.model_dump(mode="json"), ensure_ascii=False, sort_keys=True
-    )
+    shown = json.dumps(extraction, ensure_ascii=False, sort_keys=True)
     return await call_model(
         client,
         build_call_prompt(PROSE_TEMPLATE, f"{call.data()}\n\nEXTRACTION:\n{shown}"),
