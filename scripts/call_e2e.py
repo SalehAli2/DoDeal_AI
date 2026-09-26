@@ -2,7 +2,12 @@
 
     uv run python -m scripts.call_e2e <audio> [--language en|ar|mixed]
         [--tenant tenant-a] [--stt-profile NAME] [--no-stage2]
-        [--out DIR] [--timeout 1800]
+        [--out DIR] [--timeout 1800] [--vocabulary FILE]
+        [--dialect gulf_uae|egyptian|levantine|msa]
+
+--vocabulary is a UTF-8 file outside this repository, one term per line,
+sent as the tenant's keyword_vocabulary; --dialect sets its
+whatsapp_default_dialect for the run. Both go in the unit_b PUT.
 
 Starts the API, the normal and stage-2 call workers and call_demo.py's
 file-and-callback server as child processes, switches calls on for the
@@ -28,7 +33,7 @@ import sys
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, Any, get_args
 
 import httpx
 import jwt
@@ -37,6 +42,7 @@ from arq.constants import health_check_key_suffix
 
 from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.redis import redis_url as store_url
+from dodeal_ai.units.call_intelligence.extras import WhatsAppDialect
 from dodeal_ai.units.call_intelligence.queues import (
     NORMAL_QUEUE,
     OVERNIGHT_QUEUE,
@@ -73,6 +79,38 @@ def outside_repo(path: Path) -> Path:
     if resolved.is_relative_to(REPO_ROOT):
         raise fail("a path inside this repository was refused")
     return resolved
+
+
+def vocabulary_terms(path: Path) -> list[str]:
+    """--vocabulary's terms, one per line, blank lines skipped; exit when the
+    file is inside this repository, unreadable or not UTF-8 (a BOM allowed)."""
+    source = outside_repo(path)
+    try:
+        text = source.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError):
+        raise fail("the vocabulary file could not be read as UTF-8") from None
+    return [line.strip() for line in text.splitlines() if line.strip()]
+
+
+def unit_b_section(
+    args: argparse.Namespace, callback_url: str, vocabulary: list[str] | None
+) -> dict[str, Any]:
+    """The unit_b PUT: calls and every checked pass on, and what the flags set."""
+    section: dict[str, Any] = {
+        "calls_enabled": True,
+        "audio_hosts": ["127.0.0.1"],
+        "callback_url": callback_url,
+        "number_detection_enabled": True,
+        "alarm_phrases_enabled": True,
+        "scoring_enabled": True,
+    }
+    if args.stt_profile:
+        section["stt_profile"] = args.stt_profile
+    if vocabulary is not None:
+        section["keyword_vocabulary"] = vocabulary
+    if args.dialect:
+        section["whatsapp_default_dialect"] = args.dialect
+    return section
 
 
 def plain(value: object) -> str:
@@ -326,7 +364,14 @@ def report(body: dict[str, Any], outcomes: list[dict[str, Any]]) -> list[str]:
     ]
     extras = at(body, "stage2_result", "extras")
     if isinstance(extras, dict):
-        for name in ("whatsapp_suggestion", "seriousness", "tags", "keywords"):
+        for name in (
+            "whatsapp_suggestion",
+            "whatsapp_dialect",
+            "agent_dialect",
+            "seriousness",
+            "tags",
+            "keywords",
+        ):
             lines.append(f"{name}: {whole(extras.get(name))}")
     else:
         lines.append(f"extras: {extras}")
@@ -523,6 +568,7 @@ def run(args: argparse.Namespace) -> int:
     audio = outside_repo(args.audio)
     if not audio.is_file():
         raise fail("the recording was not found")
+    vocabulary = None if args.vocabulary is None else vocabulary_terms(args.vocabulary)
     stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     out = outside_repo(args.out or audio.parent / f"e2e_{audio.stem}_{stamp}")
     (out / "logs").mkdir(parents=True, exist_ok=True)
@@ -644,16 +690,11 @@ def run(args: argparse.Namespace) -> int:
         if audio_url is None:
             raise fail(f"the demo server printed no audio URL; see {demo_log}")
 
-        section: dict[str, Any] = {
-            "calls_enabled": True,
-            "audio_hosts": ["127.0.0.1"],
-            "callback_url": f"http://127.0.0.1:{demo_port}/callback",
-            "number_detection_enabled": True,
-            "alarm_phrases_enabled": True,
-            "scoring_enabled": True,
-        }
-        if args.stt_profile:
-            section["stt_profile"] = args.stt_profile
+        section = unit_b_section(
+            args, f"http://127.0.0.1:{demo_port}/callback", vocabulary
+        )
+        if vocabulary is not None:
+            print(f"vocabulary: {len(vocabulary)} terms")
         with httpx.Client(base_url=api, timeout=30) as client:
             put = client.put(
                 "/api/v1/admin/tenant-config/unit_b", json=section, headers=headers()
@@ -760,6 +801,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-stage2", action="store_true")
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--timeout", type=float, default=1800.0)
+    parser.add_argument("--vocabulary", type=Path, default=None)
+    parser.add_argument("--dialect", choices=list(get_args(WhatsAppDialect.__value__)))
     return run(parser.parse_args(argv))
 
 

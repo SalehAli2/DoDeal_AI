@@ -1,11 +1,13 @@
 """scripts/call_e2e.py's refusal to start while other workers consume the call
-queues, read from arq's health-check keys on a fakeredis client."""
+queues, read from arq's health-check keys on a fakeredis client; its report;
+and the --vocabulary and --dialect flags in the unit_b PUT."""
 
 from __future__ import annotations
 
 import copy
 import json
 from html.parser import HTMLParser
+from pathlib import Path
 
 import fakeredis
 import pytest
@@ -60,6 +62,8 @@ _EXTRAS = {
         }
     ],
     "tags": {"outcome": "moved_forward", "stage": "viewing", "client_type": "end_user"},
+    "agent_dialect": {"dialect": "unknown", "quote": None, "segment": None},
+    "whatsapp_dialect": None,
     "whatsapp_suggestion": {"language": "en", "text": "See you on Tuesday at four."},
     "seriousness": {
         "band": "medium",
@@ -160,9 +164,11 @@ def test_the_report_prints_the_reasons_and_the_whole_extras_part() -> None:
     shown = json.dumps({"score": "too_short"}, indent=2)
     assert f"part_reasons: {shown}" in lines
     assert f"stage2_result.reasons: {shown}" in lines
-    for name in ("whatsapp_suggestion", "seriousness", "tags", "keywords"):
+    names = ("whatsapp_suggestion", "agent_dialect", "seriousness", "tags", "keywords")
+    for name in names:
         whole = json.dumps(_EXTRAS[name], ensure_ascii=False, indent=2)
         assert f"{name}: {whole}" in lines
+    assert "whatsapp_dialect: None" in lines
 
 
 def test_the_report_names_a_missing_extras_part_and_no_stage2_line() -> None:
@@ -270,3 +276,63 @@ def test_a_closing_script_tag_in_the_call_cannot_end_the_embedded_json() -> None
 def test_the_page_renders_a_partial_or_odd_payload(body: dict) -> None:
     parsed = _parsed(call_e2e.report_html(body, []))
     assert json.loads(parsed.embedded) == body
+
+
+# --- --vocabulary and --dialect ------------------------------------------------------
+
+CALLBACK = "http://127.0.0.1:9/callback"
+
+
+@pytest.fixture
+def parse(monkeypatch):
+    """main's parse without the run: the flags as run() gets them."""
+    seen: list[object] = []
+    monkeypatch.setattr(call_e2e, "run", lambda args: seen.append(args) or 0)
+
+    def parsed(*flags: str) -> object:
+        call_e2e.main(["call.wav", *flags])
+        return seen[-1]
+
+    return parsed
+
+
+def test_the_vocabulary_is_one_term_per_line_in_utf8(tmp_path: Path, parse) -> None:
+    listed = tmp_path / "vocabulary.txt"
+    listed.write_bytes(
+        "\ufeffPalm Grove\n\n  واحة النخيل  \r\nMarina Heights\n".encode()
+    )
+    terms = call_e2e.vocabulary_terms(listed)
+    assert terms == ["Palm Grove", "واحة النخيل", "Marina Heights"]
+    section = call_e2e.unit_b_section(parse(), CALLBACK, terms)
+    assert section["keyword_vocabulary"] == terms
+    assert "whatsapp_default_dialect" not in section
+
+
+def test_a_vocabulary_inside_the_repo_or_not_utf8_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit, match="inside this repository"):
+        call_e2e.vocabulary_terms(Path("README.md"))
+    latin = tmp_path / "latin1.txt"
+    latin.write_bytes("Caf\xe9 Towers\n".encode("latin-1"))
+    with pytest.raises(SystemExit, match="could not be read as UTF-8"):
+        call_e2e.vocabulary_terms(latin)
+    with pytest.raises(SystemExit, match="could not be read as UTF-8"):
+        call_e2e.vocabulary_terms(tmp_path / "missing.txt")
+
+
+def test_the_dialect_flag_sets_the_default_dialect_for_the_run(parse) -> None:
+    section = call_e2e.unit_b_section(parse("--dialect", "egyptian"), CALLBACK, None)
+    assert section["whatsapp_default_dialect"] == "egyptian"
+    assert "keyword_vocabulary" not in section
+    with pytest.raises(SystemExit):
+        parse("--dialect", "gulf")
+
+
+def test_without_the_flags_the_put_is_unchanged(parse) -> None:
+    assert call_e2e.unit_b_section(parse(), CALLBACK, None) == {
+        "calls_enabled": True,
+        "audio_hosts": ["127.0.0.1"],
+        "callback_url": CALLBACK,
+        "number_detection_enabled": True,
+        "alarm_phrases_enabled": True,
+        "scoring_enabled": True,
+    }
