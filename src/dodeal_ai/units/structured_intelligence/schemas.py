@@ -661,3 +661,6 @@ class Judgement(BaseModel):
     enforcement: Enforcement
     versions: Versions
     request_id: str
+    # D-97: true on a pilot company's judgement, set by the pipeline from the
+    # tenant's rules and never from any input. Absent, never false, otherwise.
+    pilot: Literal[True] | None = Field(default=None, exclude_if=lambda v: v is None)

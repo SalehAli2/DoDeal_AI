@@ -48,6 +48,7 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta
 
+from dodeal_ai.core.tenant_config import pilot_label
 from dodeal_ai.units.structured_intelligence.config import TenantConfig
 from dodeal_ai.units.structured_intelligence.judgement_rows import JudgementRow
 from dodeal_ai.units.structured_intelligence.measures import (
@@ -154,6 +155,8 @@ class Brief:
     signals: list[Signal] = field(default_factory=list)
     flagged_yesterday: list[FlaggedPerson] = field(default_factory=list)
     coaching: list[str] = field(default_factory=list)
+    # D-97: a pilot company's brief; the body then carries "pilot": true.
+    pilot: bool = False
 
     def body(self) -> dict[str, object]:
         """The JSON body. Ids and figures only: no row carries note text."""
@@ -169,6 +172,7 @@ class Brief:
             "signals": [asdict(signal) for signal in self.signals],
             "flagged_yesterday": [asdict(person) for person in self.flagged_yesterday],
             "coaching": [{"name": name} for name in self.coaching],
+            **pilot_label(self.pilot),
         }
 
 
@@ -621,4 +625,5 @@ def build_brief(
         signals=parts.signals,
         flagged_yesterday=parts.flagged_yesterday,
         coaching=parts.coaching,
+        pilot=config.pilot,
     )

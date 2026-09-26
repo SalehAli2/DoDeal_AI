@@ -26,7 +26,8 @@ call's author as an asserted subject (`author:<author_id>`).
   GET  /api/v1/calls/jobs/{job_id}
                              {job_id, status, reason, delivery, stage2,
                              result, stage2_result, translations, whatsapp},
-                             each while held;
+                             each while held, and "pilot": true for a pilot
+                             company (D-97);
                              another tenant's job is 404. Counted on the
                              READS counter, and every read is audited.
 """
@@ -37,6 +38,7 @@ from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Path
+from fastapi.responses import JSONResponse
 
 from dodeal_ai.core.auth.dependencies import (
     service_gate4_calls_cost,
@@ -46,6 +48,7 @@ from dodeal_ai.core.auth.dependencies import (
 from dodeal_ai.core.config import Settings, get_settings
 from dodeal_ai.core.context import RequestContext
 from dodeal_ai.core.llm import LLMClient, get_llm_client
+from dodeal_ai.core.tenant_config import pilot_label
 from dodeal_ai.units.call_intelligence.admission import admit_call
 from dodeal_ai.units.call_intelligence.config import resolve_calls_config
 from dodeal_ai.units.call_intelligence.reads import CallJobView, read_call_job
@@ -123,11 +126,15 @@ async def create_whatsapp(
     return await regenerate_whatsapp(context, job_id, body, llm, settings)
 
 
-@router.get("/jobs/{job_id}")
+@router.get("/jobs/{job_id}", response_model=CallJobView)
 async def read_call_job_route(
     context: Annotated[RequestContext, Depends(service_gate4_reads_cost)],
     job_id: Annotated[str, Path(pattern=r"^[0-9a-f]{32}$")],
-) -> CallJobView:
+) -> CallJobView | JSONResponse:
     """Where one call job is. Polling is a read: it never moves the calls
-    counter, and it never changes the job."""
-    return await read_call_job(context, job_id)
+    counter, and it never changes the job. A pilot company's answer carries
+    "pilot": true (D-97); everyone else's is the view as it was."""
+    view = await read_call_job(context, job_id)
+    if not (await resolve_calls_config(context.tenant)).pilot:
+        return view
+    return JSONResponse({**view.model_dump(mode="json"), **pilot_label(True)})

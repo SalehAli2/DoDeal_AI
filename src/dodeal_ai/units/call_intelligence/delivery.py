@@ -28,7 +28,8 @@ pending gets delivery_failed: there is nowhere left to send it.
 
 The body is built from db3 at every attempt: ids, the stage-1 or stage-2
 result, or the failure's status and reason. Never the audio link, a hash or a
-voiceprint.
+voiceprint. A pilot company's events carry "pilot": true (D-97), read from the
+call rules in force at the attempt.
 """
 
 from __future__ import annotations
@@ -66,6 +67,7 @@ from dodeal_ai.core.jobs import (
     translation_delivery_field,
 )
 from dodeal_ai.core.logging_config import job_log_context
+from dodeal_ai.core.tenant_config import pilot_label
 from dodeal_ai.units.call_intelligence.config import CallsConfig, resolve_calls_config
 from dodeal_ai.units.call_intelligence.queues import enqueue_delivery
 from dodeal_ai.units.call_intelligence.reanalysis import is_reanalysis
@@ -110,11 +112,12 @@ def _owed(job: Job, event: str) -> DeliveryState | None:
     return job.stage2_delivery if stage2_event(job, event) else job.delivery
 
 
-async def event_body(job: Job, event: str) -> bytes:
-    """The event's JSON body, from the job as it is now in db3."""
+async def event_body(job: Job, event: str, *, pilot: bool = False) -> bytes:
+    """The event's JSON body, from the job as it is now in db3; `pilot` adds
+    the D-97 label."""
     target = _target(event)
     if target is not None:
-        return await _translation_body(job, event, target)
+        return await _translation_body(job, event, target, pilot=pilot)
     body: dict[str, object] = {
         "event": event,
         "event_id": event_id(job.tenant, job.job_id, event),
@@ -122,6 +125,7 @@ async def event_body(job: Job, event: str) -> bytes:
         "call_id": job.call_id,
         "lead_id": job.metadata.get("lead_id"),
         "author_id": job.metadata.get("author_id"),
+        **pilot_label(pilot),
     }
     if is_reanalysis(job):
         body["reanalysis"] = True
@@ -141,7 +145,7 @@ async def event_body(job: Job, event: str) -> bytes:
     return json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
-async def _translation_body(job: Job, event: str, target: str) -> bytes:
+async def _translation_body(job: Job, event: str, target: str, *, pilot: bool) -> bytes:
     """call.translation's body: the ids and the translation as held now."""
     body: dict[str, object] = {
         "event": CALL_TRANSLATION,
@@ -149,6 +153,7 @@ async def _translation_body(job: Job, event: str, target: str) -> bytes:
         "job_id": job.job_id,
         "call_id": job.call_id,
         "result": await read_translation(job.tenant, job.job_id, target),
+        **pilot_label(pilot),
     }
     return json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
@@ -166,7 +171,7 @@ async def _attempt(
         tenant=job.tenant,
         event=event.partition(":")[0],
         event_id=event_id(job.tenant, job.job_id, event),
-        body=await event_body(current, event),
+        body=await event_body(current, event, pilot=config.pilot),
         timestamp=str(int(time.time())),
         http=ctx["http"],
         resolve=ctx.get("resolve", resolve_host),

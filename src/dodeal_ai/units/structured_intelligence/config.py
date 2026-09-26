@@ -311,6 +311,10 @@ class TenantConfig:
     # about individual people at all. Off by default -- a tenant opts in -- so a
     # deployment never publishes a person's numbers by accident. Off is 403.
     rep_numbers_enabled: bool
+    # D-97: whether this company is a pilot. On, every judgement, brief and
+    # per-agent measure carries "pilot": true, so nobody reads a pilot's figures
+    # as settled. Off by default; off by mistake drops the label, never a mark.
+    pilot: bool
     # The model route this tenant's passes go through (core/llm/routing.py):
     # "default" is DODEAL_LLM_*, any other a DODEAL_MODEL_ROUTES name. Policy
     # only: a judgement's marks do not depend on who ran the checks.
@@ -396,6 +400,7 @@ _DEFAULT_CONFIG = TenantConfig(
     blocking_stages=frozenset({"qualified", "won", "lost"}),
     timezone="Asia/Dubai",
     rep_numbers_enabled=False,
+    pilot=False,
     model_route=DEFAULT_ROUTE,
     # -5: the deal switch now needs the lead's deal_type too (Q13 answered),
     # so what a mark under the switch means changed. -4 was register item
@@ -462,6 +467,7 @@ class TenantConfigFile(BaseModel):
     blocking_stages: frozenset[str] | None = None
     timezone: str | None = None
     rep_numbers_enabled: bool | None = None
+    pilot: bool | None = None
     model_route: str | None = None
 
     @field_validator("model_route")

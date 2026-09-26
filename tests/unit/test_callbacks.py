@@ -209,6 +209,26 @@ async def test_stage1_goes_signed_to_the_callback_url_only(
     assert (job.status, job.delivery) == (JobStatus.DONE, DeliveryState.DELIVERED)
 
 
+@pytest.mark.parametrize("pilot", [True, False])
+@pytest.mark.parametrize("event", [CALL_STAGE1, CALL_FAILED])
+async def test_a_pilot_companys_stage_events_carry_the_label(
+    ctx: dict, world: _World, monkeypatch, pilot: bool, event: str
+) -> None:
+    """D-97: call.stage1 and call.failed carry "pilot": true for a pilot
+    company; another company's events have no such key, not even false."""
+    await _setup({"pilot": True} if pilot else None)
+    if event == CALL_FAILED:
+        monkeypatch.setenv("DODEAL_CALL_MAX_TRIES", "1")
+        get_settings.cache_clear()
+        world.audio_status = 503
+    await process_call(ctx, "tenant-a", JOB)
+
+    (post,) = world.posts
+    body = json.loads(post.content)
+    assert body["event"] == event
+    assert body.get("pilot") is True if pilot else "pilot" not in body
+
+
 async def test_a_dead_lettered_job_sends_call_failed_with_its_reason(
     ctx: dict, world: _World, monkeypatch
 ) -> None:

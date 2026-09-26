@@ -138,6 +138,7 @@ from dodeal_ai.core.resilience import (
     gather_first_wins,
     gather_or_cancel,
 )
+from dodeal_ai.core.tenant_config import pilot_label
 from dodeal_ai.schemas.lead import Lead, LeadNote
 from dodeal_ai.tools.errors import (
     BackendEnvelopeInvalid,
@@ -363,6 +364,12 @@ async def _timed[T](coro: Awaitable[T]) -> tuple[T, int]:
     started = time.monotonic()
     result = await coro
     return result, _ms_since(started)
+
+
+def _labelled[J: Judgement](judgement: J, config: TenantConfig) -> J:
+    """D-97: a pilot company's judgement carries "pilot": true, a replay too.
+    Added on the way out, so the stored copy is the judgement alone."""
+    return judgement.model_copy(update=pilot_label(config.pilot))
 
 
 def _versions(config: TenantConfig, model_version: str = NO_MODEL) -> Versions:
@@ -803,7 +810,7 @@ async def _judge_fetched(
             lead, note, copied = await _fetch_note(
                 scope, request, deps, deadline=deadline
             )
-            return await _judge(
+            judgement = await _judge(
                 scope,
                 request,
                 lead,
@@ -815,6 +822,7 @@ async def _judge_fetched(
                 route="fetch",
                 copied_previous=copied,
             )
+            return _labelled(judgement, deps.config)
     except TimeoutError:
         raise _deadline_exceeded(scope, started) from None
 
@@ -949,7 +957,7 @@ async def _judge_sent(
                 author_id=request.author_id,
                 createdAt=created_at,
             )
-            return await _judge(
+            judgement = await _judge(
                 scope,
                 request,
                 lead,
@@ -963,6 +971,7 @@ async def _judge_sent(
                 copied_previous=_copied_by_fingerprint(request),
                 deal_type=request.lead.deal_type,
             )
+            return _labelled(judgement, deps.config)
     except TimeoutError:
         raise _deadline_exceeded(scope, started) from None
 

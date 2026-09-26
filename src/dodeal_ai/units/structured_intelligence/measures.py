@@ -41,6 +41,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
 from zoneinfo import ZoneInfo
 
+from dodeal_ai.core.tenant_config import pilot_label
 from dodeal_ai.units.structured_intelligence.config import TenantConfig
 from dodeal_ai.units.structured_intelligence.judgement_rows import JudgementRow
 from dodeal_ai.units.structured_intelligence.schemas import (
@@ -406,8 +407,11 @@ def measure_body(measure: BandMeasure | ShareMeasure, config: TenantConfig) -> d
 
 
 def figures(rows: Sequence[JudgementRow], config: TenantConfig) -> dict:
-    """The three measures and the average total over one set of rows."""
+    """The three measures and the average total over one set of rows, with
+    "pilot": true for a pilot company (D-97): on every per-agent measure, at
+    the top of a rep's answer and of a team's and on each member's."""
     return {
+        **pilot_label(config.pilot),
         "measures": {
             MeasureName.AVERAGE_BAND.value: measure_body(
                 average_band(rows, config), config

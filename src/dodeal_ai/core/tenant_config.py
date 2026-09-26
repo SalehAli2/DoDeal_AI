@@ -89,6 +89,12 @@ def load_tenant_configs(directory: Path, parsers: Mapping[str, SectionParser]) -
     _LOADED.update(loaded)
 
 
+def pilot_label(pilot: bool) -> dict[str, bool]:
+    """D-97: {"pilot": true} for a pilot company's output, else nothing. The
+    label is absent for everyone else, never false. Both units add it."""
+    return {"pilot": True} if pilot else {}
+
+
 def tenant_section(tenant: str, section: str) -> object | None:
     """This tenant's parsed `section`, or None when it has no file or no section."""
     return _LOADED.get(tenant, {}).get(section)

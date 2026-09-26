@@ -150,6 +150,10 @@ class CallsConfig(BaseModel):
     number_detection_enabled: bool = False
     alarm_phrases_enabled: bool = False
     prosody_enabled: bool = False
+    # D-97: whether this company is a pilot. On, every call stage event and
+    # status read carries "pilot": true, so a pilot's calls are not read as
+    # settled. Off by default; off by mistake drops the label and nothing else.
+    pilot: bool = False
 
     # Stamped by the override store on a runtime PUT (core/tenant_config.py);
     # None under a tenant file that sets none, and under the default.
