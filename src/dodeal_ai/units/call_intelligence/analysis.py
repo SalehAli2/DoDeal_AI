@@ -18,10 +18,15 @@ it, stage 1's transcript included, reads the transcript it returns, and the
 summary language follows the languages it heard, else the script
 (language.py). Stage 1's languages block says which.
 
-A PASS THAT FAILS still lets stage 1 go: analysis is null and analysis_reason
-says which pass and why (`extract_model_unavailable`, `prose_malformed_output`,
-`extract_pass_interrupted`, or `llm_not_configured` for a run with no client).
-The prose pass is not started once the extraction has failed.
+A PASS THAT FAILS still lets stage 1 go. The extraction failing: analysis is
+null and analysis_reason says why (`extract_model_unavailable`,
+`extract_pass_interrupted`, or `llm_not_configured` for a run with no client),
+and the prose pass is not started. The prose failing alone (A3): the analysis
+goes out with its elements, details and mood, summary and crm_note null, and
+analysis_reason `prose_failed`.
+
+ROLES REASONS ARE REBUILT IN CODE on every run (a re-analysis included): a
+roles_failed or roles_unclear the transcript came with never carries over.
 """
 
 from __future__ import annotations
@@ -35,7 +40,10 @@ from dodeal_ai.core.jobs import Job, start_pass
 from dodeal_ai.core.llm import LLMClient
 from dodeal_ai.units.call_intelligence.alarms import alarms_if_enabled
 from dodeal_ai.units.call_intelligence.config import CallsConfig
-from dodeal_ai.units.call_intelligence.evidence import QUOTE_FILLERS_VERSION
+from dodeal_ai.units.call_intelligence.evidence import (
+    QUOTE_FILLERS_VERSION,
+    ROLES_NOT_APPLIED,
+)
 from dodeal_ai.units.call_intelligence.keywords import spot_keywords
 from dodeal_ai.units.call_intelligence.language import (
     UNHEARD,
@@ -71,6 +79,7 @@ from dodeal_ai.units.call_intelligence.roles import (
     opening,
     single_voice,
     spoken,
+    without,
 )
 from dodeal_ai.units.call_intelligence.signals import SIGNALS_VERSION, call_signals
 from dodeal_ai.units.call_intelligence.transcriber import Transcript
@@ -79,6 +88,8 @@ ROLES = "roles"
 EXTRACT = "extract"
 PROSE = "prose"
 NO_CLIENT = "llm_not_configured"
+# The analysis delivered without its summary and CRM note: the prose failed.
+PROSE_FAILED = "prose_failed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,15 +109,16 @@ class Wave1:
 
 
 def _analysis(
-    call: CallText, clock: CallClock, extraction: Extraction, prose: Prose
+    call: CallText, clock: CallClock, extraction: Extraction, prose: Prose | None
 ) -> dict[str, object]:
     """The analysis block: the passes' answers with code's word on evidence and
-    certainty (passes.settled)."""
+    certainty (passes.settled); summary and crm_note null when the prose pass
+    failed."""
     kept = settled(extraction, call, clock)
     return {
         "language": call.language,
         "uncertain": call.uncertain,
-        "summary": prose.summary,
+        "summary": None if prose is None else prose.summary,
         "elements": {
             name: kept[name]
             for name in (
@@ -121,7 +133,7 @@ def _analysis(
         },
         "details": kept["details"],
         "mood": kept["mood"],
-        "crm_note": prose.crm_note,
+        "crm_note": None if prose is None else prose.crm_note,
     }
 
 
@@ -226,6 +238,10 @@ async def wave1(
         dropped, unverified = extraction_evidence(call, extraction)
         usage.evidence(EXTRACT, dropped=dropped, unverified=unverified)
         doubted = settled(extraction, call, clock)
+    except PassFailed as failed:
+        _stamp(versions, stamps)
+        return Wave1(None, str(failed), versions, code, transcript, roles, languages)
+    try:
         prose, stamps[PROSE] = await run_pass(
             run,
             PROSE,
@@ -234,12 +250,12 @@ async def wave1(
                 metered, call, doubted, scope=scope, settings=settings
             ),
         )
-    except PassFailed as failed:
-        _stamp(versions, stamps)
-        return Wave1(None, str(failed), versions, code, transcript, roles, languages)
+    except PassFailed:
+        prose = None
     _stamp(versions, stamps)
     analysis = _analysis(call, clock, extraction, prose)
-    return Wave1(analysis, None, versions, code, transcript, roles, languages)
+    reason = None if prose is not None else PROSE_FAILED
+    return Wave1(analysis, reason, versions, code, transcript, roles, languages)
 
 
 async def _roles(
@@ -255,7 +271,8 @@ async def _roles(
     language as heard; as it came, None and unheard, when no voice carries the
     engine's label -- doubted even then when one voice is all a long call has."""
     if not needs_roles(transcript):
-        doubted = transcript.doubted(*single_voice(transcript, call_seconds))
+        kept = without(transcript, ROLES_NOT_APPLIED)
+        doubted = kept.doubted(*single_voice(transcript, call_seconds))
         return doubted, None, UNHEARD
     judged: Judged | None = None
     if run is not None:

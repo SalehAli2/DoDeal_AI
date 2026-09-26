@@ -489,9 +489,11 @@ async def test_a_malformed_extraction_twice_fails_the_pass_without_the_prose(
     assert ctx["llm"].call_count == 2
 
 
-async def test_a_prose_outage_fails_stage_1_analysis_with_the_extract_model(
+async def test_a_prose_outage_delivers_the_analysis_without_its_prose(
     ctx: dict,
 ) -> None:
+    """The guard (A3): the prose failing costs the summary and the CRM note,
+    never the elements, details and mood the extraction verified."""
     ctx["llm"] = FakeLLM(
         json_response(EXTRACTION), RuntimeError("down"), RuntimeError("down")
     )
@@ -499,7 +501,12 @@ async def test_a_prose_outage_fails_stage_1_analysis_with_the_extract_model(
     await process_call(ctx, "tenant-a", JOB)
 
     result = await _result()
-    assert result["analysis_reason"] == "prose_model_unavailable"
+    assert result["analysis_reason"] == "prose_failed"
+    analysis = result["analysis"]
+    assert (analysis["summary"], analysis["crm_note"]) == (None, None)
+    assert analysis["elements"]["wanted"]["unverified"] is False
+    assert analysis["details"]["budget"]["state"] == "stated"
+    assert analysis["mood"]["value"] == "positive"
     assert result["versions"]["model"] == "fake-model-pinned"
     assert ctx["llm"].call_count == 3
 

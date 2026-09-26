@@ -210,17 +210,20 @@ def test_the_when_quote_is_checked_among_the_extractions_quotes() -> None:
 
 
 def test_booked_needs_a_time_given_and_a_verified_agreement() -> None:
-    """Both sides agreed a time: a booking with no time, or resting on an
-    agreement quote that failed, is not one; the time itself stands on its own
-    quote but is uncertain under an unverified agreement."""
-    assert _kept(_step(when=None, booked=True))["booked"] is False
+    """The guard (A3): a booking with no time, or resting on an agreement
+    quote that failed, is not one -- the latter with booked_reason
+    agreement_unverified -- and the time stands on its own quote alone:
+    stated, whatever became of the agreement."""
+    no_time = _kept(_step(when=None, booked=True))
+    assert (no_time["booked"], no_time["booked_reason"]) == (False, None)
     unverified = _kept(
         _timed("2026-09-27T17:00:00+04:00", booked=True, quote="we never met")
     )
     assert (unverified["unverified"], unverified["booked"]) == (True, False)
+    assert unverified["booked_reason"] == "agreement_unverified"
     assert (unverified["when"], unverified["when_state"]) == (
         "2026-09-27T17:00:00+04:00",
-        UNCERTAIN,
+        STATED,
     )
 
 

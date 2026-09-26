@@ -24,8 +24,9 @@ half of the quotes it gives or owes fail.
 WHAT THE MODEL MAY NOT DECIDE. A detail not mentioned has no value, quote or
 segment, and one stated has a value: either broken is malformed, never
 repaired. A detail stated from a segment below the transcript's confidence
-floor is marked uncertain in code, and every detail of an uncertain
-transcript is (settled()). The CRM note is at most 80 words, and the summary
+floor is marked uncertain in code, and every detail of a transcript whose
+words are uncertain is (settled()); one doubted only because its roles were
+not applied keeps each detail's own state (A3), the call still uncertain. The CRM note is at most 80 words, and the summary
 and note must be written in the language asked for -- at least 60 % of their
 letters outside quotes in its script (evidence.in_language); both are checked
 here.
@@ -46,11 +47,13 @@ time from WHEN_SLACK_SECONDS before it to MAX_NEXT_STEP_DAYS after it, to the
 minute in the tenant's zone. With no verified when_quote the time is null,
 uncertain, when_missing_quote; out of range the same, when_out_of_range; with
 the call's own time unknown the same, when_no_anchor. Vague timing is null and
-uncertain. booked (D-77) needs the model's word and a time it gave, the
+uncertain. when_state is the time's alone: stated for a time kept, whatever
+became of the agreement quote (A3). booked (D-77) needs the model's word and a time it gave, the
 when_quote and the agreement quote both found, said by two different voices
 whose roles are known (prompts.said_by: never on a call whose roles were not
 applied), within MAX_BOOKING_GAP_SEGMENTS of each other; code dropping a time
-out of range or with no anchor never changes it.
+out of range or with no anchor never changes it. A booking whose agreement
+quote failed is false with booked_reason agreement_unverified.
 
 The prose pass reads the transcript and the SETTLED extraction -- validated
 and quote-checked output with every failed quote removed, in the data half
@@ -157,6 +160,10 @@ WHEN_SLACK_SECONDS = 60
 WHEN_MISSING_QUOTE = "when_missing_quote"
 WHEN_OUT_OF_RANGE = "when_out_of_range"
 WHEN_NO_ANCHOR = "when_no_anchor"
+
+# Why code unbooked a next step the model said was booked: its agreement
+# quote failed the quote check.
+AGREEMENT_UNVERIFIED = "agreement_unverified"
 
 # The furthest apart, in segments either way, the agreement quote and the
 # words naming the time may be found and still book it: an assent answers
@@ -528,9 +535,10 @@ def _settled_detail(
     call: CallText, detail: AnyDetail, failed: bool
 ) -> dict[str, object]:
     """A detail as delivered: a failed quote removed and the detail uncertain;
-    uncertain too on an uncertain transcript or a low-confidence segment."""
+    uncertain too when the transcript's words are, or its segment is below
+    the confidence floor."""
     kept = detail.model_dump(mode="json")
-    doubtful = call.uncertain or (
+    doubtful = call.words_uncertain or (
         detail.state == STATED and call.low_confidence(detail.segment)
     )
     if failed:
@@ -612,24 +620,28 @@ def _settled_step(
 ) -> dict[str, object]:
     """The next step as delivered: its time held to the moment its words were
     said (_held_when), with when_reason when code dropped a time given;
-    when_state stated for a held time on a verified agreement, uncertain for
-    a time said but vague, dropped or unverified, else not_mentioned. booked
-    is _booked's, on the time the MODEL gave (step.when, never the held one).
-    A failed when_quote is removed, as every failed quote is."""
+    when_state stated for a held time -- the time's alone, never the
+    agreement's (A3) -- uncertain for a time said but vague, dropped or
+    unverified, else not_mentioned. booked is _booked's, on the time the
+    MODEL gave (step.when, never the held one); false with booked_reason
+    agreement_unverified when the model booked it on an agreement quote that
+    failed. A failed when_quote is removed, as every failed quote is."""
     kept = _settled_item(step, failed)
     if when_failed:
         kept.update(when_quote=None, when_segment=None)
     when, reason = _held_when(call, step, when_failed, clock)
     timed = step.when is not None or step.due is not None
     state = NOT_MENTIONED if not timed else UNCERTAIN
-    if when is not None and not failed:
+    if when is not None:
         state = STATED
+    unbooked = step.booked and failed
     return {
         **kept,
         "when": None if when is None else when.isoformat(),
         "when_state": state,
         "when_reason": reason,
-        "booked": _booked(call, step),
+        "booked": False if unbooked else _booked(call, step),
+        "booked_reason": AGREEMENT_UNVERIFIED if unbooked else None,
     }
 
 

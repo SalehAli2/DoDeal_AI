@@ -161,6 +161,41 @@ async def test_a_reanalysis_never_calls_the_transcriber(
     assert sent["reanalysis"] is True and job.stage2 is Stage2State.NOT_ELIGIBLE
 
 
+@pytest.mark.parametrize("labelled", [True, False])
+async def test_a_stale_roles_failed_never_carries_over(
+    ctx: dict[str, Any], redis_fakes: RedisFakes, labelled: bool
+) -> None:
+    """The guard (A3): the stored transcript says roles_failed; re-analysis
+    rebuilds the roles reasons in code -- the engine's labels mapped this
+    time, or voices already named agent and client -- so none carries."""
+    labels = {"agent": "speaker_1", "lead": "speaker_2"} if labelled else {}
+    segments = tuple(
+        s.model_copy(update={"speaker": labels.get(s.speaker, s.speaker)})
+        for s in SEGMENTS
+    )
+    stale = Transcript.of(segments, provider="g", model="g", reasons=("roles_failed",))
+    roles = {
+        "speakers": [
+            {"speaker": "speaker_1", "role": "agent", "quote": "this is the sales office", "segment": "s1"},
+            {"speaker": "speaker_2", "role": "client", "quote": "I want a villa", "segment": "s2"},
+        ]
+    }  # fmt: skip
+    answers = [json_response(EXTRACTION), json_response(PROSE)]
+    ctx["llm"] = FakeLLM(*([json_response(roles)] if labelled else []), *answers)
+    await _calls_on()
+    body = ReanalysisRequest.model_validate(
+        _body(stages=[1], transcript=stale.model_dump(mode="json"))
+    )
+    accepted = await admit_reanalysis(SCOPE, body, CONFIG, now=datetime.now(UTC))
+    await process_call(ctx, "tenant-a", accepted.job_id)
+
+    result = await read_result("tenant-a", accepted.job_id)
+    assert result is not None
+    assert result["transcript"]["uncertain_reasons"] == []
+    assert result["transcript"]["uncertain"] is False
+    assert (result["roles"] is not None) is labelled
+
+
 async def test_stage_2_alone_skips_stage_1s_passes_and_no_transcript_fails(
     ctx: dict[str, Any], redis_fakes: RedisFakes
 ) -> None:

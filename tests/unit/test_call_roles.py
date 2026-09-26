@@ -337,8 +337,12 @@ async def test_unapplied_roles_and_an_alarm_phrase_give_a_review_escalation(
     await process_call(ctx, "tenant-a", JOB)
     result = await _result()
     assert result["roles"]["applied"] is False
+    assert result["eligible_for_full_analysis"] is False
     if answered:
         assert "[s1 00:00 unknown @ " in ctx["llm"].calls[2].prompt.variable
+        analysis = result["analysis"]
+        assert analysis["uncertain"] is True
+        assert analysis["details"]["budget"]["state"] == "stated"
     signals = result["signals"]
     where = {"speaker": "unknown", "start_s": 10.0, "segment": "s3"}
     assert signals["alarms"] == [{"phrase": 0, **where}]

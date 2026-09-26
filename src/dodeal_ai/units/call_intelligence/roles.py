@@ -108,11 +108,15 @@ MAX_SPEAKERS = 10
 
 UNCLEAR = "unclear"
 
-# Why code doubts a transcript's roles, fixed codes only.
+# Why code doubts a transcript's roles, fixed codes only; the first two are
+# evidence.ROLES_NOT_APPLIED.
 ROLES_FAILED = "roles_failed"
 ROLES_UNCLEAR = "roles_unclear"
 OVER_TWO = "speakers_over_two"
 SINGLE_VOICE = "single_voice"
+# Every reason above, rebuilt in code on each run over the engine's labels: a
+# re-analysed transcript's own never carries over (A3).
+ROLE_REASONS = frozenset({ROLES_FAILED, ROLES_UNCLEAR, OVER_TWO, SINGLE_VOICE})
 
 # From this long (the call's duration), one voice heard is doubted: under it,
 # a call may be one side's short message. Provisional, like the audio floors.
@@ -391,12 +395,24 @@ def single_voice(transcript: Transcript, call_seconds: float) -> tuple[str, ...]
     return (SINGLE_VOICE,) if alone and call_seconds >= SINGLE_VOICE_MIN_SECONDS else ()
 
 
+def without(transcript: Transcript, reasons: frozenset[str]) -> Transcript:
+    """The transcript with none of `reasons` among its uncertain reasons."""
+    kept = tuple(r for r in transcript.uncertain_reasons if r not in reasons)
+    return Transcript.of(
+        transcript.segments,
+        provider=transcript.provider,
+        model=transcript.model,
+        reasons=kept,
+    )
+
+
 def apply_roles(
     transcript: Transcript, judged: Judged | None, *, call_seconds: float
 ) -> tuple[Transcript, dict[str, object]]:
     """The transcript relabelled when the judged mapping is clear, doubted
     when it is not, failed (None), over two voices or one voice on a long
-    call; and stage 1's block: each voice as judged, with verified."""
+    call -- every roles reason it came with dropped first and rebuilt here --
+    and stage 1's block: each voice as judged, with verified."""
     roles: list[str] = (
         [] if judged is None or judged.errors else [s.role for s in judged.speakers]
     )
@@ -420,7 +436,7 @@ def apply_roles(
         segments,
         provider=transcript.provider,
         model=transcript.model,
-        reasons=transcript.uncertain_reasons,
+        reasons=without(transcript, ROLE_REASONS).uncertain_reasons,
     ).doubted(*reasons)
     block: dict[str, object] = {
         "speakers": None

@@ -5,8 +5,9 @@ types every pass's answer is built from.
 THE TRANSCRIPT AS A PASS SEES IT (CallText): each segment's prompt copy --
 numbers and emails masked under the tenant's country code (numbers.py) -- its
 speaker's role, each side's language as the roles pass heard it, the summary
-language decided in code from them (language.py), and whether the transcript
-as a whole is uncertain.
+language decided in code from them (language.py), whether the transcript as a
+whole is uncertain, and whether its words are: a transcript doubted only
+because its roles were not applied (ROLES_NOT_APPLIED) has its words as heard.
 
 THE QUOTE CHECK, in code, on every quote a pass returns: at most 40 words (the
 prompts ask for 15); the segment it cites exists; and its words, normalised as
@@ -59,6 +60,7 @@ from dodeal_ai.units.call_intelligence.transcriber import (
     MIN_MEAN_CONFIDENCE,
     Segment,
     Transcript,
+    is_uncertain,
 )
 
 # The most words a quote may carry. 40 leaves headroom above the prompts' 15, so
@@ -135,6 +137,10 @@ NEGATIONS: tuple[str, ...] = (
 _NEGATION_WORDS = frozenset(words(" ".join(NEGATIONS)))
 _FILLER_WORDS = frozenset(words(" ".join(QUOTE_FILLERS))) - _NEGATION_WORDS
 
+# The reasons that doubt only who spoke, never what was said: the roles pass
+# failed, or its mapping was not clear (roles.py).
+ROLES_NOT_APPLIED = frozenset({"roles_failed", "roles_unclear"})
+
 # A quote a pass needs said by one side, found in a voice no role mapping named.
 SPEAKER_UNKNOWN = "quote_speaker_unknown"
 
@@ -196,14 +202,16 @@ class Strict(BaseModel):
 @dataclass(frozen=True, slots=True)
 class CallText:
     """The transcript as every pass sees it: each segment's prompt copy and
-    role, the summary language, whether the whole is uncertain, and each
-    side's language as the roles pass heard it."""
+    role, the summary language, whether the whole is uncertain, each side's
+    language as the roles pass heard it, and whether the words themselves
+    are uncertain (the whole is, for any reason but ROLES_NOT_APPLIED)."""
 
     segments: tuple[Segment, ...]
     shown: tuple[str, ...]
     language: SummaryLanguage
     uncertain: bool
     spoken: Spoken = UNHEARD
+    words_uncertain: bool = True
 
     @classmethod
     def of(
@@ -220,6 +228,8 @@ class CallText:
             language=summary_language(transcript, spoken),
             uncertain=transcript.uncertain,
             spoken=spoken,
+            words_uncertain=is_uncertain(transcript.segments)
+            or any(r not in ROLES_NOT_APPLIED for r in transcript.uncertain_reasons),
         )
 
     def data(self, stamps: Sequence[str] | None = None) -> str:
