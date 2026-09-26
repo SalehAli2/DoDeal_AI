@@ -215,6 +215,10 @@ class Settings(BaseSettings):
     # like the CRM sending bad requests, so the row in .env.example carries the
     # default rather than leaving it to be guessed.
     max_request_body_bytes: int = Field(default=65_536, ge=1)
+    # The body cap of POST /api/v1/calls/reanalysis alone (L7), which carries a
+    # whole stored transcript. 1 MB holds an hour's call with room; too low
+    # 413s long calls' re-analysis, too high lets one request hold that memory.
+    max_reanalysis_body_bytes: int = Field(default=1_048_576, ge=1)
 
     # Backend service credentials, ONE PER TENANT (integration guide §1: a key is valid only against
     # its own tenant host). Keyed by tenant subdomain. Parsed from JSON in the env var, e.g.

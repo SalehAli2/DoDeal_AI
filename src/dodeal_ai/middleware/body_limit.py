@@ -72,6 +72,11 @@ so the check costs them a dict lookup and nothing else, and an exemption would
 be a path a caller can aim a large body at -- the exact bytes this refuses,
 through the two routes that skip the cap.
 
+ONE ROUTE HAS ITS OWN CAP (L7): POST /api/v1/calls/reanalysis carries a whole
+stored transcript, so it is bounded by MAX_REANALYSIS_BODY_BYTES (1 MB) and
+every other request by MAX_REQUEST_BODY_BYTES. Matched on the exact method and
+path; any other spelling gets the default cap, the smaller one.
+
 THE CAP IS READ LAZILY, per request, never in __init__ (ASSUMPTIONS 10.1).
 This is the middleware that section is about: the first build of it called
 `get_settings()` in its constructor, which forced config to load at import
@@ -91,6 +96,17 @@ from dodeal_ai.core.errors import PayloadTooLarge, dodeal_error_response
 # bounds the cheap path only, and the streamed count below is what actually
 # holds when the header is absent, chunked, or a lie.
 _CONTENT_LENGTH_HEADER = b"content-length"
+
+# The one route with a cap of its own: re-analysis, which carries a transcript.
+REANALYSIS_ROUTE = ("POST", "/api/v1/calls/reanalysis")
+
+
+def _cap(scope: Scope) -> int:
+    """The body cap of this request's route."""
+    settings = get_settings()
+    if (scope.get("method"), scope.get("path")) == REANALYSIS_ROUTE:
+        return settings.max_reanalysis_body_bytes
+    return settings.max_request_body_bytes
 
 
 def _declared_length(scope: Scope) -> int | None:
@@ -147,7 +163,7 @@ class BodyLimitMiddleware:
             await self.app(scope, receive, send)
             return
 
-        cap = get_settings().max_request_body_bytes
+        cap = _cap(scope)
 
         declared = _declared_length(scope)
         if declared is not None and declared > cap:

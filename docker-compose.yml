@@ -1,7 +1,11 @@
+# LOCAL ONLY: a laptop's stack. Production follows the DevOps sheet (its own
+# Redis, persistence, restarts and grace periods), never this file.
 services:
   api:
     build: .
     ports: ["8000:8000"]
+    # Time for in-flight requests to finish after SIGTERM before SIGKILL.
+    stop_grace_period: 45s
     # Optional, and it is the DEMO that made it optional: a clean checkout has
     # no .env, and `required: true` made `docker compose up` fail before the
     # service could tell anyone what was missing. Nothing is loosened by this --
@@ -25,6 +29,9 @@ services:
       service: api
     command: ["python", "-m", "dodeal_ai.workers.calls", "priority"]
     ports: !reset []
+    # CALL_JOB_COMPLETION_WAIT_SECONDS (660) for running jobs, plus 30 s to
+    # record them and close, before SIGKILL cuts a paid call short.
+    stop_grace_period: 690s
     # The image's HEALTHCHECK probes the api's port, which a worker never opens.
     healthcheck:
       disable: true
@@ -43,6 +50,9 @@ services:
 
   redis:
     image: redis:7-alpine
+    # Every write kept on disk, so a restart loses no job, budget or hold.
+    command: ["redis-server", "--appendonly", "yes"]
+    # This machine only: an open Redis on the network holds every job record.
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     restart: unless-stopped

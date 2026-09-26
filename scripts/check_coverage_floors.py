@@ -56,6 +56,9 @@ decides what a salesperson is told about their own work:
                        answer paid for twice, a stuck job never swept.
     units/call_intelligence/stage2.py  analyse_stage2. Wrong -> a stage 2
                        left pending, or its event never sent.
+    units/call_intelligence/ passes, delivery, translation, whatsapp and
+                       reanalysis, and core/safety.py. Wrong -> a paid call
+                       or a send nobody ran, or an unsafe start allowed.
 
 A file matched by both a `**` pattern and its own exact pattern is checked
 against both and printed twice; the stricter floor governs. That is deliberate
@@ -206,6 +209,16 @@ _FLOORS: dict[str, float] = {
     "src/dodeal_ai/units/call_intelligence/http_stt.py": 100,
     "src/dodeal_ai/units/call_intelligence/keywords.py": 100,
     "src/dodeal_ai/units/call_intelligence/roles.py": 100,
+    # Review fixes B, asked for by the lead at 100. Wave 1's passes, the
+    # callbacks' schedule, a translation, a WhatsApp suggestion and a
+    # re-analysis each pay for or send something; the production refusals
+    # decide what may start. A gap is a paid call or a refusal nobody ran.
+    "src/dodeal_ai/units/call_intelligence/passes.py": 100,
+    "src/dodeal_ai/units/call_intelligence/delivery.py": 100,
+    "src/dodeal_ai/units/call_intelligence/translation.py": 100,
+    "src/dodeal_ai/units/call_intelligence/whatsapp.py": 100,
+    "src/dodeal_ai/units/call_intelligence/reanalysis.py": 100,
+    "src/dodeal_ai/core/safety.py": 100,
 }
 
 
