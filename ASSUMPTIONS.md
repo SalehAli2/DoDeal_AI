@@ -679,6 +679,8 @@ Ordered by what they release. Items 4.1–4.3 are the critical path.
   by the call's length; a short relative time reads late and a true one can
   drop as `when_out_of_range`. The fix is `said_at` alone (subtract
   `duration_seconds`); nothing else reads `recorded_at` for a time.
+- **With no `recorded_at`:** nothing is assumed. No stamp is written and a
+  next step's time is `null`, `uncertain`, with `when_reason` `when_no_anchor`.
 
 ---
 
