@@ -374,7 +374,7 @@ async def test_stage2_is_held_and_delivered_as_call_stage2(
     assert all(held[name] is not None for name in parts if name != "score")
     assert held["reasons"] == {"score": "scoring_off"}
     assert held["versions"] == {
-        "prompt": "unit_b_prompts_v10",
+        "prompt": "unit_b_prompts_v11",
         "objection_list": "objection_list_v1",
         "rubric": "call_rubric_v1",
         "tone_list": "tone_list_v1",

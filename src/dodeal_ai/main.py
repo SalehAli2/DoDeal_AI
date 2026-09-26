@@ -43,6 +43,7 @@ from dodeal_ai.units.call_intelligence.config import (
     UNIT_B_SECTION,
     parse_unit_b_section,
 )
+from dodeal_ai.units.call_intelligence.prompts import API_TEMPLATES
 from dodeal_ai.units.call_intelligence.queues import refresh_queue_depths
 from dodeal_ai.units.structured_intelligence.config import (
     UNIT_A_SECTION,
@@ -140,7 +141,7 @@ async def lifespan(app: FastAPI):
     # FIRST, before any socket or pool exists: a missing template must refuse
     # here, not on the first paid call days later. Read once for the app's life
     # so no judgement makes a disk read on the event loop (register item 85).
-    preload_templates(UNIT_A_TEMPLATES)
+    preload_templates((*UNIT_A_TEMPLATES, *API_TEMPLATES))
     # Register item 97: the section parsers the runtime override store parses
     # with, then every tenant file validated before any socket exists.
     register_section_parsers(TENANT_CONFIG_SECTIONS)

@@ -17,10 +17,16 @@ call's author as an asserted subject (`author:<author_id>`).
                              202; 409 result_expired, 409 already_in_language;
                              counted on the READS counter, sent back as
                              call.translation
+  POST /api/v1/calls/jobs/{job_id}/whatsapp {language: one of 12 codes}
+                             200 {job_id, language, dialect, text}: the
+                             suggestion written again in that language, one
+                             paid pass per language, held beside the result;
+                             409 result_expired, 409 whatsapp_in_progress;
+                             counted on the READS counter
   GET  /api/v1/calls/jobs/{job_id}
                              {job_id, status, reason, delivery, stage2,
-                             result, stage2_result, translations}, each while
-                             held;
+                             result, stage2_result, translations, whatsapp},
+                             each while held;
                              another tenant's job is 404. Counted on the
                              READS counter, and every read is audited.
 """
@@ -37,7 +43,9 @@ from dodeal_ai.core.auth.dependencies import (
     service_gate4_reads_cost,
     service_gate4_reanalysis_cost,
 )
+from dodeal_ai.core.config import Settings, get_settings
 from dodeal_ai.core.context import RequestContext
+from dodeal_ai.core.llm import LLMClient, get_llm_client
 from dodeal_ai.units.call_intelligence.admission import admit_call
 from dodeal_ai.units.call_intelligence.config import resolve_calls_config
 from dodeal_ai.units.call_intelligence.reads import CallJobView, read_call_job
@@ -51,6 +59,11 @@ from dodeal_ai.units.call_intelligence.translation import (
     TranslationAccepted,
     TranslationRequest,
     request_translation,
+)
+from dodeal_ai.units.call_intelligence.whatsapp import (
+    WhatsAppRequest,
+    WhatsAppSuggestion,
+    regenerate_whatsapp,
 )
 
 router = APIRouter(prefix="/api/v1/calls", tags=["unit-b"])
@@ -95,6 +108,19 @@ async def create_translation(
     """Translate a done call's transcript; the answer comes as
     call.translation and through the status route."""
     return await request_translation(context, job_id, body)
+
+
+@router.post("/jobs/{job_id}/whatsapp")
+async def create_whatsapp(
+    body: WhatsAppRequest,
+    context: Annotated[RequestContext, Depends(service_gate4_reads_cost)],
+    llm: Annotated[LLMClient, Depends(get_llm_client)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    job_id: Annotated[str, Path(pattern=r"^[0-9a-f]{32}$")],
+) -> WhatsAppSuggestion:
+    """Write a done call's WhatsApp suggestion again in the language asked;
+    the answer comes back here and through the status route."""
+    return await regenerate_whatsapp(context, job_id, body, llm, settings)
 
 
 @router.get("/jobs/{job_id}")

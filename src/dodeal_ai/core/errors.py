@@ -290,6 +290,22 @@ class AlreadyInLanguage(DodealError):
         super().__init__("already_in_language", 409)
 
 
+class WhatsAppInProgress(DodealError):
+    """A suggestion in this language is being written for this call now: the
+    one request paying for it holds the claim, and a second pays for nothing."""
+
+    def __init__(self) -> None:
+        super().__init__("whatsapp_in_progress", 409)
+
+
+class CallsBudgetUnavailable(DodealError):
+    """The store that counts the calls budget cannot answer, so no call is
+    paid for (fails closed, register item 105)."""
+
+    def __init__(self) -> None:
+        super().__init__("cost_store_unavailable", 503)
+
+
 class JobStoreUnavailableResponse(DodealError):
     """db3 could not be read or written (register item 50). Fails closed: the
     job store is the job, so there is no answer to guess."""

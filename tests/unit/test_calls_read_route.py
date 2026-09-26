@@ -100,6 +100,7 @@ async def test_a_queued_job_reads_back_with_no_result(client) -> None:
         "result": None,
         "stage2_result": None,
         "translations": {},
+        "whatsapp": {},
     }
 
 

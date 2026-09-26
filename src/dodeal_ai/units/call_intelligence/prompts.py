@@ -43,6 +43,7 @@ ESCALATIONS_TEMPLATE = "call_intelligence/escalations_v2.txt"
 COACHING_TEMPLATE = "call_intelligence/coaching_v2.txt"
 EXTRAS_TEMPLATE = "call_intelligence/extras_v5.txt"
 TRANSLATE_TEMPLATE = "call_intelligence/translate_v1.txt"
+WHATSAPP_TEMPLATE = "call_intelligence/whatsapp_v1.txt"
 REPROMPT_TAIL_TEMPLATE = "call_intelligence/reprompt_tail_v1.txt"
 QUOTE_LENGTH_TAIL_TEMPLATE = "call_intelligence/reprompt_tail_quote_length_v1.txt"
 QUOTE_EXACT_TAIL_TEMPLATE = "call_intelligence/reprompt_tail_quote_exact_v1.txt"
@@ -80,7 +81,7 @@ RETIRED_TEMPLATES: tuple[str, ...] = (
 
 # The stamp stage 1 carries under versions.prompt. Move it with the digest
 # in the stamp test whenever one of UNIT_B_TEMPLATES changes.
-PROMPT_SET_VERSION = "unit_b_prompts_v10"
+PROMPT_SET_VERSION = "unit_b_prompts_v11"
 
 # Every template Unit B can send, in pass order, then the retired ones; the
 # worker preloads them all.
@@ -94,11 +95,16 @@ UNIT_B_TEMPLATES: tuple[str, ...] = (
     COACHING_TEMPLATE,
     EXTRAS_TEMPLATE,
     TRANSLATE_TEMPLATE,
+    WHATSAPP_TEMPLATE,
     REPROMPT_TAIL_TEMPLATE,
     QUOTE_LENGTH_TAIL_TEMPLATE,
     QUOTE_EXACT_TAIL_TEMPLATE,
     *RETIRED_TEMPLATES,
 )
+
+# What the API process sends itself (the WhatsApp route, whatsapp.py); the
+# lifespan preloads them beside Unit A's.
+API_TEMPLATES: tuple[str, ...] = (WHATSAPP_TEMPLATE, REPROMPT_TAIL_TEMPLATE)
 
 AGENT = "agent"
 CLIENT = "client"

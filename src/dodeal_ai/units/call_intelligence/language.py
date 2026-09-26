@@ -72,6 +72,24 @@ ARABIC_LANGUAGES = frozenset(code for code in CALL_LANGUAGES if code.endswith("_
 ENGLISH = "en"
 OTHER = "other"
 
+# The twelve languages the product covers: a message may be asked for in any.
+type ProductLanguage = Literal[
+    "gulf_ar",
+    "egyptian_ar",
+    "levantine_ar",
+    "iraqi_ar",
+    "en",
+    "hi",
+    "ur",
+    "ru",
+    "zh",
+    "fr",
+    "fa",
+    "tr",
+]
+
+PRODUCT_LANGUAGES: tuple[str, ...] = get_args(ProductLanguage.__value__)
+
 # The codes a tenant may coach and score calls in: every one but other.
 type CoachedLanguage = Literal[
     "gulf_ar",

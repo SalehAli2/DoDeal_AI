@@ -1,6 +1,7 @@
 """Reading a call job back (register item 50): status, reason, the callback's
 delivery and wave 2's state beside the status, and the stage-1 and stage-2
-results while each is held.
+results, the translations and the regenerated WhatsApp suggestions
+(whatsapp.py) while each is held.
 
 TENANT BY KEY. The job is looked up under the tenant the gates verified, so
 another tenant's job_id is simply not there: 404 call_job_not_found, the same
@@ -27,7 +28,9 @@ from dodeal_ai.core.jobs import (
     read_result,
     read_stage2_result,
     read_translation,
+    read_whatsapps,
 )
+from dodeal_ai.units.call_intelligence.language import PRODUCT_LANGUAGES
 
 _audit = logging.getLogger("dodeal_ai.audit")
 
@@ -49,6 +52,8 @@ class CallJobView(BaseModel):
     stage2_result: dict[str, object] | None
     # The held translations by target (translation.py); {} for none.
     translations: dict[str, object] = {}
+    # The held regenerated suggestions by language (whatsapp.py); {} for none.
+    whatsapp: dict[str, object] = {}
 
 
 async def read_translations(tenant: str, job_id: str) -> dict[str, object]:
@@ -71,6 +76,11 @@ async def read_call_job(context: RequestContext, job_id: str) -> CallJobView:
         )
         translations = (
             {} if job is None else await read_translations(context.tenant, job_id)
+        )
+        whatsapp = (
+            {}
+            if job is None
+            else await read_whatsapps(context.tenant, job_id, PRODUCT_LANGUAGES)
         )
     except JobStoreUnavailable:
         raise JobStoreUnavailableResponse() from None
@@ -98,4 +108,5 @@ async def read_call_job(context: RequestContext, job_id: str) -> CallJobView:
         result=result,
         stage2_result=stage2,
         translations=translations,
+        whatsapp=whatsapp,
     )

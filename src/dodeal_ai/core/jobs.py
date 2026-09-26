@@ -13,6 +13,11 @@ another tenant's job, and one index of every running job across tenants:
   call_work:{tenant}:{job_id}         a hash of what stage 1 has paid for so
                                       far -- the transcript, each pass's
                                       outcome -- EX result_ttl_seconds
+  call_whatsapp:{tenant}:{job_id}:{language}
+                                      a regenerated WhatsApp suggestion, EX
+                                      no longer than the stage-1 result is
+                                      left; its _claim twin, SET NX with a
+                                      short EX, is the one request paying
   call_jobs_active                    a sorted set: `<tenant>:<job_id>` for
                                       every job not yet terminal, scored by
                                       its last transition's unix time -- a
@@ -66,7 +71,7 @@ is never logged, never on a repr, and never in an exception.
 from __future__ import annotations
 
 import json
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -190,6 +195,14 @@ def stage2_result_key(tenant: str, job_id: str) -> str:
 
 def translation_key(tenant: str, job_id: str, target: str) -> str:
     return f"call_translation:{tenant}:{job_id}:{target}"
+
+
+def whatsapp_key(tenant: str, job_id: str, language: str) -> str:
+    return f"call_whatsapp:{tenant}:{job_id}:{language}"
+
+
+def whatsapp_claim_key(tenant: str, job_id: str, language: str) -> str:
+    return f"call_whatsapp_claim:{tenant}:{job_id}:{language}"
 
 
 def work_key(tenant: str, job_id: str) -> str:
@@ -984,6 +997,65 @@ async def read_translation(
 ) -> dict[str, object] | None:
     """The held translation into `target`, or None."""
     return await _read_json(translation_key(tenant, job_id, target))
+
+
+async def result_seconds_left(tenant: str, job_id: str) -> int | None:
+    """Whole seconds before the stage-1 result expires; None when it is gone
+    or holds no expiry."""
+    client = get_jobs_client()
+    left = await _call(lambda: client.ttl(result_key(tenant, job_id)))
+    return int(left) if int(left) > 0 else None
+
+
+async def claim_whatsapp(
+    tenant: str, job_id: str, language: str, *, ttl_seconds: int
+) -> bool:
+    """The one request that may pay for this language's suggestion: True for
+    the first, False while another holds the claim."""
+    client = get_jobs_client()
+    key = whatsapp_claim_key(tenant, job_id, language)
+    taken = await _call(lambda: client.set(key, "1", nx=True, ex=ttl_seconds))
+    return bool(taken)
+
+
+async def release_whatsapp(tenant: str, job_id: str, language: str) -> None:
+    """Give the claim back, so a later request may ask again."""
+    client = get_jobs_client()
+    await _call(lambda: client.delete(whatsapp_claim_key(tenant, job_id, language)))
+
+
+async def store_whatsapp(
+    tenant: str,
+    job_id: str,
+    language: str,
+    suggestion: dict[str, object],
+    *,
+    ttl_seconds: int,
+) -> None:
+    """Hold a regenerated suggestion in `language` for `ttl_seconds`."""
+    client = get_jobs_client()
+    await _call(
+        lambda: client.set(
+            whatsapp_key(tenant, job_id, language),
+            json.dumps(suggestion, sort_keys=True),
+            ex=ttl_seconds,
+        )
+    )
+
+
+async def read_whatsapps(
+    tenant: str, job_id: str, languages: Sequence[str]
+) -> dict[str, object]:
+    """Every held suggestion of the job among `languages`, by language, in
+    one read."""
+    client = get_jobs_client()
+    keys = [whatsapp_key(tenant, job_id, language) for language in languages]
+    raws = await _call(lambda: client.mget(keys))
+    return {
+        language: json.loads(raw)
+        for language, raw in zip(languages, raws, strict=True)
+        if raw is not None
+    }
 
 
 async def _read_json(key: str) -> dict[str, object] | None:
