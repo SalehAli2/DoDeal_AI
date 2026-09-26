@@ -293,6 +293,52 @@ async def test_3_minutes_and_the_clients_okay_book_a_time_3_minutes_on() -> None
     assert "RECORDED AT: 2026-09-26T10:00:00+04:00" in llm.calls[0].prompt.variable
 
 
+async def test_3_minutes_said_at_05_00_is_due_8_minutes_after_recorded_at() -> None:
+    """The guard: a short relative time counts from the moment it was said --
+    recorded_at plus the segment's start, plus the time said -- and the
+    client's "اوكي" books it."""
+    segments = (
+        _ar(0, "agent", "مرحبا، معك مكتب المبيعات بخصوص الشقة"),
+        _ar(300, "agent", "تمام، بتصل عليك بعد 3 دقايق عشان نكمل"),
+        _ar(305, "lead", "اوكي"),
+    )
+    call = CallText.of(
+        Transcript.of(segments, provider="fake", model="fake"), country_code="971"
+    )
+    answer = _extraction()
+    answer.update(
+        wanted=None,
+        discussed=[],
+        agreed=[],
+        mood={"value": "positive", "quote": "اوكي", "segment": "s3"},
+        next_step={
+            "action": "Call the client back",
+            "owner": "agent",
+            "due": "بعد 3 دقايق",
+            "quote": "بتصل عليك بعد 3 دقايق",
+            "segment": "s2",
+            "kind": "callback",
+            "when": "2026-09-26T10:08:00+04:00",
+            "booked": True,
+        },
+    )
+    llm = FakeLLM(json_response(answer))
+
+    found, _ = await extract(
+        llm, call, scope=SCOPE, settings=get_settings(), clock=CLOCK
+    )
+
+    step = settled(found, call, CLOCK)["next_step"]
+    assert (step["when"], step["when_state"], step["booked"]) == (
+        "2026-09-26T10:08:00+04:00",
+        STATED,
+        True,
+    )
+    assert (
+        "[s2 05:00 agent] تمام، بتصل عليك بعد 3 دقايق" in llm.calls[0].prompt.variable
+    )
+
+
 def test_the_extract_prompt_counts_short_times_from_recorded_at() -> None:
     from dodeal_ai.core.prompting import build_prompt
     from dodeal_ai.units.call_intelligence.prompts import EXTRACT_TEMPLATE
@@ -300,6 +346,7 @@ def test_the_extract_prompt_counts_short_times_from_recorded_at() -> None:
     text = build_prompt(EXTRACT_TEMPLATE, caller_data="").stable
     for said in ('"in 3 minutes"', '"بعد 5 دقايق"', '"بكرة الساعة 5"'):
         assert said in text
-    assert "RECORDED AT plus 3 minutes" in text
+    assert "counts from the moment it was said" in text
+    assert '"بعد 3 دقايق" said at 05:00 on a call recorded at 10:00 is 10:08' in text
     for agreement in ('"اوكي"', '"تمام"'):
         assert agreement in text

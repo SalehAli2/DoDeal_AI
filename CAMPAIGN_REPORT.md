@@ -7517,3 +7517,7 @@ failure modes, then one stress test (sabotage in brackets).
 - extract topics (2): an invented topic lands in the summary; a kept answer with bare topics no longer reads back. Test: an unquoted or invented topic is unverified and absent from the prose prompt; bare topics read back unverified (filter off fails 1).
 - extract times (3): "بعد 3 دقايق" left null; an agreement unbooked. Test: 3 minutes plus the client's "اوكي" gives recorded_at + 3 min, stated and booked. Prompt only; no sabotage owed.
 - Stress test: a 30-segment call where the client speaks one word until s25: roles_data shows s25 and the language check passes on it.
+
+## Unit B relative times from the moment said
+- extract (extract_v7, unit_b_prompts_v17): "in 3 minutes" said 40 minutes into a call is booked 37 minutes early; a time counted twice. Test: "بعد 3 دقايق" said at 05:00 on a call recorded at 10:00 is due 10:08 and booked on the client's "اوكي". Prompt only; no sabotage owed.
+- Stress test: the same words at 00:00 still give recorded_at + 3 minutes.
