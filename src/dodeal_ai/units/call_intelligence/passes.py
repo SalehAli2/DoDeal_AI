@@ -72,7 +72,9 @@ from dodeal_ai.units.call_intelligence.evidence import (
     SegmentId,
     Strict,
     evidence_errors,
+    failed_quotes,
     in_language,
+    mostly_failed,
     quote_errors,
     relocated,
 )
@@ -111,11 +113,6 @@ DEAD = "dead"
 # A dead call whose client gave no reason: the one loss reason owing no quote.
 NO_REASON_GIVEN = "no_reason_given"
 LOSS_CATEGORIES = (*OBJECTION_CATEGORIES, NO_REASON_GIVEN)
-
-# The share of an extraction's quotes that may fail and the answer still be
-# kept field by field: more than half failing is a model not reading the call.
-# Lower reprompts answers with one slip; higher keeps answers mostly invented.
-MAX_FAILED_QUOTE_SHARE = 0.5
 
 DETAIL_NAMES = (
     "budget",
@@ -404,11 +401,9 @@ def check_extraction(call: CallText) -> Callable[[Extraction], None]:
 
     def check(answer: Extraction) -> None:
         quotes = extraction_quotes(call, answer)
-        failed = [error for errors in quotes.values() for error in errors]
-        failing = sum(1 for errors in quotes.values() if errors)
         shape = _shape_errors(answer)
-        if shape or failing > MAX_FAILED_QUOTE_SHARE * len(quotes):
-            raise output_rejected(EXTRACT_LABEL, tuple(shape + failed))
+        if shape or mostly_failed(quotes):
+            raise output_rejected(EXTRACT_LABEL, tuple(shape + failed_quotes(quotes)))
 
     return check
 

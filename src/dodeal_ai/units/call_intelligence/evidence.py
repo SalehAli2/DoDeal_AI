@@ -66,6 +66,12 @@ MAX_QUOTE_WORDS = 40
 # the language asked for.
 MIN_SCRIPT_SHARE = 0.6
 
+# The share of an answer's quotes that may fail and the answer still be kept
+# field by field (the extraction, the extras): more than half failing is a
+# model not reading the call. Lower reprompts answers with one slip; higher
+# keeps answers mostly invented.
+MAX_FAILED_QUOTE_SHARE = 0.5
+
 # The hesitations a quote may leave out of its segment, Arabic and English:
 # sounds that carry no meaning. Versioned: a change is a new version. A word
 # that carries meaning here lets a quote drop it and still pass as exact.
@@ -361,6 +367,18 @@ def evidence_errors(
     if quote is None and segment is None:
         return [(where, "quote_missing")]
     return quote_errors(call, where, quote, segment, speaker=speaker)
+
+
+def mostly_failed(quotes: dict[str, Errors]) -> bool:
+    """Whether more than MAX_FAILED_QUOTE_SHARE of the quotes, each by where
+    it is with its failures, failed."""
+    failing = sum(1 for errors in quotes.values() if errors)
+    return failing > MAX_FAILED_QUOTE_SHARE * len(quotes)
+
+
+def failed_quotes(quotes: dict[str, Errors]) -> Errors:
+    """Every failure of every quote, in order."""
+    return [error for errors in quotes.values() for error in errors]
 
 
 def in_language(text: str, language: SummaryLanguage) -> bool:

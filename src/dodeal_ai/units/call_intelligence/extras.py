@@ -26,14 +26,18 @@ could send next, and how serious the client is.
                A for 4 or 5 yes, B for 2 or 3, C for 0 or 1. Marked
                manager_only: for the agent's manager, never the agent.
 
-THE CHECKS, in code, any failure a malformed answer (one reprompt, then the
-pass fails and the extras part is null): every keyword's words -- at most
-MAX_KEYWORD_WORDS -- in the segment it cites, and its canonical name, if any,
-exactly one on the list; every
-quote given under the quote check, and every yes quoted; a known agent
-dialect quoted, and any dialect quote from a segment of the agent's; the
-WhatsApp text within 60 words and in its language's script
-(evidence.written_in). The language and dialect the text was asked in
+THE CHECKS, in code. The shape: every keyword's said at most
+MAX_KEYWORD_WORDS, its canonical name, if any, exactly one on the list, and
+the WhatsApp text within 60 words and in its language's script
+(evidence.written_in); any failure is a malformed answer (one reprompt, then
+the pass fails and the extras part is null). The evidence, FIELD BY FIELD as
+the extraction's (passes.py): every keyword's words in the segment it cites,
+every yes quoted and every quote given checked, a known agent dialect quoted
+from a segment of the agent's. A keyword whose quote fails is dropped; a
+seriousness check or the agent dialect whose quote fails is kept with
+unverified true and its quote and segment null, and an unverified yes does
+not count toward the band; the tags and the WhatsApp suggestion are always
+kept. The answer is malformed on its quotes only when more than half fail. The language and dialect the text was asked in
 (whatsapp_suggestion.language, whatsapp_dialect) are code's, from the client's
 language, the checked agent dialect and the default.
 """
@@ -59,6 +63,8 @@ from dodeal_ai.units.call_intelligence.evidence import (
     SegmentId,
     Strict,
     evidence_errors,
+    failed_quotes,
+    mostly_failed,
     quote_errors,
     relocated,
     written_in,
@@ -246,29 +252,48 @@ def extras_data(
     )
 
 
+def extras_quotes(call: CallText, answer: Extras) -> dict[str, Errors]:
+    """Every quote the extras give or owe, by where it is, with the quote
+    check's failures ([] for one that passes)."""
+    found: dict[str, Errors] = {}
+    for n, keyword in enumerate(answer.keywords):
+        where = f"keywords.{n}"
+        found[where] = evidence_errors(call, where, keyword.said, keyword.segment)
+    for name in SERIOUSNESS_CHECKS:
+        check: SeriousCheck = getattr(answer.seriousness, name)
+        if check.answer == YES or (check.quote, check.segment) != (None, None):
+            owed = evidence_errors if check.answer == YES else quote_errors
+            where = f"seriousness.{name}"
+            found[where] = owed(call, where, check.quote, check.segment)
+    agent = answer.agent_dialect
+    if agent.dialect != UNKNOWN_DIALECT or (agent.quote, agent.segment) != (None, None):
+        found["agent_dialect"] = _dialect_errors(call, agent)
+    return found
+
+
+def _shape_errors(call: CallText, answer: Extras, vocabulary: frozenset[str]) -> Errors:
+    """What no quote can mend: a keyword longer than a name or named off the
+    list, a WhatsApp text too long or in the wrong script."""
+    errors: Errors = []
+    for n, keyword in enumerate(answer.keywords):
+        if len(words(keyword.said)) > MAX_KEYWORD_WORDS:
+            errors.append((f"keywords.{n}", "keyword_too_long"))
+        if keyword.canonical is not None and keyword.canonical not in vocabulary:
+            errors.append((f"keywords.{n}.canonical", "not_listed"))
+    return errors + _whatsapp_errors(call, answer.whatsapp)
+
+
 def check_extras(
     call: CallText, vocabulary: frozenset[str] = frozenset()
 ) -> Callable[[Extras], None]:
-    """The rules the schema cannot hold (module docstring), for call_model."""
+    """The rules the schema cannot hold (module docstring), for call_model:
+    malformed on a broken shape or when more than half of the quotes fail."""
 
     def check(answer: Extras) -> None:
-        errors: Errors = []
-        for n, keyword in enumerate(answer.keywords):
-            if len(words(keyword.said)) > MAX_KEYWORD_WORDS:
-                errors.append((f"keywords.{n}", "keyword_too_long"))
-            errors += evidence_errors(
-                call, f"keywords.{n}", keyword.said, keyword.segment
-            )
-            if keyword.canonical is not None and keyword.canonical not in vocabulary:
-                errors.append((f"keywords.{n}.canonical", "not_listed"))
-        for name in SERIOUSNESS_CHECKS:
-            found: SeriousCheck = getattr(answer.seriousness, name)
-            owed = evidence_errors if found.answer == YES else quote_errors
-            errors += owed(call, f"seriousness.{name}", found.quote, found.segment)
-        errors += _dialect_errors(call, answer.agent_dialect)
-        errors += _whatsapp_errors(call, answer.whatsapp)
-        if errors:
-            raise output_rejected(EXTRAS_LABEL, tuple(errors))
+        quotes = extras_quotes(call, answer)
+        shape = _shape_errors(call, answer, vocabulary)
+        if shape or mostly_failed(quotes):
+            raise output_rejected(EXTRAS_LABEL, tuple(shape + failed_quotes(quotes)))
 
     return check
 
@@ -309,23 +334,42 @@ async def find_extras(
     return relocated(call, answer), response
 
 
+def _kept(found: SeriousCheck | AgentDialect, failed: bool) -> dict[str, object]:
+    """A quoted answer as delivered: kept with unverified true and no quote
+    when its quote failed."""
+    kept = found.model_dump()
+    if failed:
+        kept.update(quote=None, segment=None)
+    return {**kept, "unverified": failed}
+
+
 def extras_part(
     call: CallText,
     answer: Extras,
     default_dialect: WhatsAppDialect = DEFAULT_WHATSAPP_DIALECT,
 ) -> dict[str, object]:
-    """Stage 2's extras part: the keywords, the tags, the agent's dialect, the
-    WhatsApp suggestion in the language and dialect code says it was asked
-    in, and the seriousness checks with the band code gives."""
+    """Stage 2's extras part: the keywords whose quotes hold, the tags, the
+    agent's dialect, the WhatsApp suggestion in the language and dialect code
+    says it was asked in, and the seriousness checks with the band code gives
+    from the verified yes answers (module docstring)."""
+    failed = {where for where, errors in extras_quotes(call, answer).items() if errors}
     checks = {
-        name: getattr(answer.seriousness, name).model_dump()
+        name: _kept(getattr(answer.seriousness, name), f"seriousness.{name}" in failed)
         for name in SERIOUSNESS_CHECKS
     }
-    yes = sum(1 for check in checks.values() if check["answer"] == YES)
+    yes = sum(
+        1
+        for check in checks.values()
+        if check["answer"] == YES and check["unverified"] is False
+    )
     return {
-        "keywords": [keyword.model_dump() for keyword in answer.keywords],
+        "keywords": [
+            keyword.model_dump()
+            for n, keyword in enumerate(answer.keywords)
+            if f"keywords.{n}" not in failed
+        ],
         "tags": answer.tags.model_dump(),
-        "agent_dialect": answer.agent_dialect.model_dump(),
+        "agent_dialect": _kept(answer.agent_dialect, "agent_dialect" in failed),
         "whatsapp_dialect": whatsapp_dialect(
             call, answer.agent_dialect, default_dialect
         ),

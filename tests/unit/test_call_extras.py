@@ -29,6 +29,7 @@ from dodeal_ai.units.call_intelligence.extras import (
     check_extras,
     extras_data,
     extras_part,
+    extras_quotes,
     find_extras,
     seriousness_band,
 )
@@ -226,7 +227,10 @@ def test_an_unknown_agent_dialect_gives_the_company_default(default: str) -> Non
     answer = Extras.model_validate(_arabic(_dialect()))
     check_extras(call)(answer)
     part = extras_part(call, answer, default)
-    assert (part["agent_dialect"], part["whatsapp_dialect"]) == (_dialect(), default)
+    assert (part["agent_dialect"], part["whatsapp_dialect"]) == (
+        {**_dialect(), "unverified": False},
+        default,
+    )
     assert part["whatsapp_suggestion"] == {"language": "ar", "text": AR_WHATSAPP}
 
 
@@ -237,7 +241,10 @@ def test_a_known_agent_dialect_is_the_dialect_of_the_message(default: str) -> No
     answer = Extras.model_validate(_arabic(heard))
     check_extras(call)(answer)
     part = extras_part(call, answer, default)
-    assert (part["agent_dialect"], part["whatsapp_dialect"]) == (heard, "gulf_ar")
+    assert (part["agent_dialect"], part["whatsapp_dialect"]) == (
+        {**heard, "unverified": False},
+        "gulf_ar",
+    )
 
 
 @pytest.mark.parametrize("default", DEFAULTS)
@@ -321,7 +328,10 @@ def test_an_english_client_on_an_arabic_call_gets_english() -> None:
     check_extras(call)(answer)
     part = extras_part(call, answer, "iraqi_ar")
     assert part["whatsapp_suggestion"] == {"language": "en", "text": english}
-    assert (part["agent_dialect"], part["whatsapp_dialect"]) == (heard, None)
+    assert (part["agent_dialect"], part["whatsapp_dialect"]) == (
+        {**heard, "unverified": False},
+        None,
+    )
 
 
 def test_a_client_in_another_language_or_unheard_gets_the_summary_language() -> None:
@@ -347,21 +357,73 @@ def test_a_true_answer_passes_and_is_marked_manager_only() -> None:
         {**keyword, "canonical": None} for keyword in ANSWER["keywords"]
     ]
     assert part["tags"] == ANSWER["tags"]
-    assert (part["agent_dialect"], part["whatsapp_dialect"]) == (_dialect(), None)
+    assert (part["agent_dialect"], part["whatsapp_dialect"]) == (
+        {**_dialect(), "unverified": False},
+        None,
+    )
     assert part["whatsapp_suggestion"] == {"language": "en", "text": ANSWER["whatsapp"]}
     seriousness = part["seriousness"]
     assert (seriousness["band"], seriousness["manager_only"]) == ("A", True)
-    assert seriousness["checks"] == ANSWER["seriousness"]
+    assert seriousness["checks"] == {
+        name: {**check, "unverified": False}
+        for name, check in ANSWER["seriousness"].items()
+    }
 
 
-def test_a_keyword_not_said_in_its_segment_is_malformed() -> None:
+def test_a_keyword_not_said_in_its_segment_is_dropped() -> None:
     answer = _answer()
     answer["keywords"][0]["said"] = "Marina Heights"
     answer["keywords"][1]["segment"] = "s9"
-    assert _refused(answer) == (
-        ("keywords.0", "quote_not_in_segment"),
-        ("keywords.1", "segment_unknown"),
+    found = Extras.model_validate(answer)
+    check_extras(_call())(found)
+    quotes = extras_quotes(_call(), found)
+    assert (quotes["keywords.0"], quotes["keywords.1"]) == (
+        [("keywords.0", "quote_not_in_segment")],
+        [("keywords.1", "segment_unknown")],
     )
+    assert extras_part(_call(), found)["keywords"] == []
+
+
+async def test_one_bad_keyword_quote_leaves_the_rest_delivered() -> None:
+    """The guard: the keyword whose quote fails is dropped, the pass is not
+    reprompted, and every other keyword, check, tag and message goes out."""
+    answer = _answer()
+    answer["keywords"][0]["said"] = "Marina Heights"
+    llm = FakeLLM(json_response(answer))
+
+    found, _ = await find_extras(llm, _call(), scope=SCOPE, settings=get_settings())
+
+    assert llm.call_count == 1
+    part = extras_part(_call(), found)
+    assert part["keywords"] == [{**ANSWER["keywords"][1], "canonical": None}]
+    assert part["tags"] == ANSWER["tags"]
+    assert part["whatsapp_suggestion"]["text"] == ANSWER["whatsapp"]
+    assert part["seriousness"]["band"] == "A"
+
+
+def _mostly_invented() -> dict[str, Any]:
+    """Six quotes -- two keywords and four yes checks -- four of them invented."""
+    answer = _answer()
+    answer["keywords"][0]["said"] = "Marina Heights"
+    answer["keywords"][1]["segment"] = "s9"
+    answer["seriousness"]["budget_stated"]["quote"] = "money is no object"
+    answer["seriousness"]["timeline_stated"]["quote"] = "we move tomorrow"
+    return answer
+
+
+async def test_more_than_half_of_the_quotes_failing_is_malformed() -> None:
+    """The guard's other side: four of six failing is reprompted, then fails;
+    three of six is kept field by field."""
+    answer = _mostly_invented()
+    assert len(extras_quotes(_call(), Extras.model_validate(answer))) == 6
+    llm = FakeLLM(json_response(answer), json_response(answer))
+    with pytest.raises(MalformedOutputError):
+        await find_extras(llm, _call(), scope=SCOPE, settings=get_settings())
+    assert llm.call_count == 2
+    assert len(_refused(answer)) == 4
+
+    answer["seriousness"]["timeline_stated"]["quote"] = "I move in March"
+    check_extras(_call())(Extras.model_validate(answer))
 
 
 def test_a_seven_word_said_is_rejected_and_five_are_a_name() -> None:
@@ -388,13 +450,52 @@ async def test_a_seven_word_said_is_reprompted_once_then_fails() -> None:
 
 
 def test_every_seriousness_quote_is_checked_and_a_yes_is_owed_one() -> None:
+    """A check whose quote fails is kept unverified with no quote; an
+    unverified yes does not count toward the band."""
     answer = _answer()
     answer["seriousness"]["budget_stated"] = _check("yes")
     answer["seriousness"]["client_engaged"] = _check("no", "we love it", "s5")
-    assert _refused(answer) == (
-        ("seriousness.budget_stated", "quote_missing"),
-        ("seriousness.client_engaged", "quote_not_in_segment"),
+    found = Extras.model_validate(answer)
+    check_extras(_call())(found)
+    quotes = extras_quotes(_call(), found)
+    assert (
+        quotes["seriousness.budget_stated"],
+        quotes["seriousness.client_engaged"],
+    ) == (
+        [("seriousness.budget_stated", "quote_missing")],
+        [("seriousness.client_engaged", "quote_not_in_segment")],
     )
+    seriousness = extras_part(_call(), found)["seriousness"]
+    assert seriousness["checks"]["budget_stated"] == {
+        "answer": "yes",
+        "reason": "As said.",
+        "quote": None,
+        "segment": None,
+        "unverified": True,
+    }
+    assert seriousness["checks"]["client_engaged"]["unverified"] is True
+    assert (seriousness["yes"], seriousness["band"]) == (3, "B")
+
+
+def test_an_agent_dialect_on_a_failing_quote_is_kept_unverified() -> None:
+    """Beside four true quotes, a client-quoted agent dialect is kept, its
+    quote removed and unverified true; the message's dialect is still the
+    one it was asked in."""
+    call = _call(*AR_SEGMENTS)
+    answer = _arabic(_dialect("gulf_ar", CLIENT_WORDS, "s2"))
+    answer["seriousness"] = {
+        name: _check("yes", AGENT_WORDS, "s1") for name in SERIOUSNESS_CHECKS
+    }
+    found = Extras.model_validate(answer)
+    check_extras(call)(found)
+    part = extras_part(call, found, "iraqi_ar")
+    assert part["agent_dialect"] == {
+        "dialect": "gulf_ar",
+        "quote": None,
+        "segment": None,
+        "unverified": True,
+    }
+    assert part["whatsapp_dialect"] == "gulf_ar"
 
 
 def test_a_whatsapp_suggestion_in_the_wrong_language_is_malformed() -> None:
@@ -513,4 +614,7 @@ async def test_wave2_sends_the_tenant_default_dialect_to_the_extras_pass() -> No
     assert "\nDEFAULT DIALECT: egyptian_ar\n" in llm.calls[-1].prompt.variable
     part = wave.parts[EXTRAS]
     assert part is not None
-    assert (part["agent_dialect"], part["whatsapp_dialect"]) == (_dialect(), None)
+    assert (part["agent_dialect"], part["whatsapp_dialect"]) == (
+        {**_dialect(), "unverified": False},
+        None,
+    )
