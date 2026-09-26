@@ -78,6 +78,15 @@ def _detail(
     return {"value": value, "state": state, "quote": quote, "segment": segment}
 
 
+def _not_mentioned(name: str) -> dict[str, Any]:
+    """A detail nobody mentioned, in its own shape."""
+    if name == "property_status":
+        return {**_detail(), "value": "unknown"}
+    if name == "handover_date":
+        return {**_detail(), "date": None}
+    return _detail()
+
+
 def _said(text: str, quote: str, segment: str) -> dict[str, str]:
     return {"text": text, "quote": quote, "segment": segment}
 
@@ -97,7 +106,7 @@ def _extraction(**details: dict[str, Any]) -> dict[str, Any]:
             "kind": "viewing",
         },
         "ending": "moved_forward",
-        "details": {name: _detail() for name in passes.DETAIL_NAMES},
+        "details": {name: _not_mentioned(name) for name in passes.DETAIL_NAMES},
         "mood": {"value": "positive", "quote": "I am happy with that", "segment": "s4"},
     }
     answer["details"].update(details)
@@ -577,7 +586,7 @@ async def test_the_extract_pass_names_its_profile_ceiling_and_the_masked_copy(
     await _extract(llm)
 
     (sent,) = llm.calls
-    assert (sent.profile, sent.max_output_tokens) == (PROFILE_UNIT_B_EXTRACT, 2500)
+    assert (sent.profile, sent.max_output_tokens) == (PROFILE_UNIT_B_EXTRACT, 3000)
     assert "call me on [PHONE]" in sent.prompt.variable
     assert "123 4567" not in sent.prompt.text
     assert "1,200,000 AED" in sent.prompt.variable

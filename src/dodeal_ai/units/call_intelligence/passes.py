@@ -3,7 +3,11 @@ through llm_call.call_model, the calls budget charged, temperature 0 unless a
 profile says otherwise, one reprompt with Unit B's tail on a malformed answer,
 and a fixed output ceiling sized for a non-reasoning model.
 
-  unit_b.extract  the six elements, six details and the client's mood
+  unit_b.extract  the six elements, eight details and the client's mood; the
+                  details are budget, area, property_reference, timeline,
+                  payment_method, decision_maker, property_status (off_plan,
+                  ready or unknown) and handover_date (as said, and an ISO
+                  date when the words name one)
   unit_b.prose    a summary and a CRM note, in the language decided in code
 
 EVIDENCE FOR EVERY ELEMENT (extract_v2). What the client wanted, each concern
@@ -44,7 +48,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Annotated, Any, Literal
 from zoneinfo import ZoneInfo
 
@@ -83,10 +87,11 @@ EXTRACT_LABEL = "llm.unit_b.extract"
 PROSE_LABEL = "llm.unit_b.prose"
 
 # What each answer may cost (register item 15), sized against the longest
-# ARABIC answer: the extraction is six elements with their quotes, six details
-# with a quote each and the mood; the prose is six sentences and an 80-word
-# note. Register item 116: a reasoning model would spend hidden tokens here.
-EXTRACT_MAX_OUTPUT_TOKENS = 2500
+# ARABIC answer: the extraction is six elements with their quotes, eight details
+# with a quote each, the next step's time and the mood; the prose is six
+# sentences and an 80-word note. Register item 116: a reasoning model would
+# spend hidden tokens here. Too low cuts an answer off: malformed, reprompted.
+EXTRACT_MAX_OUTPUT_TOKENS = 3000
 PROSE_MAX_OUTPUT_TOKENS = 1500
 
 MAX_CRM_NOTE_WORDS = 80
@@ -107,7 +112,12 @@ DETAIL_NAMES = (
     "timeline",
     "payment_method",
     "decision_maker",
+    "property_status",
+    "handover_date",
 )
+
+# A property status the call does not settle: the value not mentioned carries.
+UNKNOWN_STATUS = "unknown"
 
 # The furthest after the call a next step's time may be. A quarter ahead is a
 # plan; later is more likely misheard or invented. Longer keeps such times as
@@ -132,6 +142,38 @@ class Detail(Strict):
     segment: SegmentId
 
 
+class StatusDetail(Strict):
+    """Whether the property is built: off_plan or ready, said with a quote;
+    unknown when the call does not say."""
+
+    value: Literal["off_plan", "ready", "unknown"]
+    state: Literal["stated", "not_mentioned", "uncertain"]
+    quote: Quote
+    segment: SegmentId
+
+
+class HandoverDetail(Strict):
+    """When the property is handed over, as said, and as an ISO date when the
+    words name one."""
+
+    value: Annotated[str | None, Field(max_length=_ITEM_CHARS)]
+    date: date | None
+    state: Literal["stated", "not_mentioned", "uncertain"]
+    quote: Quote
+    segment: SegmentId
+
+
+type AnyDetail = Detail | StatusDetail | HandoverDetail
+
+# An answer kept before the two existed reads back as neither mentioned.
+_STATUS_NOT_MENTIONED = StatusDetail(
+    value="unknown", state="not_mentioned", quote=None, segment=None
+)
+_HANDOVER_NOT_MENTIONED = HandoverDetail(
+    value=None, date=None, state="not_mentioned", quote=None, segment=None
+)
+
+
 class Details(Strict):
     budget: Detail
     area: Detail
@@ -139,6 +181,8 @@ class Details(Strict):
     timeline: Detail
     payment_method: Detail
     decision_maker: Detail
+    property_status: StatusDetail = _STATUS_NOT_MENTIONED
+    handover_date: HandoverDetail = _HANDOVER_NOT_MENTIONED
 
 
 class Item(Strict):
@@ -233,7 +277,7 @@ class Prose(Strict):
     crm_note: Annotated[str, Field(min_length=1, max_length=_NOTE_CHARS)]
 
 
-def _detail_quote(call: CallText, where: str, detail: Detail) -> Errors | None:
+def _detail_quote(call: CallText, where: str, detail: AnyDetail) -> Errors | None:
     """A detail's quote check; None when it neither gives nor owes one."""
     if detail.state == STATED:
         return evidence_errors(call, where, detail.quote, detail.segment)
@@ -277,18 +321,30 @@ def _step_errors(step: NextStep) -> Errors:
     return []
 
 
+def _given(detail: AnyDetail) -> tuple[object, ...]:
+    """What a detail carries: its value (none for an unknown status), its
+    handover date, its quote and its segment."""
+    value = None if detail.value == UNKNOWN_STATUS else detail.value
+    when = detail.date if isinstance(detail, HandoverDetail) else None
+    return (value, when, detail.quote, detail.segment)
+
+
 def _shape_errors(answer: Extraction) -> Errors:
     """What no quote can mend: a detail not mentioned that carries anything, a
-    stated one with no value, a next step's kind without its action."""
+    stated one with no value, a handover date with no words for it, a next
+    step's kind without its action."""
     errors: Errors = _step_errors(answer.next_step)
     for name in DETAIL_NAMES:
-        detail: Detail = getattr(answer.details, name)
+        detail: AnyDetail = getattr(answer.details, name)
         where = f"details.{name}"
-        given = (detail.value, detail.quote, detail.segment)
-        if detail.state == NOT_MENTIONED and given != (None, None, None):
+        given = _given(detail)
+        value, when = given[0], given[1]
+        if detail.state == NOT_MENTIONED and given != (None, None, None, None):
             errors.append((where, "not_mentioned_with_value"))
-        if detail.state == STATED and detail.value is None:
+        if detail.state == STATED and value is None:
             errors.append((where, "stated_without_value"))
+        if when is not None and value is None:
+            errors.append((where, "date_without_value"))
     return errors
 
 
@@ -323,7 +379,9 @@ def check_prose(call: CallText) -> Callable[[Prose], None]:
     return check
 
 
-def _settled_detail(call: CallText, detail: Detail, failed: bool) -> dict[str, object]:
+def _settled_detail(
+    call: CallText, detail: AnyDetail, failed: bool
+) -> dict[str, object]:
     """A detail as delivered: a failed quote removed and the detail uncertain;
     uncertain too on an uncertain transcript or a low-confidence segment."""
     kept = detail.model_dump(mode="json")
