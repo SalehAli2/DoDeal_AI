@@ -364,6 +364,29 @@ def test_a_keyword_not_said_in_its_segment_is_malformed() -> None:
     )
 
 
+def test_a_seven_word_said_is_rejected_and_five_are_a_name() -> None:
+    """The guard: a keyword is a name, never a sentence -- a seven-word said is
+    malformed even when its words are in the segment it cites."""
+    answer = _answer()
+    answer["keywords"][0]["said"] = "My budget is about two million, and"
+    answer["keywords"][0]["segment"] = "s2"
+    assert _refused(answer) == (("keywords.0", "keyword_too_long"),)
+    answer["keywords"][0]["said"] = "My budget is about two"
+    check_extras(_call())(Extras.model_validate(answer))
+
+
+async def test_a_seven_word_said_is_reprompted_once_then_fails() -> None:
+    answer = _answer()
+    answer["keywords"][0].update(
+        said="My budget is about two million, and", segment="s2"
+    )
+    llm = FakeLLM(json_response(answer), json_response(answer))
+
+    with pytest.raises(MalformedOutputError):
+        await find_extras(llm, _call(), scope=SCOPE, settings=get_settings())
+    assert llm.call_count == 2
+
+
 def test_every_seriousness_quote_is_checked_and_a_yes_is_owed_one() -> None:
     answer = _answer()
     answer["seriousness"]["budget_stated"] = _check("yes")

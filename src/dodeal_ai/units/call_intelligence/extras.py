@@ -2,7 +2,8 @@
 could send next, and how serious the client is.
 
   keywords     the projects, communities, developers and topics said: each as
-               said, its words checked in the segment it cites, an English
+               said, a name of at most five words, never a sentence, its
+               words checked in the segment it cites, an English
                form where one exists, else null, and the tenant's canonical
                name when it is one on its keyword_vocabulary (config.py),
                else null and kept as found
@@ -26,8 +27,9 @@ could send next, and how serious the client is.
                manager_only: for the agent's manager, never the agent.
 
 THE CHECKS, in code, any failure a malformed answer (one reprompt, then the
-pass fails and the extras part is null): every keyword's words in the segment
-it cites, and its canonical name, if any, exactly one on the list; every
+pass fails and the extras part is null): every keyword's words -- at most
+MAX_KEYWORD_WORDS -- in the segment it cites, and its canonical name, if any,
+exactly one on the list; every
 quote given under the quote check, and every yes quoted; a known agent
 dialect quoted, and any dialect quote from a segment of the agent's; the
 WhatsApp text within 60 words and in its language's script
@@ -47,6 +49,7 @@ from dodeal_ai.core.config import Settings
 from dodeal_ai.core.context import TenantScope
 from dodeal_ai.core.llm import LLMClient, LLMResponse
 from dodeal_ai.core.llm.profiles import PROFILE_UNIT_B_EXTRAS, task_ceiling
+from dodeal_ai.units.call_intelligence.alarms import words
 from dodeal_ai.units.call_intelligence.evidence import (
     CallText,
     Cited,
@@ -86,6 +89,11 @@ EXTRAS_REASONING_MAX_OUTPUT_TOKENS = 4000
 
 # More keywords than any honest call names.
 MAX_KEYWORDS = 15
+
+# The most words a keyword's `said` may carry: a name, never a sentence. Five
+# holds a long project name; more lets a clause pass as a keyword, fewer
+# refuses a true name and costs the pass a reprompt.
+MAX_KEYWORD_WORDS = 5
 
 # The longest WhatsApp suggestion, in words (BRD): a message, not a letter.
 WHATSAPP_MAX_WORDS = 60
@@ -246,6 +254,8 @@ def check_extras(
     def check(answer: Extras) -> None:
         errors: Errors = []
         for n, keyword in enumerate(answer.keywords):
+            if len(words(keyword.said)) > MAX_KEYWORD_WORDS:
+                errors.append((f"keywords.{n}", "keyword_too_long"))
             errors += evidence_errors(
                 call, f"keywords.{n}", keyword.said, keyword.segment
             )
