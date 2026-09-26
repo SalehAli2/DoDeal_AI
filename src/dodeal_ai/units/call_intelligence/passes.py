@@ -44,8 +44,10 @@ the segment that names it, as ISO 8601 with an offset, quoting those words
 the when_quote's FOUND segment was said, never the agreement's: code keeps a
 time from WHEN_SLACK_SECONDS before it to MAX_NEXT_STEP_DAYS after it, to the
 minute in the tenant's zone. With no verified when_quote the time is null,
-uncertain, when_missing_quote; out of range the same, when_out_of_range.
-Vague timing is null and uncertain. booked rests on the agreement quote.
+uncertain, when_missing_quote; out of range the same, when_out_of_range; with
+the call's own time unknown the same, when_no_anchor. Vague timing is null and
+uncertain. booked rests on the agreement quote and a time the model gave;
+code dropping that time never changes it.
 
 The prose pass reads the transcript and the SETTLED extraction -- validated
 and quote-checked output with every failed quote removed, in the data half
@@ -149,6 +151,7 @@ WHEN_SLACK_SECONDS = 60
 # Why code kept no time for a next step that gave one.
 WHEN_MISSING_QUOTE = "when_missing_quote"
 WHEN_OUT_OF_RANGE = "when_out_of_range"
+WHEN_NO_ANCHOR = "when_no_anchor"
 
 # The weekday on a said-at stamp, in English whatever the process's locale.
 _WEEKDAYS = (
@@ -539,13 +542,15 @@ def _held_when(
     call: CallText, step: NextStep, when_failed: bool, clock: CallClock
 ) -> tuple[datetime | None, str | None]:
     """The next step's time as code keeps it, or None and why: no time given
-    (no reason), no verified when_quote (WHEN_MISSING_QUOTE), the call's own
-    time unknown (no reason), or out of range of the anchor (WHEN_OUT_OF_RANGE).
-    The anchor is when the when_quote's FOUND segment was said (D-50), never
-    the agreement quote's segment."""
+    (no reason), the call's own time unknown (WHEN_NO_ANCHOR), no verified
+    when_quote (WHEN_MISSING_QUOTE), or out of range of the anchor
+    (WHEN_OUT_OF_RANGE). The anchor is when the when_quote's FOUND segment was
+    said (D-50), never the agreement quote's segment."""
     quote, segment = step.when_quote, step.when_segment
     if step.when is None:
         return None, None
+    if clock.recorded_at is None:
+        return None, WHEN_NO_ANCHOR
     found = (
         None
         if when_failed or quote is None or segment is None
@@ -554,8 +559,7 @@ def _held_when(
     if found is None:
         return None, WHEN_MISSING_QUOTE
     anchor = clock.said_at(call.segments[found].start_s)
-    if anchor is None:
-        return None, None
+    assert anchor is not None  # recorded_at is known, so every segment has one
     when = clock.held(step.when, anchor)
     return when, None if when is not None else WHEN_OUT_OF_RANGE
 
@@ -571,7 +575,8 @@ def _settled_step(
     said (_held_when), with when_reason when code dropped a time given;
     when_state stated for a held time on a verified agreement, uncertain for
     a time said but vague, dropped or unverified, else not_mentioned. booked
-    rests on the verified agreement and a time given; when_reason never
+    rests on the verified agreement and a time the MODEL gave (step.when, never
+    the held one): code dropping the time, whatever its when_reason, never
     changes it. A failed when_quote is removed, as every failed quote is."""
     kept = _settled_item(step, failed)
     if when_failed:

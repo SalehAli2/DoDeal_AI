@@ -23,6 +23,7 @@ from dodeal_ai.units.call_intelligence.passes import (
     STATED,
     UNCERTAIN,
     WHEN_MISSING_QUOTE,
+    WHEN_NO_ANCHOR,
     WHEN_OUT_OF_RANGE,
     CallClock,
     Extraction,
@@ -227,8 +228,10 @@ def test_no_time_said_is_not_mentioned() -> None:
 
 
 async def test_with_the_calls_time_unknown_no_stamp_is_written_nor_time_held() -> None:
+    """The guard: with no recorded_at there is no moment to hold a time to,
+    so the model's time is dropped with when_no_anchor, booked unchanged."""
     unknown = CallClock(None, "UTC")
-    llm = FakeLLM(json_response(_timed("2026-09-27T17:00:00+04:00")))
+    llm = FakeLLM(json_response(_timed("2026-09-27T17:00:00+04:00", booked=True)))
 
     found, _ = await extract(
         llm, _call(), scope=SCOPE, settings=get_settings(), clock=unknown
@@ -239,8 +242,59 @@ async def test_with_the_calls_time_unknown_no_stamp_is_written_nor_time_held() -
     assert (kept["when"], kept["when_state"], kept["when_reason"]) == (
         None,
         UNCERTAIN,
-        None,
+        WHEN_NO_ANCHOR,
     )
+    assert (kept["booked"], kept["when_quote"]) == (True, "Tuesday at four")
+
+
+def test_an_unknown_call_time_is_no_anchor_even_without_a_when_quote() -> None:
+    """recorded_at unknown decides the reason before the time's quote does."""
+    kept = _kept(
+        _step(when="2026-09-27T17:00:00+04:00", booked=True),
+        CallClock(None, "Asia/Dubai"),
+    )
+    assert (kept["when"], kept["when_state"], kept["when_reason"]) == (
+        None,
+        UNCERTAIN,
+        WHEN_NO_ANCHOR,
+    )
+    assert kept["booked"] is True
+
+
+@pytest.mark.parametrize(
+    ("answer", "clock", "reason"),
+    [
+        (_step(when="2026-09-27T17:00:00+04:00"), CLOCK, WHEN_MISSING_QUOTE),
+        (_timed("2026-09-20T17:00:00+04:00"), CLOCK, WHEN_OUT_OF_RANGE),
+        (
+            _timed("2026-09-27T17:00:00+04:00"),
+            CallClock(None, "Asia/Dubai"),
+            WHEN_NO_ANCHOR,
+        ),
+    ],
+    ids=["missing-quote", "out-of-range", "no-anchor"],
+)
+@pytest.mark.parametrize("model_booked", [True, False])
+def test_a_time_code_dropped_leaves_booked_as_the_model_gave_it(
+    answer: dict[str, Any], clock: CallClock, reason: str, model_booked: bool
+) -> None:
+    """The guard: booked follows the model's own time, never code's held one;
+    each reason code drops a time for leaves the model's booked as it was."""
+    answer = {**answer, "next_step": {**answer["next_step"], "booked": model_booked}}
+    kept = _kept(answer, clock)
+    assert (kept["when"], kept["when_reason"]) == (None, reason)
+    assert kept["booked"] is model_booked
+
+
+def test_no_time_from_the_model_is_never_booked_whatever_the_clock() -> None:
+    """The one rule that sets booked false on its own: no time given at all."""
+    for clock in (CLOCK, CallClock(None, "Asia/Dubai")):
+        kept = _kept(_step(when=None, booked=True, **TUESDAY), clock)
+        assert (kept["when"], kept["when_reason"], kept["booked"]) == (
+            None,
+            None,
+            False,
+        )
 
 
 # --- the shape ---------------------------------------------------------------------
