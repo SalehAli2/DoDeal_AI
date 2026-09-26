@@ -7498,3 +7498,10 @@ failure modes, then one stress test (sabotage in brackets).
 - extras (2): one bad keyword quote throws away the tags and the message; an unverified yes lifts the band. Test: one bad keyword leaves the rest delivered, 4 of 6 failing is malformed (old strictness fails 5; drop off fails 2; unverified counted fails 1).
 - stage2 cost (3), call_e2e report (4), versions.quote_fillers, README timezone and coaching_languages (5): low risk, no sabotage owed.
 - Stress test: a stage-2 run with one unpriced model: its line, its stage and the report total are null, never a partial sum.
+
+## Unit B cost metric, extras format errors, evidence counts, e2e restarts
+- stage2 cost (1): stage 2's spend missing from task_cost; an unpriced run counted as zero. Test: priced run adds 4 passes' cost under stage2_done, unpriced adds nothing (count off fails 1).
+- extras format (2): one long WhatsApp text throws away keywords, tags and seriousness; a bad text delivered to the agent. Test: 70 words twice is null with too_long, the rest delivered (reprompt spent ignored fails 2; length filter off fails 2; canonical off fails 1).
+- evidence counts (3): silent drops; words on the line. Test: 3 invented keyword quotes give evidence_dropped {extras: 3}, counts only. No sabotage owed.
+- call_e2e keys (4): the next run refused by our own stale keys; another worker's key deleted. Test: two runs back to back both start; an overwritten key is kept (compare off fails 2).
+- Stress test: a foreign worker overwrites the normal queue's key a second before our stop: the watched delete leaves it and the next run is refused.
