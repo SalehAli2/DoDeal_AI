@@ -4,6 +4,7 @@ field, and the task settling that field."""
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
@@ -755,3 +756,35 @@ async def test_a_dead_call_with_no_reason_gets_the_ask_why_tip(
     held = await read_stage2_result("tenant-a", JOB)
     assert held is not None
     assert held["coaching"]["ask_why"] == (ASK_WHY["en"] if ask_why else None)
+
+
+async def test_the_stage2_outcome_line_carries_its_cost_and_price_table(
+    ctx: dict, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Four passes of 100 input and 20 output tokens each, priced at 1 and 2
+    USD per million, under the table the line names."""
+    prices = {"fake-model-pinned": {"input": 1.0, "cached_input": 0.5, "output": 2.0}}
+    monkeypatch.setenv("DODEAL_MODEL_PRICES", json.dumps(prices))
+    monkeypatch.setenv("DODEAL_PRICE_TABLE_VERSION", "prices-2026-09")
+    get_settings.cache_clear()
+    await _done_and_pending(ctx)
+
+    with caplog.at_level(logging.INFO, logger="dodeal_ai.unit_b"):
+        await analyse_stage2(_stage2_ctx(), "tenant-a", JOB)
+
+    (line,) = [r for r in caplog.records if r.getMessage() == "call_stage2_outcome"]
+    assert line.cost_usd == pytest.approx(4 * (100 * 1.0 + 20 * 2.0) / 1e6)
+    assert (line.price_table_version, line.model_calls) == ("prices-2026-09", 4)
+
+
+async def test_an_unpriced_model_gives_a_null_cost_never_a_partial_one(
+    ctx: dict, caplog: pytest.LogCaptureFixture
+) -> None:
+    await _done_and_pending(ctx)
+    with caplog.at_level(logging.INFO, logger="dodeal_ai.unit_b"):
+        await analyse_stage2(_stage2_ctx(), "tenant-a", JOB)
+    (line,) = [r for r in caplog.records if r.getMessage() == "call_stage2_outcome"]
+    assert (line.cost_usd, line.price_table_version) == (
+        None,
+        get_settings().price_table_version,
+    )

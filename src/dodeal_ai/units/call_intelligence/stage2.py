@@ -35,7 +35,9 @@ to do.
 
 The arq job carries only (tenant, job_id); everything else is read from db3.
 Ids, counts and fixed words on its one outcome line -- each pass's tokens and
-reasoning tokens among them; never a word said, never reasoning text.
+reasoning tokens among them, and the run's cost_usd with the
+price_table_version it was priced under; never a word said, never reasoning
+text.
 """
 
 from __future__ import annotations
@@ -52,7 +54,7 @@ from arq import Retry
 from dodeal_ai.core.callbacks import CALL_FAILED, CALL_STAGE2
 from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.cost.limiter import CallsBudgetPaused, calls_budget_preflight
-from dodeal_ai.core.cost.spend import spending
+from dodeal_ai.core.cost.spend import current_spend, spending
 from dodeal_ai.core.jobs import (
     DeliveryState,
     Job,
@@ -291,5 +293,13 @@ def _log_outcome(run: Stage2Run) -> None:
             "part_reasons": None if run.wave is None else run.wave.reasons or None,
             "pass_tokens": run.usage.tokens or None,
             "pass_reasoning_tokens": run.usage.reasoning or None,
+            **_spent(),
         },
     )
+
+
+def _spent() -> dict[str, object]:
+    """The run's spend fields -- model calls, tokens, cost_usd and the
+    price_table_version it was priced under -- as stage 1's line carries."""
+    spend = current_spend()
+    return {} if spend is None else spend.fields()
