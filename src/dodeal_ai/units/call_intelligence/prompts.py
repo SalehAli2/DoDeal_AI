@@ -45,7 +45,7 @@ EXTRACT_TEMPLATE = "call_intelligence/extract_v10.txt"
 PROSE_TEMPLATE = "call_intelligence/prose_v3.txt"
 OBJECTIONS_TEMPLATE = "call_intelligence/objections_v2.txt"
 SCORE_TEMPLATE = "call_intelligence/score_v2.txt"
-ESCALATIONS_TEMPLATE = "call_intelligence/escalations_v3.txt"
+ESCALATIONS_TEMPLATE = "call_intelligence/escalations_v4.txt"
 COACHING_TEMPLATE = "call_intelligence/coaching_v4.txt"
 EXTRAS_TEMPLATE = "call_intelligence/extras_v8.txt"
 TRANSLATE_TEMPLATE = "call_intelligence/translate_v2.txt"
@@ -89,8 +89,9 @@ REPROMPT_TAILS: Mapping[str, str] = MappingProxyType(
 # booked), unit_b_prompts_v18, then extract_v8 by extract_v9 (the agreement
 # quoted as the other speaker's short assent near the time, D-77),
 # unit_b_prompts_v19, then extract_v9, prose_v2 and whatsapp_v3 by the three
-# that name a voice no role mapping named unknown, unit_b_prompts_v20; never
-# sent again.
+# that name a voice no role mapping named unknown, and escalations_v3 by
+# escalations_v4 (over_promise against wrong_price), unit_b_prompts_v20;
+# never sent again.
 RETIRED_TEMPLATES: tuple[str, ...] = (
     "call_intelligence/extract_v1.txt",
     "call_intelligence/extras_v1.txt",
@@ -124,6 +125,7 @@ RETIRED_TEMPLATES: tuple[str, ...] = (
     "call_intelligence/extract_v9.txt",
     "call_intelligence/prose_v2.txt",
     "call_intelligence/whatsapp_v3.txt",
+    "call_intelligence/escalations_v3.txt",
 )
 
 # The stamp stage 1 carries under versions.prompt. Move it with the digest

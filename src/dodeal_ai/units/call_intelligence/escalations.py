@@ -16,18 +16,19 @@ or an alarm phrase).
                                   others; one flag per quote
 
 Every flag's quote goes through the quote check; the first four must come
-from an agent segment and possible_broker from a client segment: a flag
-without a real quote, or from the wrong side, is a malformed answer,
-reprompted once, then the pass fails and the escalations part is null. Who
-said it and when are read from the cited segment in code, never from the model.
+from an agent segment and possible_broker from a client segment. A flag
+without a real quote, or from the wrong side, is dropped on its own, one by
+one (A5): the rest are kept and nothing is reprompted. Then the price flags
+past MAX_PRICE_FLAGS and every flag past MAX_FLAGS are dropped, in the model's
+order, never a schema error. Only a broken shape is malformed: reprompted
+once, then the pass fails and the escalations part is null. Who said it and
+when are read from the found segment in code, never from the model.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
-from typing import Annotated, Literal
-
-from pydantic import Field
+from collections.abc import Sequence
+from typing import Literal
 
 from dodeal_ai.core.config import Settings
 from dodeal_ai.core.context import TenantScope
@@ -35,9 +36,8 @@ from dodeal_ai.core.llm import LLMClient, LLMResponse
 from dodeal_ai.core.llm.profiles import PROFILE_UNIT_B_ESCALATIONS, task_ceiling
 from dodeal_ai.units.call_intelligence.evidence import (
     CallText,
-    Cited,
-    Errors,
-    Said,
+    Quote,
+    SegmentId,
     Strict,
     evidence_errors,
     relocated,
@@ -51,10 +51,7 @@ from dodeal_ai.units.call_intelligence.prompts import (
     build_call_prompt,
     role_of,
 )
-from dodeal_ai.units.structured_intelligence.llm_call import (
-    call_model,
-    output_rejected,
-)
+from dodeal_ai.units.structured_intelligence.llm_call import call_model
 
 ESCALATIONS_LABEL = "llm.unit_b.escalations"
 
@@ -65,8 +62,13 @@ ESCALATIONS_MAX_OUTPUT_TOKENS = 2500
 # inside the ceiling (register item 116): the ceiling follows the profile.
 ESCALATIONS_REASONING_MAX_OUTPUT_TOKENS = 6000
 
-# More flags than any honest call raises.
+# The most flags kept, in the model's order: more than any honest call
+# raises. Higher lets a model flood the manager; lower drops real ones.
 MAX_FLAGS = 10
+# The most price or terms claims kept, in order: each is checked by hand, and
+# a call rarely states more than three prices. Higher floods that check;
+# lower drops a real claim.
+MAX_PRICE_FLAGS = 3
 
 WRONG_PRICE = "wrong_price_or_terms"
 CLAIM_TO_VERIFY = "claim_to_verify"
@@ -106,40 +108,46 @@ _SPEAKER = {
 
 
 class Flag(Strict):
-    """One issue, and the quote that shows it."""
+    """One issue, and the quote that shows it; one with no quote is dropped
+    (kept_flags), never refused by the schema."""
 
     issue: Issue
-    quote: Said
-    segment: Cited
+    quote: Quote
+    segment: SegmentId
 
 
 class Flags(Strict):
-    """unit_b.escalations' answer, exactly."""
+    """unit_b.escalations' answer, exactly: any number of flags, capped in
+    code (kept_flags)."""
 
-    escalations: Annotated[list[Flag], Field(max_length=MAX_FLAGS)]
+    escalations: list[Flag]
 
 
-def check_flags(call: CallText) -> Callable[[Flags], None]:
-    """Every flag's quote real, the agent's issues from the agent and the
-    client's from the client."""
-
-    def check(answer: Flags) -> None:
-        errors: Errors = []
-        for n, flag in enumerate(answer.escalations):
-            speaker = _SPEAKER.get(flag.issue)
-            errors += evidence_errors(
-                call, f"escalations.{n}", flag.quote, flag.segment, speaker=speaker
-            )
-        if errors:
-            raise output_rejected(ESCALATIONS_LABEL, tuple(errors))
-
-    return check
+def kept_flags(call: CallText, answer: Flags) -> Flags:
+    """The answer with each flag whose quote fails the quote check -- or comes
+    from the wrong side -- dropped on its own, then the price flags past
+    MAX_PRICE_FLAGS and every flag past MAX_FLAGS, in the model's order."""
+    kept: list[Flag] = []
+    prices = 0
+    for n, flag in enumerate(answer.escalations):
+        speaker = _SPEAKER.get(flag.issue)
+        where = f"escalations.{n}"
+        if evidence_errors(call, where, flag.quote, flag.segment, speaker=speaker):
+            continue
+        if flag.issue == WRONG_PRICE:
+            prices += 1
+            if prices > MAX_PRICE_FLAGS:
+                continue
+        if len(kept) < MAX_FLAGS:
+            kept.append(flag)
+    return answer.model_copy(update={"escalations": kept})
 
 
 async def find_flags(
     client: LLMClient, call: CallText, *, scope: TenantScope, settings: Settings
 ) -> tuple[Flags, LLMResponse]:
-    """unit_b.escalations: one call, or two when the first answer is malformed."""
+    """unit_b.escalations: one call, or two when the first answer's shape is
+    broken; its flags as kept_flags keeps them."""
     answer, response = await call_model(
         client,
         build_call_prompt(ESCALATIONS_TEMPLATE, call.data()),
@@ -155,18 +163,17 @@ async def find_flags(
             reasoning=ESCALATIONS_REASONING_MAX_OUTPUT_TOKENS,
             client=client,
         ),
-        check=check_flags(call),
         reprompt_tail=REPROMPT_TAIL_TEMPLATE,
         tail_by_error=REPROMPT_TAILS,
     )
-    return relocated(call, answer), response
+    return relocated(call, kept_flags(call, answer)), response
 
 
 def _escalation(call: CallText, flag: Flag) -> dict[str, object]:
     """A flag as an escalation, beside stage 1's: who and when from the
     segment, and a price or terms claim as one to verify."""
-    index = call.index_of(flag.segment)
-    assert index is not None  # the quote check found the segment
+    index = None if flag.segment is None else call.index_of(flag.segment)
+    assert index is not None  # kept_flags kept only flags found in a segment
     segment = call.segments[index]
     return {
         "type": CLAIM_TO_VERIFY if flag.issue == WRONG_PRICE else flag.issue,
@@ -182,7 +189,9 @@ def _escalation(call: CallText, flag: Flag) -> dict[str, object]:
 def escalations_part(
     call: CallText, answer: Flags, stage1: Sequence[dict[str, object]]
 ) -> dict[str, object]:
-    """Stage 2's escalations part: stage 1's and the model's, by time."""
-    items = [*stage1, *(_escalation(call, flag) for flag in answer.escalations)]
+    """Stage 2's escalations part: stage 1's and the model's as kept_flags
+    keeps them, by time."""
+    flags = kept_flags(call, answer).escalations
+    items = [*stage1, *(_escalation(call, flag) for flag in flags)]
     items.sort(key=lambda item: float(str(item["start_s"])))
     return {"items": items}

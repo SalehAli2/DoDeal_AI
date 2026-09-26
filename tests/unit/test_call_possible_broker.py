@@ -8,15 +8,14 @@ import pytest
 
 from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.context import RequestContext
-from dodeal_ai.core.validation import OutputValidationError
 from dodeal_ai.units.call_intelligence.escalations import (
     POSSIBLE_BROKER,
     Flags,
-    check_flags,
     escalations_part,
     find_flags,
+    kept_flags,
 )
-from dodeal_ai.units.call_intelligence.evidence import CallText
+from dodeal_ai.units.call_intelligence.evidence import CallText, evidence_errors
 from dodeal_ai.units.call_intelligence.transcriber import Segment, Transcript
 from tests.helpers.fake_llm import FakeLLM, json_response
 
@@ -122,6 +121,8 @@ async def test_a_genuine_investor_raises_nothing() -> None:
 def test_possible_broker_rests_on_the_clients_own_words(
     call: CallText, flag: dict, error: str
 ) -> None:
-    with pytest.raises(OutputValidationError) as refused:
-        check_flags(call)(Flags.model_validate({"escalations": [flag]}))
-    assert refused.value.errors == (("escalations.0", error),)
+    assert evidence_errors(call, "x", flag["quote"], flag["segment"], speaker="client") == [
+        ("x", error)
+    ]  # fmt: skip
+    kept = kept_flags(call, Flags.model_validate({"escalations": [flag]}))
+    assert kept.escalations == []

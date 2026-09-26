@@ -854,12 +854,13 @@ async def test_wave2_marks_the_score_again_once_the_escalations_answer() -> None
 
 
 async def test_wave2_with_the_escalations_pass_failed_keeps_the_score() -> None:
-    """The guard: two malformed escalations answers leave that part null, and
-    the score is the score pass's alone."""
+    """The guard: two malformed escalations answers (an issue off the list:
+    a bad quote alone is only dropped, A5) leave that part null, and the
+    score is the score pass's alone."""
     invented = {
         "escalations": [
             {
-                "issue": "over_promise_or_guarantee",
+                "issue": "free_car_promise",
                 "quote": "I promise you a free car",
                 "segment": "s3",
             }

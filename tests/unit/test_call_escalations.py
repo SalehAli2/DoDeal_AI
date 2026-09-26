@@ -11,18 +11,18 @@ import pytest
 
 from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.context import RequestContext
-from dodeal_ai.core.errors import MalformedOutputError
 from dodeal_ai.core.jobs import JobStatus, Stage2State, create_job, read_job, transition
 from dodeal_ai.core.llm.profiles import PROFILE_UNIT_B_ESCALATIONS
-from dodeal_ai.core.validation import OutputValidationError
 from dodeal_ai.units.call_intelligence.config import CallsConfig
 from dodeal_ai.units.call_intelligence.escalations import (
+    MAX_FLAGS,
+    MAX_PRICE_FLAGS,
     Flags,
-    check_flags,
     escalations_part,
     find_flags,
+    kept_flags,
 )
-from dodeal_ai.units.call_intelligence.evidence import CallText
+from dodeal_ai.units.call_intelligence.evidence import CallText, evidence_errors
 from dodeal_ai.units.call_intelligence.paid import PassUsage
 from dodeal_ai.units.call_intelligence.prompts import (
     ESCALATIONS_TEMPLATE,
@@ -81,24 +81,39 @@ HANGING = _flag("qualified_no_next_step", "My budget is two million", "s2")
 ANSWER = {"escalations": [PRICE, GUARANTEE, HANGING]}
 
 
-def _refused(*flags: dict[str, str]) -> tuple[tuple[str, str], ...]:
-    with pytest.raises(OutputValidationError) as refused:
-        check_flags(_call())(Flags.model_validate({"escalations": list(flags)}))
-    return refused.value.errors
+def _kept(*flags: dict[str, str | None]) -> list[dict[str, str | None]]:
+    """The flags kept_flags keeps, in order."""
+    answer = kept_flags(_call(), Flags.model_validate({"escalations": list(flags)}))
+    return [flag.model_dump() for flag in answer.escalations]
 
 
 # --- the guard ---------------------------------------------------------------------
 
 
-async def test_a_flag_without_a_real_quote_is_rejected() -> None:
+async def test_one_bad_flag_is_dropped_and_the_rest_kept() -> None:
+    """The guard (A5): a flag without a real quote is dropped on its own; the
+    pass is kept with the others, on one call, and nothing is reprompted."""
     invented = _flag("rudeness_or_pressure", "sign today or lose it", "s3")
-    answer = json_response({"escalations": [invented]})
-    llm = FakeLLM(answer, answer)
+    llm = FakeLLM(json_response({"escalations": [PRICE, invented, GUARANTEE]}))
 
-    with pytest.raises(MalformedOutputError):
-        await find_flags(llm, _call(), scope=SCOPE, settings=get_settings())
-    assert llm.call_count == 2
-    assert _refused(invented) == (("escalations.0", "quote_not_in_segment"),)
+    answer, _ = await find_flags(llm, _call(), scope=SCOPE, settings=get_settings())
+    assert llm.call_count == 1
+    assert [flag.model_dump() for flag in answer.escalations] == [PRICE, GUARANTEE]
+    assert _kept(invented) == []
+    assert _kept({**HANGING, "quote": None, "segment": None}, HANGING) == [HANGING]
+
+
+def test_flags_over_the_caps_are_dropped_by_order_never_refused() -> None:
+    """A5: past MAX_FLAGS, and past MAX_PRICE_FLAGS for price claims, flags
+    are dropped in the model's order; the schema takes any number."""
+    prices = [
+        _flag("wrong_price_or_terms", quote, "s3")
+        for quote in ("The price is", "1,500,000 AED", "no service charges", "price is 1,500,000")
+    ]  # fmt: skip
+    assert (MAX_PRICE_FLAGS, MAX_FLAGS) == (3, 10)
+    assert _kept(*prices, GUARANTEE) == [*prices[:3], GUARANTEE]
+    many = [GUARANTEE] * 12
+    assert _kept(*many) == [GUARANTEE] * 10
 
 
 @pytest.mark.parametrize(
@@ -115,11 +130,22 @@ async def test_a_flag_without_a_real_quote_is_rejected() -> None:
 def test_every_flag_is_quote_checked_and_an_agent_issue_is_the_agents(
     flag: dict[str, str], error: str
 ) -> None:
-    assert _refused(flag) == (("escalations.0", error),)
+    assert evidence_errors(_call(), "x", flag["quote"], flag["segment"], speaker="agent") == [
+        ("x", error)
+    ]  # fmt: skip
+    assert _kept(flag) == []
 
 
 def test_a_qualified_client_with_no_next_step_may_quote_the_client() -> None:
-    check_flags(_call())(Flags.model_validate({"escalations": [HANGING]}))
+    assert _kept(HANGING) == [HANGING]
+
+
+def test_the_prompt_tells_a_promise_from_a_price() -> None:
+    from dodeal_ai.core.prompting import build_prompt
+
+    text = " ".join(build_prompt(ESCALATIONS_TEMPLATE, caller_data="").stable.split())
+    assert "what a price, rent or value WILL do" in text
+    assert "what a price or term IS" in text
 
 
 # --- the part --------------------------------------------------------------------------
