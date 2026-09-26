@@ -17,6 +17,7 @@ from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.cost.limiter import CallsBudgetPaused
 from dodeal_ai.core.errors import ModelUnavailableError
 from dodeal_ai.core.jobs import (
+    JobStoreUnavailable,
     claim_whatsapp,
     create_job,
     store_result,
@@ -271,3 +272,45 @@ async def test_the_text_is_never_logged(
     (line,) = [r for r in caplog.records if r.getMessage() == "call_whatsapp_written"]
     assert (line.job_id, line.language, line.held) == (JOB, "ru", True)
     assert not [r for r in caplog.records if "Спасибо" in str(r.__dict__)]
+
+
+# --- the store failing -----------------------------------------------------------------
+
+
+def _down(*args: object, **kwargs: object):
+    raise JobStoreUnavailable()
+
+
+@pytest.mark.parametrize("step", ["read_job", "claim_whatsapp"])
+async def test_a_store_down_before_the_pass_is_503_and_pays_for_nothing(
+    client: httpx.AsyncClient, redis_fakes: RedisFakes, monkeypatch, step: str
+) -> None:
+    await _done_call(RESULT)
+    monkeypatch.setattr(whatsapp, step, _down)
+    llm = _answering({"whatsapp": RUSSIAN})
+    down = await _post(client, "ru")
+    assert (down.status_code, down.json()["reason"]) == (503, "job_store_unavailable")
+    assert llm.call_count == 0
+
+
+@pytest.mark.parametrize("step", ["store_whatsapp", "release_whatsapp"])
+async def test_a_store_down_after_the_pass_still_answers(
+    client: httpx.AsyncClient, redis_fakes: RedisFakes, monkeypatch, step: str
+) -> None:
+    await _done_call(RESULT)
+    monkeypatch.setattr(whatsapp, step, _down)
+    llm = _answering({"whatsapp": RUSSIAN})
+    answered = await _post(client, "ru")
+    assert (answered.status_code, answered.json()["text"]) == (200, RUSSIAN)
+    assert llm.call_count == 1
+
+
+async def test_a_message_over_60_words_is_reprompted_then_503(
+    client: httpx.AsyncClient, redis_fakes: RedisFakes
+) -> None:
+    await _done_call(RESULT)
+    long = {"whatsapp": " ".join(["слово"] * 61)}
+    llm = _answering(long, long)
+    refused = await _post(client, "ru")
+    assert (refused.status_code, refused.json()["reason"]) == (503, "malformed_output")
+    assert llm.call_count == 2
