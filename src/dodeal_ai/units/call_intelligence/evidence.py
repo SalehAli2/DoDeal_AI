@@ -17,8 +17,11 @@ Not in the cited segment, the quote is looked for in the one just before, then
 the one just after, and where found there that segment is stored (relocated).
 The segment is read as the model read it, so a quote can never carry a number
 back out. Where a pass names who must have said it, the segment it is found in
-is that speaker's. Any failure is a malformed answer: the pass is reprompted
-once, then fails -- except where a pass says otherwise (passes.py).
+is that speaker's: a voice no role mapping named (prompts.said_by) is no one's,
+so such a check fails there (quote_speaker_unknown). Any failure is a
+malformed answer: the pass is reprompted once, then fails -- except where a
+pass says otherwise (passes.py). A quote failing only on an unknown voice is
+never the model's slip, so it never counts toward mostly_failed.
 
 THE LANGUAGE SHARE: a text is in the language asked for when at least 60 % of
 its letters are in that language's script, counting none inside quotation
@@ -47,8 +50,9 @@ from dodeal_ai.units.call_intelligence.language import (
 )
 from dodeal_ai.units.call_intelligence.numbers import prompt_copy
 from dodeal_ai.units.call_intelligence.prompts import (
+    UNKNOWN,
     render_transcript,
-    role_of,
+    said_by,
     segment_id,
 )
 from dodeal_ai.units.call_intelligence.transcriber import (
@@ -130,6 +134,9 @@ NEGATIONS: tuple[str, ...] = (
 )
 _NEGATION_WORDS = frozenset(words(" ".join(NEGATIONS)))
 _FILLER_WORDS = frozenset(words(" ".join(QUOTE_FILLERS))) - _NEGATION_WORDS
+
+# A quote a pass needs said by one side, found in a voice no role mapping named.
+SPEAKER_UNKNOWN = "quote_speaker_unknown"
 
 # Where a quote not in its cited segment is looked for next: the segment just
 # before, then the one just after.
@@ -367,7 +374,10 @@ def quote_errors(
     found = _found_at(call, quoted, index)
     if found is None:
         return [(where, "quote_not_in_segment")]
-    if speaker is not None and role_of(call.segments[found]) != speaker:
+    said = said_by(call.segments[found])
+    if speaker is not None and said == UNKNOWN:
+        return [(where, SPEAKER_UNKNOWN)]
+    if speaker is not None and said != speaker:
         return [(where, "quote_wrong_speaker")]
     return []
 
@@ -388,8 +398,13 @@ def evidence_errors(
 
 def mostly_failed(quotes: dict[str, Errors]) -> bool:
     """Whether more than MAX_FAILED_QUOTE_SHARE of the quotes, each by where
-    it is with its failures, failed."""
-    failing = sum(1 for errors in quotes.values() if errors)
+    it is with its failures, failed; one failing only on an unknown voice is
+    not counted failed."""
+    failing = sum(
+        1
+        for errors in quotes.values()
+        if any(code != SPEAKER_UNKNOWN for _, code in errors)
+    )
     return failing > MAX_FAILED_QUOTE_SHARE * len(quotes)
 
 

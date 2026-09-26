@@ -47,8 +47,9 @@ minute in the tenant's zone. With no verified when_quote the time is null,
 uncertain, when_missing_quote; out of range the same, when_out_of_range; with
 the call's own time unknown the same, when_no_anchor. Vague timing is null and
 uncertain. booked (D-77) needs the model's word and a time it gave, the
-when_quote and the agreement quote both found, said by two different known
-voices, within MAX_BOOKING_GAP_SEGMENTS of each other; code dropping a time
+when_quote and the agreement quote both found, said by two different voices
+whose roles are known (prompts.said_by: never on a call whose roles were not
+applied), within MAX_BOOKING_GAP_SEGMENTS of each other; code dropping a time
 out of range or with no anchor never changes it.
 
 The prose pass reads the transcript and the SETTLED extraction -- validated
@@ -96,6 +97,7 @@ from dodeal_ai.units.call_intelligence.prompts import (
     REPROMPT_TAILS,
     UNKNOWN,
     build_call_prompt,
+    said_by,
 )
 from dodeal_ai.units.call_intelligence.transcriber import Segment
 from dodeal_ai.units.structured_intelligence.llm_call import (
@@ -584,17 +586,19 @@ def _found(call: CallText, quote: str | None, segment: str | None) -> int | None
 def _booked(call: CallText, step: NextStep) -> bool:
     """D-77: booked only when the model said so and gave a time, the words
     naming the time and the agreement both found, in segments of two
-    different voices, neither unknown, at most MAX_BOOKING_GAP_SEGMENTS
-    apart. Code dropping a time out of range or with no anchor never
-    unbooks it; a when_quote not found does."""
+    different voices whose roles are known (said_by, A2), at most
+    MAX_BOOKING_GAP_SEGMENTS apart. Code dropping a time out of range or with
+    no anchor never unbooks it; a when_quote not found does."""
     if not step.booked or step.when is None:
         return False
     agreed = _found(call, step.quote, step.segment)
     named = _found(call, step.when_quote, step.when_segment)
     if agreed is None or named is None:
         return False
-    voices = (call.segments[agreed].speaker, call.segments[named].speaker)
-    if UNKNOWN in voices or voices[0] == voices[1]:
+    voices = (call.segments[agreed], call.segments[named])
+    if UNKNOWN in {said_by(voice) for voice in voices}:
+        return False
+    if voices[0].speaker == voices[1].speaker:
         return False
     return abs(agreed - named) <= MAX_BOOKING_GAP_SEGMENTS
 

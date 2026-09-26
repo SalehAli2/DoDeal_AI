@@ -12,13 +12,13 @@ it replaces stays in the set, unsent, so the digest covers every shipped file.
 THE TRANSCRIPT COMES FIRST, inside the delimited data half, and the
 instructions after it (AssembledPrompt.data_first). One line per segment:
 
-    [s<n> mm:ss agent|client] text
+    [s<n> mm:ss agent|client|unknown] text
 
 `s<n>` is the segment's id, 1-based in transcript order: the id a quote
 cites and the check in code looks up. The extraction's lines also carry when
 the segment was said, written in code (passes.CallClock.stamp):
 
-    [s<n> mm:ss agent|client @ YYYY-MM-DD HH:MM Weekday] text
+    [s<n> mm:ss agent|client|unknown @ YYYY-MM-DD HH:MM Weekday] text
  Whitespace inside a segment is folded
 to single spaces, so no segment can start a line of its own and pass for
 another segment or for the LANGUAGE line. The delimiters are neutralised by
@@ -26,7 +26,9 @@ build_prompt, as for a note.
 
 WHO SPOKE: a segment whose speaker label is "agent" is the agent; every other
 label is the client. A provisional rule until voice ID exists: diarisation
-labels are the transcriber's, and only the agent is named by it.
+labels are the transcriber's, and only the agent is named by it. A prompt
+writes a voice no role mapping named (an engine's speaker_N left as it was,
+or unknown) as unknown (said_by), never as the client (unit_b_prompts_v20).
 """
 
 from __future__ import annotations
@@ -39,15 +41,15 @@ from dodeal_ai.core.prompting import AssembledPrompt, build_prompt
 from dodeal_ai.units.call_intelligence.transcriber import Segment
 
 ROLES_TEMPLATE = "call_intelligence/roles_v4.txt"
-EXTRACT_TEMPLATE = "call_intelligence/extract_v9.txt"
-PROSE_TEMPLATE = "call_intelligence/prose_v2.txt"
+EXTRACT_TEMPLATE = "call_intelligence/extract_v10.txt"
+PROSE_TEMPLATE = "call_intelligence/prose_v3.txt"
 OBJECTIONS_TEMPLATE = "call_intelligence/objections_v2.txt"
 SCORE_TEMPLATE = "call_intelligence/score_v2.txt"
 ESCALATIONS_TEMPLATE = "call_intelligence/escalations_v3.txt"
 COACHING_TEMPLATE = "call_intelligence/coaching_v4.txt"
 EXTRAS_TEMPLATE = "call_intelligence/extras_v8.txt"
 TRANSLATE_TEMPLATE = "call_intelligence/translate_v2.txt"
-WHATSAPP_TEMPLATE = "call_intelligence/whatsapp_v3.txt"
+WHATSAPP_TEMPLATE = "call_intelligence/whatsapp_v4.txt"
 REPROMPT_TAIL_TEMPLATE = "call_intelligence/reprompt_tail_v1.txt"
 QUOTE_LENGTH_TAIL_TEMPLATE = "call_intelligence/reprompt_tail_quote_length_v1.txt"
 QUOTE_EXACT_TAIL_TEMPLATE = "call_intelligence/reprompt_tail_quote_exact_v1.txt"
@@ -86,7 +88,9 @@ REPROMPT_TAILS: Mapping[str, str] = MappingProxyType(
 # it like this" in the agent's dialect, and no next step advised once one is
 # booked), unit_b_prompts_v18, then extract_v8 by extract_v9 (the agreement
 # quoted as the other speaker's short assent near the time, D-77),
-# unit_b_prompts_v19; never sent again.
+# unit_b_prompts_v19, then extract_v9, prose_v2 and whatsapp_v3 by the three
+# that name a voice no role mapping named unknown, unit_b_prompts_v20; never
+# sent again.
 RETIRED_TEMPLATES: tuple[str, ...] = (
     "call_intelligence/extract_v1.txt",
     "call_intelligence/extras_v1.txt",
@@ -117,11 +121,14 @@ RETIRED_TEMPLATES: tuple[str, ...] = (
     "call_intelligence/extract_v7.txt",
     "call_intelligence/coaching_v3.txt",
     "call_intelligence/extract_v8.txt",
+    "call_intelligence/extract_v9.txt",
+    "call_intelligence/prose_v2.txt",
+    "call_intelligence/whatsapp_v3.txt",
 )
 
 # The stamp stage 1 carries under versions.prompt. Move it with the digest
 # in the stamp test whenever one of UNIT_B_TEMPLATES changes.
-PROMPT_SET_VERSION = "unit_b_prompts_v19"
+PROMPT_SET_VERSION = "unit_b_prompts_v20"
 
 # Every template Unit B can send, in pass order, then the retired ones; the
 # worker preloads them all.
@@ -209,13 +216,14 @@ def render_transcript(
     texts: Sequence[str] | None = None,
     stamps: Sequence[str] | None = None,
 ) -> str:
-    """The transcript as the prompt shows it. `texts`, one per segment, is
-    what to show instead of each segment's own text (the masked copy);
-    `stamps`, one per segment, when each was said, after an @."""
+    """The transcript as the prompt shows it, each voice as said_by names it.
+    `texts`, one per segment, is what to show instead of each segment's own
+    text (the masked copy); `stamps`, one per segment, when each was said,
+    after an @."""
     shown = [segment.text for segment in segments] if texts is None else texts
     said = [""] * len(segments) if stamps is None else [f" @ {s}" for s in stamps]
     return "\n".join(
-        f"[{segment_id(n)} {clock(segment.start_s)} {role_of(segment)}{at}] "
+        f"[{segment_id(n)} {clock(segment.start_s)} {said_by(segment)}{at}] "
         f"{one_line(text)}"
         for n, (segment, text, at) in enumerate(zip(segments, shown, said, strict=True))
     )

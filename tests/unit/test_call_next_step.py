@@ -732,16 +732,25 @@ def test_the_segment_an_assent_is_found_in_decides(
 @pytest.mark.parametrize(
     ("namer", "agreer", "booked"),
     [
-        ("speaker_1", "speaker_2", True),
+        ("agent", "client", True),
+        ("speaker_1", "speaker_2", False),
         ("speaker_1", "speaker_1", False),
         ("agent", "unknown", False),
         ("unknown", "unknown", False),
+        ("agent", "speaker_2", False),
     ],
-    ids=["two-engine-voices", "one-engine-voice", "an-unknown-voice", "both-unknown"],
+    ids=[
+        "agent-and-client",
+        "two-engine-voices",
+        "one-engine-voice",
+        "an-unknown-voice",
+        "both-unknown",
+        "an-engine-voice",
+    ],
 )
 def test_two_known_voices_are_needed(namer: str, agreer: str, booked: bool) -> None:
-    """Roles not applied, the engine's two labels are still two voices; a
-    voice nobody named may be either side, so it books nothing."""
+    """The guard (A2): booked needs the roles applied. The engine's labels
+    left as they were name no one, like unknown, so they book nothing."""
     call = _turns(s56=(namer, TIME), s57=(agreer, "اوكي"))
     assert _booked(call, _booking("s56", "s57"))["booked"] is booked
 
@@ -754,8 +763,8 @@ def test_the_extract_prompt_asks_for_the_other_speakers_short_assent() -> None:
     )
 
     assert (EXTRACT_TEMPLATE, PROMPT_SET_VERSION) == (
-        "call_intelligence/extract_v9.txt",
-        "unit_b_prompts_v19",
+        "call_intelligence/extract_v10.txt",
+        "unit_b_prompts_v20",
     )
     text = " ".join(build_prompt(EXTRACT_TEMPLATE, caller_data="").stable.split())
     assert "the other speaker's own short assent" in text
