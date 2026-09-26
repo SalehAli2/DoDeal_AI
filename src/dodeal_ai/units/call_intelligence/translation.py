@@ -13,8 +13,10 @@ is the model's. THE CHECKS, in code: each chunk's ids answered once each and
 no other, the chunk's text in the target's script (evidence.in_language).
 
 PAID ONCE: a chunk the model never answered is asked once more; a malformed
-answer gets its one reprompt and then fails the translation. The task is never
-re-run (max_tries 1), so no answered chunk is paid for twice.
+answer gets its one reprompt and then fails the translation. A reprompt that
+got no answer is sent once more alone, the first answer read back unpaid
+(paid.ask_twice). The task is never re-run (max_tries 1), so no answered
+chunk is paid for twice.
 
 THE RESULT is held beside the stage-1 result for the tenant's result hold,
 readable through the status route, and sent signed to the callback as
@@ -54,6 +56,7 @@ from dodeal_ai.core.llm.profiles import PROFILE_UNIT_B_TRANSLATE, task_ceiling
 from dodeal_ai.units.call_intelligence.config import resolve_calls_config
 from dodeal_ai.units.call_intelligence.delivery import translation_event
 from dodeal_ai.units.call_intelligence.evidence import CallText, Errors, in_language
+from dodeal_ai.units.call_intelligence.paid import ask_twice
 from dodeal_ai.units.call_intelligence.prompts import (
     PROMPT_SET_VERSION,
     REPROMPT_TAIL_TEMPLATE,
@@ -201,9 +204,9 @@ async def _chunk(
 ) -> Translated:
     """One chunk, asked once more only when no answer arrived."""
 
-    async def ask() -> Translated:
+    async def ask(replay: LLMClient) -> Translated:
         answer, _ = await call_model(
-            client,
+            replay,
             build_call_prompt(TRANSLATE_TEMPLATE, translate_data(call, run, target)),
             Translated,
             TRANSLATE_LABEL,
@@ -223,10 +226,7 @@ async def _chunk(
         )
         return answer
 
-    try:
-        return await ask()
-    except ModelUnavailableError:
-        return await ask()
+    return await ask_twice(client, ask)
 
 
 async def translate_call(

@@ -16,7 +16,8 @@ malformed_output. A SUGGESTION ONLY, as in extras.py: nothing is sent.
 
 PAID ONCE PER LANGUAGE. A held suggestion is answered from the store, never
 asked again; a claim (SET NX) lets one request pay while a second gets 409;
-a model that never answered is asked once more (the lead's one exception).
+a model that never answered is asked once more (the lead's one exception),
+a lost reprompt alone, the first answer read back unpaid (paid.ask_twice).
 Charged to the calls budget of the call's author, checked first: 429 at the
 budget, 503 when the store that counts it cannot say.
 
@@ -39,7 +40,6 @@ from dodeal_ai.core.errors import (
     CallJobNotFound,
     CallsBudgetUnavailable,
     JobStoreUnavailableResponse,
-    ModelUnavailableError,
     ResultExpired,
     TokenBudgetExceeded,
     WhatsAppInProgress,
@@ -65,6 +65,7 @@ from dodeal_ai.units.call_intelligence.language import (
     message_language,
     spoken_of,
 )
+from dodeal_ai.units.call_intelligence.paid import ask_twice
 from dodeal_ai.units.call_intelligence.prompts import (
     PROMPT_SET_VERSION,
     REPROMPT_TAIL_TEMPLATE,
@@ -153,11 +154,11 @@ async def write_whatsapp(
     settings: Settings,
 ) -> Written:
     """unit_b.whatsapp: one call, a second when the first answer is malformed,
-    and one more only when no answer arrived at all."""
+    and the one that got no answer sent once more, alone."""
 
-    async def ask() -> Written:
+    async def ask(replay: LLMClient) -> Written:
         answer, _ = await call_model(
-            client,
+            replay,
             build_call_prompt(WHATSAPP_TEMPLATE, whatsapp_data(call, language)),
             Written,
             WHATSAPP_LABEL,
@@ -176,10 +177,7 @@ async def write_whatsapp(
         )
         return answer
 
-    try:
-        return await ask()
-    except ModelUnavailableError:
-        return await ask()
+    return await ask_twice(client, ask)
 
 
 def _suggestion(job_id: str, held: dict[str, object]) -> WhatsAppSuggestion:

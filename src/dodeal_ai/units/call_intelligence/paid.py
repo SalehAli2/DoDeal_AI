@@ -11,6 +11,11 @@ a pass is counted in db3 before the paid call:
     starts the pass has failed;
   - a malformed answer has already had its one reprompt (llm_call.py) and
     fails the pass at once: a response we received is never paid for again.
+  - A LOST REPROMPT (M4): the first answer arrived, malformed, and the
+    reprompt's never did. The second start sends the reprompt alone: the
+    first answer is read back from memory, unpaid (Replay), never asked
+    again. The reprompt is marked in the work before it is sent, so a run cut
+    off during it fails the pass rather than send the first prompt again.
 
 The tokens each pass spent in a run are counted per pass for its outcome line,
 both answers of a reprompt included, and apart from them the reasoning tokens
@@ -24,7 +29,7 @@ later run reports the same stamp without calling again.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 
 from pydantic import BaseModel
@@ -40,6 +45,8 @@ from dodeal_ai.core.prompting import AssembledPrompt
 # response never arrived (BRD B6, the lead's override). Never a third.
 PASS_TRIES = 2
 PASS_INTERRUPTED = "pass_interrupted"
+# The work mark of a reprompt sent: its first answer arrived (M4).
+REPROMPTING = "reprompting"
 
 # Counts one more start of a pass before its paid call: its starts after this
 # one, or None when the job has moved on and nothing is left to finish.
@@ -92,19 +99,37 @@ class PassUsage:
         self.reasoning[name] = self.reasoning.get(name, 0) + response.reasoning_tokens
 
 
-class _Metered:
-    """An LLMClient that counts every response of one pass into the usage, and
-    hands the adapter the pass's schema for a json_schema profile."""
+def _unpaid(response: LLMResponse) -> LLMResponse:
+    """A received response read back: the same answer with no tokens, so no
+    budget, spend or metric counts them again."""
+    return replace(
+        response,
+        input_tokens=0,
+        output_tokens=0,
+        cached_input_tokens=0,
+        reasoning_tokens=0,
+    )
 
-    def __init__(
-        self,
-        client: LLMClient,
-        usage: PassUsage,
-        name: str,
-        schema: Mapping[str, object],
-    ) -> None:
-        self._client, self._usage, self._name = client, usage, name
-        self._schema = schema
+
+class Replay:
+    """An LLMClient for one call_model and its one retry (M4). It keeps every
+    response it received; after rewind() those are read back in order, unpaid,
+    and only the call that got none -- the first prompt, or the reprompt
+    alone -- is sent again."""
+
+    def __init__(self, client: LLMClient) -> None:
+        self._client = client
+        self._received: list[LLMResponse] = []
+        self._next = 0
+
+    @property
+    def received(self) -> int:
+        """Responses that arrived, each paid for once."""
+        return len(self._received)
+
+    def rewind(self) -> None:
+        """Before the retry: read back what arrived, send only what did not."""
+        self._next = 0
 
     def profile_for(self, name: str) -> ModelProfile | None:
         """The routed client's profile for `name`, so a ceiling follows it."""
@@ -120,14 +145,81 @@ class _Metered:
         max_output_tokens: int | None = None,
         response_schema: Mapping[str, object] | None = None,
     ) -> LLMResponse:
+        if self._next < len(self._received):
+            self._next += 1
+            return _unpaid(self._received[self._next - 1])
+        await self._before_send()
         response = await self._client.complete(
+            prompt,
+            profile=profile,
+            max_output_tokens=max_output_tokens,
+            response_schema=response_schema,
+        )
+        self._received.append(response)
+        self._next += 1
+        self._paid(response)
+        return response
+
+    async def _before_send(self) -> None:
+        """Called before each paid call; nothing here."""
+
+    def _paid(self, response: LLMResponse) -> None:
+        """Called once per response received; nothing here."""
+
+
+async def ask_twice[T](
+    client: LLMClient, ask: Callable[[LLMClient], Awaitable[T]]
+) -> T:
+    """`ask`, once more only when no response arrived (the lead's one
+    exception): the first prompt again when its own answer never came, else
+    the reprompt alone. A response received is never paid for again."""
+    replay = Replay(client)
+    try:
+        return await ask(replay)
+    except ModelUnavailableError:
+        replay.rewind()
+        return await ask(replay)
+
+
+class _Metered(Replay):
+    """A Replay for one pass that counts every response into the usage, hands
+    the adapter the pass's schema for a json_schema profile, and marks the
+    pass's work before a reprompt is sent."""
+
+    def __init__(
+        self,
+        client: LLMClient,
+        usage: PassUsage,
+        name: str,
+        schema: Mapping[str, object],
+        mark: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
+        super().__init__(client)
+        self._usage, self._name, self._schema = usage, name, schema
+        self._mark = mark
+
+    async def complete(
+        self,
+        prompt: AssembledPrompt,
+        *,
+        profile: str,
+        max_output_tokens: int | None = None,
+        response_schema: Mapping[str, object] | None = None,
+    ) -> LLMResponse:
+        return await super().complete(
             prompt,
             profile=profile,
             max_output_tokens=max_output_tokens,
             response_schema=response_schema or self._schema,
         )
+
+    async def _before_send(self) -> None:
+        if self.received and self._mark is not None:
+            # A reprompt: its first answer arrived and must never be re-asked.
+            await self._mark()
+
+    def _paid(self, response: LLMResponse) -> None:
         self._usage.add(self._name, response)
-        return response
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,11 +252,22 @@ async def run_pass[M: BaseModel](
     if kept is not None:
         if "failed" in kept:
             raise PassFailed(f"{name}_{kept['failed']}")
+        if REPROMPTING in kept:
+            # A run stopped during the reprompt: its first answer arrived, so
+            # the first prompt is never sent again (M4).
+            raise await _failed(run, name, PASS_INTERRUPTED)
         provider = kept.get("provider")
         return schema.model_validate(kept["answer"]), Stamp(
             None if provider is None else str(provider), str(kept["model"])
         )
     starts = run.job.passes.get(name, 0)
+    metered = _Metered(
+        run.client,
+        run.usage,
+        name,
+        schema.model_json_schema(),
+        lambda: _keep(run, name, {REPROMPTING: True}),
+    )
     while True:
         if starts >= PASS_TRIES:
             raise await _failed(run, name, PASS_INTERRUPTED)
@@ -173,11 +276,11 @@ async def run_pass[M: BaseModel](
             raise JobGone()
         starts = counted
         try:
-            metered = _Metered(run.client, run.usage, name, schema.model_json_schema())
             answer, response = await call(metered)
         except ModelUnavailableError:
             if starts >= PASS_TRIES:
                 raise await _failed(run, name, "model_unavailable")
+            metered.rewind()
             continue
         except MalformedOutputError:
             raise await _failed(run, name, "malformed_output")
