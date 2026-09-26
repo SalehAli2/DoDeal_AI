@@ -7541,3 +7541,12 @@ failure modes, then one stress test (sabotage in brackets).
 - call_e2e (2): several recordings meant several runs. Test: two paths give two pushes, two report folders and one stop; one path keeps its layout.
 - D-76 prefixes (3): "وما" and "ماعرفتش" were missed. Test: both counted; "مشروع" is not.
 - Stress test: a one-word assent cited one segment off is judged on the segment it is found in, so the agent's own "تمام" never books.
+
+## Unit B review fixes A: roles, unknown voices, cascades, quote matcher, escalations, prose numbers (unit_b_prompts_v20)
+- A1 roles (1, RISK): a borrowed quote verified the wrong voice; one failed language quote threw away a good mapping. Test: two voices with one verified role map the other, three never infer, a failed language quote keeps the mapping and the script decides the languages. Sabotage: 3 of 3 fail.
+- A2 unknown voices (2, RISK): an unmapped voice read as the client; a roles-failed call booked a next step. Test: speaker_N and unknown render unknown, booked needs known roles, a loss reason from an unknown voice is unverified. Sabotage: 2 of 2 fail.
+- A3 cascades (3, RISK): a prose failure dropped the whole analysis; a roles failure forced every detail uncertain. Test: prose_failed keeps elements, details and mood; when_state is the time's alone; agreement_unverified; a stale roles_failed never carries. Sabotage: 3 of 3 fail.
+- A4 quote matcher (4, RISK): a proclitic turned a negation into another word; a digit or hamza written the other way failed a true quote. Test: folds, one proclitic, detached و, negation guards, fillers v2, stored transcript words. Sabotage: 3 of 3 fail.
+- A5 escalations (5): one bad flag is dropped alone, caps 10 and 3 price, escalations_v4. Sabotage: 1 of 1 fails. A6 (6): coaching_v5; the tail holds no rejected text. A7 prose numbers (7): number_not_in_transcript, one reprompt, prose_failed. Sabotage: 1 of 1 fails.
+- Not built: the tail listing failing paths and codes (core/prompting.py, llm_call.py) and per-pass failure sub-code counts on the outcome line (paid.py, worker.py, stage2.py).
+- Stress test: "لما وصلت" never matches "ما وصلت", while "والسعر عالي" matches "و السعر يعني عالي" and is stored as those transcript words.
