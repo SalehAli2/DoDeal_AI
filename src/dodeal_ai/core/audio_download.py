@@ -14,7 +14,9 @@ rule is here, in order, and every refusal happens BEFORE a byte is kept:
      Host and the TLS server name, so a second lookup cannot answer
      differently (DNS rebinding)
   6. no redirect is followed         else audio_redirect_refused
-  7. the answer is audio/*           else audio_type_refused
+  7. the answer is audio/*, or application/octet-stream or
+     binary/octet-stream (storage that does not know the type; ffprobe
+     decides what it is before any paid call)   else audio_type_refused
   8. at most max_audio_bytes, by the header and then by the count, inside
      CALL_DOWNLOAD_TIMEOUT_SECONDS  else audio_too_large / audio_download_timeout
 
@@ -144,8 +146,18 @@ def pinned_request(
     return httpx.URL(url).copy_with(host=address), {"Host": host_header}, extensions
 
 
+# Untyped bytes a store may serve a recording as (M12). Admitted here only
+# because ffprobe decides, after the download and before any paid call.
+_OCTET_STREAMS = frozenset({"application/octet-stream", "binary/octet-stream"})
+
+
 def _media_type(response: httpx.Response) -> str:
     return response.headers.get("content-type", "").split(";")[0].strip().lower()
+
+
+def _admitted_type(media: str) -> bool:
+    """Rule 7: audio/*, or untyped bytes for ffprobe to judge."""
+    return media.startswith("audio/") or media in _OCTET_STREAMS
 
 
 def _check_response(response: httpx.Response, max_bytes: int) -> None:
@@ -157,7 +169,7 @@ def _check_response(response: httpx.Response, max_bytes: int) -> None:
         raise AudioDownloadError("audio_source_unavailable", retryable=True)
     if status != httpx.codes.OK:
         raise _refused("audio_source_refused")
-    if not _media_type(response).startswith("audio/"):
+    if not _admitted_type(_media_type(response)):
         raise _refused("audio_type_refused")
     declared = response.headers.get("content-length")
     if declared is not None and (not declared.isdigit() or int(declared) > max_bytes):

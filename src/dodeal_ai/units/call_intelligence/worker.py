@@ -25,8 +25,9 @@ THE ORDER, and what each step may cost:
      probed, inspected and converted (audio.py) before any paid call: a file
      ffprobe cannot decode, over 3600 s, unreadable, or not two channels under
      a stereo setting fails it, unpaid. Every engine is sent 16 kHz mono FLAC:
-     the call's one track, or each side of a stereo call. Its seconds are
-     charged -- twice for stereo, whose two sides are each transcribed, each
+     the call's one track, or each side of a stereo call. Its seconds as
+     ffprobe measured them (the push's only without ffmpeg) are charged, spent
+     and counted -- twice for stereo, whose two sides are each transcribed, each
      side kept once it exists -- then transcribed; poor audio makes the
      transcript uncertain whatever the engine says. A transcription that failed
      and may succeed later is retried ONCE, as an attempt, its seconds charged
@@ -64,6 +65,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -666,8 +668,9 @@ async def _transcribe(
                     ttl_seconds=config.result_ttl_seconds,
                 )
             async with _engine_audio(tools, audio.path, stereo) as files:
+                billed = billed_seconds(seconds, run.audio)
                 try:
-                    await charge_audio_seconds(scope, seconds * len(files))
+                    await charge_audio_seconds(scope, billed * len(files))
                 except CallsBudgetPaused as paused:
                     await _pause(job, paused.reason_code, claimed=True, run=run)
                     run.attempts = attempt - 1
@@ -677,16 +680,18 @@ async def _transcribe(
                     return None
                 transcriptions = count
                 run.moved(JobStatus.TRANSCRIBING)
-                metrics.AUDIO_SECONDS_PROCESSED.inc(seconds)
+                metrics.AUDIO_SECONDS_PROCESSED.inc(billed)
                 length = call_length(seconds, run.audio)
                 started = time.monotonic()
                 try:
                     if stereo:
                         transcript = await _two_sides(
-                            ctx, job, config, files, work, length
+                            ctx, job, config, files, work, length, billed
                         )
                     else:
-                        transcript = await _paid(ctx, job, config, files[0], length)
+                        transcript = await _paid(
+                            ctx, job, config, files[0], length, billed
+                        )
                 finally:
                     run.transcribe_ms = _ms_since(started)
             if run.audio is not None:
@@ -717,6 +722,15 @@ async def _inspected(tools: AudioTools, path: Path, stereo: bool) -> AudioQualit
     if stereo and quality.channels != 2:
         raise AudioError(CHANNELS_MISMATCH)
     return quality
+
+
+def billed_seconds(declared: int, audio: AudioQuality | None) -> int:
+    """The seconds the audio budget, the spend and the metrics count (M11):
+    ffprobe's measure, rounded up, never the push's word; the push's only
+    when nothing measured (the demo without ffmpeg)."""
+    if audio is None:
+        return declared
+    return math.ceil(audio.duration_seconds)
 
 
 def call_length(declared: int, audio: AudioQuality | None) -> float:
@@ -756,14 +770,18 @@ def transcriber_for(ctx: dict[str, Any], profile: str) -> Transcriber:
 
 
 async def _paid(
-    ctx: dict[str, Any], job: Job, config: CallsConfig, path: Path, length: float
+    ctx: dict[str, Any],
+    job: Job,
+    config: CallsConfig,
+    path: Path,
+    length: float,
+    seconds: int,
 ) -> Transcript:
     """One paid transcription of `path`, a call `length` seconds long, its
-    seconds recorded on the spend under the model that answered, or as
-    unpriced when none did."""
+    billed `seconds` recorded on the spend under the model that answered, or
+    as unpriced when none did."""
     transcriber = transcriber_for(ctx, config.stt_profile)
     hint = job.metadata.get("language_hint")
-    seconds = int(str(job.metadata["duration_seconds"]))
     spend = current_spend()
     try:
         transcript = await transcriber.transcribe(
@@ -790,6 +808,7 @@ async def _two_sides(
     files: tuple[Path, ...],
     work: dict[str, dict[str, object]],
     length: float,
+    seconds: int,
 ) -> Transcript:
     """Each side of a stereo call transcribed on its own and merged by time,
     a side kept the moment it exists so a retry never pays for it again."""
@@ -800,7 +819,7 @@ async def _two_sides(
         if kept is not None:
             sides.append((role, Transcript.model_validate(kept)))
             continue
-        side = await _paid(ctx, job, config, side_path, length)
+        side = await _paid(ctx, job, config, side_path, length, seconds)
         await store_work(
             job.tenant,
             job.job_id,
