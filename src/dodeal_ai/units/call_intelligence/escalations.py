@@ -1,6 +1,7 @@
-"""unit_b.escalations (wave 2): the five BRD issues a manager must see, each
-with the quote that shows it, merged with the escalations stage 1 found in
-code (off_channel_contact, from a number or an alarm phrase).
+"""unit_b.escalations (wave 2): the issues a manager must see -- the five the
+BRD names and possible_broker -- each with the quote that shows it, merged
+with the escalations stage 1 found in code (off_channel_contact, from a number
+or an alarm phrase).
 
   over_promise_or_guarantee       an agent's promise nobody can keep
   wrong_price_or_terms            an agent's price or terms; goes out as
@@ -9,9 +10,14 @@ code (off_channel_contact, from a number or an alarm phrase).
   rudeness_or_pressure            an agent rude to the client, or pushing
   unprofessional_competitor_talk  an agent running down a competitor
   qualified_no_next_step          a qualified client left with no next step
+  possible_broker                 a client who presents as a buyer but talks
+                                  like a broker: asks about commission, says
+                                  "my client(s)", asks for several units for
+                                  others; one flag per quote
 
-Every flag's quote goes through the quote check, and the first four must come
-from an agent segment: a flag without a real quote is a malformed answer,
+Every flag's quote goes through the quote check; the first four must come
+from an agent segment and possible_broker from a client segment: a flag
+without a real quote, or from the wrong side, is a malformed answer,
 reprompted once, then the pass fails and the escalations part is null. Who
 said it and when are read from the cited segment in code, never from the model.
 """
@@ -38,6 +44,7 @@ from dodeal_ai.units.call_intelligence.evidence import (
 )
 from dodeal_ai.units.call_intelligence.prompts import (
     AGENT,
+    CLIENT,
     ESCALATIONS_TEMPLATE,
     REPROMPT_TAIL_TEMPLATE,
     REPROMPT_TAILS,
@@ -74,13 +81,25 @@ AGENT_ISSUES = frozenset(
     }
 )
 
+# The issue only the client can show: a buyer who talks like a broker.
+POSSIBLE_BROKER = "possible_broker"
+CLIENT_ISSUES = frozenset({POSSIBLE_BROKER})
+
 type Issue = Literal[
     "over_promise_or_guarantee",
     "wrong_price_or_terms",
     "rudeness_or_pressure",
     "unprofessional_competitor_talk",
     "qualified_no_next_step",
+    "possible_broker",
 ]
+
+
+# Who must have said the quote an issue rests on; any side for the rest.
+_SPEAKER = {
+    **dict.fromkeys(AGENT_ISSUES, AGENT),
+    **dict.fromkeys(CLIENT_ISSUES, CLIENT),
+}
 
 
 class Flag(Strict):
@@ -98,12 +117,13 @@ class Flags(Strict):
 
 
 def check_flags(call: CallText) -> Callable[[Flags], None]:
-    """Every flag's quote real, and the agent's issues from the agent."""
+    """Every flag's quote real, the agent's issues from the agent and the
+    client's from the client."""
 
     def check(answer: Flags) -> None:
         errors: Errors = []
         for n, flag in enumerate(answer.escalations):
-            speaker = AGENT if flag.issue in AGENT_ISSUES else None
+            speaker = _SPEAKER.get(flag.issue)
             errors += evidence_errors(
                 call, f"escalations.{n}", flag.quote, flag.segment, speaker=speaker
             )
