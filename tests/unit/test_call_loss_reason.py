@@ -78,6 +78,7 @@ def _dead(loss_reason: dict[str, Any] | None, ending: str = "dead") -> dict:
     answer = _extraction()
     answer.update(
         wanted=None,
+        discussed=[],
         agreed=[],
         next_step=dict(NO_STEP),
         ending=ending,

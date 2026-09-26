@@ -57,7 +57,7 @@ from datetime import date, datetime, timedelta
 from typing import Annotated, Any, Literal
 from zoneinfo import ZoneInfo
 
-from pydantic import AwareDatetime, BaseModel, Field
+from pydantic import AwareDatetime, BaseModel, Field, model_validator
 
 from dodeal_ai.core.config import Settings
 from dodeal_ai.core.context import TenantScope
@@ -141,7 +141,6 @@ _SUMMARY_CHARS = 2000
 _NOTE_CHARS = 1000
 
 type _Item = Annotated[str, Field(min_length=1, max_length=_ITEM_CHARS)]
-type _Items = Annotated[list[_Item], Field(max_length=_ITEMS)]
 
 
 class Detail(Strict):
@@ -200,6 +199,24 @@ class Item(Strict):
     text: _Item
     quote: Said
     segment: Cited
+
+
+class Discussed(Strict):
+    """A topic the call covered, and the quote it rests on; one with no quote
+    is kept unverified (settled())."""
+
+    text: _Item
+    quote: Quote
+    segment: SegmentId
+
+    @model_validator(mode="before")
+    @classmethod
+    def _bare_topic(cls, value: object) -> object:
+        """A bare topic -- as an answer kept before topics were quoted holds
+        them -- is one with no quote."""
+        if isinstance(value, str):
+            return {"text": value, "quote": None, "segment": None}
+        return value
 
 
 class Wanted(Strict):
@@ -295,7 +312,7 @@ class Extraction(Strict):
     """unit_b.extract's answer, exactly (extract_v2)."""
 
     wanted: Wanted | None
-    discussed: _Items
+    discussed: Annotated[list[Discussed], Field(max_length=_ITEMS)]
     concerns: Annotated[list[Item], Field(max_length=_ITEMS)]
     agreed: Annotated[list[Item], Field(max_length=_ITEMS)]
     next_step: NextStep
@@ -336,6 +353,9 @@ def extraction_quotes(call: CallText, answer: Extraction) -> dict[str, Errors]:
     if answer.wanted is not None:
         wanted = answer.wanted
         found["wanted"] = quote_errors(call, "wanted", wanted.quote, wanted.segment)
+    for n, topic in enumerate(answer.discussed):
+        where = f"discussed.{n}"
+        found[where] = evidence_errors(call, where, topic.quote, topic.segment)
     for field in ("concerns", "agreed"):
         items: list[Item] = getattr(answer, field)
         for n, item in enumerate(items):
@@ -494,7 +514,10 @@ def settled(
             if answer.wanted is None
             else _settled_item(answer.wanted, "wanted" in failed)
         ),
-        "discussed": list(answer.discussed),
+        "discussed": [
+            _settled_item(topic, f"discussed.{n}" in failed)
+            for n, topic in enumerate(answer.discussed)
+        ],
         **{
             field: [
                 _settled_item(item, f"{field}.{n}" in failed)
@@ -525,6 +548,21 @@ def settled(
             "evidence_failed": mood_failed,
         },
     }
+
+
+def verified(extraction: dict[str, Any]) -> dict[str, Any]:
+    """The settled extraction as the prose pass reads it: every element whose
+    quote failed left out -- an unverified topic, concern or agreement from
+    its list, an unverified wanted, next step or loss reason as null. The
+    details keep their state: an uncertain one is written as uncertain."""
+    kept = dict(extraction)
+    for field in ("discussed", "concerns", "agreed"):
+        kept[field] = [item for item in extraction[field] if not item["unverified"]]
+    for field in ("wanted", "next_step", "loss_reason"):
+        item = extraction[field]
+        if item is not None and item["unverified"]:
+            kept[field] = None
+    return kept
 
 
 async def extract(
@@ -563,8 +601,9 @@ async def write_prose(
     scope: TenantScope,
     settings: Settings,
 ) -> tuple[Prose, LLMResponse]:
-    """unit_b.prose from the transcript and the settled extraction."""
-    shown = json.dumps(extraction, ensure_ascii=False, sort_keys=True)
+    """unit_b.prose from the transcript and the settled extraction, its
+    verified elements only (verified())."""
+    shown = json.dumps(verified(extraction), ensure_ascii=False, sort_keys=True)
     return await call_model(
         client,
         build_call_prompt(PROSE_TEMPLATE, f"{call.data()}\n\nEXTRACTION:\n{shown}"),

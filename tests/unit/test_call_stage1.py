@@ -75,7 +75,10 @@ def _detail(value=None, state="not_mentioned", quote=None, segment=None) -> dict
 
 EXTRACTION: dict[str, Any] = {
     "wanted": {"text": "A villa.", "quote": "I want a villa", "segment": "s2"},
-    "discussed": ["budget", "viewing"],
+    "discussed": [
+        {"text": "budget", "quote": "my budget is 1,200,000 AED", "segment": "s2"},
+        {"text": "a meeting", "quote": "Shall we meet on Tuesday", "segment": "s4"},
+    ],
     "concerns": [],
     "agreed": [
         {

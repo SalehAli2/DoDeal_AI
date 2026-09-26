@@ -94,7 +94,10 @@ def _said(text: str, quote: str, segment: str) -> dict[str, str]:
 def _extraction(**details: dict[str, Any]) -> dict[str, Any]:
     answer: dict[str, Any] = {
         "wanted": _said("A villa within budget.", "My budget is 1,200,000 AED", "s2"),
-        "discussed": ["budget", "viewing"],
+        "discussed": [
+            _said("budget", "My budget is 1,200,000 AED", "s2"),
+            _said("viewing", "book the viewing", "s3"),
+        ],
         "concerns": [],
         "agreed": [_said("a viewing on Tuesday", "Yes, Tuesday works", "s4")],
         "next_step": {
@@ -155,6 +158,7 @@ def _ten_quotes(failing: int) -> dict[str, Any]:
     answer["agreed"] = [
         _said("a viewing", "Yes, Tuesday works", "s4") for _ in range(4)
     ]
+    answer["discussed"] = []
     answer["mood"] = {"value": "neutral", "quote": None, "segment": None}
     places = [
         answer["wanted"],
@@ -205,6 +209,7 @@ def _broken(budget: dict[str, Any]) -> dict[str, Any]:
     answer = _extraction(budget=budget)
     answer["wanted"]["segment"] = "s9"
     answer["agreed"][0]["segment"] = "s9"
+    answer["discussed"] = []
     return answer
 
 
@@ -697,3 +702,75 @@ def test_words_inside_quotes_do_not_count_and_one_name_does_not_fail_it(
     from dodeal_ai.units.call_intelligence.evidence import in_language
 
     assert in_language(text, language)  # type: ignore[arg-type]
+
+
+# --- discussed topics, quoted; the prose reads verified elements only -------------
+
+
+def test_each_discussed_topic_is_quote_checked_field_by_field() -> None:
+    answer = _extraction()
+    answer["discussed"] = [
+        _said("budget", "My budget is 1,200,000 AED", "s2"),
+        _said("a penthouse", "I want a penthouse", "s2"),
+        "parking",
+    ]
+    found = passes.Extraction.model_validate(answer)
+    passes.check_extraction(_call())(found)
+    quotes = extraction_quotes(_call(), found)
+    assert (quotes["discussed.0"], quotes["discussed.1"], quotes["discussed.2"]) == (
+        [],
+        [("discussed.1", "quote_not_in_segment")],
+        [("discussed.2", "quote_missing")],
+    )
+    assert [topic["unverified"] for topic in settled(found, _call())["discussed"]] == [
+        False,
+        True,
+        True,
+    ]
+
+
+async def test_an_unquoted_discussed_item_never_reaches_the_summary() -> None:
+    """The guard: the prose pass is sent the verified topics only; an invented
+    or unquoted one is not in its prompt at all."""
+    answer = _extraction()
+    answer["discussed"] = [
+        _said("budget", "My budget is 1,200,000 AED", "s2"),
+        _said("a rooftop pool", "I want a rooftop pool", "s4"),
+        "golf membership",
+    ]
+    call = _call()
+    kept = settled(passes.Extraction.model_validate(answer), call)
+    llm = FakeLLM(json_response(PROSE))
+
+    await write_prose(llm, call, kept, scope=SCOPE, settings=get_settings())
+
+    (sent,) = llm.calls
+    assert "rooftop pool" not in sent.prompt.variable
+    assert "golf membership" not in sent.prompt.variable
+    assert '"text": "budget"' in sent.prompt.variable
+
+
+def test_the_prose_reads_no_unverified_element() -> None:
+    answer = _extraction()
+    answer["wanted"]["quote"] = "I want a penthouse"
+    answer["agreed"] = [
+        _said("a viewing", "Yes, Tuesday works", "s4"),
+        _said("a discount", "I give you 10%", "s3"),
+    ]
+    answer["next_step"]["quote"] = "We will sign tomorrow"
+    shown = passes.verified(settled(passes.Extraction.model_validate(answer), _call()))
+    assert (shown["wanted"], shown["next_step"]) == (None, None)
+    assert [item["text"] for item in shown["agreed"]] == ["a viewing"]
+    assert shown["details"]["budget"]["state"] == NOT_MENTIONED
+
+
+def test_a_topic_kept_as_a_bare_word_reads_back_unverified() -> None:
+    """An answer kept before topics were quoted still reads back."""
+    answer = _extraction()
+    answer["discussed"] = ["budget", "viewing"]
+    found = passes.Extraction.model_validate(answer)
+    topics = settled(found, _call())["discussed"]
+    assert topics == [
+        {"text": "budget", "quote": None, "segment": None, "unverified": True},
+        {"text": "viewing", "quote": None, "segment": None, "unverified": True},
+    ]
