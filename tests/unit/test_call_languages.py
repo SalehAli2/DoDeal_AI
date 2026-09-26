@@ -22,6 +22,7 @@ from dodeal_ai.units.call_intelligence.roles import (
     Roles,
     apply_roles,
     check_roles,
+    judge,
     opening,
     roles_data,
     spoken,
@@ -111,10 +112,12 @@ FRENCH_ANSWER = (
 def _heard(transcript: Transcript, client: dict, agent: dict) -> Spoken:
     """Checked, applied, and each side's language as code keeps it."""
     answer = _answer(transcript, client, agent)
-    check_roles(opening(transcript, country_code="971"))(answer)
-    _, block = apply_roles(transcript, answer, call_seconds=150)
+    view = opening(transcript, country_code="971")
+    check_roles(view)(answer)
+    judged = judge(view, answer)
+    _, block = apply_roles(transcript, judged, call_seconds=150)
     assert block["applied"] is True
-    return spoken(answer, applied=True)
+    return spoken(judged, applied=True)
 
 
 def _refused(transcript: Transcript, client: dict, agent: dict):
@@ -150,21 +153,26 @@ def test_a_french_call_is_fr_not_en() -> None:
     assert languages_block(FRENCH, heard)["profile"] == "other"
 
 
-def test_a_side_quoted_from_the_other_sides_voice_is_malformed() -> None:
+def test_a_side_quoted_from_the_other_sides_voice_falls_back_to_script() -> None:
+    """A1: a language quote that fails is never a malformed answer; the
+    mapping stays applied and the languages come from the script."""
     client, agent = URDU_ANSWER
-    borrowed = _side("ur", agent["quote"], agent["segment"])
-    assert _refused(URDU, borrowed, agent) == (
-        ("call_languages.client", "quote_wrong_speaker"),
-    )
-    assert _refused(URDU, client, _side("ur", client["quote"], "s2")) == (
-        ("call_languages.agent", "quote_wrong_speaker"),
-    )
-    assert _refused(URDU, _side("ur", None, None), agent) == (
-        ("call_languages.client", "quote_missing"),
-    )
-    assert _refused(URDU, client, _side(None, client["quote"], "s2")) == (
-        ("call_languages.agent", "quote_wrong_speaker"),
-    )
+    view = opening(URDU, country_code="971")
+    for sides in (
+        (_side("ur", agent["quote"], agent["segment"]), agent),
+        (client, _side("ur", client["quote"], "s2")),
+        (_side("ur", None, None), agent),
+    ):
+        answer = _answer(URDU, *sides)
+        check_roles(view)(answer)
+        judged = judge(view, answer)
+        _, block = apply_roles(URDU, judged, call_seconds=150)
+        assert block["applied"] is True and judged.languages_failed is True
+        assert spoken(judged, applied=True) == UNHEARD
+    unheard = _answer(URDU, client, _side(None, client["quote"], "s2"))
+    judged = judge(view, unheard)
+    assert judged.languages_failed is False
+    assert judged.languages.agent.model_dump() == _side(None, None, None)
 
 
 # --- the fallback and the rest ----------------------------------------------------------
@@ -201,7 +209,8 @@ def test_the_profile_and_summary_follow_the_sides_heard(
 
 def test_an_unapplied_mapping_or_no_answer_hears_nothing() -> None:
     answer = _answer(URDU, *URDU_ANSWER)
-    assert spoken(answer, applied=False) == UNHEARD
+    judged = judge(opening(URDU, country_code="971"), answer)
+    assert spoken(judged, applied=False) == UNHEARD
     assert spoken(None, applied=True) == UNHEARD
 
 
@@ -209,7 +218,8 @@ def test_an_answer_kept_before_the_languages_reads_back_as_unheard() -> None:
     raw = _roles(*URDU_ANSWER)
     del raw["call_languages"]
     kept = Roles.model_validate(raw)
-    assert spoken(kept, applied=True) == UNHEARD
+    judged = judge(opening(URDU, country_code="971"), kept)
+    assert spoken(judged, applied=True) == UNHEARD
 
 
 @pytest.mark.parametrize(
@@ -298,8 +308,9 @@ def test_a_dialect_heard_only_after_segment_20_is_still_detected() -> None:
     answer["speakers"][1].update(quote="نعم", segment="s2")
     found = Roles.model_validate(answer)
     check_roles(view)(found)
-    _, block = apply_roles(transcript, found, call_seconds=150)
-    assert spoken(found, applied=block["applied"] is True).client == "egyptian_ar"
+    judged = judge(view, found)
+    _, block = apply_roles(transcript, judged, call_seconds=150)
+    assert spoken(judged, applied=block["applied"] is True).client == "egyptian_ar"
 
 
 def test_each_voice_shows_its_eight_longest_segments_and_the_opening() -> None:
@@ -328,8 +339,8 @@ def test_a_quote_from_a_segment_past_the_opening_is_checked_like_any() -> None:
     )
     answer["speakers"][0].update(quote="هلا والله", segment="s1")
     answer["speakers"][1].update(quote="نعم", segment="s2")
-    with pytest.raises(OutputValidationError) as refused:
-        check_roles(opening(transcript, country_code="971"))(
-            Roles.model_validate(answer)
-        )
-    assert refused.value.errors == (("call_languages.client", "quote_not_in_segment"),)
+    view = opening(transcript, country_code="971")
+    check_roles(view)(Roles.model_validate(answer))
+    judged = judge(view, Roles.model_validate(answer))
+    assert judged.languages_failed is True
+    assert judged.languages.client.language is None

@@ -62,9 +62,11 @@ from dodeal_ai.units.call_intelligence.passes import (
 )
 from dodeal_ai.units.call_intelligence.prompts import PROMPT_SET_VERSION
 from dodeal_ai.units.call_intelligence.roles import (
+    Judged,
     Roles,
     apply_roles,
     ask_roles,
+    judge,
     needs_roles,
     opening,
     single_voice,
@@ -255,7 +257,7 @@ async def _roles(
     if not needs_roles(transcript):
         doubted = transcript.doubted(*single_voice(transcript, call_seconds))
         return doubted, None, UNHEARD
-    answer: Roles | None = None
+    judged: Judged | None = None
     if run is not None:
         head = opening(transcript, country_code=config.phone_country_code)
         try:
@@ -267,10 +269,11 @@ async def _roles(
                     metered, head, scope=scope, settings=settings
                 ),
             )
+            judged = judge(head, answer)
         except PassFailed:
-            answer = None
-    relabelled, block = apply_roles(transcript, answer, call_seconds=call_seconds)
-    return relabelled, block, spoken(answer, applied=block["applied"] is True)
+            judged = None
+    relabelled, block = apply_roles(transcript, judged, call_seconds=call_seconds)
+    return relabelled, block, spoken(judged, applied=block["applied"] is True)
 
 
 def _stamp(versions: dict[str, object], stamps: dict[str, Stamp]) -> None:

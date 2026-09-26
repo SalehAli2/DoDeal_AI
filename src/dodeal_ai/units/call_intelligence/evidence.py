@@ -289,6 +289,15 @@ def _found_at(call: CallText, quoted: Sequence[str], index: int) -> int | None:
     return None
 
 
+def holds(call: CallText, quote: str, index: int) -> bool:
+    """Whether the segment at `index` holds the quote, under the quote check's
+    length rule and matcher; no other segment is looked at."""
+    quoted = words(quote)
+    if not quoted or len(quoted) > MAX_QUOTE_WORDS:
+        return False
+    return _matches(words(call.shown[index]), quoted)
+
+
 def found_at(call: CallText, quote: str, segment: str) -> int | None:
     """The position of the segment a quote is found in (_found_at), or None
     when the cited id is unknown, the quote's length is wrong or no segment

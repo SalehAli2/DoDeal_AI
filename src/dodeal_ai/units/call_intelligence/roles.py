@@ -11,20 +11,30 @@ client's and the agent's language, one code each (language.CALL_LANGUAGES),
 judged from the words, not the script, so a dialect heard only late in the
 call is still heard.
 
-THE CHECKS, in code, any failure a malformed answer (one reprompt, then the
-pass fails): every label in the segments shown named once and no other; an agent
-or a client quoted, under the quote check, from that voice's own segment; a
-side's language quoted, under the quote check, from a segment of a voice the
-answer gives that side's role -- the client's from a client, the agent's from
-the agent; a side not heard is null, and any quote it gives is checked alike.
+THE MAPPING AND THE LANGUAGES ARE JUDGED APART (judge). A voice's quote is
+verified when any segment carrying that voice's own label holds it, under
+the quote check's matcher: the cited segment first, then the voice's others
+in call order; the segment it is found in is stored. Every label in the
+segments shown must be named once and no other.
+- TWO VOICES: a verified role stands; one verified role gives the other
+  label the other role. The answer is malformed (one reprompt, then the pass
+  fails) only when no role is verified or both are verified alike.
+- ANY OTHER COUNT, as before: every agent or client quote must be verified
+  and an unclear one's quote, when given, must pass the quote check, or the
+  answer is malformed.
+- THE LANGUAGES never make the answer malformed. A side's language counts
+  only when its quote passes the quote check in a segment of a voice holding
+  that side's role; a side whose quote fails is kept null, and the call's
+  languages then come from the script (language.py) while the mapping stays.
 
 CODE DECIDES what the answer is worth. The mapping is applied -- each label
 becomes agent or client, a voice first heard later a client -- only when it is
 clear: exactly one agent, at least one client and no unclear. Otherwise, or
 when the pass failed, the labels stay and the transcript is uncertain; more
 than two voices make it uncertain too, mapped or not. Stage 1 carries the
-answer and what became of it. The languages are used only with the mapping
-applied (spoken); otherwise the language falls back to script (language.py).
+answer as judged and what became of it. The languages are used only with the
+mapping applied and neither side's quote failed (spoken); otherwise the
+language falls back to script (language.py).
 
 ONE VOICE on a call of SINGLE_VOICE_MIN_SECONDS or more is uncertain
 (single_voice), whoever labelled it: the engine or a stereo channel. A sales
@@ -33,7 +43,7 @@ call that long has two sides; hearing one means one was lost.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Annotated, Literal
 
@@ -43,13 +53,16 @@ from dodeal_ai.core.config import Settings
 from dodeal_ai.core.context import TenantScope
 from dodeal_ai.core.llm import LLMClient, LLMResponse
 from dodeal_ai.core.llm.profiles import PROFILE_UNIT_B_ROLES, task_ceiling
+from dodeal_ai.units.call_intelligence.alarms import words
 from dodeal_ai.units.call_intelligence.evidence import (
+    MAX_QUOTE_WORDS,
     CallText,
     Errors,
     Quote,
     SegmentId,
     Strict,
-    evidence_errors,
+    found_at,
+    holds,
     quote_errors,
     relocated,
 )
@@ -187,61 +200,162 @@ def roles_data(view: RolesView) -> str:
     return f"TRANSCRIPT:\n{lines}"
 
 
-def check_roles(view: RolesView) -> Callable[[Roles], None]:
-    """The rules the schema cannot hold (module docstring), for call_model."""
+# The other role, given to the one voice of two whose role no quote showed.
+_OTHER = {AGENT: CLIENT, CLIENT: AGENT}
+
+
+@dataclass(frozen=True, slots=True)
+class Judged:
+    """Code's word on a roles answer (module docstring): each label's role as
+    decided, with its quote and segment where verified and null where not;
+    what makes the answer malformed; each side's language as kept, and
+    whether a side's language quote failed."""
+
+    speakers: tuple[SpeakerRole, ...]
+    verified: tuple[bool, ...]
+    errors: tuple[tuple[str, str], ...]
+    languages: CallLanguages
+    languages_failed: bool
+
+
+def _own(call: CallText, found: SpeakerRole) -> int | None:
+    """Where a voice's quote is found among the segments with its own label:
+    the cited one first, then the others in call order; None for no quote,
+    an unclear voice, or no segment of that voice holding it."""
+    if found.quote is None or found.role == UNCLEAR:
+        return None
+    own = [n for n, s in enumerate(call.segments) if s.speaker == found.speaker]
+    cited = None if found.segment is None else call.index_of(found.segment)
+    order = ([cited] if cited in own else []) + [n for n in own if n != cited]
+    return next((n for n in order if holds(call, found.quote, n)), None)
+
+
+def _own_errors(call: CallText, where: str, found: SpeakerRole) -> Errors:
+    """Why an agent's or a client's quote is not verified; an unclear one's
+    quote, when given, under the plain quote check."""
+    if found.role == UNCLEAR:
+        return quote_errors(call, where, found.quote, found.segment)
+    if found.quote is None:
+        return [(where, "quote_missing")]
+    if _own(call, found) is not None:
+        return []
+    quoted = words(found.quote)
+    if not quoted or len(quoted) > MAX_QUOTE_WORDS:
+        return [(where, "quote_length")]
+    elsewhere = any(holds(call, found.quote, n) for n in range(len(call.segments)))
+    return [(where, "quote_wrong_speaker" if elsewhere else "quote_not_in_segment")]
+
+
+def _paired(speakers: Sequence[SpeakerRole], verified: Sequence[bool]) -> Errors:
+    """Two voices: malformed only when no role is verified or both alike."""
+    sure = [s.role for s, ok in zip(speakers, verified, strict=True) if ok]
+    if not sure:
+        return [("speakers", "no_role_verified")]
+    if len(sure) == 2 and sure[0] == sure[1]:
+        return [("speakers", "same_role")]
+    return []
+
+
+def _decided(speakers: Sequence[SpeakerRole], verified: Sequence[bool]) -> list[str]:
+    """Two voices, one verified: the other takes the other role."""
+    sure = [s.role for s, ok in zip(speakers, verified, strict=True) if ok]
+    if len(speakers) != 2 or len(sure) != 1:
+        return [s.role for s in speakers]
+    return [s.role if ok else _OTHER[sure[0]] for s, ok in zip(speakers, verified)]
+
+
+def _languages(
+    call: CallText, answer: Roles, speakers: Sequence[SpeakerRole]
+) -> tuple[CallLanguages, bool]:
+    """Each side's language kept when its quote passes the quote check in a
+    segment of a voice holding that side's role (as decided); a side whose
+    quote fails is null, and failed is true."""
+    kept: dict[str, SideLanguage] = {}
+    failed = False
+    for side in SIDES:
+        found: SideLanguage = getattr(answer.call_languages, side)
+        if found.language is None:
+            kept[side] = _NOT_HEARD
+            continue
+        voices = {s.speaker for s in speakers if s.role == side}
+        at = (
+            None
+            if found.quote is None or found.segment is None
+            else found_at(call, found.quote, found.segment)
+        )
+        if at is None or call.segments[at].speaker not in voices:
+            kept[side], failed = _NOT_HEARD, True
+        else:
+            kept[side] = found.model_copy(update={"segment": segment_id(at)})
+    return CallLanguages(client=kept[CLIENT], agent=kept[AGENT]), failed
+
+
+def judge(view: RolesView, answer: Roles) -> Judged:
+    """The answer judged as the module docstring says."""
     call = view.call
     heard = sorted({call.segments[n].speaker for n in view.shown})
+    errors: Errors = []
+    if sorted(found.speaker for found in answer.speakers) != heard:
+        errors.append(("speakers", "not_each_once"))
+    found = [_own(call, speaker) for speaker in answer.speakers]
+    verified = [at is not None for at in found]
+    if len(heard) == 2:
+        paired = [] if errors else _paired(answer.speakers, verified)
+        for n, speaker in enumerate(answer.speakers):
+            if paired and not verified[n]:
+                errors += _own_errors(call, f"speakers.{n}", speaker)
+        errors += paired
+    else:
+        for n, speaker in enumerate(answer.speakers):
+            errors += _own_errors(call, f"speakers.{n}", speaker)
+    roles = _decided(answer.speakers, verified)
+    speakers = tuple(
+        speaker.model_copy(
+            update={
+                "role": role,
+                "quote": None if at is None else speaker.quote,
+                "segment": None if at is None else segment_id(at),
+            }
+        )
+        for speaker, role, at in zip(answer.speakers, roles, found, strict=True)
+    )
+    languages, failed = _languages(call, answer, speakers)
+    return Judged(speakers, tuple(verified), tuple(errors), languages, failed)
+
+
+def check_roles(view: RolesView) -> Callable[[Roles], None]:
+    """The rules the schema cannot hold (module docstring), for call_model."""
 
     def check(answer: Roles) -> None:
-        # Each quote at the segment it is found in, so a voice is read there.
-        answer = relocated(call, answer)
-        errors: Errors = []
-        if sorted(found.speaker for found in answer.speakers) != heard:
-            errors.append(("speakers", "not_each_once"))
-        for n, found in enumerate(answer.speakers):
-            where = f"speakers.{n}"
-            if found.role == UNCLEAR:
-                errors += quote_errors(call, where, found.quote, found.segment)
-                continue
-            owed = evidence_errors(call, where, found.quote, found.segment)
-            errors += owed
-            index = None if found.segment is None else call.index_of(found.segment)
-            wrong = index is not None and call.segments[index].speaker != found.speaker
-            if not owed and wrong:
-                errors.append((where, "quote_wrong_speaker"))
-        errors += _language_errors(call, answer)
+        errors = judge(view, answer).errors
         if errors:
-            raise output_rejected(ROLES_LABEL, tuple(errors))
+            raise output_rejected(ROLES_LABEL, errors)
 
     return check
 
 
-def _language_errors(call: CallText, answer: Roles) -> Errors:
-    """Each side's language quoted from a voice the answer gives that role; a
-    known language owes its quote."""
-    errors: Errors = []
-    for side in SIDES:
-        found: SideLanguage = getattr(answer.call_languages, side)
-        where = f"call_languages.{side}"
-        owed = quote_errors if found.language is None else evidence_errors
-        checked = owed(call, where, found.quote, found.segment)
-        errors += checked
-        if checked or found.segment is None:
-            continue
-        voices = {s.speaker for s in answer.speakers if s.role == side}
-        index = call.index_of(found.segment)
-        if index is not None and call.segments[index].speaker not in voices:
-            errors.append((where, "quote_wrong_speaker"))
-    return errors
+def stored(view: RolesView, answer: Roles) -> Roles:
+    """The answer as kept: a verified voice's segment the one its quote is
+    found in, each language quote's the one the quote check found; nothing
+    else changes, so judging it again gives the same word."""
+    call = view.call
+    speakers = []
+    for speaker in answer.speakers:
+        at = _own(call, speaker)
+        moved = {"segment": segment_id(at)} if at is not None else {}
+        speakers.append(speaker.model_copy(update=moved))
+    languages = relocated(call, answer.call_languages)
+    return answer.model_copy(update={"speakers": speakers, "call_languages": languages})
 
 
-def spoken(answer: Roles | None, *, applied: bool) -> Spoken:
-    """Each side's language, only from an answer whose mapping was applied."""
-    if answer is None or not applied:
+def spoken(judged: Judged | None, *, applied: bool) -> Spoken:
+    """Each side's language, only from an answer whose mapping was applied
+    and whose language quotes all held; else unheard (the script decides)."""
+    if judged is None or not applied or judged.languages_failed:
         return UNHEARD
     return Spoken(
-        client=answer.call_languages.client.language,
-        agent=answer.call_languages.agent.language,
+        client=judged.languages.client.language,
+        agent=judged.languages.agent.language,
     )
 
 
@@ -268,7 +382,7 @@ async def ask_roles(
         reprompt_tail=REPROMPT_TAIL_TEMPLATE,
         tail_by_error=REPROMPT_TAILS,
     )
-    return relocated(view.call, answer), response
+    return stored(view, answer), response
 
 
 def single_voice(transcript: Transcript, call_seconds: float) -> tuple[str, ...]:
@@ -278,19 +392,21 @@ def single_voice(transcript: Transcript, call_seconds: float) -> tuple[str, ...]
 
 
 def apply_roles(
-    transcript: Transcript, answer: Roles | None, *, call_seconds: float
+    transcript: Transcript, judged: Judged | None, *, call_seconds: float
 ) -> tuple[Transcript, dict[str, object]]:
-    """The transcript relabelled when the answer's mapping is clear, doubted
+    """The transcript relabelled when the judged mapping is clear, doubted
     when it is not, failed (None), over two voices or one voice on a long
-    call; and stage 1's block."""
-    mapping = {} if answer is None else {s.speaker: s.role for s in answer.speakers}
-    roles: list[str] = list(mapping.values())
+    call; and stage 1's block: each voice as judged, with verified."""
+    roles: list[str] = (
+        [] if judged is None or judged.errors else [s.role for s in judged.speakers]
+    )
     clear = roles.count(AGENT) == 1 and CLIENT in roles and UNCLEAR not in roles
+    mapping = {} if judged is None else {s.speaker: s.role for s in judged.speakers}
     reasons = [
         *([OVER_TWO] if len(transcript.speakers) > 2 else []),
         *single_voice(transcript, call_seconds),
-        *([ROLES_FAILED] if answer is None else []),
-        *([ROLES_UNCLEAR] if answer is not None and not clear else []),
+        *([ROLES_FAILED] if judged is None else []),
+        *([ROLES_UNCLEAR] if judged is not None and not clear else []),
     ]
     segments = (
         tuple(
@@ -308,12 +424,13 @@ def apply_roles(
     ).doubted(*reasons)
     block: dict[str, object] = {
         "speakers": None
-        if answer is None
-        else [found.model_dump() for found in answer.speakers],
+        if judged is None
+        else [
+            {**found.model_dump(), "verified": ok}
+            for found, ok in zip(judged.speakers, judged.verified, strict=True)
+        ],
         "applied": clear,
         "reasons": reasons,
-        "call_languages": None
-        if answer is None
-        else answer.call_languages.model_dump(),
+        "call_languages": None if judged is None else judged.languages.model_dump(),
     }
     return relabelled, block

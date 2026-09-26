@@ -10,7 +10,6 @@ import pytest
 
 from dodeal_ai.core.config import get_settings
 from dodeal_ai.core.context import RequestContext
-from dodeal_ai.core.validation import OutputValidationError
 from dodeal_ai.units.call_intelligence import evidence
 from dodeal_ai.units.call_intelligence.alarms import words
 from dodeal_ai.units.call_intelligence.evidence import (
@@ -21,7 +20,7 @@ from dodeal_ai.units.call_intelligence.evidence import (
 )
 from dodeal_ai.units.call_intelligence.passes import Extraction, extract
 from dodeal_ai.units.call_intelligence.prompts import AGENT, CLIENT
-from dodeal_ai.units.call_intelligence.roles import Roles, check_roles, opening
+from dodeal_ai.units.call_intelligence.roles import Roles, judge, opening
 from dodeal_ai.units.call_intelligence.transcriber import Segment, Transcript
 from tests.helpers.fake_llm import FakeLLM, json_response
 from tests.unit.test_call_passes import _extraction
@@ -204,7 +203,8 @@ def test_the_speaker_is_read_at_the_segment_the_quote_is_in() -> None:
 
 def test_the_roles_check_reads_the_voice_where_the_quote_is() -> None:
     """A quote of speaker_1's words cited at speaker_2's segment is found in
-    s1 and read as speaker_1's: a borrowed quote, not a missing one."""
+    s1, speaker_1's: it never verifies speaker_2 (A1), who takes the role
+    the verified client leaves."""
     head = Transcript.of(
         (
             _say(0, "speaker_1", "Hello, who is calling please?"),
@@ -232,9 +232,9 @@ def test_the_roles_check_reads_the_voice_where_the_quote_is() -> None:
             ]
         }
     )
-    with pytest.raises(OutputValidationError) as refused:
-        check_roles(opening(head, country_code="971"))(answer)
-    assert refused.value.errors == (("speakers.1", "quote_wrong_speaker"),)
+    judged = judge(opening(head, country_code="971"), answer)
+    assert judged.verified == (True, False) and judged.errors == ()
+    assert judged.speakers[1].quote is None
 
 
 # --- the list ----------------------------------------------------------------------
