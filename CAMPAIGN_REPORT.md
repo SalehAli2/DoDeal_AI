@@ -7482,3 +7482,13 @@ failure modes, then one stress test (sabotage in brackets).
 - coaching languages: an untested language is coached and scored; a heard client is overruled by script. Test: ur, hi, fr, other get language_not_enabled, no pass run (gate off fails 6).
 - call_e2e --vocabulary and --dialect; docs for all. No sabotage owed.
 - Stress test: two requests for one language at once: one pays, one gets 409 whatsapp_in_progress.
+
+## Unit B quote matching, field-level evidence and the real-estate details
+- evidence (1): a stutter or "يعني" fails a true quote and pays for a reprompt; a quote dropping "ما" passes as the opposite. Test: "عمري عمري" and fillers match, a dropped negation fails, s11 cited, s12 stored (skip rule open fails 7; neighbours off fails 5).
+- extract (2): one bad quote throws away the whole analysis; a mostly invented answer is kept. Test: one bad detail is uncertain with evidence_failed, 6 of 10 failing is malformed (old strictness fails 10; no ceiling fails 4).
+- score (3): the new tolerance leaks into the score; one invented quote is scored. Test: one failing quote among three true ones leaves no score (check off fails 6).
+- extras (4): a sentence passes as a keyword; a true five-word name is refused. Test: seven words malformed, five kept (limit off fails 2).
+- next step (6): a time before the call is booked; a UTC answer shows as local. Test: "tomorrow at 5" on the 26th is 2026-09-27T17:00+04:00; past or past 90 days is null and uncertain (range off fails 4).
+- details (7): a stated "unknown" status passes; a date with no words. loss_reason (8): the agent's words become the client's reason; dead with no reason. Tests: shape and speaker (status fold off fails 3; speaker off fails 2).
+- possible_broker (9): the agent's words flag the client; an investor flagged. Test: client quotes only (speaker off fails 1). call_e2e reasons (5), prompts v12 and docs: no sabotage owed.
+- Stress test: the client says "انا عمري ما زرت دبي" and the model quotes "انا عمري زرت دبي" citing the segment before: no neighbour holds it, so the detail is uncertain and never the opposite.

@@ -93,27 +93,35 @@ Each event then adds its own fields (sections 3 to 5 and 7). A re-analysis job's
       "summary": "The client wants a villa. They meet on Tuesday.",
       "crm_note": "Villa, budget 1,200,000 AED; meeting Tuesday.",
       "elements": {
-        "wanted": {"text": "A villa.", "quote": "I want a villa", "segment": "s2"},
+        "wanted": {"text": "A villa.", "quote": "I want a villa", "segment": "s2", "unverified": false},
         "discussed": ["budget", "viewing"],
         "concerns": [],
-        "agreed": [{"text": "a meeting on Tuesday", "quote": "Shall we meet on Tuesday?", "segment": "s4"}],
+        "agreed": [{"text": "a meeting on Tuesday", "quote": "Shall we meet on Tuesday?", "segment": "s4",
+                    "unverified": false}],
         "next_step": {"action": "Meet", "owner": "agent", "due": "Tuesday",
-                      "quote": "Shall we meet on Tuesday?", "segment": "s4"},
-        "ending": "moved_forward"
+                      "quote": "Shall we meet on Tuesday?", "segment": "s4", "unverified": false,
+                      "kind": "office_visit", "when": null, "when_state": "uncertain", "booked": false},
+        "ending": "moved_forward",
+        "loss_reason": null
       },
       "details": {
-        "budget": {"value": "1,200,000 AED", "state": "stated", "quote": "my budget is 1,200,000 AED", "segment": "s2"},
-        "area": {"value": null, "state": "not_mentioned", "quote": null, "segment": null},
-        "property_reference": {"value": null, "state": "not_mentioned", "quote": null, "segment": null},
-        "timeline": {"value": null, "state": "not_mentioned", "quote": null, "segment": null},
-        "payment_method": {"value": null, "state": "not_mentioned", "quote": null, "segment": null},
-        "decision_maker": {"value": null, "state": "not_mentioned", "quote": null, "segment": null}
+        "budget": {"value": "1,200,000 AED", "state": "stated", "quote": "my budget is 1,200,000 AED", "segment": "s2",
+                   "evidence_failed": false},
+        "area": {"value": null, "state": "not_mentioned", "quote": null, "segment": null, "evidence_failed": false},
+        "property_reference": {"value": null, "state": "not_mentioned", "quote": null, "segment": null, "evidence_failed": false},
+        "timeline": {"value": null, "state": "not_mentioned", "quote": null, "segment": null, "evidence_failed": false},
+        "payment_method": {"value": null, "state": "not_mentioned", "quote": null, "segment": null, "evidence_failed": false},
+        "decision_maker": {"value": null, "state": "not_mentioned", "quote": null, "segment": null, "evidence_failed": false},
+        "property_status": {"value": "unknown", "state": "not_mentioned", "quote": null, "segment": null, "evidence_failed": false},
+        "handover_date": {"value": null, "date": null, "state": "not_mentioned", "quote": null, "segment": null,
+                          "evidence_failed": false}
       },
-      "mood": {"value": "positive", "quote": "I am happy with that", "segment": "s4", "uncertain": false}
+      "mood": {"value": "positive", "quote": "I am happy with that", "segment": "s4", "uncertain": false,
+               "evidence_failed": false}
     },
     "analysis_reason": null,
     "versions": {
-      "prompt": "unit_b_prompts_v11",
+      "prompt": "unit_b_prompts_v12",
       "signals": "call_signals_v2",
       "model": "fake-model-pinned",
       "transcriber": "fake/fake-stt-1",
@@ -137,9 +145,14 @@ Each event then adds its own fields (sections 3 to 5 and 7). A re-analysis job's
 | `signals.escalations[]` | `off_channel_contact`, from a number (`source: number`, the agent's `agent_personal`) or an agent's alarm phrase (`source: alarm_phrase`, with `phrase`), in time order |
 | `analysis` | `null` when a pass failed; `analysis_reason` then says which pass and why, for example `extract_model_unavailable`, `prose_malformed_output`, `extract_pass_interrupted` or `llm_not_configured`. With no transcript it is `null` and `analysis_reason` is `no_transcript`. |
 | `analysis.language` | the summary language, `en` or `ar`, decided in code |
-| `analysis.elements` | **The evidence fields.** `wanted` (or `null`), every `concerns[]` and `agreed[]` item, and the `next_step` carry a `quote` and the `segment` it is from. Each quote is at most 25 words and has been checked, in code, to appear word for word in that segment; the same holds for `details` and `mood`. `next_step.owner` is `agent`, `client` or `unknown`; its `action`, `due`, `quote` and `segment` are `null` when there is none. `ending` is `moved_forward`, `stalled`, `needs_follow_up` or `dead`. |
-| `analysis.details` | budget, area, property_reference, timeline, payment_method and decision_maker. Each has `state`: `stated` (with a value and a quote), `not_mentioned` (all `null`), or `uncertain` (stated, but from a low-confidence segment or an uncertain call). Nothing is filled from general knowledge. |
-| `analysis.mood` | `positive`, `neutral` or `negative`, with its quote and `uncertain` |
+| `analysis.elements` | **The evidence fields.** `wanted` (or `null`), every `concerns[]` and `agreed[]` item, the `next_step` and the `loss_reason` carry a `quote` and the `segment` it is from, checked in code; the same holds for `details` and `mood`. Each quote is asked for at most 15 words, and the check in code allows up to 40. Its words, normalised (case, Arabic letter forms and marks), must appear in the segment it cites in the same order. Between two of them the segment may hold only a word that repeats the word before it ("عمري عمري") or a filler of the versioned list `quote_fillers_v1` (يعني، اه، ايوه، um, uh and the like); a negation (ما، مش، لا، لم، لن، مو، ليس, not, no, never, don't and the like) is never a filler. A quote not in the segment it cites is looked for in the segment just before, then just after, and is delivered with the `segment` it was found in. An element whose quote fails is kept with `unverified: true` and its `quote` and `segment` `null`. `next_step.owner` is `agent`, `client` or `unknown`; its `action`, `due`, `quote`, `segment`, `kind` and `when` are `null` and `booked` is `false` when there is none. `ending` is `moved_forward`, `stalled`, `needs_follow_up` or `dead`. |
+| `analysis.elements.next_step` | `kind`: `viewing`, `online_meeting`, `office_visit`, `callback`, `send_details` or `other`; present exactly when there is an `action`. `when`: ISO 8601 with the offset of the tenant's `timezone` (`unit_b.timezone`, default `Asia/Dubai`), resolved by the model from the call's `recorded_at` and that zone. Code refuses a time before the call or more than 90 days after it. `when_state`: `stated` for a kept time on a verified quote; `uncertain` when a time was said but was vague ("next week sometime"), refused or rests on an unverified quote, and `when` is then `null`; `not_mentioned` when no time was said. `booked`: `true` only when both sides agreed that time, and only with `when_state` `stated`. |
+| `analysis.elements.loss_reason` | `null` unless `ending` is `dead`, and never `null` then. `{category, quote, segment, unverified}`: `category` is one of the nine objection categories (`price`, `timing`, `competitor`, `trust`, `property_fit`, `payment_finance`, `location`, `third_party_approval`, `service_charges_fees`) or `no_reason_given`. A category rests on the **client's** quote; `no_reason_given` ("not interested" and nothing more) may carry the client's refusal or `null`. |
+| `analysis.details` | budget, area, property_reference, timeline, payment_method, decision_maker, property_status and handover_date. Each has `state`: `stated` (with a value and a quote), `not_mentioned` (all `null`), or `uncertain` (unclear, from a low-confidence segment, on an uncertain call, or with a failed quote). **`evidence_failed: true`** marks a detail whose quote failed the check: its `state` is `uncertain` and its `quote` and `segment` are `null`, the value kept. Nothing is filled from general knowledge. |
+| `analysis.details.property_status` | `value` is `off_plan` (being built, "في طور البناء"), `ready`, or `unknown` exactly when `not_mentioned` |
+| `analysis.details.handover_date` | `value` as said ("نهاية ٢٠٢٧"), and `date`, an ISO date (`YYYY-MM-DD`), only when the words name a clear day or month; else `null` |
+| `analysis.mood` | `positive`, `neutral` or `negative`, with its quote, `uncertain`, and `evidence_failed` (a failed quote: quote and segment `null`, `uncertain` true) |
+| **When the analysis is null** | Only a broken shape (a detail `not_mentioned` with a value, a `stated` one without, a `date` without a `value`, a `kind` without an `action`, `dead` without a `loss_reason` or one without `dead`) or **more than half of the extraction's quotes failing** makes the answer malformed: one reprompt, then `analysis: null` with `extract_malformed_output`. Fewer failing quotes are handled field by field, as above. |
 | `versions` | the prompt set, the signals version, the model(s) wave 1 ran on, `provider/model` of the transcriber, and the alarm list's digest (`null` while alarms are off) |
 
 A **segment id** is `s<n>`, 1-based in `transcript.segments` order: `s3` is the third segment.
@@ -254,7 +267,8 @@ A **segment id** is `s<n>`, 1-based in `transcript.segments` order: `s3` is the 
         "presentation": {"done": "no", "quote": null, "segment": null},
         "objections": {"done": "no", "quote": null, "segment": null},
         "close": {"done": "no", "quote": null, "segment": null}
-      }
+      },
+      "ask_why": null
     },
     "extras": {
       "keywords": [{"kind": "topic", "said": "a villa", "english": "villa", "segment": "s2"}],
@@ -277,7 +291,7 @@ A **segment id** is `s<n>`, 1-based in `transcript.segments` order: `s3` is the 
     },
     "reasons": {},
     "versions": {
-      "prompt": "unit_b_prompts_v11",
+      "prompt": "unit_b_prompts_v12",
       "objection_list": "objection_list_v1",
       "rubric": "call_rubric_v1",
       "tone_list": "tone_list_v1",
@@ -301,16 +315,17 @@ A **segment id** is `s<n>`, 1-based in `transcript.segments` order: `s3` is the 
 |---|---|
 | `objections` | `raised`, `addressed` and `satisfied` counts, and `items[]`. Each item has a `category`: `price`, `timing`, `competitor`, `trust`, `property_fit`, `payment_finance`, `location`, `third_party_approval` or `service_charges_fees` (objection_list_v1). It also has the client's `quote` and `segment`; `addressed` (`yes`/`no`) with the agent's `agent_quote` and `agent_segment`; and `satisfied` (`yes`/`no`/`unclear`) with `satisfied_quote` and `satisfied_segment`. |
 | `score` | call_rubric_v1. Every `mark`, the `raw` sum, the `applicable_weight`, the `total` (0 to 100) and the `band` are computed in code, never by a model. `band` is `excellent` (85 and up), `good` (70 to 84), `needs_work` (50 to 69) or `coaching_required` (under 50). A component with `mark: null` is `suppressed`: `no_objections`, or `no_product_question`. It is left out of `applicable_weight`, not scored zero. A marked product_knowledge carries `correctness_unverified: true`. A check with `source: code` was decided in code, not by the model. |
-| `escalations` | `items[]` in time order: stage 1's `off_channel_contact` items merged with the model's flags. A model flag has `type`, `issue`, `source: model`, `speaker`, `start_s`, `segment` and `quote`. `issue` is one of `over_promise_or_guarantee`, `wrong_price_or_terms`, `rudeness_or_pressure`, `unprofessional_competitor_talk` or `qualified_no_next_step`; `type` equals `issue`, except that **`wrong_price_or_terms` goes out as `type: claim_to_verify`**, a claim to check and not a finding. |
-| `coaching` | in the summary `language`. 2 or 3 `observations` (at least one `strength` and one `improvement`; an improvement has `say_it_like_this`). Up to 4 `moments`, each with `timestamp` (`mm:ss`) and `start_s` read from its segment in code. A 3-action `plan`. The seven `stages`, each `done` with a quote when yes. |
-| `extras` | `keywords[]`: `kind` (`project`, `community`, `developer` or `topic`), `said` as spoken and checked in its `segment`, and `english` or `null`. `tags`: `outcome` (`moved_forward`, `stalled`, `needs_follow_up`, `dead`), `stage` (`first_contact`, `follow_up`, `viewing`, `negotiation`, `closing`) and `client_type` (`end_user`, `investor`, `broker`, `unknown`). `whatsapp_suggestion`: at most 60 words in `language`. **This service never sends it**; show it to the agent to send or not. `seriousness`: five checks, each with a `reason` and a quote for a yes. The `band` is computed in code from the `yes` count: `A` for 4 or 5, `B` for 2 or 3, `C` for 0 or 1. **`manager_only: true`**: show it to the agent's manager, never to the agent. |
+| `escalations` | `items[]` in time order: stage 1's `off_channel_contact` items merged with the model's flags. A model flag has `type`, `issue`, `source: model`, `speaker`, `start_s`, `segment` and `quote`. `issue` is one of `over_promise_or_guarantee`, `wrong_price_or_terms`, `rudeness_or_pressure`, `unprofessional_competitor_talk`, `qualified_no_next_step` or `possible_broker`; `type` equals `issue`, except that **`wrong_price_or_terms` goes out as `type: claim_to_verify`**, a claim to check and not a finding. |
+| `escalations`: `possible_broker` | a manager escalation beside the others: the client presents as a buyer but talks like a broker (asks about commission, says "my client(s)", asks for several units for others). One item per quote, each the **client's** own words from a client segment (`speaker: client`). A client buying several units for themselves is an investor and is not flagged. |
+| `coaching` | in the summary `language`. 2 or 3 `observations` (at least one `strength` and one `improvement`; an improvement has `say_it_like_this`). Up to 4 `moments`, each with `timestamp` (`mm:ss`) and `start_s` read from its segment in code. A 3-action `plan`. The seven `stages`, each `done` with a quote when yes. **`ask_why`**: a fixed tip, written in code and not by the model, in the summary language, to ask the client why they said no; set when stage 1's `loss_reason` is `no_reason_given`, else `null`. |
+| `extras` | `keywords[]`: `kind` (`project`, `community`, `developer` or `topic`), `said` as spoken, a name of at most five words (a longer one is malformed), checked in its `segment`, and `english` or `null`. `tags`: `outcome` (`moved_forward`, `stalled`, `needs_follow_up`, `dead`), `stage` (`first_contact`, `follow_up`, `viewing`, `negotiation`, `closing`) and `client_type` (`end_user`, `investor`, `broker`, `unknown`). `whatsapp_suggestion`: at most 60 words in `language`. **This service never sends it**; show it to the agent to send or not. `seriousness`: five checks, each with a `reason` and a quote for a yes. The `band` is computed in code from the `yes` count: `A` for 4 or 5, `B` for 2 or 3, `C` for 0 or 1. **`manager_only: true`**: show it to the agent's manager, never to the agent. |
 | `extras.agent_dialect` | `{dialect, quote, segment}`: the agent's Arabic dialect, `gulf_ar`, `egyptian_ar`, `levantine_ar`, `iraqi_ar`, `maghrebi_ar` or `msa_ar`, with a quote checked to come from one of the **agent's** segments; `unknown` with `null` quote and segment when the agent's words do not show it |
 | `extras.whatsapp_suggestion.language` | the language the message is written in, decided in code: the client's (stage 1's `languages.client`), `ar` for any Arabic code; else the summary language. One of `ar`, `en`, `hi`, `ur`, `ru`, `zh`, `fr`, `fa` or `tr`. The text is checked to be in that language's script |
 | `extras.whatsapp_dialect` | the Arabic dialect the message was asked in, decided in code: the agent's `agent_dialect` when known, else the tenant's `whatsapp_default_dialect` (default `gulf_ar`). `null` when the message is not in Arabic |
 | `versions` | the prompt set, the objection list, the rubric, the tone list, the model each pass's answer came from, and `passes`, `{<pass>: {provider, model}}` (a pass that did not answer is absent from both) |
 | `extras.keywords[].canonical` | the company's `keyword_vocabulary` name this keyword is, copied exactly as listed; `null` when it is none, and the keyword is kept as found |
 
-Every quote in every part is at most 25 words and has been checked to appear word for word in the segment it cites, from the right speaker where it matters. Quotes read the masked copy, so they may contain `[PHONE]` or `[EMAIL]`.
+**The quote rule, in every part.** Each quote is asked for at most 15 words, and the check in code allows up to 40. Its words, normalised (case, Arabic letter forms and marks), must appear in the segment it cites in the same order. Between two of them the segment may hold only a word that repeats the word before it ("عمري عمري") or a filler of the versioned list `quote_fillers_v1` (يعني، اه، ايوه، um, uh and the like); a negation (ما، مش، لا، لم، لن، مو، ليس, not, no, never, don't and the like) is never a filler. A quote not in the segment it cites is looked for in the segment just before, then just after, and is delivered with the `segment` it was found in. It comes from the right speaker where that matters, read at the segment the quote was found in. Quotes read the masked copy, so they may contain `[PHONE]` or `[EMAIL]`. In stage 2 any failing quote makes that pass malformed (one reprompt, then the part is `null`): the score keeps this strictness, and only the stage-1 extraction is kept field by field.
 
 ## 5. `call.failed`
 
