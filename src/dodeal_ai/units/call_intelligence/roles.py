@@ -2,14 +2,17 @@
 and which language each side speaks.
 
 A transcript labelled by the engine (speaker_N) names no one, and every label
-but "agent" reads as the client (prompts.role_of). This pass reads the first
-ROLE_SEGMENTS segments as the engine labelled them and answers each label's
-role -- agent, client or unclear -- quoting one of that voice's own segments;
-and call_languages: the client's and the agent's language, one code each
-(language.CALL_LANGUAGES), judged from the words, not the script.
+but "agent" reads as the client (prompts.role_of). This pass reads the call as
+the engine labelled it -- the first ROLE_SEGMENTS segments, and each voice's
+LANGUAGE_SEGMENTS longest segments from anywhere in the call, each under its
+own id (RolesView) -- and answers each label's role -- agent, client or
+unclear -- quoting one of that voice's own segments; and call_languages: the
+client's and the agent's language, one code each (language.CALL_LANGUAGES),
+judged from the words, not the script, so a dialect heard only late in the
+call is still heard.
 
 THE CHECKS, in code, any failure a malformed answer (one reprompt, then the
-pass fails): every label in those segments named once and no other; an agent
+pass fails): every label in the segments shown named once and no other; an agent
 or a client quoted, under the quote check, from that voice's own segment; a
 side's language quoted, under the quote check, from a segment of a voice the
 answer gives that side's role -- the client's from a client, the agent's from
@@ -31,6 +34,7 @@ call that long has two sides; hearing one means one was lost.
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Annotated, Literal
 
 from pydantic import Field
@@ -81,6 +85,10 @@ ROLES_REASONING_MAX_OUTPUT_TOKENS = 2000
 
 # The segments the pass reads: an opening names who is calling whom.
 ROLE_SEGMENTS = 20
+# And each voice's longest segments from the whole call, by words: where its
+# dialect shows. More costs input tokens on every labelled call; fewer can
+# miss a side that says little until late.
+LANGUAGE_SEGMENTS = 8
 
 # More voices than any sales call has.
 MAX_SPEAKERS = 10
@@ -144,28 +152,45 @@ def needs_roles(transcript: Transcript) -> bool:
     return any(ENGINE_LABEL.match(speaker) for speaker in transcript.speakers)
 
 
-def opening(transcript: Transcript, *, country_code: str) -> CallText:
-    """The first ROLE_SEGMENTS segments, as the pass reads them."""
-    head = Transcript.of(
-        transcript.segments[:ROLE_SEGMENTS],
-        provider=transcript.provider,
-        model=transcript.model,
+@dataclass(frozen=True, slots=True)
+class RolesView:
+    """What the pass is shown -- the indices of the segments, in call order --
+    and the whole call its quotes are checked against."""
+
+    call: CallText
+    shown: tuple[int, ...]
+
+
+def opening(transcript: Transcript, *, country_code: str) -> RolesView:
+    """The first ROLE_SEGMENTS segments and each voice's LANGUAGE_SEGMENTS
+    longest (by words, the earlier first on a tie), each once, in order."""
+    segments = transcript.segments
+    shown = set(range(min(ROLE_SEGMENTS, len(segments))))
+    for voice in {segment.speaker for segment in segments}:
+        own = [n for n, segment in enumerate(segments) if segment.speaker == voice]
+        own.sort(key=lambda n: (-len(segments[n].text.split()), n))
+        shown.update(own[:LANGUAGE_SEGMENTS])
+    return RolesView(
+        CallText.of(transcript, country_code=country_code), tuple(sorted(shown))
     )
-    return CallText.of(head, country_code=country_code)
 
 
-def roles_data(call: CallText) -> str:
-    """The opening with the engine's labels, one segment per line."""
+def roles_data(view: RolesView) -> str:
+    """The segments shown with the engine's labels, one per line, each under
+    its own id in the call."""
+    call = view.call
     lines = "\n".join(
-        f"[{segment_id(n)} {clock(segment.start_s)} {segment.speaker}] {one_line(text)}"
-        for n, (segment, text) in enumerate(zip(call.segments, call.shown, strict=True))
+        f"[{segment_id(n)} {clock(call.segments[n].start_s)} "
+        f"{call.segments[n].speaker}] {one_line(call.shown[n])}"
+        for n in view.shown
     )
     return f"TRANSCRIPT:\n{lines}"
 
 
-def check_roles(call: CallText) -> Callable[[Roles], None]:
+def check_roles(view: RolesView) -> Callable[[Roles], None]:
     """The rules the schema cannot hold (module docstring), for call_model."""
-    heard = sorted({segment.speaker for segment in call.segments})
+    call = view.call
+    heard = sorted({call.segments[n].speaker for n in view.shown})
 
     def check(answer: Roles) -> None:
         # Each quote at the segment it is found in, so a voice is read there.
@@ -221,12 +246,12 @@ def spoken(answer: Roles | None, *, applied: bool) -> Spoken:
 
 
 async def ask_roles(
-    client: LLMClient, call: CallText, *, scope: TenantScope, settings: Settings
+    client: LLMClient, view: RolesView, *, scope: TenantScope, settings: Settings
 ) -> tuple[Roles, LLMResponse]:
     """unit_b.roles: one call, or two when the first answer is malformed."""
     answer, response = await call_model(
         client,
-        build_call_prompt(ROLES_TEMPLATE, roles_data(call)),
+        build_call_prompt(ROLES_TEMPLATE, roles_data(view)),
         Roles,
         ROLES_LABEL,
         scope=scope,
@@ -239,11 +264,11 @@ async def ask_roles(
             reasoning=ROLES_REASONING_MAX_OUTPUT_TOKENS,
             client=client,
         ),
-        check=check_roles(call),
+        check=check_roles(view),
         reprompt_tail=REPROMPT_TAIL_TEMPLATE,
         tail_by_error=REPROMPT_TAILS,
     )
-    return relocated(call, answer), response
+    return relocated(view.call, answer), response
 
 
 def single_voice(transcript: Transcript, call_seconds: float) -> tuple[str, ...]:

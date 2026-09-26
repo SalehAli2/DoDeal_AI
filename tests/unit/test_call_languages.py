@@ -23,6 +23,7 @@ from dodeal_ai.units.call_intelligence.roles import (
     apply_roles,
     check_roles,
     opening,
+    roles_data,
     spoken,
 )
 from dodeal_ai.units.call_intelligence.transcriber import (
@@ -261,3 +262,74 @@ async def test_stage_1_carries_the_languages_block(ctx: dict[str, Any]) -> None:
     }
     assert result["roles"]["call_languages"] == english["call_languages"]
     assert result["analysis"]["language"] == "en"
+
+
+# --- the whole call, not only the opening ---------------------------------------------
+
+
+def _late_egyptian() -> Transcript:
+    """Thirty invented segments: an agent in Gulf Arabic, a client who answers
+    in one word until s25, where the Egyptian markers first show."""
+    segments = []
+    for n in range(24):
+        speaker = "speaker_1" if n % 2 == 0 else "speaker_2"
+        text = "هلا والله، شلونك؟ نبي نرتب معاينة" if n % 2 == 0 else "نعم"
+        segments.append(_say(n * 5, speaker, text, "ar"))
+    segments.append(
+        _say(120, "speaker_2", "ازيك يا باشا، انا عايز اشوف الشقة دي النهاردة", "ar")
+    )
+    for n in range(25, 30):
+        segments.append(_say(n * 5, "speaker_1", "زين، نشوفك باجر", "ar"))
+    return _call(*segments)
+
+
+def test_a_dialect_heard_only_after_segment_20_is_still_detected() -> None:
+    """The guard: the client's longest segment, s25, is shown with its own id,
+    and the client's language quoted from it passes the check."""
+    transcript = _late_egyptian()
+    view = opening(transcript, country_code="971")
+    assert 24 in view.shown
+    assert "[s25 02:00 speaker_2] ازيك يا باشا" in roles_data(view)
+    answer = _roles(
+        _side("egyptian_ar", "انا عايز اشوف الشقة دي النهاردة", "s25"),
+        _side("gulf_ar", "هلا والله، شلونك؟", "s1"),
+    )
+    answer["speakers"][0].update(quote="هلا والله", segment="s1")
+    answer["speakers"][1].update(quote="نعم", segment="s2")
+    found = Roles.model_validate(answer)
+    check_roles(view)(found)
+    _, block = apply_roles(transcript, found, call_seconds=150)
+    assert spoken(found, applied=block["applied"] is True).client == "egyptian_ar"
+
+
+def test_each_voice_shows_its_eight_longest_segments_and_the_opening() -> None:
+    segments = [_say(0, "speaker_1", "hello there", "en")]
+    for n in range(1, 40):
+        words = " ".join(["word"] * (n % 13 + 1))
+        segments.append(_say(n * 5, f"speaker_{n % 2 + 1}", words, "en"))
+    view = opening(_call(*segments), country_code="971")
+    beyond = [n for n in view.shown if n >= 20]
+    by_voice = {
+        voice: [n for n in beyond if segments[n].speaker == voice]
+        for voice in ("speaker_1", "speaker_2")
+    }
+    assert all(len(found) <= 8 for found in by_voice.values())
+    assert list(view.shown) == sorted(set(view.shown))
+    assert set(range(20)) <= set(view.shown)
+    longest = max(range(40), key=lambda n: (len(segments[n].text.split()), -n))
+    assert longest in view.shown
+
+
+def test_a_quote_from_a_segment_past_the_opening_is_checked_like_any() -> None:
+    transcript = _late_egyptian()
+    answer = _roles(
+        _side("egyptian_ar", "انا عايز اشتري فيلا", "s25"),
+        _side("gulf_ar", "هلا والله، شلونك؟", "s1"),
+    )
+    answer["speakers"][0].update(quote="هلا والله", segment="s1")
+    answer["speakers"][1].update(quote="نعم", segment="s2")
+    with pytest.raises(OutputValidationError) as refused:
+        check_roles(opening(transcript, country_code="971"))(
+            Roles.model_validate(answer)
+        )
+    assert refused.value.errors == (("call_languages.client", "quote_not_in_segment"),)
