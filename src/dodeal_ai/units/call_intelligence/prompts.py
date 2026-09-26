@@ -44,7 +44,7 @@ PROSE_TEMPLATE = "call_intelligence/prose_v2.txt"
 OBJECTIONS_TEMPLATE = "call_intelligence/objections_v2.txt"
 SCORE_TEMPLATE = "call_intelligence/score_v2.txt"
 ESCALATIONS_TEMPLATE = "call_intelligence/escalations_v3.txt"
-COACHING_TEMPLATE = "call_intelligence/coaching_v3.txt"
+COACHING_TEMPLATE = "call_intelligence/coaching_v4.txt"
 EXTRAS_TEMPLATE = "call_intelligence/extras_v8.txt"
 TRANSLATE_TEMPLATE = "call_intelligence/translate_v2.txt"
 WHATSAPP_TEMPLATE = "call_intelligence/whatsapp_v3.txt"
@@ -82,7 +82,9 @@ REPROMPT_TAILS: Mapping[str, str] = MappingProxyType(
 # agreement booking), unit_b_prompts_v16, then extract_v6 by extract_v7 (a
 # short relative time from the moment it was said), unit_b_prompts_v17, then
 # extract_v7 by extract_v8 (each segment's said-at stamp written in code, and
-# the words that name the time quoted), unit_b_prompts_v18; never sent again.
+# the words that name the time quoted) and coaching_v3 by coaching_v4 (a "say
+# it like this" in the agent's dialect, and no next step advised once one is
+# booked), unit_b_prompts_v18; never sent again.
 RETIRED_TEMPLATES: tuple[str, ...] = (
     "call_intelligence/extract_v1.txt",
     "call_intelligence/extras_v1.txt",
@@ -111,6 +113,7 @@ RETIRED_TEMPLATES: tuple[str, ...] = (
     "call_intelligence/extract_v5.txt",
     "call_intelligence/extract_v6.txt",
     "call_intelligence/extract_v7.txt",
+    "call_intelligence/coaching_v3.txt",
 )
 
 # The stamp stage 1 carries under versions.prompt. Move it with the digest

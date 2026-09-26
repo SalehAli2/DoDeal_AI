@@ -762,6 +762,39 @@ async def test_a_dead_call_with_no_reason_gets_the_ask_why_tip(
     assert held["coaching"]["ask_why"] == (ASK_WHY["en"] if ask_why else None)
 
 
+@pytest.mark.parametrize(
+    ("next_step", "lines"),
+    [
+        (
+            {"action": "Viewing", "kind": "viewing", "booked": True},
+            "NEXT STEP BOOKED: true\nNEXT STEP KIND: viewing",
+        ),
+        (
+            {"action": "Call back", "kind": "callback", "booked": False},
+            "NEXT STEP BOOKED: false\nNEXT STEP KIND: callback",
+        ),
+        (None, "NEXT STEP BOOKED: false\nNEXT STEP KIND: none"),
+    ],
+    ids=["booked-viewing", "unbooked-callback", "none"],
+)
+async def test_the_coaching_pass_is_told_stage_1s_next_step(
+    ctx: dict, next_step: dict | None, lines: str
+) -> None:
+    """D-63: stage 1's next step, read from its stored analysis, reaches the
+    coaching pass's data as booked and its kind."""
+    await _done_and_pending(ctx)
+    result = await read_result("tenant-a", JOB)
+    assert result is not None
+    result["analysis"] = {"elements": {"next_step": next_step}}
+    await store_result("tenant-a", JOB, result, ttl_seconds=600)
+    stage2_ctx = _stage2_ctx()
+
+    await analyse_stage2(stage2_ctx, "tenant-a", JOB)
+
+    (sent,) = [c for c in stage2_ctx["llm"].calls if c.profile == "unit_b.coaching"]
+    assert lines in sent.prompt.variable
+
+
 async def test_the_stage2_outcome_line_carries_its_cost_and_price_table(
     ctx: dict, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:

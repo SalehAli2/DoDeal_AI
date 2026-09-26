@@ -11,6 +11,12 @@
   ask_why       code's, not the model's: a fixed tip to ask the client why,
                 when stage 1's loss reason is no_reason_given; else null
 
+WHAT THE PASS IS TOLD BESIDE THE CALL (coaching_data, D-63), decided in code:
+the agent's dialect, from the roles pass's call_languages.agent, msa_ar when
+unheard or not Arabic, which every Arabic "say it like this" is written in;
+and stage 1's next step, booked and its kind, so a booked call is never told
+to confirm or set one (a prompt rule, not checked in code).
+
 THE CHECKS, all in code, any failure a malformed answer (one reprompt, then
 the pass fails and the coaching part is null): every quote under the quote
 check; a strength and an improvement both there; every moment's segment real;
@@ -23,7 +29,8 @@ phrases are (alarms.py: folded, proclitics, two-word gaps).
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Annotated, Literal
+from dataclasses import dataclass
+from typing import Annotated, Literal, get_args
 
 from pydantic import Field
 
@@ -45,6 +52,8 @@ from dodeal_ai.units.call_intelligence.evidence import (
     quote_errors,
     relocated,
 )
+from dodeal_ai.units.call_intelligence.language import ARABIC_LANGUAGES, Spoken
+from dodeal_ai.units.call_intelligence.passes import NextKind
 from dodeal_ai.units.call_intelligence.prompts import (
     COACHING_TEMPLATE,
     REPROMPT_TAIL_TEMPLATE,
@@ -110,6 +119,22 @@ ASK_WHY: dict[str, str] = {
         "جوابه يحدد المكالمة القادمة."
     ),
 }
+
+# The dialect a "say it like this" is written in when the agent's language is
+# unheard or not Arabic: Modern Standard Arabic, understood everywhere.
+MSA = "msa_ar"
+_NEXT_KINDS = frozenset(get_args(NextKind.__value__))
+
+
+@dataclass(frozen=True, slots=True)
+class NextStepSeen:
+    """Stage 1's next step as coaching is told it: booked, and its kind."""
+
+    booked: bool = False
+    kind: str | None = None
+
+
+NO_NEXT_STEP = NextStepSeen()
 
 STRENGTH = "strength"
 IMPROVEMENT = "improvement"
@@ -236,13 +261,37 @@ def check_coaching(call: CallText) -> Callable[[Coaching], None]:
     return check
 
 
+def agent_dialect(spoken: Spoken) -> str:
+    """The agent's Arabic dialect as the roles pass heard it; MSA when it did
+    not hear the agent, or heard a language that is not Arabic."""
+    return spoken.agent if spoken.agent in ARABIC_LANGUAGES else MSA
+
+
+def coaching_data(call: CallText, next_step: NextStepSeen = NO_NEXT_STEP) -> str:
+    """The call's data, then the agent's dialect and stage 1's next step: booked
+    and its kind (none for none, or a kind that is not one)."""
+    kind = next_step.kind if next_step.kind in _NEXT_KINDS else None
+    return (
+        f"{call.data()}\n\n"
+        f"AGENT DIALECT: {agent_dialect(call.spoken)}\n"
+        f"NEXT STEP BOOKED: {'true' if next_step.booked else 'false'}\n"
+        f"NEXT STEP KIND: {kind or 'none'}"
+    )
+
+
 async def coach(
-    client: LLMClient, call: CallText, *, scope: TenantScope, settings: Settings
+    client: LLMClient,
+    call: CallText,
+    *,
+    scope: TenantScope,
+    settings: Settings,
+    next_step: NextStepSeen = NO_NEXT_STEP,
 ) -> tuple[Coaching, LLMResponse]:
-    """unit_b.coaching: one call, or two when the first answer is malformed."""
+    """unit_b.coaching: one call, or two when the first answer is malformed.
+    `next_step` is stage 1's, as coaching_data writes it."""
     answer, response = await call_model(
         client,
-        build_call_prompt(COACHING_TEMPLATE, call.data()),
+        build_call_prompt(COACHING_TEMPLATE, coaching_data(call, next_step)),
         Coaching,
         COACHING_LABEL,
         scope=scope,

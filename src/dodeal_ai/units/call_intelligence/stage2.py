@@ -69,6 +69,7 @@ from dodeal_ai.core.jobs import (
 )
 from dodeal_ai.core.logging_config import job_log_context
 from dodeal_ai.units.call_intelligence.analysis import NO_CLIENT
+from dodeal_ai.units.call_intelligence.coaching import NO_NEXT_STEP, NextStepSeen
 from dodeal_ai.units.call_intelligence.config import resolve_calls_config
 from dodeal_ai.units.call_intelligence.language import spoken_of
 from dodeal_ai.units.call_intelligence.paid import JobGone, PassUsage
@@ -208,6 +209,7 @@ async def _analyse(
             stage1_escalations=_stage1_escalations(result),
             spoken=spoken_of(result.get("languages")),
             loss_reason=_loss_reason(result),
+            next_step=_next_step(result),
         )
     except JobGone:
         return
@@ -235,6 +237,20 @@ def _loss_reason(result: dict[str, object]) -> str | None:
     lost = elements.get("loss_reason") if isinstance(elements, dict) else None
     category = lost.get("category") if isinstance(lost, dict) else None
     return category if isinstance(category, str) else None
+
+
+def _next_step(result: dict[str, object]) -> NextStepSeen:
+    """Stage 1's next step, booked and its kind, from its stored analysis; not
+    booked and no kind when the analysis, or its next step, is null."""
+    analysis = result.get("analysis")
+    elements = analysis.get("elements") if isinstance(analysis, dict) else None
+    step = elements.get("next_step") if isinstance(elements, dict) else None
+    if not isinstance(step, dict):
+        return NO_NEXT_STEP
+    kind = step.get("kind")
+    return NextStepSeen(
+        booked=step.get("booked") is True, kind=kind if isinstance(kind, str) else None
+    )
 
 
 async def _again_or_fail(

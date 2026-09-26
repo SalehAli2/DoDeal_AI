@@ -7521,3 +7521,10 @@ failure modes, then one stress test (sabotage in brackets).
 ## Unit B relative times from the moment said
 - extract (extract_v7, unit_b_prompts_v17): "in 3 minutes" said 40 minutes into a call is booked 37 minutes early; a time counted twice. Test: "بعد 3 دقايق" said at 05:00 on a call recorded at 10:00 is due 10:08 and booked on the client's "اوكي". Prompt only; no sabotage owed.
 - Stress test: the same words at 00:00 still give recorded_at + 3 minutes.
+
+## Unit B D-61 to D-63 and the call_e2e stop (unit_b_prompts_v18)
+- call_e2e (1): the stop crashed on the poll timer and left both health-check keys, so the next run was refused. Test: a whole faked run() releases both keys; an exception or Ctrl+C after the start still stops the children and releases them.
+- D-61 relative times (2, RISK): a time counted from the call's start, not the moment it was said, is kept 5 minutes early; a time on an unverified quote is delivered as fact. Test: "بعد 3 دقايق" said at 05:00, agreed at 05:10, is 10:08; 10:03 is when_out_of_range; no verified when_quote is when_missing_quote. Sabotage: 5 of 5 fail.
+- D-62 reasoning cost (3, RISK): reasoning reported only in total_tokens is never priced; a reported detail added on top of completion double-charges. Test: a 900-token gap is output and in cost_usd and task_cost_usd_total; a detail inside completion is counted once. Sabotage: 3 of 3 fail.
+- D-63 coaching (4): an Egyptian agent coached with Gulf or formal phrasings; a booked call told to set a next step. Test: the prompt pins both rules; the data carries AGENT DIALECT and NEXT STEP lines. No sabotage owed.
+- Stress test: a call that begins at 23:55 and says "بكرة" at 10:00 in stamps the 27th and keeps the 28th at 17:00.
