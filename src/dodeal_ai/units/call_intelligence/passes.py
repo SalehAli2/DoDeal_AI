@@ -49,6 +49,7 @@ from dodeal_ai.units.call_intelligence.evidence import (
     evidence_errors,
     in_language,
     quote_errors,
+    relocated,
 )
 from dodeal_ai.units.call_intelligence.prompts import (
     EXTRACT_TEMPLATE,
@@ -246,7 +247,7 @@ async def extract(
     client: LLMClient, call: CallText, *, scope: TenantScope, settings: Settings
 ) -> tuple[Extraction, LLMResponse]:
     """unit_b.extract: one call, or two when the first answer is malformed."""
-    return await call_model(
+    answer, response = await call_model(
         client,
         build_call_prompt(EXTRACT_TEMPLATE, call.data()),
         Extraction,
@@ -259,6 +260,7 @@ async def extract(
         reprompt_tail=REPROMPT_TAIL_TEMPLATE,
         tail_by_error=REPROMPT_TAILS,
     )
+    return relocated(call, answer), response
 
 
 async def write_prose(

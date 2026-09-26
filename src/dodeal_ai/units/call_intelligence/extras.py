@@ -57,6 +57,7 @@ from dodeal_ai.units.call_intelligence.evidence import (
     Strict,
     evidence_errors,
     quote_errors,
+    relocated,
     written_in,
 )
 from dodeal_ai.units.call_intelligence.language import message_language
@@ -274,7 +275,7 @@ async def find_extras(
     """unit_b.extras: one call, or two when the first answer is malformed;
     `vocabulary` is the tenant's keyword_vocabulary, `default_dialect` its
     whatsapp_default_dialect."""
-    return await call_model(
+    answer, response = await call_model(
         client,
         build_call_prompt(
             EXTRAS_TEMPLATE, extras_data(call, vocabulary, default_dialect)
@@ -295,6 +296,7 @@ async def find_extras(
         reprompt_tail=REPROMPT_TAIL_TEMPLATE,
         tail_by_error=REPROMPT_TAILS,
     )
+    return relocated(call, answer), response
 
 
 def extras_part(

@@ -280,7 +280,7 @@ async def test_a_true_quote_passes_whatever_its_case_and_punctuation() -> None:
         (_detail("x", STATED, "My budget", "s9"), "segment_unknown"),
         (_detail("x", STATED, "budget " * 41, "s2"), "quote_length"),
         (_detail("x", UNCERTAIN, "...", "s2"), "quote_length"),
-        (_detail("x", STATED, "budget is", "s1"), "quote_not_in_segment"),
+        (_detail("x", STATED, "budget is", "s4"), "quote_not_in_segment"),
         (_detail("x", STATED, "call me on 050 123 4567", "s2"), "quote_not_in_segment"),
     ],
 )

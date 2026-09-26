@@ -47,6 +47,7 @@ from dodeal_ai.units.call_intelligence.evidence import (
     Strict,
     evidence_errors,
     quote_errors,
+    relocated,
 )
 from dodeal_ai.units.call_intelligence.language import (
     UNHEARD,
@@ -167,6 +168,8 @@ def check_roles(call: CallText) -> Callable[[Roles], None]:
     heard = sorted({segment.speaker for segment in call.segments})
 
     def check(answer: Roles) -> None:
+        # Each quote at the segment it is found in, so a voice is read there.
+        answer = relocated(call, answer)
         errors: Errors = []
         if sorted(found.speaker for found in answer.speakers) != heard:
             errors.append(("speakers", "not_each_once"))
@@ -221,7 +224,7 @@ async def ask_roles(
     client: LLMClient, call: CallText, *, scope: TenantScope, settings: Settings
 ) -> tuple[Roles, LLMResponse]:
     """unit_b.roles: one call, or two when the first answer is malformed."""
-    return await call_model(
+    answer, response = await call_model(
         client,
         build_call_prompt(ROLES_TEMPLATE, roles_data(call)),
         Roles,
@@ -240,6 +243,7 @@ async def ask_roles(
         reprompt_tail=REPROMPT_TAIL_TEMPLATE,
         tail_by_error=REPROMPT_TAILS,
     )
+    return relocated(call, answer), response
 
 
 def single_voice(transcript: Transcript, call_seconds: float) -> tuple[str, ...]:

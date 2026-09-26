@@ -41,6 +41,7 @@ from dodeal_ai.units.call_intelligence.evidence import (
     evidence_errors,
     in_language,
     quote_errors,
+    relocated,
 )
 from dodeal_ai.units.call_intelligence.prompts import (
     COACHING_TEMPLATE,
@@ -222,7 +223,7 @@ async def coach(
     client: LLMClient, call: CallText, *, scope: TenantScope, settings: Settings
 ) -> tuple[Coaching, LLMResponse]:
     """unit_b.coaching: one call, or two when the first answer is malformed."""
-    return await call_model(
+    answer, response = await call_model(
         client,
         build_call_prompt(COACHING_TEMPLATE, call.data()),
         Coaching,
@@ -241,6 +242,7 @@ async def coach(
         reprompt_tail=REPROMPT_TAIL_TEMPLATE,
         tail_by_error=REPROMPT_TAILS,
     )
+    return relocated(call, answer), response
 
 
 def coaching_part(call: CallText, answer: Coaching) -> dict[str, object]:

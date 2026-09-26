@@ -34,6 +34,7 @@ from dodeal_ai.units.call_intelligence.evidence import (
     Strict,
     evidence_errors,
     quote_errors,
+    relocated,
 )
 from dodeal_ai.units.call_intelligence.prompts import (
     AGENT,
@@ -145,7 +146,7 @@ async def find_objections(
     client: LLMClient, call: CallText, *, scope: TenantScope, settings: Settings
 ) -> tuple[Objections, LLMResponse]:
     """unit_b.objections: one call, or two when the first answer is malformed."""
-    return await call_model(
+    answer, response = await call_model(
         client,
         build_call_prompt(OBJECTIONS_TEMPLATE, call.data()),
         Objections,
@@ -164,6 +165,7 @@ async def find_objections(
         reprompt_tail=REPROMPT_TAIL_TEMPLATE,
         tail_by_error=REPROMPT_TAILS,
     )
+    return relocated(call, answer), response
 
 
 def objections_part(answer: Objections) -> dict[str, object]:

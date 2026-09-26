@@ -34,6 +34,7 @@ from dodeal_ai.units.call_intelligence.evidence import (
     Said,
     Strict,
     evidence_errors,
+    relocated,
 )
 from dodeal_ai.units.call_intelligence.prompts import (
     AGENT,
@@ -116,7 +117,7 @@ async def find_flags(
     client: LLMClient, call: CallText, *, scope: TenantScope, settings: Settings
 ) -> tuple[Flags, LLMResponse]:
     """unit_b.escalations: one call, or two when the first answer is malformed."""
-    return await call_model(
+    answer, response = await call_model(
         client,
         build_call_prompt(ESCALATIONS_TEMPLATE, call.data()),
         Flags,
@@ -135,6 +136,7 @@ async def find_flags(
         reprompt_tail=REPROMPT_TAIL_TEMPLATE,
         tail_by_error=REPROMPT_TAILS,
     )
+    return relocated(call, answer), response
 
 
 def _escalation(call: CallText, flag: Flag) -> dict[str, object]:

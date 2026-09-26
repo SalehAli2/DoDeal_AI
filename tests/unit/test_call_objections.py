@@ -153,7 +153,7 @@ async def test_a_true_answer_passes_and_is_counted() -> None:
 @pytest.mark.parametrize(
     ("change", "error"),
     [
-        ({"segment": "s3"}, ("objections.0", "quote_not_in_segment")),
+        ({"segment": "s5"}, ("objections.0", "quote_not_in_segment")),
         (
             {"quote": "We can offer a payment plan", "segment": "s3"},
             ("objections.0", "quote_wrong_speaker"),

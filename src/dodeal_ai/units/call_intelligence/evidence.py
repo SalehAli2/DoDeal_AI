@@ -8,12 +8,17 @@ speaker's role, each side's language as the roles pass heard it, the summary
 language decided in code from them (language.py), and whether the transcript
 as a whole is uncertain.
 
-THE QUOTE CHECK, in code, on every quote a pass returns: at most 40 words; the
-segment it cites exists; and its words, normalised as the alarm matcher
-normalises (alarms.py), appear in that segment in order and unbroken. The
-segment is read as the model read it, so a quote can never carry a number back
-out. Where a pass names who must have said it, the segment is that speaker's.
-Any failure is a malformed answer: the pass is reprompted once, then fails.
+THE QUOTE CHECK, in code, on every quote a pass returns: at most 40 words (the
+prompts ask for 15); the segment it cites exists; and its words, normalised as
+the alarm matcher normalises (alarms.py), appear in that segment in order.
+Between two of them the segment may hold only words that repeat the word
+before them ("عمري عمري") or are on QUOTE_FILLERS; a negation never is one.
+Not in the cited segment, the quote is looked for in the one just before, then
+the one just after, and where found there that segment is stored (relocated).
+The segment is read as the model read it, so a quote can never carry a number
+back out. Where a pass names who must have said it, the segment it is found in
+is that speaker's. Any failure is a malformed answer: the pass is reprompted
+once, then fails -- except where a pass says otherwise (passes.py).
 
 THE LANGUAGE SHARE: a text is in the language asked for when at least 60 % of
 its letters are in that language's script, counting none inside quotation
@@ -27,7 +32,7 @@ and Han for zh -- so French passes as Latin, never as not-English.
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from typing import Annotated
 
@@ -41,7 +46,11 @@ from dodeal_ai.units.call_intelligence.language import (
     summary_language,
 )
 from dodeal_ai.units.call_intelligence.numbers import prompt_copy
-from dodeal_ai.units.call_intelligence.prompts import render_transcript, role_of
+from dodeal_ai.units.call_intelligence.prompts import (
+    render_transcript,
+    role_of,
+    segment_id,
+)
 from dodeal_ai.units.call_intelligence.transcriber import (
     MIN_MEAN_CONFIDENCE,
     Segment,
@@ -56,6 +65,76 @@ MAX_QUOTE_WORDS = 40
 # The share of a text's letters, outside quotes, that must be in the script of
 # the language asked for.
 MIN_SCRIPT_SHARE = 0.6
+
+# The hesitations a quote may leave out of its segment, Arabic and English:
+# sounds that carry no meaning. Versioned: a change is a new version. A word
+# that carries meaning here lets a quote drop it and still pass as exact.
+QUOTE_FILLERS_VERSION = "quote_fillers_v1"
+QUOTE_FILLERS: tuple[str, ...] = (
+    "يعني",
+    "اه",
+    "آه",
+    "ايوه",
+    "إيوه",
+    "امم",
+    "اممم",
+    "ممم",
+    "um",
+    "umm",
+    "uh",
+    "uhh",
+    "uhm",
+    "er",
+    "erm",
+    "hmm",
+    "mm",
+    "ah",
+)
+# The negations, Arabic and English, never skipped whatever QUOTE_FILLERS
+# says: a quote that drops one says the opposite of the call.
+NEGATIONS: tuple[str, ...] = (
+    "ما",
+    "مش",
+    "مو",
+    "مب",
+    "لا",
+    "لم",
+    "لن",
+    "ليس",
+    "مافي",
+    "ماني",
+    "not",
+    "no",
+    "never",
+    "nor",
+    "neither",
+    "none",
+    "nothing",
+    "nobody",
+    "cannot",
+    "don't",
+    "doesn't",
+    "didn't",
+    "won't",
+    "can't",
+    "isn't",
+    "aren't",
+    "wasn't",
+    "weren't",
+)
+_NEGATION_WORDS = frozenset(words(" ".join(NEGATIONS)))
+_FILLER_WORDS = frozenset(words(" ".join(QUOTE_FILLERS))) - _NEGATION_WORDS
+
+# Where a quote not in its cited segment is looked for next: the segment just
+# before, then the one just after.
+_NEIGHBOURS = (-1, 1)
+# The fields a quote and its segment are held in, in every pass's answer.
+_QUOTE_FIELDS = (
+    ("quote", "segment"),
+    ("said", "segment"),
+    ("agent_quote", "agent_segment"),
+    ("satisfied_quote", "satisfied_segment"),
+)
 
 # A span in double quotation marks, in the three forms a summary may use.
 _QUOTED = re.compile(r'"[^"]*"|“[^”]*”|«[^»]*»')
@@ -162,9 +241,83 @@ def script_language(text: str, hint: str | None) -> str:
     return hint if hint in ("ar", "en") else "und"
 
 
-def _contains(said: Sequence[str], quote: Sequence[str]) -> bool:
-    size = len(quote)
-    return any(said[at : at + size] == quote for at in range(len(said) - size + 1))
+def _skippable(said: Sequence[str], at: int) -> bool:
+    """Whether the word at `at` may sit between two of a quote's words: it
+    repeats the word before it, or it is a filler (never a negation)."""
+    return said[at] in _FILLER_WORDS or (at > 0 and said[at - 1] == said[at])
+
+
+def _reachable(said: Sequence[str], start: int) -> Iterator[int]:
+    """The positions the next quote word may stand at after one that ended at
+    `start`: `start`, and each after a run of skippable words."""
+    at = start
+    while at < len(said):
+        yield at
+        if not _skippable(said, at):
+            return
+        at += 1
+
+
+def _matches(said: Sequence[str], quote: Sequence[str]) -> bool:
+    """Whether the quote's words stand in `said` in order, nothing between two
+    of them but skippable words (module docstring)."""
+    ends = {at + 1 for at, word in enumerate(said) if word == quote[0]}
+    for wanted in quote[1:]:
+        ends = {
+            at + 1
+            for start in ends
+            for at in _reachable(said, start)
+            if said[at] == wanted
+        }
+    return bool(ends)
+
+
+def _found_at(call: CallText, quoted: Sequence[str], index: int) -> int | None:
+    """The segment the quote's words are in: the cited one, else the one just
+    before, else the one just after; None when none holds them."""
+    for at in (index, *(index + step for step in _NEIGHBOURS)):
+        if 0 <= at < len(call.shown) and _matches(words(call.shown[at]), quoted):
+            return at
+    return None
+
+
+def locate(call: CallText, quote: str, segment: str) -> str | None:
+    """The id of the segment a quote is found in (_found_at), or None when the
+    cited id is unknown, the quote's length is wrong or no segment holds it."""
+    index = call.index_of(segment)
+    quoted = words(quote)
+    if index is None or not quoted or len(quoted) > MAX_QUOTE_WORDS:
+        return None
+    found = _found_at(call, quoted, index)
+    return None if found is None else segment_id(found)
+
+
+def relocated[M: BaseModel](call: CallText, answer: M) -> M:
+    """The answer with every quote's segment the one the quote is found in:
+    a quote found in a neighbour of the segment it cites is stored with the
+    neighbour's id. Nothing else changes, and a failing quote stays as it is."""
+    update: dict[str, object] = {}
+    for name in type(answer).model_fields:
+        value = getattr(answer, name)
+        if isinstance(value, BaseModel):
+            moved = relocated(call, value)
+            if moved is not value:
+                update[name] = moved
+        elif isinstance(value, list):
+            items = [
+                relocated(call, item) if isinstance(item, BaseModel) else item
+                for item in value
+            ]
+            if any(new is not old for new, old in zip(items, value, strict=True)):
+                update[name] = items
+    for quote_field, segment_field in _QUOTE_FIELDS:
+        quote = getattr(answer, quote_field, None)
+        segment = getattr(answer, segment_field, None)
+        if isinstance(quote, str) and isinstance(segment, str):
+            found = locate(call, quote, segment)
+            if found is not None and found != segment:
+                update[segment_field] = found
+    return answer.model_copy(update=update) if update else answer
 
 
 def quote_errors(
@@ -176,7 +329,8 @@ def quote_errors(
     speaker: str | None = None,
 ) -> Errors:
     """The quote check for one cited quote, which may be absent altogether;
-    [] when it passes. `speaker`, when given, is who must have said it."""
+    [] when it passes. `speaker`, when given, is who must have said it, in
+    the segment the quote is found in."""
     if quote is None and segment is None:
         return []
     if quote is None or segment is None:
@@ -187,9 +341,10 @@ def quote_errors(
     quoted = words(quote)
     if not quoted or len(quoted) > MAX_QUOTE_WORDS:
         return [(where, "quote_length")]
-    if not _contains(words(call.shown[index]), quoted):
+    found = _found_at(call, quoted, index)
+    if found is None:
         return [(where, "quote_not_in_segment")]
-    if speaker is not None and role_of(call.segments[index]) != speaker:
+    if speaker is not None and role_of(call.segments[found]) != speaker:
         return [(where, "quote_wrong_speaker")]
     return []
 
