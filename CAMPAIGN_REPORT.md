@@ -7535,3 +7535,9 @@ failure modes, then one stress test (sabotage in brackets).
 - D-75 (3, RISK): an agent's verified over-promise scored as no over-promise; a client's words, or an unverified quote, fail the agent. Test: s16's promise turns no_over_promise no, professionalism 15 to 11, 88 excellent to 82 good; client, unknown, unverified and failed-pass cases change nothing; re-analysis reconciles. Sabotage: 7 of 7 fail.
 - D-76 (4): a lost "ما" hides in WER as one word. Test: "عمري ما زرت" against "عمري زرت" is recall 0 for ما. No sabotage owed.
 - Stress test: an escalation part whose item says agent but whose quote sits in a client segment changes no mark.
+
+## Unit B D-77 booking, call_e2e batches, negation prefixes (unit_b_prompts_v19)
+- D-77 booked (1, RISK): an agent agreeing with themself, or an "ok" said to something else, booked a call. Test: agent s56 time, client s57 "اوكي" books; both quotes the agent's, 5 segments apart, an unfound assent or an unknown voice do not. extract_v9 asks for the other speaker's short assent. Sabotage: 3 of 3 fail.
+- call_e2e (2): several recordings meant several runs. Test: two paths give two pushes, two report folders and one stop; one path keeps its layout.
+- D-76 prefixes (3): "وما" and "ماعرفتش" were missed. Test: both counted; "مشروع" is not.
+- Stress test: a one-word assent cited one segment off is judged on the segment it is found in, so the agent's own "تمام" never books.
