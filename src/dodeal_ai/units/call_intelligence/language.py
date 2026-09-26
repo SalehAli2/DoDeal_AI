@@ -26,6 +26,12 @@ THE SUMMARY LANGUAGE from the profile:
 
 Only a mixed call looks further, at words, because time favours whoever speaks
 slowly. A word is a whitespace-separated token of a segment's text.
+
+COACHED LANGUAGES (BRD B1): a call is coached and scored only when its
+client's language is on the tenant's coaching_languages, until each language
+is tested; otherwise both are null with language_not_enabled (wave2.py). The
+client's language as heard decides; unheard, the script fallback's profile:
+mostly_en needs en listed, mostly_ar an Arabic code, mixed both, other never.
 """
 
 from __future__ import annotations
@@ -33,7 +39,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, get_args
 
-from dodeal_ai.units.call_intelligence.transcriber import LanguageProfile, Transcript
+from dodeal_ai.units.call_intelligence.transcriber import (
+    LanguageProfile,
+    Segment,
+    Transcript,
+    profile_of,
+)
 
 type SummaryLanguage = Literal["ar", "en"]
 
@@ -60,6 +71,31 @@ CALL_LANGUAGES: tuple[str, ...] = get_args(CallLanguage.__value__)
 ARABIC_LANGUAGES = frozenset(code for code in CALL_LANGUAGES if code.endswith("_ar"))
 ENGLISH = "en"
 OTHER = "other"
+
+# The codes a tenant may coach and score calls in: every one but other.
+type CoachedLanguage = Literal[
+    "gulf_ar",
+    "egyptian_ar",
+    "levantine_ar",
+    "iraqi_ar",
+    "maghrebi_ar",
+    "msa_ar",
+    "en",
+    "hi",
+    "ur",
+    "ru",
+    "zh",
+    "fr",
+    "fa",
+    "tr",
+]
+# The languages tested so far: the four Arabic dialects of the product and
+# English.
+DEFAULT_COACHING_LANGUAGES: frozenset[CoachedLanguage] = frozenset(
+    {"gulf_ar", "egyptian_ar", "levantine_ar", "iraqi_ar", "en"}
+)
+# Why a call gets no coaching and no score (BRD B1).
+LANGUAGE_NOT_ENABLED = "language_not_enabled"
 
 # Where the spoken languages came from, for the stage-1 languages block.
 FROM_MODEL = "model"
@@ -130,6 +166,21 @@ def message_language(code: str | None, fallback: SummaryLanguage) -> str:
     if code is None or code == OTHER:
         return fallback
     return "ar" if code in ARABIC_LANGUAGES else code
+
+
+def coached(
+    spoken: Spoken, segments: tuple[Segment, ...], enabled: frozenset[str]
+) -> bool:
+    """Whether the call is coached and scored (the module docstring's rule)."""
+    if spoken.client is not None:
+        return spoken.client in enabled
+    profile = profile_of(segments)
+    arabic = bool(enabled & ARABIC_LANGUAGES)
+    if profile is LanguageProfile.MOSTLY_AR:
+        return arabic
+    if profile is LanguageProfile.MOSTLY_EN:
+        return ENGLISH in enabled
+    return profile is LanguageProfile.MIXED and arabic and ENGLISH in enabled
 
 
 def languages_block(transcript: Transcript, spoken: Spoken) -> dict[str, object]:

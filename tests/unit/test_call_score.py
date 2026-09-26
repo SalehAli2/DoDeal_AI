@@ -291,18 +291,22 @@ def test_the_bands(total: int, band: str) -> None:
 
 
 @pytest.mark.parametrize(
-    ("enabled", "eligible", "share", "objections", "reason"),
+    ("enabled", "language", "eligible", "share", "objections", "reason"),
     [
-        (False, True, 0.5, True, "scoring_off"),
-        (True, False, 0.5, True, "not_eligible"),
-        (True, True, 0.19, True, "not_engaged"),
-        (True, True, None, True, "not_engaged"),
-        (True, True, 0.20, False, "objections_unavailable"),
-        (True, True, 0.20, True, None),
+        (False, True, True, 0.5, True, "scoring_off"),
+        (False, False, True, 0.5, True, "scoring_off"),
+        (True, False, True, 0.5, True, "language_not_enabled"),
+        (True, False, False, 0.1, False, "language_not_enabled"),
+        (True, True, False, 0.5, True, "not_eligible"),
+        (True, True, True, 0.19, True, "not_engaged"),
+        (True, True, True, None, True, "not_engaged"),
+        (True, True, True, 0.20, False, "objections_unavailable"),
+        (True, True, True, 0.20, True, None),
     ],
 )
 def test_each_null_reason(
     enabled: bool,
+    language: bool,
     eligible: bool,
     share: float | None,
     objections: bool,
@@ -311,6 +315,7 @@ def test_each_null_reason(
     assert (
         score_gate(
             scoring_enabled=enabled,
+            language_enabled=language,
             eligible=eligible,
             client_share=share,
             objections_answered=objections,

@@ -22,9 +22,10 @@ weight (the suppressed components' left out), times 100, rounded half up. The
 band: excellent 85+, good 70 to 84, needs_work 50 to 69, coaching_required
 below 50. Exact fractions throughout, so 12.5 is 13 and never 12.
 
-A SCORE ONLY when the tenant's scoring_enabled is on, the call is eligible,
-the client engaged (a talk share of at least 0.20), and the objections pass
-answered; otherwise null, with the reason: scoring_off, not_eligible,
+A SCORE ONLY when the tenant's scoring_enabled is on, the client's language
+is one it coaches (language.coached), the call is eligible, the client engaged
+(a talk share of at least 0.20), and the objections pass answered; otherwise
+null, with the reason: scoring_off, language_not_enabled, not_eligible,
 not_engaged or objections_unavailable -- and the pass is not run.
 
 THE EVIDENCE: each check's quote goes through the quote check; one is owed
@@ -53,6 +54,7 @@ from dodeal_ai.units.call_intelligence.evidence import (
     evidence_errors,
     quote_errors,
 )
+from dodeal_ai.units.call_intelligence.language import LANGUAGE_NOT_ENABLED
 from dodeal_ai.units.call_intelligence.prompts import (
     REPROMPT_TAIL_TEMPLATE,
     REPROMPT_TAILS,
@@ -224,6 +226,7 @@ def band_of(total: int) -> str:
 def score_gate(
     *,
     scoring_enabled: bool,
+    language_enabled: bool,
     eligible: bool,
     client_share: float | None,
     objections_answered: bool,
@@ -231,6 +234,8 @@ def score_gate(
     """Why the call gets no score, or None when it gets one."""
     if not scoring_enabled:
         return SCORING_OFF
+    if not language_enabled:
+        return LANGUAGE_NOT_ENABLED
     if not eligible:
         return NOT_ELIGIBLE
     if client_share is None or client_share < ENGAGED_SHARE:

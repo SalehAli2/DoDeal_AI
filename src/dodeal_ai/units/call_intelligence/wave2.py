@@ -53,7 +53,12 @@ from dodeal_ai.units.call_intelligence.escalations import (
 )
 from dodeal_ai.units.call_intelligence.evidence import CallText
 from dodeal_ai.units.call_intelligence.extras import Extras, extras_part, find_extras
-from dodeal_ai.units.call_intelligence.language import UNHEARD, Spoken
+from dodeal_ai.units.call_intelligence.language import (
+    LANGUAGE_NOT_ENABLED,
+    UNHEARD,
+    Spoken,
+    coached,
+)
 from dodeal_ai.units.call_intelligence.objections import (
     OBJECTION_LIST_VERSION,
     Objections,
@@ -152,7 +157,9 @@ async def wave2(
         lambda metered: find_objections(metered, call, scope=scope, settings=settings),
     )
     wave.parts[OBJECTIONS] = None if found is None else objections_part(found)
-    await _score(run, wave, call, config, scope, settings, eligible)
+    # BRD B1: no coaching and no score in a language not yet tested.
+    language_on = coached(call.spoken, call.segments, config.coaching_languages)
+    await _score(run, wave, call, config, scope, settings, eligible, language_on)
     flags = await _part(
         run,
         wave,
@@ -163,14 +170,20 @@ async def wave2(
     wave.parts[ESCALATIONS] = (
         None if flags is None else escalations_part(call, flags, stage1_escalations)
     )
-    coached = await _part(
-        run,
-        wave,
-        COACHING,
-        Coaching,
-        lambda metered: coach(metered, call, scope=scope, settings=settings),
-    )
-    wave.parts[COACHING] = None if coached is None else coaching_part(call, coached)
+    if language_on:
+        coaching = await _part(
+            run,
+            wave,
+            COACHING,
+            Coaching,
+            lambda metered: coach(metered, call, scope=scope, settings=settings),
+        )
+        wave.parts[COACHING] = (
+            None if coaching is None else coaching_part(call, coaching)
+        )
+    else:
+        wave.parts[COACHING] = None
+        wave.reasons[COACHING] = LANGUAGE_NOT_ENABLED
     extras = await _part(
         run,
         wave,
@@ -221,12 +234,14 @@ async def _score(
     scope: TenantScope,
     settings: Settings,
     eligible: bool,
+    language_on: bool,
 ) -> None:
     """The score part, or null with why -- the pass unrun when it would be."""
     share = talk_share(call.segments, CLIENT)
     objections = wave.parts[OBJECTIONS]
     gate = score_gate(
         scoring_enabled=config.scoring_enabled,
+        language_enabled=language_on,
         eligible=eligible,
         client_share=share,
         objections_answered=objections is not None,

@@ -29,6 +29,10 @@ from dodeal_ai.units.call_intelligence.extras import (
     WhatsAppDialect,
 )
 from dodeal_ai.units.call_intelligence.keywords import MAX_KEYWORD_TERMS
+from dodeal_ai.units.call_intelligence.language import (
+    DEFAULT_COACHING_LANGUAGES,
+    CoachedLanguage,
+)
 from dodeal_ai.units.call_intelligence.numbers import DEFAULT_COUNTRY_CODE
 from dodeal_ai.units.call_intelligence.transcriber import (
     DEFAULT_STT_PROFILE,
@@ -114,6 +118,10 @@ class CallsConfig(BaseModel):
     # when the agent's is unknown (extras.py): gulf_ar, the agencies' market. A
     # wrong one reads foreign to the client; a code not of the four is refused.
     whatsapp_default_dialect: WhatsAppDialect = DEFAULT_WHATSAPP_DIALECT
+    # The client languages a call is coached and scored in (BRD B1): the four
+    # Arabic dialects and English, the ones tested. One listed untested judges
+    # agents on a pass nobody checked; one left off leaves its calls unscored.
+    coaching_languages: frozenset[CoachedLanguage] = DEFAULT_COACHING_LANGUAGES
 
     # The switches, all off: calls_enabled admits jobs at all (403 otherwise);
     # the other five name later passes and are parsed and stored only. A switch
