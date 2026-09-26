@@ -171,6 +171,48 @@ def test_the_report_prints_the_reasons_and_the_whole_extras_part() -> None:
     assert "whatsapp_dialect: None" in lines
 
 
+REFUSED = (
+    "output_validation_failed label=llm.unit_b.extract error_count=2 "
+    "error_types=quote_not_in_segment"
+)
+
+
+def test_the_reasons_print_every_output_validation_failed_line() -> None:
+    """The worker's refused answers, as logged, under the reasons: label,
+    count and error types; the cost lines read the outcome lines only."""
+    logged = [*OUTCOMES, {"message": REFUSED, "level": "WARNING"}]
+
+    lines = call_e2e.report(SAMPLE, logged)
+
+    at = lines.index("output_validation_failed: 1")
+    assert lines[at + 1] == f"  {REFUSED}"
+    assert lines[at - 1].startswith("stage2_result.reasons:")
+    costs = lines[lines.index("=== TOKENS AND COST ===") + 1 : -1]
+    assert [line.split(":")[0] for line in costs] == [
+        "  call_job_outcome",
+        "  call_stage2_outcome",
+    ]
+    assert "output_validation_failed: none" in call_e2e.report(SAMPLE, OUTCOMES)
+    page = call_e2e.report_html(SAMPLE, logged)
+    assert REFUSED in page
+
+
+def test_the_refused_lines_are_read_from_the_worker_log(tmp_path: Path) -> None:
+    log = tmp_path / "worker.log"
+    log.write_text(
+        "\n".join(
+            [
+                json.dumps({"message": "call_job_outcome", "cost_usd": 0.01}),
+                json.dumps({"message": REFUSED}),
+                "not json output_validation_failed",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    found = call_e2e.outcome_records(log, call_e2e.REJECTED_LINE)
+    assert call_e2e.validation_failures(found) == [REFUSED]
+
+
 def test_the_report_names_a_missing_extras_part_and_no_stage2_line() -> None:
     body = {**SAMPLE, "stage2_result": None}
     lines = call_e2e.report(body, OUTCOMES[:1])

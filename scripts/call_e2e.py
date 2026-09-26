@@ -65,6 +65,11 @@ EXIT_DONE, EXIT_FAILED, EXIT_TIMEOUT, EXIT_INTERRUPTED = 0, 1, 2, 130
 # Every call queue a running worker could take this run's jobs from.
 CALL_QUEUES = (PRIORITY_QUEUE, NORMAL_QUEUE, OVERNIGHT_QUEUE, STAGE2_QUEUE)
 
+# The worker log lines the report reads: each run's outcome, and every model
+# answer refused (label, count and error types only; never the answer).
+OUTCOME_LINES = ("call_job_outcome", "call_stage2_outcome")
+REJECTED_LINE = "output_validation_failed"
+
 
 # --- small helpers --------------------------------------------------------------
 
@@ -223,6 +228,15 @@ def part_reasons(outcomes: list[dict[str, Any]]) -> Any:
     return lines[-1].get("part_reasons") if lines else None
 
 
+def validation_failures(outcomes: list[dict[str, Any]]) -> list[str]:
+    """Every output_validation_failed line the workers logged, as logged."""
+    return [
+        str(record["message"])
+        for record in outcomes
+        if str(record.get("message", "")).startswith(REJECTED_LINE)
+    ]
+
+
 def short(value: object) -> str:
     text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
     return text if len(text) <= TEXT_LIMIT else text[:TEXT_LIMIT] + " ..."
@@ -310,7 +324,9 @@ def outcome_records(log: Path, name: str) -> list[dict[str, Any]]:
 
 
 def report(body: dict[str, Any], outcomes: list[dict[str, Any]]) -> list[str]:
-    """A readable report of the status body and the outcome lines."""
+    """A readable report of the status body and the outcome lines, every
+    refused model answer's line among the reasons."""
+    refused = validation_failures(outcomes)
     lines = [
         "=== CALL ===",
         f"status: {body.get('status')}  reason: {body.get('reason')}",
@@ -318,6 +334,8 @@ def report(body: dict[str, Any], outcomes: list[dict[str, Any]]) -> list[str]:
         f"analysis_reason: {at(body, 'result', 'analysis_reason')}",
         f"part_reasons: {whole(part_reasons(outcomes))}",
         f"stage2_result.reasons: {whole(at(body, 'stage2_result', 'reasons'))}",
+        f"{REJECTED_LINE}: {len(refused) or 'none'}",
+        *(f"  {line}" for line in refused),
         "",
         "=== TRANSCRIPT ===",
         f"language profile: {find(body, 'language_profile')}",
@@ -381,6 +399,8 @@ def report(body: dict[str, Any], outcomes: list[dict[str, Any]]) -> list[str]:
     ]
     total = 0.0
     for record in outcomes:
+        if record.get("message") not in OUTCOME_LINES:
+            continue
         cost = record.get("cost_usd")
         if isinstance(cost, int | float):
             total += float(cost)
@@ -509,6 +529,7 @@ def report_html(body: dict[str, Any], outcomes: list[dict[str, Any]]) -> str:
         "analysis_reason": at(result, "analysis_reason"),
         "part_reasons": part_reasons(outcomes),
         "stage2_result.reasons": at(stage2, "reasons"),
+        REJECTED_LINE: validation_failures(outcomes) or None,
     }
     summary = {
         "summary": at(analysis, "summary"),
@@ -759,7 +780,7 @@ def run(args: argparse.Namespace) -> int:
         outcomes = [
             record
             for log in worker_logs
-            for name in ("call_job_outcome", "call_stage2_outcome")
+            for name in (*OUTCOME_LINES, REJECTED_LINE)
             for record in outcome_records(log, name)
         ]
         (out / "status.json").write_text(
