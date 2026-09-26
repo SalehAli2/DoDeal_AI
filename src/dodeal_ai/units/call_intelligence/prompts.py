@@ -35,13 +35,13 @@ from dodeal_ai.core.prompting import AssembledPrompt, build_prompt
 from dodeal_ai.units.call_intelligence.transcriber import Segment
 
 ROLES_TEMPLATE = "call_intelligence/roles_v3.txt"
-EXTRACT_TEMPLATE = "call_intelligence/extract_v3.txt"
+EXTRACT_TEMPLATE = "call_intelligence/extract_v4.txt"
 PROSE_TEMPLATE = "call_intelligence/prose_v1.txt"
 OBJECTIONS_TEMPLATE = "call_intelligence/objections_v2.txt"
 SCORE_TEMPLATE = "call_intelligence/score_v2.txt"
-ESCALATIONS_TEMPLATE = "call_intelligence/escalations_v2.txt"
+ESCALATIONS_TEMPLATE = "call_intelligence/escalations_v3.txt"
 COACHING_TEMPLATE = "call_intelligence/coaching_v2.txt"
-EXTRAS_TEMPLATE = "call_intelligence/extras_v5.txt"
+EXTRAS_TEMPLATE = "call_intelligence/extras_v6.txt"
 TRANSLATE_TEMPLATE = "call_intelligence/translate_v1.txt"
 WHATSAPP_TEMPLATE = "call_intelligence/whatsapp_v1.txt"
 REPROMPT_TAIL_TEMPLATE = "call_intelligence/reprompt_tail_v1.txt"
@@ -63,7 +63,11 @@ REPROMPT_TAILS: Mapping[str, str] = MappingProxyType(
 # 15-word, one-segment quote rule (unit_b_prompts_v6), then extras_v3 by
 # extras_v4 (the agent's dialect, unit_b_prompts_v8), then roles_v2 by roles_v3
 # (each side's language, unit_b_prompts_v9), then extras_v4 by extras_v5 (the
-# message in the client's language, unit_b_prompts_v10); never sent again.
+# message in the client's language, unit_b_prompts_v10), then extract_v3,
+# extras_v5 and escalations_v2 by extract_v4 (the next step's kind, time and
+# booking, the two property details, the loss reason), extras_v6 (a keyword
+# is a name of at most five words) and escalations_v3 (possible_broker),
+# unit_b_prompts_v12; never sent again.
 RETIRED_TEMPLATES: tuple[str, ...] = (
     "call_intelligence/extract_v1.txt",
     "call_intelligence/extras_v1.txt",
@@ -77,11 +81,14 @@ RETIRED_TEMPLATES: tuple[str, ...] = (
     "call_intelligence/extras_v3.txt",
     "call_intelligence/roles_v2.txt",
     "call_intelligence/extras_v4.txt",
+    "call_intelligence/extract_v3.txt",
+    "call_intelligence/extras_v5.txt",
+    "call_intelligence/escalations_v2.txt",
 )
 
 # The stamp stage 1 carries under versions.prompt. Move it with the digest
 # in the stamp test whenever one of UNIT_B_TEMPLATES changes.
-PROMPT_SET_VERSION = "unit_b_prompts_v11"
+PROMPT_SET_VERSION = "unit_b_prompts_v12"
 
 # Every template Unit B can send, in pass order, then the retired ones; the
 # worker preloads them all.

@@ -20,8 +20,8 @@ from dodeal_ai.units.call_intelligence.prompts import (
     UNIT_B_TEMPLATES,
 )
 
-PROMPT_SET = "unit_b_prompts_v11"
-PROMPT_SET_DIGEST = "11abb120aaf37bbc66d04967d4eabb8d0376b187414cc1bc7a98d96e03698a96"
+PROMPT_SET = "unit_b_prompts_v12"
+PROMPT_SET_DIGEST = "420c26c22f805239c616aa18207bc9a90bc8e08d0d3596cb094e303a5f27bedb"
 
 _HOW_TO_UPDATE = (
     "A Unit B prompt template changed. Bump PROMPT_SET_VERSION in "
@@ -125,6 +125,15 @@ TEMPLATE_DIGESTS = {
     ),
     "call_intelligence/extract_v1.txt": (
         "7ccf78ffa14164c08f5f21b90b73864354559cf9f0d99e1a7e8880ea30ae839a"
+    ),
+    "call_intelligence/extract_v4.txt": (
+        "3c1611686a42cd14329214712c98f8f7244639f0be2cf7d24f68a01d33b3ff2c"
+    ),
+    "call_intelligence/extras_v6.txt": (
+        "c0249a6b5143a2be7c59a3fc0b414da2fe0db221938b6a1b4b81ce06ab0c6e3d"
+    ),
+    "call_intelligence/escalations_v3.txt": (
+        "0b5381db2af967deeb0a419050ac53c0f5f1ead8114dd02a2867115d322ddbbd"
     ),
 }
 
