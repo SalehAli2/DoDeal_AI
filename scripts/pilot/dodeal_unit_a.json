@@ -1,0 +1,55 @@
+{
+  "weights": {
+    "what_happened": 25,
+    "client_said": 20,
+    "next_step_date": 25,
+    "deal_specifics": 20,
+    "clarity": 10
+  },
+  "band_boundaries": [["poor", 39], ["fair", 69], ["good", 84], ["excellent", 100]],
+  "short_note_codes": ["cb", "na", "wa"],
+  "short_note_phrases": [
+    "no answer",
+    "no reply",
+    "not interested",
+    "wrong number",
+    "لا يرد",
+    "مش مهتم"
+  ],
+  "short_note_fillers": [
+    "again",
+    "am",
+    "bkra",
+    "bokra",
+    "pm",
+    "tmrw",
+    "today",
+    "النهاردة",
+    "بكرة"
+  ],
+  "accept_threshold": 70,
+  "flag_threshold": 40,
+  "min_note_chars": 15,
+  "min_note_tokens": 3,
+  "max_note_chars": 2000,
+  "clarification_cap": 1,
+  "rate_limit_per_hour": 3,
+  "rate_limit_per_day": 10,
+  "rate_limit_window_seconds": 3600,
+  "attempt_ttl_seconds": 21600,
+  "idempotency_ttl_seconds": 86400,
+  "measure_evidence_floor": 10,
+  "rolling_window_days": 30,
+  "enforcement_mode": "strict",
+  "deal_specifics_applicable": true,
+  "blocking_enabled": true,
+  "blocking_stages": [
+    "PLACEHOLDER_qualified_stage",
+    "PLACEHOLDER_won_stage",
+    "PLACEHOLDER_lost_stage"
+  ],
+  "timezone": "Asia/Dubai",
+  "rep_numbers_enabled": true,
+  "pilot": true,
+  "model_route": "default"
+}
