@@ -181,6 +181,7 @@ from dodeal_ai.units.structured_intelligence.schemas import (
 from dodeal_ai.units.structured_intelligence.scoring import (
     SCORE_LABEL,
     compute_score,
+    for_lead,
     score_note,
 )
 from dodeal_ai.units.structured_intelligence.vague import VAGUE_LABEL, detect_vagueness
@@ -960,6 +961,7 @@ async def _judge_sent(
                 route=route,
                 stage_change=_stage_change(request, deps.config),
                 copied_previous=_copied_by_fingerprint(request),
+                deal_type=request.lead.deal_type,
             )
     except TimeoutError:
         raise _deadline_exceeded(scope, started) from None
@@ -1047,6 +1049,7 @@ async def _judge(
     route: Route,
     stage_change: bool = False,
     copied_previous: bool = False,
+    deal_type: str | None = None,
 ) -> Judgement:
     """Every step from the length gate down, for every entry point.
 
@@ -1059,14 +1062,15 @@ async def _judge(
     The history route (register item 127) withholds every prompt, reads and
     writes no db2 counter, and reserves under its own idempotency namespace.
     `stage_change` (register item 142) is the one boolean a CRM stage becomes;
-    it reaches the enforcement block and nothing else.
+    it reaches the enforcement block and nothing else. `deal_type` (Q13,
+    answered) only gates the deal-specific checks; the fetch route has none.
 
     `started` is the entry point's `time.monotonic()` reading, taken there and
     not here so that the fetch route's two backend calls are inside its
     `elapsed_ms`. It is a DURATION baseline and never a timestamp: nothing
     compares it to a clock, and it is not on any line.
     """
-    config = deps.config
+    config = for_lead(deps.config, deal_type)
     history = route == "history"
     operation = state.JUDGE_HISTORY if history else state.JUDGE_NOTE
     # Register item 34: the note's script, on its own text, on every judgement.

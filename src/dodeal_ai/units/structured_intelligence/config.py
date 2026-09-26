@@ -246,25 +246,11 @@ class TenantConfig:
     accept_threshold: int
     flag_threshold: int
 
-    # --- ASSUMPTION[Q13] ---------------------------------------------------
-    # The rubric was written for two business lines with different "deal
-    # specifics" (budget/bedrooms/area for sales; term/handover for leasing).
-    # No field on the lead is CONFIRMED to carry the business line -- `leadFor`
-    # and `enquiryType` both look plausible and neither is confirmed, and
-    # inventing a backend field is not allowed. So the component is switched
-    # OFF: business_line_field stays None, deal_specifics_applicable stays
-    # False, and deal_specifics is suppressed for every type -- its 20 points
-    # leave the denominator (100 -> 80).
-    #
-    # CORRECTION PATH when the backend confirms the field:
-    #   1. Set business_line_field to its confirmed name and flip
-    #      deal_specifics_applicable to True.
-    #   2. Add the per-business-line checklist the prompt needs to mark it.
-    #   3. Bump config_version.
-    #   4. NEVER rescore history. Old judgements carry the old config_version
-    #      and a denominator of 80; new ones carry 100. They are distinguishable
-    #      by the stamp, which is the whole reason the stamp exists.
-    business_line_field: str | None
+    # The deal switch (Q13, answered). deal_specifics counts only when this is
+    # on AND the note's lead block names its `deal_type`, the business line
+    # (scoring.for_lead); otherwise its 20 points leave the denominator
+    # (100 -> 80). Off by default: a tenant turns it on once its CRM sends the
+    # deal type. On with no deal type sent is 80, never a mark of 0.
     deal_specifics_applicable: bool
 
     min_note_chars: int
@@ -390,8 +376,7 @@ _DEFAULT_CONFIG = TenantConfig(
     ),
     accept_threshold=70,
     flag_threshold=40,
-    business_line_field=None,  # ASSUMPTION[Q13] -- see TenantConfig above
-    deal_specifics_applicable=False,  # ASSUMPTION[Q13]
+    deal_specifics_applicable=False,
     min_note_chars=15,
     min_note_tokens=3,
     max_note_chars=2000,  # provisional -- the real sample's longest note is 340
@@ -412,11 +397,10 @@ _DEFAULT_CONFIG = TenantConfig(
     timezone="Asia/Dubai",
     rep_numbers_enabled=False,
     model_route=DEFAULT_ROUTE,
-    # -4: register item 142 changed the enforcement_mode vocabulary, so a file
-    # saying "blocking" no longer parses. The rubric did not move and
-    # RUBRIC_VERSION did not either -- this stamp is what makes an old
-    # judgement, made under the old vocabulary, still identifiable.
-    config_version="tenant-cfg-default-4",
+    # -5: the deal switch now needs the lead's deal_type too (Q13 answered),
+    # so what a mark under the switch means changed. -4 was register item
+    # 142's enforcement_mode vocabulary. Old judgements keep their stamp.
+    config_version="tenant-cfg-default-5",
     policy_version=None,
 )
 
@@ -440,11 +424,11 @@ UNIT_A_SECTION = "unit_a"
 class TenantConfigFile(BaseModel):
     """A tenant's `unit_a` section: the numbers it may set, over the default.
 
-    The per-type rubric maps and `business_line_field` are not here: they
-    change what a component MEANS, not how it is weighted, and stay code.
-    `deal_specifics_applicable` IS here (register item 97): the Q13 switch a
-    tenant flips when its business line is known. `_check` still refuses a
-    rubric the switch leaves with no applicable weight.
+    The per-type rubric maps are not here: they change what a component
+    MEANS, not how it is weighted, and stay code. `deal_specifics_applicable`
+    IS here (register item 97): the deal switch a tenant turns on once its CRM
+    sends each lead's deal_type. `_check` still refuses a rubric the switch
+    leaves with no applicable weight.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -527,9 +511,9 @@ def _check(config: TenantConfig) -> None:
     if sum(config.weights.values()) != 100:
         raise ValueError("weights_sum")
     # Summing to 100 is not enough (register item 137). deal_specifics is
-    # suppressed for EVERY type while Q13 is open, so a rubric that puts all
-    # 100 on it leaves every judgement with a denominator of 0 -- accepted at
-    # startup, then a ValueError on every note. Refused here instead.
+    # suppressed for EVERY type while the deal switch is off, so a rubric that
+    # puts all 100 on it leaves every judgement with a denominator of 0 --
+    # accepted at startup, then a ValueError on every note. Refused here.
     if not any(
         weight
         for component, weight in config.weights.items()

@@ -515,7 +515,7 @@ def test_the_printed_period_is_local_dates_first_to_last() -> None:
 def test_the_zone_is_parsed_and_an_unknown_one_refused() -> None:
     """An IANA name is accepted; anything else fails with no value quoted."""
     assert CONFIG.timezone == "Asia/Dubai"
-    assert CONFIG.config_version == "tenant-cfg-default-4"
+    assert CONFIG.config_version == "tenant-cfg-default-5"
     london = parse_unit_a_section({"config_version": "v", "timezone": "Europe/London"})
     assert london.timezone == "Europe/London"
     unset = parse_unit_a_section({"config_version": "v", "timezone": None})

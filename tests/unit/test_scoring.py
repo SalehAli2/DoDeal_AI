@@ -56,10 +56,8 @@ NOTE_ID = 10
 NOTE_TEXT = "Called the client, discussed the New Cairo 3BR, following up Tuesday."
 
 CONFIG = get_tenant_config("tenant-a")
-# Q13 resolved: the only lever that turns deal_specifics back on.
-Q13_RESOLVED = dataclasses.replace(
-    CONFIG, business_line_field="leadFor", deal_specifics_applicable=True
-)
+# The deal switch on: the only lever that turns deal_specifics back on.
+Q13_RESOLVED = dataclasses.replace(CONFIG, deal_specifics_applicable=True)
 
 WH = ComponentName.WHAT_HAPPENED
 CS = ComponentName.CLIENT_SAID
@@ -106,8 +104,8 @@ def _only(note_type, config, *true_checks):
 
 
 def test_q13_suppresses_deal_specifics_for_every_type():
-    # ASSUMPTION[Q13]: no lead field is confirmed to carry the business line, so
-    # there is no checklist to mark deal_specifics against.
+    # The deal switch is off by default, so there is no business line to mark
+    # deal_specifics against.
     for note_type in NoteType:
         if note_type is NoteType.SYSTEM_EVENT:
             continue

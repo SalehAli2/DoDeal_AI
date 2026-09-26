@@ -45,6 +45,7 @@ that disappeared with the marks.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Callable, Mapping
 
 from dodeal_ai.core.config import Settings
@@ -89,18 +90,13 @@ def applicable_components(
                    no_contact note has no what_happened, no client_said and no
                    deal_specifics -- the client was never reached.
 
-      ASSUMPTION[Q13]  no field on the lead is CONFIRMED to carry the business
-                   line, so there is no per-line checklist to mark
-                   `deal_specifics` against, and marking it anyway would be
-                   marking a guess. `deal_specifics_applicable` is False and the
-                   component leaves the denominator for EVERY type (100 -> 80).
-
-                   CORRECTION PATH when the backend names the field: set
-                   `business_line_field`, flip `deal_specifics_applicable` to
-                   True, add the checklist the prompt needs, bump
-                   `config_version` -- and NEVER rescore history. Old judgements
-                   carry the old stamp and a denominator of 80; new ones carry
-                   100. That they are distinguishable is the point of the stamp.
+      BY DEAL      `deal_specifics_applicable` is False, and the component
+                   leaves the denominator for EVERY type (100 -> 80). The
+                   pipeline turns it off per note, through `for_lead`, when the
+                   lead block names no deal_type: with no business line there
+                   is nothing to mark the deal against, and marking it anyway
+                   would be marking a guess. History is never rescored: old
+                   judgements keep their config_version and their 80.
 
     Iterating `ComponentName` rather than the config's mapping is deliberate: the
     enum's declaration order IS the response order, so the caller can rely on
@@ -118,6 +114,15 @@ def applicable_components(
             or config.deal_specifics_applicable
         )
     )
+
+
+def for_lead(config: TenantConfig, deal_type: str | None) -> TenantConfig:
+    """The rubric one note is scored under: the tenant's, with the deal switch
+    off unless the lead block names a deal_type (Q13, answered). Blank is
+    absent. Only the switch can move, so config_version stays the tenant's."""
+    if config.deal_specifics_applicable and not (deal_type or "").strip():
+        return dataclasses.replace(config, deal_specifics_applicable=False)
+    return config
 
 
 def applicable_checks(
@@ -206,7 +211,7 @@ def compute_score(
 
     The arithmetic, in full:
 
-        applicable  = components not suppressed by type and not suppressed by Q13
+        applicable  = components not suppressed by type or by the deal switch
         mark        = marks_by_true_count[component][how many of its checks are true]
         denominator = sum of the applicable weights   (80, or 35 for no_contact)
         raw         = sum of the applicable marks

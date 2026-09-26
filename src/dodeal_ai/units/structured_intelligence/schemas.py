@@ -312,15 +312,19 @@ MAX_NOTE_TEXT_CHARS = 4000
 
 
 class LeadContext(BaseModel):
-    """The four lead fields the classifier's context section reads.
+    """The four lead fields the classifier's context section reads, and the
+    lead's deal type.
 
-    Exactly the four, and nothing else. The fetch route gets a whole `Lead`
-    from the backend and uses these four; the direct route is sent these four
-    and nothing more, so the CRM cannot widen what reaches a prompt by adding
-    fields to its payload. All four are optional because every lead field
+    Exactly those, and nothing else. The fetch route gets a whole `Lead` from
+    the backend and uses the four; the direct route is sent the four and
+    nothing more reaches a prompt, so the CRM cannot widen what a model reads
+    by adding fields to its payload. All are optional because every lead field
     except `id` is nullable in the backend contract (schemas/lead.py).
 
-    extra="forbid": a fifth field is a 422, not a silently ignored one.
+    `deal_type` is the lead's business line (Q13, answered). It reaches no
+    prompt: it is one gate on the deal-specific checks (scoring.for_lead).
+
+    extra="forbid": any other field is a 422, not a silently ignored one.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -329,6 +333,9 @@ class LeadContext(BaseModel):
     enquiryType: str | None = None
     project: str | None = None
     status: str | None = None
+    # The business line, as the CRM names it. Bounded like stage_change_to: a
+    # label, not a paragraph. Blank is read as absent (scoring.for_lead).
+    deal_type: str | None = Field(default=None, max_length=100)
 
 
 class _SentNote(BaseModel):

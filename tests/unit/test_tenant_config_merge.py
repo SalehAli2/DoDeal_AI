@@ -29,7 +29,7 @@ LATER = datetime(2026, 9, 23, 10, 0, tzinfo=UTC)
 CFG = "tenant-cfg-tenant-a-20260923-"
 POLICY = "tenant-policy-tenant-a-20260923-"
 OTHER = "unit_b"
-DEFAULT_A = "tenant-cfg-default-4"
+DEFAULT_A = "tenant-cfg-default-5"
 
 
 def _parse_other(raw: object) -> dict:

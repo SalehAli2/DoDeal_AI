@@ -305,7 +305,7 @@ disagrees.
 | **`prompt_withheld`** | `null` when a prompt was sent **and** when the decision was `accept_silent` — there was nothing to withhold. Otherwise one of `resubmission`, `attempt_cap`, `rate_limited`, `nothing_to_ask`, in that fixed precedence. It names why a prompt that *would* have been sent was not. |
 | **Rate limit never 429** | Hitting the clarification rate limit on this route returns **200** with `prompt_withheld: "rate_limited"`, never a 429. The judgement was still produced and is still worth returning; only the question is withheld. A 429 would tell the CRM the request failed when it did not. |
 | **Thin evidence** | `min_note_chars 15`, `min_note_tokens 3`, both applied to the **stripped** text, and **both** must pass — "ok" fails on length, a long run of one repeated word fails on tokens. Whitespace-split, deliberately crude, and identical for Arabic, English and mixed text. Checked **before** any reservation and before any model call, so a thin note costs nothing. |
-| **Denominators** | 100 with everything applicable · **80** under Q13 (deal_specifics suppressed) · **60** for no_contact under Q13 · 75 for no_contact with Q13 resolved. **The 75 is not reachable** from §2.2's own weights: no_contact suppresses `client_said` *and* `deal_specifics` by type, so lifting Q13 leaves 25+25+10 = 60. Recorded as a disagreement between the campaign brief and the arithmetic; the tree is followed. See CAMPAIGN_REPORT.md, Phase F. |
+| **Denominators** | 100 with everything applicable (deal switch on and a `deal_type` sent) · **80** otherwise (deal_specifics suppressed) · **60** for no_contact · 75 for no_contact with the deal switch on. **The 75 is not reachable** from §2.2's own weights: no_contact suppresses `client_said` *and* `deal_specifics` by type, so turning the deal switch on leaves 25+25+10 = 60. Recorded as a disagreement between the campaign brief and the arithmetic; the tree is followed. See CAMPAIGN_REPORT.md, Phase F. |
 | **Band is derived** | Never accepted from any input and never returned by the model. A `band` or `total` field in a model answer is malformed output, rejected by `extra="forbid"`, and earns the single reprompt. |
 | **Relative times count as dates** | A time anchored to when the note was written — "tomorrow", "after 2 hrs", "next Tuesday", "end of the week" — satisfies `next_step_with_date`. The corpus writes `cb tmrw` far more often than a calendar date. |
 | **An explicit closure is a next step** | A stated outcome with a reason — closed, bought elsewhere, withdrew, dropped — takes full marks for `next_step_date`, because nothing follows and the note says so. |
@@ -739,20 +739,13 @@ the whole of Project 1 rests on.
   determined, fall back to the three universal components and **suppress** the
   specifics weight rather than scoring zero.
 - Cheap now, expensive after launch — rescoring history is not something we do.
-- **Marker: `ASSUMPTION[Q13]`.** Grep it:
-  `src/dodeal_ai/units/structured_intelligence/config.py` (the two fields that
-  carry the decision), `README.md`'s provisional-answers table, and here. It is
-  also cited in `scoring.py` and in three test modules, which is deliberate —
-  the arithmetic changes when it resolves. **Assumed:** no lead field is
-  confirmed to carry the business line, so `business_line_field = None` and
-  `deal_specifics_applicable = False`; `deal_specifics` is suppressed for every
-  type and the denominator is 80 rather than 100. Suppressed is a **state**, not
-  a zero — the weight leaves the denominator instead of dragging the total down.
-  **If wrong / when answered:** set both fields in `config.py` and nothing else
-  moves — `applicable_components` reads them, the denominator becomes 100, and
-  `tests/unit/test_scoring.py::Q13_RESOLVED` already pins the resolved
-  arithmetic. Past judgements are **not** recomputed; they carry
-  `config_version` so a reader can see which rubric produced them.
+- **Answered (Q13).** The note request's lead block carries an optional
+  `deal_type`, the business line. `deal_specifics` counts only when the
+  tenant's deal switch (`unit_a.deal_specifics_applicable`) is on **and**
+  `deal_type` is present (`scoring.for_lead`); otherwise it is suppressed and
+  the denominator is 80. `deal_type` reaches no prompt. The default
+  `config_version` moved to `tenant-cfg-default-5`; past judgements are **not**
+  recomputed.
 
 ### 5.3 Evaluation data
 - **300-500 real notes**, target 1,000: random not hand-picked, across at least

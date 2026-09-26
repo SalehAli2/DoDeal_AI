@@ -553,7 +553,7 @@ def test_a_judgement_carries_all_four_versions(client):
         # A classifier RAN, so the stamp is what it reported -- not the
         # configured pin, and not "".
         "model_version": FAKE_MODEL,
-        "config_version": "tenant-cfg-default-4",
+        "config_version": "tenant-cfg-default-5",
         # Register item 97: no runtime PUT is in force.
         "policy_version": None,
     }
@@ -656,7 +656,7 @@ def test_a_judgement_is_logged_without_note_text(client, json_log):
     assert GOOD_NOTE not in json_log.getvalue()
     line = next(x for x in _lines(json_log) if x["message"] == "judgement_completed")
     assert line["band"] == "fair"  # 55 of 80 -> 69
-    assert line["denominator"] == 80  # ASSUMPTION[Q13]: deal_specifics is out
+    assert line["denominator"] == 80  # the deal switch is off: deal_specifics out
     assert line["action"] == "accept_flag_prompt"
     assert line["prompt_sent"] is True
     assert line["prompt_withheld"] is None
@@ -696,7 +696,7 @@ def test_meta_versions_returns_the_four_strings(client):
         "rubric_version": "note_rubric_v2",
         "prompt_version": "unit_a_prompts_v3",
         "model_version": "",  # the configured pin; no model is pinned yet
-        "config_version": "tenant-cfg-default-4",
+        "config_version": "tenant-cfg-default-5",
         "policy_version": None,  # register item 97: no runtime PUT in force
     }
 
@@ -721,7 +721,7 @@ def test_meta_versions_takes_a_service_token_through_the_same_dependency(
     r = client.get(VERSIONS, headers=service)
 
     assert r.status_code == 200
-    assert r.json()["config_version"] == "tenant-cfg-default-4"
+    assert r.json()["config_version"] == "tenant-cfg-default-5"
     assert set(cost.store) == {"cost:tenant:tenant-a"}
 
 
@@ -996,7 +996,7 @@ def test_scenario_2_a_fair_vague_note_is_flagged_and_the_prompt_is_sent(
 
     assert body["score"]["total"] == 69
     assert body["score"]["band"] == "fair"
-    assert body["score"]["denominator"] == 80  # ASSUMPTION[Q13]
+    assert body["score"]["denominator"] == 80  # the deal switch is off
     assert body["decision"] == {
         "action": "accept_flag_prompt",
         "prompt_sent": True,

@@ -24,8 +24,8 @@ report. See `test_the_seam_marker_is_gone` below.
 WHY "AT LEAST ONE UNDER src/", NOT "EXACTLY THREE FILES". The campaign brief
 asked for exactly three files per marker. That is not reachable and never was:
 `ASSUMPTION[Q6]` is load-bearing in both `classify.py` and `schemas.py`,
-`ASSUMPTION[Q7]` in both `pipeline.py` and `state.py`, and `ASSUMPTION[Q13]` in
-both `config.py` and `scoring.py` -- and several are cited in the tests that pin
+and `ASSUMPTION[Q7]` in both `pipeline.py` and `state.py` -- and several are
+cited in the tests that pin
 the behaviour they describe, which is exactly where a reader would want them.
 Forcing the count to three would mean deleting markers from code that genuinely
 depends on them, to satisfy a number. The three-way presence check is the
@@ -50,7 +50,6 @@ ASSUMPTION_MARKERS = [
     "ASSUMPTION[Q6]",
     "ASSUMPTION[Q7]",
     "ASSUMPTION[Q8]",
-    "ASSUMPTION[Q13]",
     # Register item 143: the two CRM reads the brief and the measures use.
     "ASSUMPTION[Q23]",
     # D-61: a call's recorded_at is when it started, so a segment was said at
@@ -62,6 +61,9 @@ ASSUMPTION_MARKERS = [
 # because the assertion below is that NO tracked file carries it -- and a file
 # that wrote it out whole would be the first one to fail its own test.
 SEAM_MARKER = "SEAM" + "[STEP3]"
+# RETIRED: Q13 is answered. The note request's lead block carries deal_type, the
+# business line (scoring.for_lead). Assembled for the same reason as above.
+Q13_MARKER = "ASSUMPTION" + "[Q13]"
 
 # CAMPAIGN_REPORT.md is excluded because it QUOTES every marker while discussing
 # the work, so counting it would make the report's own prose satisfy the
@@ -126,6 +128,16 @@ def test_the_seam_marker_is_gone():
         f"Piece N.2 (core/cost/limiter.py::token_preflight). A file still "
         f"carrying it is describing a stub that no longer exists: "
         f"{sorted(found)}. Delete the marker and say what the code does now."
+    )
+
+
+def test_the_q13_marker_is_gone():
+    """Q13 is answered, so its marker must appear in no tracked file."""
+    found = _files_containing(Q13_MARKER)
+
+    assert not found, (
+        f"{Q13_MARKER} is retired -- the lead block's deal_type is the business "
+        f"line. A file still carrying it: {sorted(found)}."
     )
 
 

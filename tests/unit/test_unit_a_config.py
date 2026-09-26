@@ -52,10 +52,10 @@ def test_containers_on_the_shared_default_are_immutable(config: TenantConfig) ->
 
 
 def test_config_version_is_stamped(config: TenantConfig) -> None:
-    # -4 at register item 142: EnforcementMode's vocabulary changed, so a file
-    # saying "blocking" no longer parses. RUBRIC_VERSION did not move with it --
-    # what a judgement CARRIES changed, not how it is scored.
-    assert config.config_version == "tenant-cfg-default-4"
+    # -5 at Q13's answer: the deal switch now needs the lead's deal_type too,
+    # so what a mark under the switch means changed. RUBRIC_VERSION did not
+    # move: the checks and the weights are the same.
+    assert config.config_version == "tenant-cfg-default-5"
 
 
 # --- weights ---------------------------------------------------------------
@@ -173,14 +173,12 @@ def test_system_event_has_no_missing_entry(config: TenantConfig) -> None:
     assert NoteType.SYSTEM_EVENT not in config.allowed_missing_by_type
 
 
-# --- ASSUMPTION[Q13] -------------------------------------------------------
+# --- the deal switch (Q13, answered) ------------------------------------------
 
 
-def test_deal_specifics_is_switched_off_pending_q13(config: TenantConfig) -> None:
-    # No lead field is CONFIRMED to carry the business line, and inventing one
-    # is not allowed -- so the component leaves the denominator (100 -> 80)
-    # rather than being marked against a checklist we cannot choose.
-    assert config.business_line_field is None
+def test_deal_specifics_is_switched_off_by_default(config: TenantConfig) -> None:
+    # Off until a tenant turns it on: the component leaves the denominator
+    # (100 -> 80) rather than being marked with no business line to mark by.
     assert config.deal_specifics_applicable is False
 
 
@@ -314,7 +312,6 @@ def test_the_same_rubric_passes_the_switch_and_fails_on_no_contact(
             _broken(
                 config,
                 weights=_ALL_ON_DEAL_SPECIFICS,
-                business_line_field="leadFor",
                 deal_specifics_applicable=True,
             )
         )
