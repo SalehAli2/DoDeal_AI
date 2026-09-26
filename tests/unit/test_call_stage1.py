@@ -5,6 +5,7 @@ is kept re-pays nothing, and a model outage still delivers the transcript."""
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import logging
@@ -89,6 +90,7 @@ EXTRACTION: dict[str, Any] = {
         "due": "Tuesday",
         "quote": "Shall we meet on Tuesday?",
         "segment": "s4",
+        "kind": "office_visit",
     },
     "ending": "moved_forward",
     "details": {
@@ -227,6 +229,13 @@ async def test_a_call_is_analysed_and_delivered_with_its_stage1_payload(
         {**EXTRACTION["agreed"][0], "unverified": False}
     ]
     assert analysis_["elements"]["next_step"]["segment"] == "s4"
+    step = analysis_["elements"]["next_step"]
+    assert (step["kind"], step["when"], step["when_state"], step["booked"]) == (
+        "office_visit",
+        None,
+        "uncertain",
+        False,
+    )
     assert analysis_["details"]["budget"]["state"] == "stated"
     assert analysis_["details"]["area"] == {**_detail(), "evidence_failed": False}
     assert analysis_["mood"]["uncertain"] is False
@@ -627,3 +636,27 @@ async def test_the_outcome_line_carries_each_passes_tokens(
     assert outcome.pass_tokens == {"extract": spent, "prose": spent}
     assert isinstance(outcome.analyse_ms, int) and outcome.analysis_reason is None
     assert "1,200,000" not in json.dumps(outcome.__dict__, default=str)
+
+
+async def test_the_extract_pass_reads_the_calls_time_in_the_tenants_zone(
+    ctx: dict,
+) -> None:
+    """The push's recorded_at (08:00 UTC) and the tenant's zone reach the data
+    half, and a next step's time is delivered in that zone."""
+    booked = copy.deepcopy(EXTRACTION)
+    booked["next_step"].update(when="2026-09-24T14:00:00Z", booked=True)
+    ctx["llm"] = FakeLLM(json_response(booked), json_response(PROSE))
+    await _push(timezone="Asia/Riyadh")
+
+    await process_call(ctx, "tenant-a", JOB)
+
+    extract_data = ctx["llm"].calls[0].prompt.variable
+    assert "RECORDED AT: 2026-09-23T11:00:00+03:00\nTIMEZONE: Asia/Riyadh" in (
+        extract_data
+    )
+    step = (await _result())["analysis"]["elements"]["next_step"]
+    assert (step["when"], step["when_state"], step["booked"]) == (
+        "2026-09-24T17:00:00+03:00",
+        "stated",
+        True,
+    )

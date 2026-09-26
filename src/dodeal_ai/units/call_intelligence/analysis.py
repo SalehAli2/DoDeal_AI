@@ -27,6 +27,7 @@ The prose pass is not started once the extraction has failed.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
 from dodeal_ai.core.config import Settings
 from dodeal_ai.core.context import TenantScope
@@ -49,6 +50,7 @@ from dodeal_ai.units.call_intelligence.paid import (
     run_pass,
 )
 from dodeal_ai.units.call_intelligence.passes import (
+    CallClock,
     CallText,
     Extraction,
     Prose,
@@ -92,11 +94,11 @@ class Wave1:
 
 
 def _analysis(
-    call: CallText, extraction: Extraction, prose: Prose
+    call: CallText, clock: CallClock, extraction: Extraction, prose: Prose
 ) -> dict[str, object]:
     """The analysis block: the passes' answers with code's word on evidence and
     certainty (passes.settled)."""
-    kept = settled(extraction, call)
+    kept = settled(extraction, call, clock)
     return {
         "language": call.language,
         "uncertain": call.uncertain,
@@ -116,6 +118,18 @@ def _analysis(
         "mood": kept["mood"],
         "crm_note": prose.crm_note,
     }
+
+
+def call_clock(job: Job, config: CallsConfig) -> CallClock:
+    """The call's recorded_at, as the push gave it, and the tenant's zone; the
+    time unknown when the job carries none that reads as one."""
+    raw = job.metadata.get("recorded_at")
+    try:
+        recorded = datetime.fromisoformat(raw) if isinstance(raw, str) else None
+    except ValueError:
+        recorded = None
+    aware = recorded is not None and recorded.tzinfo is not None
+    return CallClock(recorded if aware else None, config.timezone)
 
 
 def _found_in_code(
@@ -183,6 +197,7 @@ async def wave1(
     languages = languages_block(transcript, heard)
     call = CallText.of(transcript, country_code=config.phone_country_code, spoken=heard)
     code, digest = _found_in_code(transcript, config, job)
+    clock = call_clock(job, config)
     versions: dict[str, object] = {
         "prompt": PROMPT_SET_VERSION,
         "signals": SIGNALS_VERSION,
@@ -198,9 +213,11 @@ async def wave1(
             run,
             EXTRACT,
             Extraction,
-            lambda metered: extract(metered, call, scope=scope, settings=settings),
+            lambda metered: extract(
+                metered, call, scope=scope, settings=settings, clock=clock
+            ),
         )
-        doubted = settled(extraction, call)
+        doubted = settled(extraction, call, clock)
         prose, stamps[PROSE] = await run_pass(
             run,
             PROSE,
@@ -213,7 +230,7 @@ async def wave1(
         _stamp(versions, stamps)
         return Wave1(None, str(failed), versions, code, transcript, roles, languages)
     _stamp(versions, stamps)
-    analysis = _analysis(call, extraction, prose)
+    analysis = _analysis(call, clock, extraction, prose)
     return Wave1(analysis, None, versions, code, transcript, roles, languages)
 
 

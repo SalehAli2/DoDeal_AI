@@ -17,6 +17,7 @@ from __future__ import annotations
 import re
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -59,6 +60,10 @@ _MAX_RESULT_TTL_SECONDS = 259_200
 # The largest recording fetched, in bytes: 200 MiB. A tenant may lower it and
 # never raise it, so a tenant file cannot size our disk.
 _MAX_AUDIO_BYTES = 209_715_200
+
+# The time zone a call's next step is resolved in when the tenant sets none:
+# the UAE's, where the agencies are.
+DEFAULT_TIMEZONE = "Asia/Dubai"
 
 # One DNS name, lower case, no scheme, port, path or wildcard.
 _LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
@@ -122,6 +127,10 @@ class CallsConfig(BaseModel):
     # Arabic dialects and English, the ones tested. One listed untested judges
     # agents on a pass nobody checked; one left off leaves its calls unscored.
     coaching_languages: frozenset[CoachedLanguage] = DEFAULT_COACHING_LANGUAGES
+    # The tenant's IANA time zone, which a next step said on a call ("tomorrow
+    # at five") is resolved in (passes.py). Asia/Dubai: the agencies' market. A
+    # wrong one shifts every booked time by the offset; an unknown one is refused.
+    timezone: str = DEFAULT_TIMEZONE
 
     # The switches, all off: calls_enabled admits jobs at all (403 otherwise);
     # the other five name later passes and are parsed and stored only. A switch
@@ -185,6 +194,16 @@ class CallsConfig(BaseModel):
         """An STT profile this deployment configures; never the name."""
         if value not in stt_profile_names(get_settings()):
             raise ValueError("stt_profile")
+        return value
+
+    @field_validator("timezone")
+    @classmethod
+    def _known_timezone(cls, value: str) -> str:
+        """A zone the tz database knows; fixed message, never the name."""
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError):
+            raise ValueError("timezone") from None
         return value
 
     @field_validator("priority_statuses", "alarm_phrases")

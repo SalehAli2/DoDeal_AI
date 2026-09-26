@@ -124,6 +124,7 @@ async def test_the_extract_pass_stores_the_segment_the_quote_is_in() -> None:
             "due": None,
             "quote": "نرتب لك زيارة",
             "segment": "s13",
+            "kind": "viewing",
         },
         mood={"value": "neutral", "quote": None, "segment": None},
     )

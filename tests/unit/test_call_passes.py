@@ -94,6 +94,7 @@ def _extraction(**details: dict[str, Any]) -> dict[str, Any]:
             "due": "Tuesday at four",
             "quote": "Shall we book the viewing on Tuesday at four?",
             "segment": "s3",
+            "kind": "viewing",
         },
         "ending": "moved_forward",
         "details": {name: _detail() for name in passes.DETAIL_NAMES},
@@ -580,7 +581,10 @@ async def test_the_extract_pass_names_its_profile_ceiling_and_the_masked_copy(
     assert "call me on [PHONE]" in sent.prompt.variable
     assert "123 4567" not in sent.prompt.text
     assert "1,200,000 AED" in sent.prompt.variable
-    assert sent.prompt.variable.endswith("LANGUAGE: en\n----- END CALLER DATA -----")
+    assert sent.prompt.variable.endswith(
+        "LANGUAGE: en\n\nRECORDED AT: unknown\nTIMEZONE: UTC\n"
+        "----- END CALLER DATA -----"
+    )
     assert redis_fakes.cost.store["tokens:calls:tenant:tenant-a"] == 120
 
 
