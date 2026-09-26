@@ -15,7 +15,9 @@ tenant, pushes the call as the CRM would, follows the job, prints a readable
 report and saves everything to --out. Demo settings reach the children
 through their environment only; .env is never written. Refuses production,
 any path inside this repository, and a start while other workers already
-consume the call queues (they would take the job with their own settings). The recording goes to the configured
+consume the call queues (they would take the job with their own settings);
+at its stop it deletes the arq health-check keys its own workers wrote, so
+the next run is not refused, and never a key another worker wrote. The recording goes to the configured
 speech-to-text provider: use only calls the audio-governance answer allows.
 """
 
@@ -64,6 +66,15 @@ EXIT_DONE, EXIT_FAILED, EXIT_TIMEOUT, EXIT_INTERRUPTED = 0, 1, 2, 130
 
 # Every call queue a running worker could take this run's jobs from.
 CALL_QUEUES = (PRIORITY_QUEUE, NORMAL_QUEUE, OVERNIGHT_QUEUE, STAGE2_QUEUE)
+
+# The workers this script starts: their log name, the command-line queue name
+# and the arq queue each consumes -- the only health-check keys it may delete.
+OWN_WORKERS = (
+    ("worker-normal", "normal", NORMAL_QUEUE),
+    ("worker-stage2", "stage2", STAGE2_QUEUE),
+)
+# How long to wait for each started worker's first health-check write.
+CLAIM_SECONDS = 30.0
 
 # The worker log lines the report reads: each run's outcome, and every model
 # answer refused (label, count and error types only; never the answer).
@@ -144,9 +155,52 @@ def busy_queues(client: Any) -> list[str]:
     """The call queues another worker consumes: those whose arq health-check
     key exists. arq deletes it on a clean stop; a killed worker's expires
     within its health-check interval plus a second (3601 s by default)."""
-    return [
-        queue for queue in CALL_QUEUES if client.exists(queue + health_check_key_suffix)
-    ]
+    return [queue for queue in CALL_QUEUES if client.exists(health_key(queue))]
+
+
+def claim_health_keys(
+    client: Any, queues: list[str], seconds: float
+) -> dict[str, bytes]:
+    """The health-check value each started worker wrote first, by queue. The
+    keys were absent at the start (refuse_other_workers), so the first value
+    seen is taken as the started worker's; a key that never appears is not
+    claimed, and so never deleted."""
+    claimed: dict[str, bytes] = {}
+    end = time.monotonic() + seconds
+    while True:
+        for queue in queues:
+            value = None if queue in claimed else client.get(health_key(queue))
+            if value is not None:
+                claimed[queue] = value
+        if len(claimed) == len(queues) or time.monotonic() >= end:
+            return claimed
+        time.sleep(0.5)
+
+
+def release_health_keys(client: Any, claimed: dict[str, bytes]) -> list[str]:
+    """After our workers stopped: delete each claimed key that still holds the
+    value our worker wrote, checked and deleted in one watched transaction. A
+    key another worker has written since, or one already gone, is left. The
+    queues whose keys were deleted."""
+    released = []
+    for queue, value in claimed.items():
+        with client.pipeline() as pipe:
+            try:
+                pipe.watch(health_key(queue))
+                if pipe.get(health_key(queue)) != value:
+                    continue
+                pipe.multi()
+                pipe.delete(health_key(queue))
+                pipe.execute()
+            except redis.WatchError:
+                continue
+        released.append(queue)
+    return released
+
+
+def health_key(queue: str) -> str:
+    """arq's health-check key for a queue."""
+    return queue + health_check_key_suffix
 
 
 def refuse_other_workers(client: Any) -> None:
@@ -673,6 +727,14 @@ def run(args: argparse.Namespace) -> int:
     api = f"http://127.0.0.1:{api_port}"
     python = sys.executable
     children = Children(out / "logs", env)
+    # The started workers by log name and queue, and the health-check values
+    # they wrote first: what the stop may delete, and nothing else.
+    started = [
+        (name, arg, arq_queue)
+        for name, arg, arq_queue in OWN_WORKERS
+        if not (args.no_stage2 and arq_queue == STAGE2_QUEUE)
+    ]
+    claimed: dict[str, bytes] = {}
 
     def token() -> str:
         now = int(time.time())
@@ -703,16 +765,9 @@ def run(args: argparse.Namespace) -> int:
             ],
         )
         worker_logs = [
-            children.start(
-                "worker-normal", [python, "-m", "dodeal_ai.workers.calls", "normal"]
-            )
+            children.start(name, [python, "-m", "dodeal_ai.workers.calls", arg])
+            for name, arg, _ in started
         ]
-        if not args.no_stage2:
-            worker_logs.append(
-                children.start(
-                    "worker-stage2", [python, "-m", "dodeal_ai.workers.calls", "stage2"]
-                )
-            )
         demo_log = children.start(
             "demo",
             [
@@ -738,6 +793,9 @@ def run(args: argparse.Namespace) -> int:
         time.sleep(3)
         if children.dead():
             raise fail(f"child exited at start: {children.dead()}; see {out / 'logs'}")
+        claimed = claim_health_keys(
+            queue, [arq_queue for _, _, arq_queue in started], CLAIM_SECONDS
+        )
 
         audio_url = served_audio_url(demo_log, 20)
         if audio_url is None:
@@ -842,7 +900,29 @@ def run(args: argparse.Namespace) -> int:
         print("interrupted; stopping")
         return EXIT_INTERRUPTED
     finally:
+        died = set(children.dead())
         children.stop()
+        stop_owned(queue, claimed, started, died)
+
+
+def stop_owned(
+    client: Any,
+    claimed: dict[str, bytes],
+    started: list[tuple[str, str, str]],
+    died: set[str],
+) -> None:
+    """Release the health-check keys of the workers this run started and
+    stopped itself; never one whose worker exited on its own (its key may not
+    be its own), never another worker's. Says which, or why not."""
+    ours = {arq_queue for name, _, arq_queue in started if name not in died}
+    try:
+        released = release_health_keys(
+            client, {q: v for q, v in claimed.items() if q in ours}
+        )
+    except redis.RedisError:
+        print("health-check keys not released: the queue Redis did not answer")
+        return
+    print(f"health-check keys released: {', '.join(released) or 'none'}")
 
 
 def main(argv: list[str] | None = None) -> int:

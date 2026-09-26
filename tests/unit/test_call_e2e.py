@@ -11,6 +11,7 @@ from pathlib import Path
 
 import fakeredis
 import pytest
+import redis
 
 from scripts import call_e2e
 
@@ -34,6 +35,74 @@ def test_a_worker_on_a_call_queue_is_refused_and_named() -> None:
         "arq:calls:stage2 (arq health-check keys present). Stop them first; "
         "a killed worker's key expires within an hour."
     )
+
+
+NORMAL = "arq:calls:normal"
+STAGE2 = "arq:calls:stage2"
+OURS = [("worker-normal", "normal", NORMAL), ("worker-stage2", "stage2", STAGE2)]
+
+
+def _run_once(client, *, died: frozenset[str] = frozenset()) -> None:
+    """One run's life for the keys: refused or not at the start, its workers
+    write their keys, the values are claimed, and the stop releases them."""
+    call_e2e.refuse_other_workers(client)
+    client.set(f"{NORMAL}:health-check", "Sep-26 10:00:00 j_complete=0 queued=0")
+    client.set(f"{STAGE2}:health-check", "Sep-26 10:00:01 j_complete=0 queued=0")
+    claimed = call_e2e.claim_health_keys(client, [NORMAL, STAGE2], 0)
+    call_e2e.stop_owned(client, claimed, OURS, set(died))
+
+
+def test_two_runs_back_to_back_both_start() -> None:
+    """The guard: the first run's workers' keys are released at its stop, so
+    the second run is not refused."""
+    client = fakeredis.FakeRedis()
+    _run_once(client)
+    assert call_e2e.busy_queues(client) == []
+    _run_once(client)
+    assert call_e2e.busy_queues(client) == []
+
+
+def test_a_key_another_worker_wrote_since_is_never_deleted() -> None:
+    """The guard's other side: a worker this run did not start overwrote the
+    key; the stop leaves it, and the next run is refused as before."""
+    client = fakeredis.FakeRedis()
+    client.set(f"{NORMAL}:health-check", "Sep-26 10:00:00 j_complete=0 queued=0")
+    claimed = call_e2e.claim_health_keys(client, [NORMAL], 0)
+    client.set(f"{NORMAL}:health-check", "Sep-26 10:00:07 j_complete=5 queued=2")
+
+    assert call_e2e.release_health_keys(client, claimed) == []
+    assert client.get(f"{NORMAL}:health-check") == (
+        b"Sep-26 10:00:07 j_complete=5 queued=2"
+    )
+    with pytest.raises(SystemExit):
+        call_e2e.refuse_other_workers(client)
+
+
+def test_a_worker_that_exited_on_its_own_keeps_its_key() -> None:
+    """Its key may be another worker's: only the workers the run stopped
+    itself have their keys released."""
+    client = fakeredis.FakeRedis()
+    _run_once(client, died=frozenset({"worker-stage2"}))
+    assert call_e2e.busy_queues(client) == [STAGE2]
+
+
+def test_a_key_that_never_appeared_is_not_claimed(capsys) -> None:
+    client = fakeredis.FakeRedis()
+    client.set(f"{NORMAL}:health-check", "Sep-26 10:00:00 j_complete=0 queued=0")
+    claimed = call_e2e.claim_health_keys(client, [NORMAL, STAGE2], 0)
+    assert list(claimed) == [NORMAL]
+    call_e2e.stop_owned(client, claimed, OURS, set())
+    assert capsys.readouterr().out == ("health-check keys released: arq:calls:normal\n")
+    assert call_e2e.release_health_keys(client, claimed) == []
+
+
+def test_a_queue_store_down_at_the_stop_is_said_not_raised(capsys) -> None:
+    class _Down:
+        def pipeline(self):
+            raise redis.ConnectionError("down")
+
+    call_e2e.stop_owned(_Down(), {NORMAL: b"x"}, OURS, set())
+    assert "not released: the queue Redis did not answer" in capsys.readouterr().out
 
 
 def test_every_call_queue_is_watched() -> None:
