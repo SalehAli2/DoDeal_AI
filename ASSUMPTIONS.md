@@ -667,6 +667,19 @@ Ordered by what they release. Items 4.1–4.3 are the critical path.
   `brief_store_unavailable`, so a wrong answer here is a missing brief and
   never a wrong figure.
 
+### 4.10 Is a call's `recorded_at` its start? (Q36)
+- **Assumed (D-61):** the push's `recorded_at` is when the call started, so a
+  segment was said at `recorded_at` plus its `start_s`. Code writes that
+  moment, in `unit_b.timezone`, on each extraction line, and holds a next
+  step's time to it: from 60 s before to 365 days after the moment the
+  words naming the time were said.
+- **Marker: `ASSUMPTION[Q36]`** (`src/dodeal_ai/units/call_intelligence/passes.py`,
+  `CallClock.said_at`), `README.md`'s provisional-answers table, and here.
+- **If wrong:** if the CRM sends the call's end, every stamp and anchor is late
+  by the call's length; a short relative time reads late and a true one can
+  drop as `when_out_of_range`. The fix is `said_at` alone (subtract
+  `duration_seconds`); nothing else reads `recorded_at` for a time.
+
 ---
 
 # 5. PENDING — awaiting a business or product answer

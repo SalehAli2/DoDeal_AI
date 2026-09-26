@@ -140,6 +140,7 @@ _QUOTE_FIELDS = (
     ("said", "segment"),
     ("agent_quote", "agent_segment"),
     ("satisfied_quote", "satisfied_segment"),
+    ("when_quote", "when_segment"),
 )
 
 # A span in double quotation marks, in the three forms a summary may use.
@@ -214,9 +215,10 @@ class CallText:
             spoken=spoken,
         )
 
-    def data(self) -> str:
-        """The transcript first, then the language line."""
-        transcript = render_transcript(self.segments, self.shown)
+    def data(self, stamps: Sequence[str] | None = None) -> str:
+        """The transcript first, then the language line; `stamps`, one per
+        segment, is when each was said, written on its line."""
+        transcript = render_transcript(self.segments, self.shown, stamps)
         return f"TRANSCRIPT:\n{transcript}\n\nLANGUAGE: {self.language}"
 
     def index_of(self, segment: str) -> int | None:
@@ -287,14 +289,20 @@ def _found_at(call: CallText, quoted: Sequence[str], index: int) -> int | None:
     return None
 
 
-def locate(call: CallText, quote: str, segment: str) -> str | None:
-    """The id of the segment a quote is found in (_found_at), or None when the
-    cited id is unknown, the quote's length is wrong or no segment holds it."""
+def found_at(call: CallText, quote: str, segment: str) -> int | None:
+    """The position of the segment a quote is found in (_found_at), or None
+    when the cited id is unknown, the quote's length is wrong or no segment
+    holds it."""
     index = call.index_of(segment)
     quoted = words(quote)
     if index is None or not quoted or len(quoted) > MAX_QUOTE_WORDS:
         return None
-    found = _found_at(call, quoted, index)
+    return _found_at(call, quoted, index)
+
+
+def locate(call: CallText, quote: str, segment: str) -> str | None:
+    """The id of the segment a quote is found in (found_at), or None."""
+    found = found_at(call, quote, segment)
     return None if found is None else segment_id(found)
 
 

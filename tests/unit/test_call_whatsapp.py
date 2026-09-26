@@ -175,7 +175,7 @@ async def test_a_held_suggestion_is_answered_again_and_read_by_status(
     held = status.json()["whatsapp"]
     assert list(held) == ["ru"]
     assert (held["ru"]["text"], held["ru"]["dialect"]) == (RUSSIAN, None)
-    assert held["ru"]["versions"] == {"prompt": "unit_b_prompts_v17"}
+    assert held["ru"]["versions"] == {"prompt": "unit_b_prompts_v18"}
 
 
 async def test_a_language_being_written_is_409_and_pays_for_nothing(

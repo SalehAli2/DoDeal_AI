@@ -53,6 +53,9 @@ ASSUMPTION_MARKERS = [
     "ASSUMPTION[Q13]",
     # Register item 143: the two CRM reads the brief and the measures use.
     "ASSUMPTION[Q23]",
+    # D-61: a call's recorded_at is when it started, so a segment was said at
+    # recorded_at plus its start.
+    "ASSUMPTION[Q36]",
 ]
 # RETIRED. The stub it named is gone (Piece N.2): `token_preflight` is a real
 # fail-open read and the pre-flight is enforced. Assembled rather than spelled,

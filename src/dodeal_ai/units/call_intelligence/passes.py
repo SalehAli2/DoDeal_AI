@@ -36,12 +36,16 @@ quote, or no_reason_given, quoted when the client said something; a quote
 that fails is kept unverified as an element's is.
 
 THE NEXT STEP'S TIME. An action has a kind (viewing, online_meeting,
-office_visit, callback, send_details, other). Its time is resolved by the
-model from the call's recorded_at and the tenant's zone, both in the data half
-(CallClock), as ISO 8601 with an offset; code refuses one before the call or
-more than MAX_NEXT_STEP_DAYS after it, and delivers the rest in the tenant's
-zone. Vague or refused timing is null with when_state uncertain; booked holds
-only with a kept time on verified evidence.
+office_visit, callback, send_details, other). Code writes on each segment's
+line when it was said -- recorded_at plus its start, in the tenant's zone
+(CallClock.stamps) -- and the model resolves the time against the stamp of
+the segment that names it, as ISO 8601 with an offset, quoting those words
+(when_quote, when_segment) under the quote check. The anchor is the moment
+the when_quote's FOUND segment was said, never the agreement's: code keeps a
+time from WHEN_SLACK_SECONDS before it to MAX_NEXT_STEP_DAYS after it, to the
+minute in the tenant's zone. With no verified when_quote the time is null,
+uncertain, when_missing_quote; out of range the same, when_out_of_range.
+Vague timing is null and uncertain. booked rests on the agreement quote.
 
 The prose pass reads the transcript and the SETTLED extraction -- validated
 and quote-checked output with every failed quote removed, in the data half
@@ -51,7 +55,7 @@ and neutralised like the transcript -- never a rejected answer.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Annotated, Any, Literal
@@ -73,6 +77,7 @@ from dodeal_ai.units.call_intelligence.evidence import (
     Strict,
     evidence_errors,
     failed_quotes,
+    found_at,
     in_language,
     mostly_failed,
     quote_errors,
@@ -87,6 +92,7 @@ from dodeal_ai.units.call_intelligence.prompts import (
     REPROMPT_TAILS,
     build_call_prompt,
 )
+from dodeal_ai.units.call_intelligence.transcriber import Segment
 from dodeal_ai.units.structured_intelligence.llm_call import (
     call_model,
     output_rejected,
@@ -128,10 +134,32 @@ DETAIL_NAMES = (
 # A property status the call does not settle: the value not mentioned carries.
 UNKNOWN_STATUS = "unknown"
 
-# The furthest after the call a next step's time may be. A quarter ahead is a
-# plan; later is more likely misheard or invented. Longer keeps such times as
-# booked; shorter drops true ones to uncertain.
-MAX_NEXT_STEP_DAYS = 90
+# Where the next step's time quote is checked, among the extraction's quotes.
+NEXT_STEP_WHEN = "next_step.when"
+
+# The furthest after the moment its words were said a next step's time may
+# be. A year covers a callback months out; later is more likely misheard or
+# invented. Longer keeps such times as stated; shorter drops true ones.
+MAX_NEXT_STEP_DAYS = 365
+# How far before that moment a time may be: the stamp shows the minute, so
+# "now" can read up to a minute early. Longer keeps a time counted from the
+# call's start; shorter refuses a callback "right now".
+WHEN_SLACK_SECONDS = 60
+
+# Why code kept no time for a next step that gave one.
+WHEN_MISSING_QUOTE = "when_missing_quote"
+WHEN_OUT_OF_RANGE = "when_out_of_range"
+
+# The weekday on a said-at stamp, in English whatever the process's locale.
+_WEEKDAYS = (
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
+)
 
 # Lengths past any honest answer: a field the size of the transcript is not one.
 _SENTENCE_CHARS = 400
@@ -234,7 +262,8 @@ type NextKind = Literal[
 
 class NextStep(Strict):
     """The next action, and the quote it rests on whenever there is one; its
-    kind, its time resolved to ISO 8601, and whether both sides agreed it."""
+    kind, its time resolved to ISO 8601 with the words that name it, and
+    whether both sides agreed it."""
 
     action: Annotated[str | None, Field(max_length=_SENTENCE_CHARS)]
     owner: Literal["agent", "client", "unknown"]
@@ -245,16 +274,40 @@ class NextStep(Strict):
     kind: NextKind | None = None
     when: AwareDatetime | None = None
     booked: bool = False
+    when_quote: Quote = None
+    when_segment: SegmentId = None
 
 
 @dataclass(frozen=True, slots=True)
 class CallClock:
     """When the call was recorded (None when the job does not say) and the
-    tenant's time zone: what a next step's time is resolved from, by the
-    model, and held to, in code."""
+    tenant's time zone: what each segment's said-at stamp is written from, and
+    a next step's time held to, in code."""
 
     recorded_at: datetime | None
     timezone: str
+
+    def said_at(self, start_s: float) -> datetime | None:
+        """When a segment starting `start_s` into the call was said, in the
+        tenant's zone; None when the call's own time is unknown."""
+        if self.recorded_at is None:
+            return None
+        # ASSUMPTION[Q36]: recorded_at is when the call started, so a segment
+        # was said at recorded_at plus its start.
+        moment = self.recorded_at + timedelta(seconds=start_s)
+        return moment.astimezone(ZoneInfo(self.timezone))
+
+    def stamps(self, segments: Sequence[Segment]) -> list[str] | None:
+        """Each segment's said-at stamp, "YYYY-MM-DD HH:MM Weekday"; None when
+        the call's own time is unknown."""
+        if self.recorded_at is None:
+            return None
+        said = (self.said_at(segment.start_s) for segment in segments)
+        return [
+            f"{moment:%Y-%m-%d %H:%M} {_WEEKDAYS[moment.weekday()]}"
+            for moment in said
+            if moment is not None
+        ]
 
     def data(self) -> str:
         """The two lines the extraction's data half ends with."""
@@ -265,16 +318,15 @@ class CallClock:
         )
         return f"RECORDED AT: {recorded}\nTIMEZONE: {self.timezone}"
 
-    def held(self, when: datetime | None) -> datetime | None:
-        """`when` in the tenant's zone; None when there is none, the call's own
-        time is unknown, or it falls before the call or more than
-        MAX_NEXT_STEP_DAYS after it."""
-        if when is None or self.recorded_at is None:
+    def held(self, when: datetime, anchor: datetime) -> datetime | None:
+        """`when` to the minute in the tenant's zone; None when it falls more
+        than WHEN_SLACK_SECONDS before `anchor`, the moment its words were
+        said, or more than MAX_NEXT_STEP_DAYS after it."""
+        earliest = anchor - timedelta(seconds=WHEN_SLACK_SECONDS)
+        if not earliest <= when <= anchor + timedelta(days=MAX_NEXT_STEP_DAYS):
             return None
-        latest = self.recorded_at + timedelta(days=MAX_NEXT_STEP_DAYS)
-        if not self.recorded_at <= when <= latest:
-            return None
-        return when.astimezone(ZoneInfo(self.timezone))
+        local = when.astimezone(ZoneInfo(self.timezone))
+        return local.replace(second=0, microsecond=0)
 
 
 class Mood(Strict):
@@ -365,6 +417,11 @@ def extraction_quotes(call: CallText, answer: Extraction) -> dict[str, Errors]:
     if step.action is not None or (step.quote, step.segment) != (None, None):
         check = quote_errors if step.action is None else evidence_errors
         found["next_step"] = check(call, "next_step", step.quote, step.segment)
+    if step.when is not None or (step.when_quote, step.when_segment) != (None, None):
+        named = quote_errors if step.when is None else evidence_errors
+        found[NEXT_STEP_WHEN] = named(
+            call, NEXT_STEP_WHEN, step.when_quote, step.when_segment
+        )
     lost = answer.loss_reason
     given = lost is not None and (lost.quote, lost.segment) != (None, None)
     if lost is not None and (given or lost.category != NO_REASON_GIVEN):
@@ -376,10 +433,12 @@ def extraction_quotes(call: CallText, answer: Extraction) -> dict[str, Errors]:
 
 
 def _step_errors(step: NextStep) -> Errors:
-    """An action has a kind; no action has no kind, time or booking."""
+    """An action has a kind; no action has no kind, time, time quote or
+    booking."""
     if step.action is not None:
         return [] if step.kind is not None else [("next_step", "action_without_kind")]
-    if (step.kind, step.when, step.booked) != (None, None, False):
+    given = (step.kind, step.when, step.booked, step.when_quote, step.when_segment)
+    if given != (None, None, False, None, None):
         return [("next_step", "next_step_without_action")]
     return []
 
@@ -476,13 +535,48 @@ def _settled_item(item: BaseModel, failed: bool) -> dict[str, object]:
     return {**kept, "unverified": failed}
 
 
-def _settled_step(step: NextStep, failed: bool, clock: CallClock) -> dict[str, object]:
-    """The next step as delivered: its time held to the call (CallClock.held)
-    and in the tenant's zone; when_state stated for a held time on verified
-    evidence, uncertain for a time said but vague, refused or unverified, else
-    not_mentioned; booked only with a held time on verified evidence."""
+def _held_when(
+    call: CallText, step: NextStep, when_failed: bool, clock: CallClock
+) -> tuple[datetime | None, str | None]:
+    """The next step's time as code keeps it, or None and why: no time given
+    (no reason), no verified when_quote (WHEN_MISSING_QUOTE), the call's own
+    time unknown (no reason), or out of range of the anchor (WHEN_OUT_OF_RANGE).
+    The anchor is when the when_quote's FOUND segment was said (D-50), never
+    the agreement quote's segment."""
+    quote, segment = step.when_quote, step.when_segment
+    if step.when is None:
+        return None, None
+    found = (
+        None
+        if when_failed or quote is None or segment is None
+        else found_at(call, quote, segment)
+    )
+    if found is None:
+        return None, WHEN_MISSING_QUOTE
+    anchor = clock.said_at(call.segments[found].start_s)
+    if anchor is None:
+        return None, None
+    when = clock.held(step.when, anchor)
+    return when, None if when is not None else WHEN_OUT_OF_RANGE
+
+
+def _settled_step(
+    call: CallText,
+    step: NextStep,
+    failed: bool,
+    when_failed: bool,
+    clock: CallClock,
+) -> dict[str, object]:
+    """The next step as delivered: its time held to the moment its words were
+    said (_held_when), with when_reason when code dropped a time given;
+    when_state stated for a held time on a verified agreement, uncertain for
+    a time said but vague, dropped or unverified, else not_mentioned. booked
+    rests on the verified agreement and a time given; when_reason never
+    changes it. A failed when_quote is removed, as every failed quote is."""
     kept = _settled_item(step, failed)
-    when = clock.held(step.when)
+    if when_failed:
+        kept.update(when_quote=None, when_segment=None)
+    when, reason = _held_when(call, step, when_failed, clock)
     timed = step.when is not None or step.due is not None
     state = NOT_MENTIONED if not timed else UNCERTAIN
     if when is not None and not failed:
@@ -491,7 +585,8 @@ def _settled_step(step: NextStep, failed: bool, clock: CallClock) -> dict[str, o
         **kept,
         "when": None if when is None else when.isoformat(),
         "when_state": state,
-        "booked": step.booked and state == STATED,
+        "when_reason": reason,
+        "booked": step.booked and not failed and step.when is not None,
     }
 
 
@@ -525,7 +620,13 @@ def settled(
             ]
             for field in ("concerns", "agreed")
         },
-        "next_step": _settled_step(answer.next_step, "next_step" in failed, clock),
+        "next_step": _settled_step(
+            call,
+            answer.next_step,
+            "next_step" in failed,
+            NEXT_STEP_WHEN in failed,
+            clock,
+        ),
         "ending": answer.ending,
         "loss_reason": (
             None
@@ -574,12 +675,14 @@ async def extract(
     clock: CallClock | None = None,
 ) -> tuple[Extraction, LLMResponse]:
     """unit_b.extract: one call, or two when the first answer is malformed.
-    The data half ends with the call's time and the tenant's zone (CallClock);
-    with no clock, both unknown."""
+    Each segment's line carries its said-at stamp, and the data half ends with
+    the call's time and the tenant's zone (CallClock); with no clock, both
+    unknown and no stamp written."""
     clock = clock or CallClock(None, "UTC")
+    data = f"{call.data(clock.stamps(call.segments))}\n\n{clock.data()}"
     answer, response = await call_model(
         client,
-        build_call_prompt(EXTRACT_TEMPLATE, f"{call.data()}\n\n{clock.data()}"),
+        build_call_prompt(EXTRACT_TEMPLATE, data),
         Extraction,
         EXTRACT_LABEL,
         scope=scope,

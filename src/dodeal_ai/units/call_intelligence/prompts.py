@@ -15,7 +15,11 @@ instructions after it (AssembledPrompt.data_first). One line per segment:
     [s<n> mm:ss agent|client] text
 
 `s<n>` is the segment's id, 1-based in transcript order: the id a quote
-cites and the check in code looks up. Whitespace inside a segment is folded
+cites and the check in code looks up. The extraction's lines also carry when
+the segment was said, written in code (passes.CallClock.stamp):
+
+    [s<n> mm:ss agent|client @ YYYY-MM-DD HH:MM Weekday] text
+ Whitespace inside a segment is folded
 to single spaces, so no segment can start a line of its own and pass for
 another segment or for the LANGUAGE line. The delimiters are neutralised by
 build_prompt, as for a note.
@@ -35,7 +39,7 @@ from dodeal_ai.core.prompting import AssembledPrompt, build_prompt
 from dodeal_ai.units.call_intelligence.transcriber import Segment
 
 ROLES_TEMPLATE = "call_intelligence/roles_v4.txt"
-EXTRACT_TEMPLATE = "call_intelligence/extract_v7.txt"
+EXTRACT_TEMPLATE = "call_intelligence/extract_v8.txt"
 PROSE_TEMPLATE = "call_intelligence/prose_v2.txt"
 OBJECTIONS_TEMPLATE = "call_intelligence/objections_v2.txt"
 SCORE_TEMPLATE = "call_intelligence/score_v2.txt"
@@ -76,8 +80,9 @@ REPROMPT_TAILS: Mapping[str, str] = MappingProxyType(
 # then roles_v3 by roles_v4 (each voice's languages from the whole call) and
 # extract_v5 by extract_v6 (quoted topics, short relative times, a clear
 # agreement booking), unit_b_prompts_v16, then extract_v6 by extract_v7 (a
-# short relative time from the moment it was said), unit_b_prompts_v17; never
-# sent again.
+# short relative time from the moment it was said), unit_b_prompts_v17, then
+# extract_v7 by extract_v8 (each segment's said-at stamp written in code, and
+# the words that name the time quoted), unit_b_prompts_v18; never sent again.
 RETIRED_TEMPLATES: tuple[str, ...] = (
     "call_intelligence/extract_v1.txt",
     "call_intelligence/extras_v1.txt",
@@ -105,11 +110,12 @@ RETIRED_TEMPLATES: tuple[str, ...] = (
     "call_intelligence/roles_v3.txt",
     "call_intelligence/extract_v5.txt",
     "call_intelligence/extract_v6.txt",
+    "call_intelligence/extract_v7.txt",
 )
 
 # The stamp stage 1 carries under versions.prompt. Move it with the digest
 # in the stamp test whenever one of UNIT_B_TEMPLATES changes.
-PROMPT_SET_VERSION = "unit_b_prompts_v17"
+PROMPT_SET_VERSION = "unit_b_prompts_v18"
 
 # Every template Unit B can send, in pass order, then the retired ones; the
 # worker preloads them all.
@@ -193,15 +199,19 @@ def one_line(text: str) -> str:
 
 
 def render_transcript(
-    segments: Sequence[Segment], texts: Sequence[str] | None = None
+    segments: Sequence[Segment],
+    texts: Sequence[str] | None = None,
+    stamps: Sequence[str] | None = None,
 ) -> str:
     """The transcript as the prompt shows it. `texts`, one per segment, is
-    what to show instead of each segment's own text (the masked copy)."""
+    what to show instead of each segment's own text (the masked copy);
+    `stamps`, one per segment, when each was said, after an @."""
     shown = [segment.text for segment in segments] if texts is None else texts
+    said = [""] * len(segments) if stamps is None else [f" @ {s}" for s in stamps]
     return "\n".join(
-        f"[{segment_id(n)} {clock(segment.start_s)} {role_of(segment)}] "
+        f"[{segment_id(n)} {clock(segment.start_s)} {role_of(segment)}{at}] "
         f"{one_line(text)}"
-        for n, (segment, text) in enumerate(zip(segments, shown, strict=True))
+        for n, (segment, text, at) in enumerate(zip(segments, shown, said, strict=True))
     )
 
 
