@@ -489,3 +489,53 @@ async def test_a_failed_score_pass_is_null_with_its_reason() -> None:
         "unit_b.coaching",
         "unit_b.extras",
     ]
+
+
+# --- the score keeps its strictness, and gains only the match -------------------
+
+
+async def test_one_failing_quote_among_true_ones_still_leaves_no_score() -> None:
+    """Unlike the extraction, the score keeps nothing field by field: one
+    invented quote among three true ones is reprompted, then no score."""
+    one_bad = _checks(
+        asked_budget="what budget do you have in mind",
+        asked_purpose="what budget do you have in mind",
+        courteous="Good morning",
+        asked_timeline="when do you want to move",
+    )
+    llm = FakeLLM(
+        json_response(NO_OBJECTIONS), json_response(one_bad), json_response(one_bad)
+    )
+
+    wave = await _wave2(llm)
+
+    assert wave.parts[SCORE] is None
+    assert wave.reasons == {SCORE: "score_malformed_output"}
+    assert llm.profiles[:3] == [
+        "unit_b.objections",
+        PROFILE_UNIT_B_SCORE,
+        PROFILE_UNIT_B_SCORE,
+    ]
+
+
+def test_the_score_quote_check_takes_the_match_and_its_neighbours() -> None:
+    """A repeated word left out, and a quote found in the segment after the
+    one cited, both pass; a dropped negation does not."""
+    call = _call(
+        _say(0, "agent", "Good morning, what what budget do you have in mind?"),
+        _say(5, "lead", "I do not want to wait."),
+    )
+    kept = ScoreChecks.model_validate(
+        _checks(asked_budget="what budget do you have in mind")
+    )
+    check_score(call)(kept)
+    borrowed = _checks(
+        courteous={"answer": "yes", "quote": "I do not want", "segment": "s1"}
+    )
+    check_score(call)(ScoreChecks.model_validate(borrowed))
+    dropped = _checks(
+        courteous={"answer": "yes", "quote": "I do want", "segment": "s2"}
+    )
+    with pytest.raises(OutputValidationError) as refused:
+        check_score(call)(ScoreChecks.model_validate(dropped))
+    assert refused.value.errors == (("courteous", "quote_not_in_segment"),)
