@@ -51,7 +51,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -112,6 +112,18 @@ class ReadBack(LLMResponse):
 class ModelRefused(ModelUnavailableError):
     """The provider's breaker was open: refused with nothing sent (D-82).
     Still a 503 model_unavailable to every caller that only knows the parent."""
+
+
+@dataclass(frozen=True, slots=True)
+class Mend[M: BaseModel]:
+    """What a Unit B pass keeps of a well-shaped answer whose evidence partly
+    failed (D-101). `failures` is what a second answer may make up for, as
+    (location, code) pairs from the fixed vocabulary; none keeps the answer
+    as it is. `merge` is the first answer's verified parts with the second's
+    for the rest: nothing of either answer ever goes back into a prompt."""
+
+    failures: Callable[[M], Sequence[tuple[str, str]]]
+    merge: Callable[[M, M], M]
 
 
 def output_rejected(
@@ -314,6 +326,7 @@ async def call_model[M: BaseModel](
     reprompt: bool = True,
     reprompt_tail: str = REPROMPT_TAIL_TEMPLATE,
     tail_by_error: Mapping[str, str] | None = None,
+    mend: Mend[M] | None = None,
 ) -> tuple[M, LLMResponse]:
     """Send a prompt, validate the answer, and on a malformed one send it ONCE
     more with a stricter tail. Returns the validated output beside the raw
@@ -363,6 +376,15 @@ async def call_model[M: BaseModel](
     after the tail (D-84): each failure's path and code, the path written only
     in the schema's field names and list indexes (prompting.failed_fields).
     Never the answer's text. Unit A's reprompt stays its bare file.
+
+    `mend` (Unit B, D-101) is for an answer the schema and `check` accept but
+    whose evidence partly failed: it is kept, the failures its `failures`
+    names are logged and listed after the tail as any rejection's are, and
+    the one reprompt is sent. Its answer, if well shaped, is merged in
+    (`merge`: the first's verified parts, the second's for the rest); if not,
+    the first answer stands. Still two calls at most, and still nothing of
+    either answer in the second prompt. What is left failing after the merge
+    is the caller's to judge. None (Unit A) changes nothing above.
     """
     response = await complete_once(
         client,
@@ -373,28 +395,39 @@ async def call_model[M: BaseModel](
         profile=profile,
         max_output_tokens=max_output_tokens,
     )
+    # The first answer, kept when it was well shaped and only mend's
+    # failures stood against it.
+    kept: M | None = None
     try:
         parsed = parse_output(response, schema, label, check=check)
     except OutputValidationError as rejected:
-        _count_call(label, "malformed")
-        tail = _tail_for(rejected.errors, reprompt_tail, tail_by_error)
-        failures = () if reprompt_tail == REPROMPT_TAIL_TEMPLATE else rejected.errors
-        if not reprompt:
-            _logger.warning(
-                "reprompt_withheld",
-                extra={"reason_code": "token_budget_degraded", "label": label},
-            )
-            raise MalformedOutputError() from None
-        # The label and nothing else. Which output failed is operational; WHAT
-        # it said is untrusted text shaped by a note we did not write.
-        # `output_validation_failed` has already recorded the error types.
-        _logger.warning(
-            "reprompt_issued",
-            extra={"reason_code": "reprompt_issued", "label": label},
-        )
+        errors = rejected.errors
     else:
-        _count_call(label, "ok")
-        return parsed, response
+        errors = () if mend is None else tuple(mend.failures(parsed))
+        if not errors:
+            _count_call(label, "ok")
+            return parsed, response
+        # Logged and collected as any refusal is: codes, never the answer.
+        output_rejected(label, errors)
+        kept = parsed
+    _count_call(label, "malformed")
+    tail = _tail_for(errors, reprompt_tail, tail_by_error)
+    failures = () if reprompt_tail == REPROMPT_TAIL_TEMPLATE else errors
+    if not reprompt:
+        if kept is not None:
+            return kept, response
+        _logger.warning(
+            "reprompt_withheld",
+            extra={"reason_code": "token_budget_degraded", "label": label},
+        )
+        raise MalformedOutputError() from None
+    # The label and nothing else. Which output failed is operational; WHAT
+    # it said is untrusted text shaped by a note we did not write.
+    # `output_validation_failed` has already recorded the error types.
+    _logger.warning(
+        "reprompt_issued",
+        extra={"reason_code": "reprompt_issued", "label": label},
+    )
 
     second = await complete_once(
         client,
@@ -409,11 +442,17 @@ async def call_model[M: BaseModel](
         parsed = parse_output(second, schema, label, check=check)
     except OutputValidationError:
         _count_call(label, "malformed")
+        if kept is not None:
+            # The first answer stands, its failures the caller's to judge.
+            return kept, response
         # from None: the OutputValidationError is ours and safe, but chaining it
         # would print a second exception line wherever a traceback is formatted,
         # and the rule in this repo is that our error paths stay unchained.
         raise MalformedOutputError() from None
     _count_call(label, "ok")
+    if kept is not None:
+        assert mend is not None  # only mend's failures keep a first answer
+        return mend.merge(kept, parsed), second
     return parsed, second
 
 
