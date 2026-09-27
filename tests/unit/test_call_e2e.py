@@ -621,6 +621,21 @@ def test_the_refused_lines_are_read_from_the_worker_log(tmp_path: Path) -> None:
     assert call_e2e.validation_failures(found) == [REFUSED]
 
 
+def test_the_quote_miss_lines_are_read_beside_the_refused_ones(tmp_path: Path) -> None:
+    miss = "quote_miss label=llm.unit_b.score where=courteous kind=altered_1 words=9"
+    log = tmp_path / "worker.log"
+    log.write_text(
+        "\n".join([json.dumps({"message": REFUSED}), json.dumps({"message": miss})]),
+        encoding="utf-8",
+    )
+    found = [
+        record
+        for name in (call_e2e.REJECTED_LINE, call_e2e.MISS_LINE)
+        for record in call_e2e.outcome_records(log, name)
+    ]
+    assert call_e2e.validation_failures(found) == [REFUSED, miss]
+
+
 def test_the_report_names_a_missing_extras_part_and_no_stage2_line() -> None:
     body = {**SAMPLE, "stage2_result": None}
     lines = call_e2e.report(body, OUTCOMES[:1])

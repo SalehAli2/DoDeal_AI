@@ -73,6 +73,7 @@ from dodeal_ai.units.call_intelligence.evidence import (
     Quote,
     SegmentId,
     evidence_errors,
+    log_misses,
     quote_errors,
     relocated,
 )
@@ -228,17 +229,43 @@ def _holds(call: CallText, name: str, found: Check) -> bool:
     )
 
 
+def _quote_at(answer: ScoreChecks) -> Callable[[str], tuple[str | None, str | None]]:
+    """A check's quote and segment by its name, for log_misses."""
+
+    def at(name: str) -> tuple[str | None, str | None]:
+        found: Check = getattr(answer, name)
+        return found.quote, found.segment
+
+    return at
+
+
+def refused_checks(call: CallText) -> Callable[[ScoreChecks], Errors]:
+    """owed_failures for mend, each quote not found logged as a quote_miss."""
+
+    def failures(answer: ScoreChecks) -> Errors:
+        errors = owed_failures(call, answer)
+        log_misses(SCORE_LABEL, call, errors, _quote_at(answer))
+        return errors
+
+    return failures
+
+
 def merged_checks(call: CallText) -> Callable[[ScoreChecks, ScoreChecks], ScoreChecks]:
     """The first answer, each check whose owed quote failed replaced by the
-    second answer's same check where that one holds (D-101)."""
+    second answer's same check where that one holds (D-101); a check failing
+    in both has the second's miss logged too."""
 
     def merge(first: ScoreChecks, second: ScoreChecks) -> ScoreChecks:
+        failed = {
+            name for name in CHECK_NAMES if not _holds(call, name, getattr(first, name))
+        }
         update = {
             name: getattr(second, name)
-            for name in CHECK_NAMES
-            if not _holds(call, name, getattr(first, name))
-            and _holds(call, name, getattr(second, name))
+            for name in failed
+            if _holds(call, name, getattr(second, name))
         }
+        still = [e for e in owed_failures(call, second) if e[0] in failed - set(update)]
+        log_misses(SCORE_LABEL, call, still, _quote_at(second))
         return first.model_copy(update=update) if update else first
 
     return merge
@@ -290,7 +317,7 @@ async def ask_checks(
         ),
         reprompt_tail=REPROMPT_TAIL_TEMPLATE,
         tail_by_error=REPROMPT_TAILS,
-        mend=Mend(lambda found: owed_failures(call, found), merged_checks(call)),
+        mend=Mend(refused_checks(call), merged_checks(call)),
     )
     try:
         check_score(call)(answer)

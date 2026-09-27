@@ -62,6 +62,7 @@ from dodeal_ai.units.call_intelligence.evidence import (
     evidence_errors,
     failed_quotes,
     in_language,
+    log_misses,
     mostly_failed,
     quote_errors,
     relocated,
@@ -295,6 +296,33 @@ def coaching_failures(call: CallText, answer: Coaching) -> Errors:
     return []
 
 
+def _quote_at(answer: Coaching) -> Callable[[str], tuple[str | None, str | None]]:
+    """An observation's or a stage's quote and segment by where it is
+    (coaching_quotes' paths), for log_misses."""
+
+    def at(where: str) -> tuple[str | None, str | None]:
+        kind, _, rest = where.partition(".")
+        found: Observation | Stage = (
+            answer.observations[int(rest)]
+            if kind == "observations"
+            else getattr(answer.stages, rest)
+        )
+        return found.quote, found.segment
+
+    return at
+
+
+def refused_coaching(call: CallText) -> Callable[[Coaching], Errors]:
+    """coaching_failures for mend, each quote not found logged as a quote_miss."""
+
+    def failures(answer: Coaching) -> Errors:
+        errors = coaching_failures(call, answer)
+        log_misses(COACHING_LABEL, call, errors, _quote_at(answer))
+        return errors
+
+    return failures
+
+
 def merged_coaching(call: CallText) -> Callable[[Coaching, Coaching], Coaching]:
     """The first answer, filled from the second (D-101): the first's standing
     observations, then the second's first standing one of each kind the first
@@ -395,7 +423,7 @@ async def coach(
         check=check_coaching(call),
         reprompt_tail=REPROMPT_TAIL_TEMPLATE,
         tail_by_error=REPROMPT_TAILS,
-        mend=Mend(lambda found: coaching_failures(call, found), merged_coaching(call)),
+        mend=Mend(refused_coaching(call), merged_coaching(call)),
     )
     failing = coaching_failures(call, answer)
     if failing:

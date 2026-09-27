@@ -26,7 +26,7 @@ from dodeal_ai.core.prompting import build_prompt
 from dodeal_ai.core.validation import OutputValidationError
 from dodeal_ai.units.call_intelligence import objections
 from dodeal_ai.units.call_intelligence.config import CallsConfig
-from dodeal_ai.units.call_intelligence.evidence import CallText
+from dodeal_ai.units.call_intelligence.evidence import CallText, relocated
 from dodeal_ai.units.call_intelligence.objections import (
     OBJECTION_CATEGORIES,
     Category,
@@ -154,7 +154,10 @@ async def test_a_true_answer_passes_and_is_counted() -> None:
 @pytest.mark.parametrize(
     ("change", "error"),
     [
-        ({"segment": "s5"}, ("objections.0", "quote_not_in_segment")),
+        (
+            {"quote": "We can offer a payment plan over four years", "segment": "s5"},
+            ("objections.0", "quote_wrong_speaker"),
+        ),
         (
             {"quote": "We can offer a payment plan", "segment": "s3"},
             ("objections.0", "quote_wrong_speaker"),
@@ -181,7 +184,7 @@ async def test_a_true_answer_passes_and_is_counted() -> None:
         ),
     ],
     ids=[
-        "raised-elsewhere",
+        "raised-far-off-by-the-agent",
         "raised-by-the-agent",
         "addressed-without-quote",
         "addressed-by-the-client",
@@ -193,6 +196,16 @@ def test_every_quote_is_checked_and_from_its_speaker(
     change: dict[str, Any], error: tuple[str, str]
 ) -> None:
     assert _refused({**copy.deepcopy(PRICE), **change}) == (error,)
+
+
+def test_a_quote_cited_far_from_where_it_was_said_is_found_there() -> None:
+    """D-102: the client's own words, cited three segments off, are found
+    where they were said, still the client's."""
+    far = {**copy.deepcopy(PRICE), "segment": "s5"}
+    answer = Objections.model_validate({"objections": [far]})
+    check_objections(_call())(answer)
+    (moved,) = relocated(_call(), answer).objections
+    assert moved.segment == PRICE["segment"]
 
 
 def test_a_quote_given_where_none_is_owed_is_still_checked() -> None:

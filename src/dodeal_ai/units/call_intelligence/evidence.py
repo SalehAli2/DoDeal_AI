@@ -20,8 +20,12 @@ least two letters). Between two quote words the segment may hold only words
 that repeat the word before them ("عمري عمري") or are on QUOTE_FILLERS; a
 negation is never skipped, never added and never matched to another word.
 Not in the cited segment, the quote is looked for in the one just before, then
-the one just after; where found, the segment it is in and the transcript's own
-words, first matched to last, are stored as the quote (relocated).
+the one just after, then -- a quote of FAR_MIN_WORDS words or more -- in every
+other segment, nearest first (D-102: the words were said, only the id was
+wrong); where found, the segment it is in and the transcript's own words,
+first matched to last, are stored as the quote (relocated). A quote refused
+as quote_not_in_segment is logged as quote_miss with why (miss_kind): codes
+and counts, never its words.
 The segment is read as the model read it, so a quote can never carry a number
 back out. Where a pass names who must have said it, the segment it is found in
 is that speaker's: a voice no role mapping named (prompts.said_by) is no one's,
@@ -42,8 +46,9 @@ and Han for zh -- so French passes as Latin, never as not-English.
 
 from __future__ import annotations
 
+import logging
 import re
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import Annotated
 
@@ -223,6 +228,18 @@ SPEAKER_UNKNOWN = "quote_speaker_unknown"
 # Where a quote not in its cited segment is looked for next: the segment just
 # before, then the one just after.
 _NEIGHBOURS = (-1, 1)
+# A quote of at least this many words found word for word in no nearer
+# segment is looked for in every other one, nearest first (D-102): the words
+# were said, only the model's segment id was wrong. Lower lets "ok thanks" move
+# to any "ok thanks"; higher refuses true quotes cited a few segments off.
+FAR_MIN_WORDS = 4
+# Why a refused quote was not found, logged as quote_miss (never the quote):
+# the words stand in another segment; they stand only across two segments;
+# at most this many of the quote's words are missing from the best nearby
+# segment (altered_1 to altered_3, altered_3 meaning three or more); or fewer
+# than half of them stand there at all (absent).
+MISS_ALTERED_MAX = 3
+_logger = logging.getLogger("dodeal_ai.unit_b")
 # The fields a quote and its segment are held in, in every pass's answer.
 _QUOTE_FIELDS = (
     ("quote", "segment"),
@@ -407,13 +424,93 @@ def _matches(said: Sequence[str], quote: Sequence[str]) -> bool:
     return _span(said, quote) is not None
 
 
+def _near(call: CallText, index: int) -> list[int]:
+    """The cited segment's position, then its neighbours', in the call."""
+    return [
+        at
+        for at in (index, *(index + step for step in _NEIGHBOURS))
+        if 0 <= at < len(call.shown)
+    ]
+
+
 def _found_at(call: CallText, quoted: Sequence[str], index: int) -> int | None:
     """The segment the quote's words are in: the cited one, else the one just
-    before, else the one just after; None when none holds them."""
-    for at in (index, *(index + step for step in _NEIGHBOURS)):
-        if 0 <= at < len(call.shown) and _matches(quote_words(call.shown[at]), quoted):
+    before, else the one just after; for a quote of FAR_MIN_WORDS or more,
+    else any other, nearest first (D-102); None when none holds them."""
+    near = _near(call, index)
+    for at in near:
+        if _matches(quote_words(call.shown[at]), quoted):
             return at
-    return None
+    if len(quoted) < FAR_MIN_WORDS:
+        return None
+    others = sorted(
+        (at for at in range(len(call.shown)) if at not in near),
+        key=lambda at: abs(at - index),
+    )
+    return next(
+        (at for at in others if _matches(quote_words(call.shown[at]), quoted)), None
+    )
+
+
+def _common(said: Sequence[str], quote: Sequence[str]) -> int:
+    """How many of the quote's words stand in `said` in order (the longest
+    common subsequence under _same)."""
+    row = [0] * (len(quote) + 1)
+    for word in said:
+        diagonal, row[0] = 0, 0
+        for n, wanted in enumerate(quote, start=1):
+            above = row[n]
+            row[n] = diagonal + 1 if _same(word, wanted) else max(row[n], row[n - 1])
+            diagonal = above
+    return row[-1]
+
+
+def miss_kind(call: CallText, quote: str | None, segment: str | None) -> str:
+    """Why a refused quote was not found, as one fixed word (MISS_ALTERED_MAX's
+    comment): elsewhere, joined, altered_N, absent -- or unchecked for one the
+    quote check refused before looking (no segment, an unknown one, a length
+    out of bounds). Never a word of the quote."""
+    index = None if segment is None else call.index_of(segment)
+    quoted = None if quote is None else _measured(quote)
+    if index is None or quoted is None:
+        return "unchecked"
+    shown = [quote_words(text) for text in call.shown]
+    if any(_matches(said, quoted) for said in shown):
+        return "elsewhere"
+    near = _near(call, index)
+    if any(
+        _matches(shown[at] + shown[at + 1], quoted)
+        for at in near
+        if at + 1 < len(shown)
+    ):
+        return "joined"
+    best = max(_common(shown[at], quoted) for at in near)
+    if best * 2 < len(quoted):
+        return "absent"
+    return f"altered_{min(len(quoted) - best, MISS_ALTERED_MAX)}"
+
+
+def log_misses(
+    label: str,
+    call: CallText,
+    errors: Iterable[tuple[str, str]],
+    quote_at: Callable[[str], tuple[str | None, str | None]],
+) -> None:
+    """One quote_miss line per quote_not_in_segment in `errors`: the label,
+    where it is (a path code built), why it missed (miss_kind) and its word
+    count. Codes and counts only, never the quote (D-102)."""
+    for where, code in errors:
+        if code != "quote_not_in_segment":
+            continue
+        quote, segment = quote_at(where)
+        quoted = [] if quote is None else quote_words(quote)
+        _logger.warning(
+            "quote_miss label=%s where=%s kind=%s words=%d",
+            label,
+            where,
+            miss_kind(call, quote, segment),
+            len(quoted),
+        )
 
 
 def _measured(quote: str) -> list[str] | None:

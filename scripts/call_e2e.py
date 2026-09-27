@@ -89,6 +89,8 @@ CLAIM_SECONDS = 30.0
 # answer refused (label, count and error types only; never the answer).
 OUTCOME_LINES = ("call_job_outcome", "call_stage2_outcome")
 REJECTED_LINE = "output_validation_failed"
+# Why a refused quote was not found (evidence.log_misses): codes, never words.
+MISS_LINE = "quote_miss"
 
 
 # --- small helpers --------------------------------------------------------------
@@ -296,11 +298,12 @@ def part_reasons(outcomes: list[dict[str, Any]]) -> Any:
 
 
 def validation_failures(outcomes: list[dict[str, Any]]) -> list[str]:
-    """Every output_validation_failed line the workers logged, as logged."""
+    """Every output_validation_failed and quote_miss line the workers logged,
+    as logged."""
     return [
         str(record["message"])
         for record in outcomes
-        if str(record.get("message", "")).startswith(REJECTED_LINE)
+        if str(record.get("message", "")).startswith((REJECTED_LINE, MISS_LINE))
     ]
 
 
@@ -977,7 +980,7 @@ def run(args: argparse.Namespace) -> int:
         records = [
             record
             for log in worker_logs
-            for name in (*OUTCOME_LINES, REJECTED_LINE)
+            for name in (*OUTCOME_LINES, REJECTED_LINE, MISS_LINE)
             for record in outcome_records(log, name)
         ]
         demo_text = callback_log.read_text(encoding="utf-8", errors="replace")
