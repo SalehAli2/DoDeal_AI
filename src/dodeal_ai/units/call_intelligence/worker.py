@@ -972,7 +972,8 @@ def _log_outcome(run: CallRun) -> None:
     """ONE line per task run, and its metrics (register item 54). Numbers,
     ids and fixed words only -- never the link, a hash or a word said.
     `pass_tokens` is each pass's tokens in this run, and
-    `pass_reasoning_tokens` the reasoning part of each, null when none ran."""
+    `pass_reasoning_tokens` the reasoning part of each, null when none ran;
+    `quote_failures` each pass's refused quote failures by code (D3)."""
     assert run.job is not None
     job, transcript = run.job, run.transcript
     status = run.status or job.status.value
@@ -999,6 +1000,7 @@ def _log_outcome(run: CallRun) -> None:
         "pass_reasoning_tokens": run.usage.reasoning or None,
         "evidence_dropped": run.usage.dropped or None,
         "evidence_unverified": run.usage.unverified or None,
+        "quote_failures": run.usage.quote_failures or None,
         "analysis_reason": run.analysis_reason,
     }
     spend = current_spend()

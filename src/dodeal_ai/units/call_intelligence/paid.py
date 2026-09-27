@@ -24,7 +24,9 @@ a pass is counted in db3 before the paid call:
 
 The tokens each pass spent in a run are counted per pass for its outcome line,
 both answers of a reprompt included, and apart from them the reasoning tokens
-the provider reported: a count only, never the reasoning itself.
+the provider reported: a count only, never the reasoning itself. So is each
+quote-check failure code of every answer a pass refused (quote_failures, D3):
+codes and counts, never a path or a word.
 
 EACH PASS IS STAMPED with the provider and the model that answered it (a
 route may send passes to different providers): kept with its answer, so a
@@ -45,7 +47,11 @@ from dodeal_ai.core.jobs import Job, give_back_pass, store_work
 from dodeal_ai.core.llm import LLMClient, LLMResponse
 from dodeal_ai.core.llm.profiles import ProfileSource
 from dodeal_ai.core.prompting import AssembledPrompt
-from dodeal_ai.units.structured_intelligence.llm_call import ModelRefused
+from dodeal_ai.units.call_intelligence.evidence import SPEAKER_UNKNOWN
+from dodeal_ai.units.structured_intelligence.llm_call import (
+    ModelRefused,
+    refused_codes,
+)
 
 # Starts a pass may make, each paid: the first and ONE more when the first
 # response never arrived (BRD B6, the lead's override). Never a third.
@@ -53,6 +59,19 @@ PASS_TRIES = 2
 PASS_INTERRUPTED = "pass_interrupted"
 # The work mark of a reprompt sent: its first answer arrived (M4).
 REPROMPTING = "reprompting"
+# The quote check's failure codes (evidence.quote_errors, evidence_errors):
+# the ones a refused answer's failures are counted by on the outcome line.
+QUOTE_FAILURES = frozenset(
+    {
+        "quote_without_segment",
+        "segment_unknown",
+        "quote_length",
+        "quote_not_in_segment",
+        SPEAKER_UNKNOWN,
+        "quote_wrong_speaker",
+        "quote_missing",
+    }
+)
 
 # Counts one more start of a pass before its paid call: its starts after this
 # one, or None when the job has moved on and nothing is left to finish.
@@ -98,11 +117,21 @@ class PassUsage:
     # quotes dropped, and those kept unverified; counts only, never a word.
     dropped: dict[str, int] = field(default_factory=dict)
     unverified: dict[str, int] = field(default_factory=dict)
+    # Per pass, each quote-check failure code of the answers it refused in
+    # this run and how many failures carried it (D3).
+    quote_failures: dict[str, dict[str, int]] = field(default_factory=dict)
 
     def evidence(self, name: str, *, dropped: int, unverified: int) -> None:
         """A field-level pass's count of fields its failed quotes cost."""
         self.dropped[name] = dropped
         self.unverified[name] = unverified
+
+    def refused(self, name: str, codes: list[str]) -> None:
+        """Count the quote-check codes among a pass's refused failures."""
+        for code in codes:
+            if code in QUOTE_FAILURES:
+                counts = self.quote_failures.setdefault(name, {})
+                counts[code] = counts.get(code, 0) + 1
 
     def add(self, name: str, response: LLMResponse) -> None:
         spent = self.tokens.setdefault(name, {"input": 0, "output": 0, "calls": 0})
@@ -290,7 +319,11 @@ async def run_pass[M: BaseModel](
             raise JobGone()
         starts = counted
         try:
-            answer, response = await call(metered)
+            with refused_codes() as codes:
+                try:
+                    answer, response = await call(metered)
+                finally:
+                    run.usage.refused(name, codes)
         except ModelUnavailableError as lost:
             if isinstance(lost, ModelRefused) and not metered.received:
                 # Nothing sent and nothing held: the start was not used.

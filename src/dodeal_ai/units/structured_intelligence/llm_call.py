@@ -51,7 +51,9 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from functools import cache
 
 from pydantic import BaseModel
@@ -83,6 +85,23 @@ _logger = logging.getLogger("dodeal_ai.unit_a")
 REPROMPT_TAIL_TEMPLATE = "structured_intelligence/reprompt_tail_v1.txt"
 
 
+# The error codes of every answer refused while a caller collects them (one
+# paid pass, paid.py): codes only, never a path or a word of the answer.
+_REFUSED_CODES: ContextVar[list[str] | None] = ContextVar("refused_codes", default=None)
+
+
+@contextmanager
+def refused_codes() -> Iterator[list[str]]:
+    """Collect, into the list yielded, the codes of every answer output_rejected
+    refuses in this context, in order, one per failure."""
+    codes: list[str] = []
+    token = _REFUSED_CODES.set(codes)
+    try:
+        yield codes
+    finally:
+        _REFUSED_CODES.reset(token)
+
+
 class ModelRefused(ModelUnavailableError):
     """The provider's breaker was open: refused with nothing sent (D-82).
     Still a 503 model_unavailable to every caller that only knows the parent."""
@@ -104,7 +123,11 @@ def output_rejected(
 
     It returns the exception rather than raising it, so the call site reads
     `raise output_rejected(...)` and the traceback starts where the rule is.
+    Its codes also go to the collector refused_codes opened, if any.
     """
+    collected = _REFUSED_CODES.get()
+    if collected is not None:
+        collected.extend(code for _, code in errors)
     _logger.warning(
         "output_validation_failed label=%s error_count=%d error_types=%s",
         label,

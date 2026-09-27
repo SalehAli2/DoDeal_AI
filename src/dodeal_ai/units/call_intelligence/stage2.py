@@ -39,7 +39,8 @@ to do.
 The arq job carries only (tenant, job_id); everything else is read from db3.
 Ids, counts and fixed words on its one outcome line -- each pass's tokens and
 reasoning tokens among them, the fields the extras' failed quotes dropped or
-left unverified (evidence_dropped, evidence_unverified), and the run's
+left unverified (evidence_dropped, evidence_unverified), each pass's refused
+quote failures counted by code (quote_failures), and the run's
 cost_usd with the price_table_version it was priced under; never a word said,
 never reasoning text.
 """
@@ -326,6 +327,7 @@ def _log_outcome(run: Stage2Run) -> None:
             "pass_reasoning_tokens": run.usage.reasoning or None,
             "evidence_dropped": run.usage.dropped or None,
             "evidence_unverified": run.usage.unverified or None,
+            "quote_failures": run.usage.quote_failures or None,
             **_spent(),
         },
     )
