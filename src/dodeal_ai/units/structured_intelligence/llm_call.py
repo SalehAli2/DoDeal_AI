@@ -52,6 +52,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable, Mapping
+from functools import cache
 
 from pydantic import BaseModel
 
@@ -325,6 +326,11 @@ async def call_model[M: BaseModel](
     `tail_by_error` maps an error code to a tail template, in priority order:
     its first code that ANY failure carries picks the tail, else `reprompt_tail`.
     None (Unit A) is `reprompt_tail` always. Only a fixed file is chosen.
+
+    A unit with a tail of its own (Unit B) also gets the failed fields listed
+    after the tail (D-84): each failure's path and code, the path written only
+    in the schema's field names and list indexes (prompting.failed_fields).
+    Never the answer's text. Unit A's reprompt stays its bare file.
     """
     response = await complete_once(
         client,
@@ -340,6 +346,7 @@ async def call_model[M: BaseModel](
     except OutputValidationError as rejected:
         _count_call(label, "malformed")
         tail = _tail_for(rejected.errors, reprompt_tail, tail_by_error)
+        failures = () if reprompt_tail == REPROMPT_TAIL_TEMPLATE else rejected.errors
         if not reprompt:
             _logger.warning(
                 "reprompt_withheld",
@@ -359,7 +366,7 @@ async def call_model[M: BaseModel](
 
     second = await complete_once(
         client,
-        with_tail(prompt, tail),
+        with_tail(prompt, tail, failures=failures, names=field_names(schema)),
         label,
         scope=scope,
         settings=settings,
@@ -376,6 +383,27 @@ async def call_model[M: BaseModel](
         raise MalformedOutputError() from None
     _count_call(label, "ok")
     return parsed, second
+
+
+@cache
+def field_names(schema: type[BaseModel]) -> frozenset[str]:
+    """Every property name the schema declares, nested models included: the
+    only words a failed field's path is written with (D-84)."""
+    names: set[str] = set()
+
+    def walk(node: object) -> None:
+        if isinstance(node, dict):
+            properties = node.get("properties")
+            if isinstance(properties, dict):
+                names.update(str(name) for name in properties)
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(schema.model_json_schema())
+    return frozenset(names)
 
 
 def _tail_for(

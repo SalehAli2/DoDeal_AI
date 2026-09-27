@@ -46,6 +46,7 @@ from dodeal_ai.units.call_intelligence.prompts import (
 from dodeal_ai.units.call_intelligence.transcriber import Segment, Transcript
 from dodeal_ai.units.call_intelligence.wave2 import OBJECTIONS, wave2
 from tests.helpers.fake_llm import FakeLLM, json_response
+from tests.helpers.reprompt_tails import tail_with
 from tests.helpers.wave2_answers import coaching_answer, extras_answer
 
 SCOPE = RequestContext.for_admitted_job(
@@ -128,7 +129,7 @@ async def test_an_invented_quote_fails_after_one_reprompt() -> None:
         await _find(llm)
 
     assert llm.call_count == 2
-    tail = build_prompt(QUOTE_EXACT_TAIL_TEMPLATE, caller_data="").stable
+    tail = tail_with(QUOTE_EXACT_TAIL_TEMPLATE, "$.objections.0: quote_not_in_segment")
     assert (llm.prompts[0].tail, llm.prompts[1].tail) == ("", tail)
     assert llm.prompts[1].variable == llm.prompts[0].variable
 

@@ -11,7 +11,6 @@ import httpx
 import pytest
 
 from dodeal_ai.core.config import get_settings
-from dodeal_ai.core.prompting import build_prompt
 from dodeal_ai.core.validation import OutputValidationError
 from dodeal_ai.units.call_intelligence.evidence import numbers_in
 from dodeal_ai.units.call_intelligence.fake_transcriber import FakeTranscriber
@@ -25,6 +24,7 @@ from dodeal_ai.units.call_intelligence.passes import (
 from dodeal_ai.units.call_intelligence.prompts import NUMBERS_TAIL_TEMPLATE
 from dodeal_ai.units.call_intelligence.worker import process_call
 from tests.helpers.fake_llm import FakeLLM, json_response
+from tests.helpers.reprompt_tails import tail_with
 from tests.unit.test_call_passes import SCOPE, _call, _extraction
 from tests.unit.test_call_stage1 import (
     EXTRACTION,
@@ -89,8 +89,8 @@ async def test_one_reprompt_carries_the_numbers_tail() -> None:
     answer, _ = await write_prose(llm, call, kept, scope=SCOPE, settings=get_settings())
 
     assert answer.summary == good["summary"] and llm.call_count == 2
-    tail = build_prompt(NUMBERS_TAIL_TEMPLATE, caller_data="").stable
-    assert llm.calls[1].prompt.tail.strip() == tail.strip()
+    tail = tail_with(NUMBERS_TAIL_TEMPLATE, "$.summary: number_not_in_transcript")
+    assert llm.calls[1].prompt.tail == tail
 
 
 @pytest.fixture

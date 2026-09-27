@@ -38,6 +38,7 @@ from dodeal_ai.units.call_intelligence.transcriber import Segment, Transcript
 from dodeal_ai.units.structured_intelligence import llm_call
 from tests.conftest import RedisFakes
 from tests.helpers.fake_llm import FakeLLM, json_response
+from tests.helpers.reprompt_tails import tail_with
 
 SCOPE = RequestContext.for_admitted_job(
     "tenant-a", request_id="req-1"
@@ -184,7 +185,15 @@ async def test_six_of_ten_quotes_failing_is_malformed() -> None:
         await _extract(llm)
 
     assert llm.call_count == 2
-    tail = build_prompt(QUOTE_EXACT_TAIL_TEMPLATE, caller_data="").stable
+    tail = tail_with(
+        QUOTE_EXACT_TAIL_TEMPLATE,
+        "$.wanted: quote_not_in_segment",
+        "$.concerns.0: quote_not_in_segment",
+        "$.concerns.1: quote_not_in_segment",
+        "$.concerns.2: quote_not_in_segment",
+        "$.concerns.3: quote_not_in_segment",
+        "$.agreed.0: quote_not_in_segment",
+    )
     assert (llm.prompts[0].tail, llm.prompts[1].tail) == ("", tail)
     assert llm.prompts[1].variable == llm.prompts[0].variable
     assert len(_refused(answer)) == 6
@@ -214,18 +223,35 @@ def _broken(budget: dict[str, Any]) -> dict[str, Any]:
 
 
 @pytest.mark.parametrize(
-    ("budget", "template"),
+    ("budget", "template", "lines"),
     [
-        (_detail("x", STATED, "budget " * 41, "s2"), QUOTE_LENGTH_TAIL_TEMPLATE),
+        (
+            _detail("x", STATED, "budget " * 41, "s2"),
+            QUOTE_LENGTH_TAIL_TEMPLATE,
+            (
+                "$.details.budget: quote_length",
+                "$.wanted: segment_unknown",
+                "$.agreed.0: segment_unknown",
+            ),
+        ),
         (
             _detail("x", STATED, "I can pay two million", "s2"),
             QUOTE_EXACT_TAIL_TEMPLATE,
+            (
+                "$.details.budget: quote_not_in_segment",
+                "$.wanted: segment_unknown",
+                "$.agreed.0: segment_unknown",
+            ),
         ),
-        (_detail(None, STATED, "My budget", "s2"), REPROMPT_TAIL_TEMPLATE),
+        (
+            _detail(None, STATED, "My budget", "s2"),
+            REPROMPT_TAIL_TEMPLATE,
+            ("$.details.budget: stated_without_value",),
+        ),
     ],
 )
 async def test_each_quote_code_from_the_extract_pass_picks_its_tail(
-    budget: dict, template: str
+    budget: dict, template: str, lines: tuple[str, ...]
 ) -> None:
     """The guard: a quote_length failure reprompts with the quote tail, a quote
     not in its segment with the exact-copy tail, anything else with the usual."""
@@ -239,7 +265,7 @@ async def test_each_quote_code_from_the_extract_pass_picks_its_tail(
     await _extract(llm)
 
     first, second = llm.prompts
-    assert (first.tail, second.tail) == ("", _tail(template))
+    assert (first.tail, second.tail) == ("", tail_with(template, *lines))
     assert (second.stable, second.variable) == (first.stable, first.variable)
     assert "budget budget" not in second.tail + second.variable
 
@@ -278,32 +304,39 @@ async def _reprompted_tail(check) -> str:
 
 
 @pytest.mark.parametrize(
-    ("errors", "template"),
+    ("errors", "template", "lines"),
     [
         (
             (("details.x", "missing_field"), ("details.budget", "quote_length")),
             QUOTE_LENGTH_TAIL_TEMPLATE,
+            # "x" is no field of the schema: written as *, never as itself.
+            ("$.details.*: missing_field", "$.details.budget: quote_length"),
         ),
         (
             (("wanted", "missing_field"), ("agreed.0", "quote_not_in_segment")),
             QUOTE_EXACT_TAIL_TEMPLATE,
+            ("$.wanted: missing_field", "$.agreed.0: quote_not_in_segment"),
         ),
         (
             (("agreed.0", "quote_not_in_segment"), ("wanted", "quote_length")),
             QUOTE_LENGTH_TAIL_TEMPLATE,
+            ("$.agreed.0: quote_not_in_segment", "$.wanted: quote_length"),
         ),
         (
             (("wanted", "missing_field"), ("agreed.0", "segment_unknown")),
             REPROMPT_TAIL_TEMPLATE,
+            ("$.wanted: missing_field", "$.agreed.0: segment_unknown"),
         ),
     ],
 )
 async def test_a_quote_code_anywhere_in_the_errors_picks_the_quote_tail(
-    errors: tuple[tuple[str, str], ...], template: str
+    errors: tuple[tuple[str, str], ...], template: str, lines: tuple[str, ...]
 ) -> None:
     """The guard: [missing_field, quote_length] gets the quote-length tail;
-    quote_length wins over quote_not_in_segment wherever each stands."""
-    assert await _reprompted_tail(_rejects_once(*errors)) == _tail(template)
+    quote_length wins over quote_not_in_segment wherever each stands; the
+    block after it names each failure by path and code (D-84)."""
+    tail = tail_with(template, *lines)
+    assert await _reprompted_tail(_rejects_once(*errors)) == tail
 
 
 async def test_call_model_without_a_tail_map_keeps_its_one_tail() -> None:

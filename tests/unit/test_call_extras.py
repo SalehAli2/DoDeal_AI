@@ -20,7 +20,6 @@ from dodeal_ai.core.context import RequestContext
 from dodeal_ai.core.errors import MalformedOutputError
 from dodeal_ai.core.jobs import JobStatus, Stage2State, create_job, read_job, transition
 from dodeal_ai.core.llm.profiles import PROFILE_UNIT_B_EXTRAS
-from dodeal_ai.core.prompting import build_prompt
 from dodeal_ai.core.validation import OutputValidationError
 from dodeal_ai.units.call_intelligence.config import CallsConfig
 from dodeal_ai.units.call_intelligence.evidence import CallText
@@ -46,6 +45,7 @@ from dodeal_ai.units.call_intelligence.prompts import (
 from dodeal_ai.units.call_intelligence.transcriber import Segment, Transcript
 from dodeal_ai.units.call_intelligence.wave2 import EXTRAS, wave2
 from tests.helpers.fake_llm import FakeLLM, json_response
+from tests.helpers.reprompt_tails import tail_with
 from tests.helpers.wave2_answers import coaching_answer
 
 SCOPE = RequestContext.for_admitted_job(
@@ -191,7 +191,7 @@ async def test_a_70_word_message_leaves_keywords_tags_and_seriousness() -> None:
     found, _ = await find_extras(llm, _call(), scope=SCOPE, settings=get_settings())
 
     assert llm.call_count == 2
-    tail = build_prompt(WHATSAPP_TAIL_TEMPLATE, caller_data="").stable
+    tail = tail_with(WHATSAPP_TAIL_TEMPLATE, "$.whatsapp: too_long")
     assert (llm.prompts[0].tail, llm.prompts[1].tail) == ("", tail)
     part = extras_part(_call(), found)
     assert (part["whatsapp_suggestion"], part["whatsapp_reason"]) == (None, "too_long")

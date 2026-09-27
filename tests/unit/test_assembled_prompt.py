@@ -142,3 +142,57 @@ def test_with_tail_takes_a_template_name_not_a_string(template_dir: Path) -> Non
     # tracked file is a hard error, exactly as it is for a prefix.
     with pytest.raises(PromptError):
         with_tail(build_prompt("t.txt", caller_data="note text"), "no_such_tail.txt")
+
+
+# --- the failed fields (D-84): paths and codes, never the answer ------------------
+
+NAMES = frozenset({"details", "budget", "wanted"})
+
+
+def test_with_tail_lists_the_failed_fields_after_the_file(template_dir: Path) -> None:
+    failures = (("details.budget", "quote_length"), ("", "json_invalid"))
+    prompt = with_tail(
+        build_prompt("t.txt", caller_data="note text"),
+        "tail.txt",
+        failures=failures,
+        names=NAMES,
+    )
+    assert prompt.tail == (
+        f"{TAIL}\n\n"
+        "----- FAILED FIELDS (path: code) -----\n"
+        "$.details.budget: quote_length\n"
+        "$: json_invalid\n"
+        "----- END FAILED FIELDS -----"
+    )
+
+
+def test_no_failures_leave_the_tail_its_file(template_dir: Path) -> None:
+    prompt = with_tail(
+        build_prompt("t.txt", caller_data="x"), "tail.txt", failures=(), names=NAMES
+    )
+    assert prompt.tail == TAIL
+
+
+def test_a_name_off_the_schema_a_long_index_or_an_odd_code_is_a_star() -> None:
+    failures = (
+        (f"details.{INJECTION}", "quote_length"),
+        ("wanted.12345", "Quote Length"),
+    )
+    assert prompting.failed_fields(failures, NAMES).splitlines()[1:3] == [
+        "$.details.*: quote_length",
+        "$.wanted.*: *",
+    ]
+
+
+def test_failures_are_listed_once_each_and_at_most_twenty() -> None:
+    failures = [("wanted", "missing")] * 3 + [
+        (f"details.{n}", "quote_length") for n in range(30)
+    ]
+    lines = prompting.failed_fields(failures, NAMES).splitlines()[1:-1]
+    assert len(lines) == prompting.MAX_FAILED_FIELDS
+    assert lines[:3] == [
+        "$.wanted: missing",
+        "$.details.0: quote_length",
+        "$.details.1: quote_length",
+    ]
+    assert lines[-1] == "$.details.18: quote_length"
