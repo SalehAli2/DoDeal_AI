@@ -13,6 +13,8 @@ from redis import asyncio as redis_async
 from dodeal_ai.core.jobs import (
     _CLAIM_SCRIPT,
     _CREATE_SCRIPT,
+    _GIVE_BACK_SCRIPT,
+    _PASS_SCRIPT,
     _PAUSE_SCRIPT,
     _STAGE2_REQUEUED_SCRIPT,
     _STAGE2_SCRIPT,
@@ -241,3 +243,37 @@ async def test_the_running_index_follows_the_status(
         *_TERMINAL_ARGS,
     )
     assert await real_redis.zscore(running, member) is None
+
+
+async def test_a_refused_start_is_given_back_never_below_zero(
+    real_redis: redis_async.Redis, key_prefix: str
+) -> None:
+    """M5: the give-back script on a real server moves only the pass's own
+    field, stops at zero, and answers -1 for a job gone."""
+    await _create(real_redis, key_prefix, "job-1")
+    job = _keys(key_prefix, "job-1")[0]
+    field = "pass:extract"
+
+    async def _give_back() -> int:
+        return int(await real_redis.eval(_GIVE_BACK_SCRIPT, 1, job, field))
+
+    async def _start() -> int:
+        return int(
+            await real_redis.eval(
+                _PASS_SCRIPT,
+                4,
+                *_keys(key_prefix, "job-1"),
+                "t1",
+                field,
+                *_touch("job-1"),
+                *_TERMINAL_ARGS,
+            )
+        )
+
+    assert await _give_back() == 0
+    assert (await _start(), await _start()) == (1, 2)
+    assert (await _give_back(), await _give_back(), await _give_back()) == (1, 0, 0)
+    assert await real_redis.hget(job, field) == "0"
+    assert await real_redis.hget(job, "attempts") == "0"
+    await real_redis.delete(job)
+    assert await _give_back() == -1
