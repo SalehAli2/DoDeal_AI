@@ -11,7 +11,7 @@ import pytest
 
 from dodeal_ai.core.validation import OutputValidationError
 from dodeal_ai.units.call_intelligence.fake_transcriber import FakeTranscriber
-from dodeal_ai.units.call_intelligence.language import UNHEARD, Spoken
+from dodeal_ai.units.call_intelligence.language import Spoken
 from dodeal_ai.units.call_intelligence.roles import (
     Roles,
     apply_roles,
@@ -170,7 +170,7 @@ def test_a_quote_with_no_words_is_quote_length_on_three_voices() -> None:
 def test_a_failed_language_quote_keeps_the_mapping_and_falls_back_to_script() -> None:
     """The guard (A1): the languages are judged apart. The client's language
     quoted from the agent's voice is dropped, never a malformed answer; the
-    mapping is applied and the call's languages come from the script."""
+    mapping is applied, and the client alone is read from its script (D-78)."""
     answer = Roles.model_validate(
         {
             "speakers": [
@@ -193,7 +193,7 @@ def test_a_failed_language_quote_keeps_the_mapping_and_falls_back_to_script() ->
         "client": {"language": None, "quote": None, "segment": None},
         "agent": {"language": "en", "quote": "this is Nada", "segment": "s2"},
     }
-    assert spoken(judged, applied=True) == UNHEARD
+    assert spoken(judged, applied=True) == Spoken(agent="en", script="client")
     kept = answer.model_copy(
         update={"call_languages": answer.call_languages.model_copy(
             update={"client": answer.call_languages.client.model_copy(

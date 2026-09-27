@@ -16,6 +16,12 @@ THE FALLBACK, when no side was heard (the pass did not run, failed, or its
 mapping was not applied): the transcript's own profile (transcriber.py), by
 each segment's language share of the spoken time.
 
+ONE SIDE'S FALLBACK (D-78): when one side's language was verified and the
+other side's quote failed, only the failed side is read from the script: its
+own segments' profile gives it Arabic (mostly_ar), English (mostly_en), both
+(mixed) or other, and the verified side keeps its code. With both quotes
+failed, the whole call falls back as above.
+
 THE SUMMARY LANGUAGE from the profile:
 
   mostly_ar  ar
@@ -33,7 +39,8 @@ until each language is tested; otherwise both are null with
 language_not_enabled (wave2.py). With either side heard, both must be heard
 and listed: a side not heard is not a listed one. With neither heard, the
 script fallback's profile decides: mostly_en needs en listed, mostly_ar an
-Arabic code, mixed both, other never.
+Arabic code, mixed both, other never. A side read from its script is listed
+by the same rule, on its own segments' profile.
 """
 
 from __future__ import annotations
@@ -41,6 +48,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, get_args
 
+from dodeal_ai.units.call_intelligence.prompts import said_by
 from dodeal_ai.units.call_intelligence.transcriber import (
     LanguageProfile,
     Segment,
@@ -124,17 +132,31 @@ DEFAULT_COACHING_LANGUAGES: frozenset[CoachedLanguage] = frozenset(
 # Why a call gets no coaching and no score (BRD B1).
 LANGUAGE_NOT_ENABLED = "language_not_enabled"
 
-# Where the spoken languages came from, for the stage-1 languages block.
+# Where the spoken languages came from, for the stage-1 languages block: one
+# side from the model and the null one from its own script is the third.
 FROM_MODEL = "model"
 FROM_SCRIPT = "script"
+FROM_MODEL_AND_SCRIPT = "model_and_script"
+SIDES = ("client", "agent")
+
+# The language families each profile stands for, the coaching gate's unit.
+_FAMILIES: dict[LanguageProfile, frozenset[str]] = {
+    LanguageProfile.MOSTLY_AR: frozenset({"ar"}),
+    LanguageProfile.MOSTLY_EN: frozenset({ENGLISH}),
+    LanguageProfile.MIXED: frozenset({"ar", ENGLISH}),
+    LanguageProfile.OTHER: frozenset({OTHER}),
+}
 
 
 @dataclass(frozen=True, slots=True)
 class Spoken:
-    """Each side's language as the roles pass heard it; None when unheard."""
+    """Each side's language as the roles pass heard it; None when unheard.
+    `script` names the one side whose quote failed while the other's held:
+    that side is read from its own segments' script (D-78)."""
 
     client: str | None = None
     agent: str | None = None
+    script: str | None = None
 
     @property
     def heard(self) -> bool:
@@ -151,12 +173,20 @@ def _family(code: str) -> str:
     return ENGLISH if code == ENGLISH else OTHER
 
 
+def _side_families(segments: tuple[Segment, ...], side: str) -> frozenset[str]:
+    """The families one side's own segments' script gives it."""
+    own = tuple(segment for segment in segments if said_by(segment) == side)
+    return _FAMILIES[profile_of(own)]
+
+
 def call_profile(transcript: Transcript, spoken: Spoken = UNHEARD) -> LanguageProfile:
     """The call's language profile: from the spoken languages when a side was
     heard, else the transcript's own (the module docstring's tables)."""
     if not spoken.heard:
         return transcript.language_profile
     families = {_family(code) for code in (spoken.client, spoken.agent) if code}
+    if spoken.script is not None:
+        families |= _side_families(transcript.segments, spoken.script)
     if families == {"ar"}:
         return LanguageProfile.MOSTLY_AR
     if families == {ENGLISH}:
@@ -199,38 +229,67 @@ def coached(
     spoken: Spoken, segments: tuple[Segment, ...], enabled: frozenset[str]
 ) -> bool:
     """Whether the call is coached and scored (the module docstring's rule)."""
-    if spoken.heard:
-        return spoken.client in enabled and spoken.agent in enabled
-    profile = profile_of(segments)
+    if not spoken.heard:
+        return _listed(_FAMILIES[profile_of(segments)], enabled)
+    return all(
+        _listed(_side_families(segments, side), enabled)
+        if side == spoken.script
+        else getattr(spoken, side) in enabled
+        for side in SIDES
+    )
+
+
+def _listed(families: frozenset[str], enabled: frozenset[str]) -> bool:
+    """Every family listed: ar by any Arabic code, en by en, other never."""
     arabic = bool(enabled & ARABIC_LANGUAGES)
-    if profile is LanguageProfile.MOSTLY_AR:
-        return arabic
-    if profile is LanguageProfile.MOSTLY_EN:
-        return ENGLISH in enabled
-    return profile is LanguageProfile.MIXED and arabic and ENGLISH in enabled
+    return all(
+        (family == "ar" and arabic) or (family == ENGLISH and ENGLISH in enabled)
+        for family in families
+    )
 
 
 def languages_block(transcript: Transcript, spoken: Spoken) -> dict[str, object]:
     """Stage 1's languages block: each side's code, the profile, and whether
-    they came from the model or the script fallback."""
+    they came from the model, the script fallback, or one side from each."""
+    source = (
+        FROM_SCRIPT
+        if not spoken.heard
+        else FROM_MODEL
+        if spoken.script is None
+        else FROM_MODEL_AND_SCRIPT
+    )
     return {
         "client": spoken.client,
         "agent": spoken.agent,
         "profile": call_profile(transcript, spoken).value,
-        "source": FROM_MODEL if spoken.heard else FROM_SCRIPT,
+        "source": source,
     }
 
 
 def spoken_of(block: object) -> Spoken:
     """The spoken languages back from a stored languages block; unheard for
-    a block that is missing, from the fallback, or holds an unknown code."""
-    if not isinstance(block, dict) or block.get("source") != FROM_MODEL:
+    a block that is missing, from the fallback, or holds an unknown code. One
+    side from each gives the null side back to its script, and needs exactly
+    one side null."""
+    if not isinstance(block, dict):
+        return UNHEARD
+    source = block.get("source")
+    if source not in (FROM_MODEL, FROM_MODEL_AND_SCRIPT):
         return UNHEARD
     sides = [block.get("client"), block.get("agent")]
     if not all(side is None or side in CALL_LANGUAGES for side in sides):
         return UNHEARD
     client, agent = sides
+    script = None
+    if source == FROM_MODEL_AND_SCRIPT:
+        unheard = [
+            name for name, code in zip(SIDES, sides, strict=True) if code is None
+        ]
+        if len(unheard) != 1:
+            return UNHEARD
+        script = unheard[0]
     return Spoken(
         client=client if isinstance(client, str) else None,
         agent=agent if isinstance(agent, str) else None,
+        script=script,
     )

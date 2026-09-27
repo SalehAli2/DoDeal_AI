@@ -33,8 +33,9 @@ clear: exactly one agent, at least one client and no unclear. Otherwise, or
 when the pass failed, the labels stay and the transcript is uncertain; more
 than two voices make it uncertain too, mapped or not. Stage 1 carries the
 answer as judged and what became of it. The languages are used only with the
-mapping applied and neither side's quote failed (spoken); otherwise the
-language falls back to script (language.py).
+mapping applied (spoken). With one side's quote failed and the other's held,
+only the failed side falls back to its script (D-78); with neither held, or
+the mapping not applied, the whole call's language does (language.py).
 
 ONE VOICE on a call of SINGLE_VOICE_MIN_SECONDS or more is uncertain
 (single_voice), whoever labelled it: the engine or a stereo channel. A sales
@@ -361,13 +362,19 @@ def stored(view: RolesView, answer: Roles) -> Roles:
 
 
 def spoken(judged: Judged | None, *, applied: bool) -> Spoken:
-    """Each side's language, only from an answer whose mapping was applied
-    and whose language quotes all held; else unheard (the script decides)."""
-    if judged is None or not applied or judged.languages_failed:
+    """Each side's language, only from an answer whose mapping was applied;
+    a side whose quote failed, while the other side's held, is read from its
+    own script (D-78); with no side held, unheard (the script decides)."""
+    if judged is None or not applied:
+        return UNHEARD
+    client = judged.languages.client.language
+    agent = judged.languages.agent.language
+    if not judged.languages_failed:
+        return Spoken(client=client, agent=agent)
+    if (client is None) == (agent is None):
         return UNHEARD
     return Spoken(
-        client=judged.languages.client.language,
-        agent=judged.languages.agent.language,
+        client=client, agent=agent, script=CLIENT if client is None else AGENT
     )
 
 

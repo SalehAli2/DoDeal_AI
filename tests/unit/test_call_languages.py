@@ -155,20 +155,27 @@ def test_a_french_call_is_fr_not_en() -> None:
 
 def test_a_side_quoted_from_the_other_sides_voice_falls_back_to_script() -> None:
     """A1: a language quote that fails is never a malformed answer; the
-    mapping stays applied and the languages come from the script."""
+    mapping stays applied. D-78: only that side is read from its script, and
+    the other keeps its verified language."""
     client, agent = URDU_ANSWER
     view = opening(URDU, country_code="971")
-    for sides in (
-        (_side("ur", agent["quote"], agent["segment"]), agent),
-        (client, _side("ur", client["quote"], "s2")),
-        (_side("ur", None, None), agent),
+    for sides, heard in (
+        (
+            (_side("ur", agent["quote"], agent["segment"]), agent),
+            Spoken(agent="ur", script="client"),
+        ),
+        (
+            (client, _side("ur", client["quote"], "s2")),
+            Spoken(client="ur", script="agent"),
+        ),
+        ((_side("ur", None, None), agent), Spoken(agent="ur", script="client")),
     ):
         answer = _answer(URDU, *sides)
         check_roles(view)(answer)
         judged = judge(view, answer)
         _, block = apply_roles(URDU, judged, call_seconds=150)
         assert block["applied"] is True and judged.languages_failed is True
-        assert spoken(judged, applied=True) == UNHEARD
+        assert spoken(judged, applied=True) == heard
     unheard = _answer(URDU, client, _side(None, client["quote"], "s2"))
     judged = judge(view, unheard)
     assert judged.languages_failed is False
