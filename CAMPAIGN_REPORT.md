@@ -7574,3 +7574,10 @@ failure modes, then one stress test (sabotage in brackets).
 - D4 language (RISK): one failed quote threw away the other side's verified language; the failed side passed the coaching gate on the whole call's time. Now only that side reads its own segments. Sabotage: 4 of 4 fail.
 - D5 (low): unmapped voices translate as unknown; a held translation is 200; a read-back is no model call; no worker publishes 8000; OWASP at v20 and quote_fillers_v2.
 - Stress test: a model breaker open for a whole stage 2: runs pause 300, 600, 1200 and 2400 s, the fifth fails model_breaker_open, and no pass start is used.
+
+## Fix E: keep the verified parts, never throw a true answer away (D-101)
+- call_model mend (RISK, paid calls): a well-shaped answer whose evidence partly failed was re-asked in full and lost; a mend that paid a third call. Now it is kept, the one reprompt lists what failed, the verified parts of both are merged, and an unshaped second answer leaves the first. Sabotage: merge skipped fails 3; the kept first thrown away fails 1.
+- score (RISK, scoring): one invented quote threw away twelve true checks; a failing quote nothing rested on cost the score. Now each failing owed check is taken from the second answer only where it holds, still no score while one fails, and a stray quote is dropped. Sabotage: a failing second check taken fails 1; the final gate off fails 2.
+- coaching (RISK, model output): one bad stage quote or moment lost the whole coaching. Now observations stand one by one, a failing stage yes is kept unverified, a bad moment dropped, the reprompt earned only with no verified strength or improvement. Sabotage: gate off fails 2; failing observations kept fails 1; stage kept verified fails 1.
+- evidence.Answer (RISK, model output): an invented key reprompted coaching. Now score and coaching drop it unread; every Answer field required, held by a guard test. Sabotage: forbid restored fails 3.
+- Stress test: coaching whose first answer's strength is invented and whose second's improvement is: two calls, the part carries the first's improvement and the second's strength, and the reprompt names the failed paths, never the words.
