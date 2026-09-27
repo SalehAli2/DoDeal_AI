@@ -106,6 +106,8 @@ def test_a_dropped_negation_is_found_nowhere_near_or_far() -> None:
         ("works for me", "s7", "elsewhere"),
         ("Tuesday at four? Yes, Tuesday", "s3", "joined"),
         ("Shall I book a visit on Tuesday at four", "s3", "altered_1"),
+        ("Shall I Tuesday at four", "s3", "spread"),
+        ("Yes Tuesday works for me", "s4", "spread"),
         ("Shall we book a visit on Wednesday at four", "s3", "altered_3"),
         ("the client wanted a sea view flat", "s3", "absent"),
         ("book a viewing", None, "unchecked"),
@@ -114,6 +116,12 @@ def test_a_dropped_negation_is_found_nowhere_near_or_far() -> None:
 )
 def test_the_miss_kind(quote: str, segment: str | None, kind: str) -> None:
     assert miss_kind(_call(), quote, segment) == kind
+
+
+def test_a_negation_in_the_gap_is_named() -> None:
+    said = (_say(0, "lead", "I do not want to wait for the handover."),)
+    call = CallText.of(Transcript.of(said, provider="f", model="f"), country_code="971")
+    assert miss_kind(call, "I do want to wait", "s1") == "negation"
 
 
 def test_a_miss_is_logged_by_where_and_why_never_its_words(

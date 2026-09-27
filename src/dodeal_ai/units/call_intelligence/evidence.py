@@ -11,14 +11,22 @@ because its roles were not applied (ROLES_NOT_APPLIED) has its words as heard.
 
 THE QUOTE CHECK, in code, on every quote a pass returns: at most 40 words (the
 prompts ask for 15); the segment it cites exists; and its words appear in that
-segment in order (A4). Words are normalised as the alarm matcher normalises
-(alarms.py), then every hamza seat (أ إ آ ؤ ئ) is folded to its base letter
-and every Arabic-Indic digit to ASCII (quote_words); a detached و is joined to
-the word after it. Two words are the same when equal, or when neither is a
-negation and one is the other with one leading و, ف, ب or ل (the rest at
-least two letters). Between two quote words the segment may hold only words
-that repeat the word before them ("عمري عمري") or are on QUOTE_FILLERS; a
-negation is never skipped, never added and never matched to another word.
+segment in order (A4). THE QUOTE LOCATES, THE TRANSCRIPT SPEAKS (D-103): the
+model's words only find the place, and what is stored and delivered is the
+transcript's own words there, so a quote may leave a word of disfluent speech
+out but never add, change or move one. Words are normalised as the alarm
+matcher normalises (alarms.py), then every hamza seat (أ إ آ ؤ ئ) is folded to
+its base letter and every Arabic-Indic digit to ASCII (quote_words); a
+detached و is joined to the word after it. Two words are the same when equal,
+or when neither is a negation and one is the other with one leading و, ف, ب
+or ل (the rest at least two letters). Between two quote words the segment may
+hold, free, words that repeat the word before them ("عمري عمري") or are on
+QUOTE_FILLERS, and a few others the quote left out (left_out_allowed: none
+under OMIT_MIN_WORDS, one per OMIT_EVERY quote words, at most OMIT_RUN in one
+gap); never a word that turns the sentence around (turns_around: a negation,
+a verb with its negation fused on, "بدون", "غير", "الا", "مفيش", "without").
+A negation is never added and never matched to another word. Of the places a
+quote stands, the one leaving out the fewest words wins, then the earliest.
 Not in the cited segment, the quote is looked for in the one just before, then
 the one just after, then -- a quote of FAR_MIN_WORDS words or more -- in every
 other segment, nearest first (D-102: the words were said, only the id was
@@ -217,6 +225,16 @@ def quote_words(text: str) -> list[str]:
 
 _NEGATION_WORDS = frozenset(quote_words(" ".join(NEGATIONS)))
 _FILLER_WORDS = frozenset(quote_words(" ".join(QUOTE_FILLERS))) - _NEGATION_WORDS
+# Words a quote may never leave out, beside the negations (D-103): "without",
+# "except", "unless" and "don't" in Arabic and English. A word that turns a
+# sentence around stays in the quote or the quote fails.
+_TURNING_WORDS = frozenset(
+    quote_words("بدون غير الا بلاش مفيش مافيش without except unless")
+)
+# An Arabic verb with the negation fused around it (ماعرفتش, مبحبش, ماكانش):
+# "ما" or "م" before, "ش" after. "معلش" or "مدهش" match too; that only
+# refuses a quote leaving one of them out, never lets a negation go.
+_FUSED_NEGATION = re.compile(r"^(?:ما|م)\w+ش$")
 
 # The reasons that doubt only who spoke, never what was said: the roles pass
 # failed, or its mapping was not clear (roles.py).
@@ -233,11 +251,25 @@ _NEIGHBOURS = (-1, 1)
 # were said, only the model's segment id was wrong. Lower lets "ok thanks" move
 # to any "ok thanks"; higher refuses true quotes cited a few segments off.
 FAR_MIN_WORDS = 4
+# THE QUOTE LOCATES, THE TRANSCRIPT SPEAKS (D-103). A model copying disfluent
+# speech leaves words out ("مثلا", a false start); every word it gives must
+# still be there, in order, and what is stored is the transcript's own words.
+# A quote this short may leave nothing out: two words with a gap prove little.
+OMIT_MIN_WORDS = 3
+# One left-out word allowed per this many quote words (at least one): 7 words
+# may leave out 2, 15 may leave out 5. Lower refuses true quotes of hesitant
+# speech; higher lets a few common words scattered over a long turn pass.
+OMIT_EVERY = 3
+# The most words left out in one gap between two quote words, fillers and
+# repeats not counted. Higher lets one quote bridge two separate sentences;
+# lower refuses a quote that skipped one aside ("يعني حضرتك عارف").
+OMIT_RUN = 3
 # Why a refused quote was not found, logged as quote_miss (never the quote):
-# the words stand in another segment; they stand only across two segments;
-# at most this many of the quote's words are missing from the best nearby
-# segment (altered_1 to altered_3, altered_3 meaning three or more); or fewer
-# than half of them stand there at all (absent).
+# the words stand in another segment (elsewhere); only across two segments
+# (joined); all there in order but a negation lies in a gap (negation) or
+# more left out than allowed (spread); this many of them missing from the
+# best nearby segment (altered_1 to altered_3, 3 or more); fewer than half
+# there at all (absent).
 MISS_ALTERED_MAX = 3
 _logger = logging.getLogger("dodeal_ai.unit_b")
 # The fields a quote and its segment are held in, in every pass's answer.
@@ -390,32 +422,75 @@ def _same(said: str, quoted: str) -> bool:
     )
 
 
-def _reachable(said: Sequence[str], start: int) -> Iterator[int]:
-    """The positions the next quote word may stand at after one that ended at
-    `start`: `start`, and each after a run of skippable words."""
-    at = start
-    while at < len(said):
-        yield at
-        if not _skippable(said, at):
+def turns_around(word: str) -> bool:
+    """Whether a quote may never leave `word` out (D-103): a negation, a
+    turning word, or an Arabic verb with its negation fused on."""
+    return (
+        word in _NEGATION_WORDS
+        or word in _TURNING_WORDS
+        or _FUSED_NEGATION.match(word) is not None
+    )
+
+
+def left_out_allowed(words: int) -> int:
+    """How many of the segment's words a quote of `words` words may leave out
+    between its own (D-103): none under OMIT_MIN_WORDS, else one in
+    OMIT_EVERY, at least one. Skippable words cost nothing."""
+    return 0 if words < OMIT_MIN_WORDS else max(1, words // OMIT_EVERY)
+
+
+def _reachable(
+    said: Sequence[str],
+    start: int,
+    *,
+    run: int = OMIT_RUN,
+    over_negations: bool = False,
+) -> Iterator[tuple[int, int]]:
+    """Each position the next quote word may stand at after one that ended at
+    `start`, with how many words it leaves out: over skippable words free,
+    over at most `run` others one each, and never over a negation. A longer
+    `run` and `over_negations` are only miss_kind's, to say why one missed."""
+    left_out = 0
+    for at in range(start, len(said)):
+        yield at, left_out
+        if _skippable(said, at):
+            continue
+        if not over_negations and turns_around(said[at]):
             return
-        at += 1
+        left_out += 1
+        if left_out > run:
+            return
 
 
-def _span(said: Sequence[str], quote: Sequence[str]) -> tuple[int, int] | None:
-    """The first and last positions of the earliest match of the quote's words
-    in `said`, in order, nothing between two of them but skippable words
-    (module docstring); None when there is none."""
-    paths = {(at, at + 1) for at, word in enumerate(said) if _same(word, quote[0])}
+def _span(
+    said: Sequence[str],
+    quote: Sequence[str],
+    *,
+    allowed: int | None = None,
+    run: int = OMIT_RUN,
+    over_negations: bool = False,
+) -> tuple[int, int] | None:
+    """The first and last positions of the quote's words in `said`, in order
+    (D-103): every one of them there, none added or changed, and between them
+    only skippable words and at most `allowed` others (left_out_allowed by
+    default), never a negation. Of all such places, the one leaving out the
+    fewest words, then the earliest; None when there is none."""
+    budget = left_out_allowed(len(quote)) if allowed is None else allowed
+    paths = {(at, at + 1): 0 for at, word in enumerate(said) if _same(word, quote[0])}
     for wanted in quote[1:]:
-        paths = {
-            (first, at + 1)
-            for first, start in paths
-            for at in _reachable(said, start)
-            if _same(said[at], wanted)
-        }
+        reached: dict[tuple[int, int], int] = {}
+        for (first, start), spent in paths.items():
+            for at, left_out in _reachable(
+                said, start, run=run, over_negations=over_negations
+            ):
+                cost = spent + left_out
+                if cost <= budget and _same(said[at], wanted):
+                    key = (first, at + 1)
+                    reached[key] = min(cost, reached.get(key, cost))
+        paths = reached
     if not paths:
         return None
-    first, end = min(paths)
+    (first, end), _ = min(paths.items(), key=lambda path: (path[1], path[0]))
     return first, end - 1
 
 
@@ -484,10 +559,18 @@ def miss_kind(call: CallText, quote: str | None, segment: str | None) -> str:
         if at + 1 < len(shown)
     ):
         return "joined"
+    wide = len(max(shown, key=len))
+    if any(_span(shown[at], quoted, allowed=wide, run=wide) for at in near):
+        return "spread"
+    if any(
+        _span(shown[at], quoted, allowed=wide, run=wide, over_negations=True)
+        for at in near
+    ):
+        return "negation"
     best = max(_common(shown[at], quoted) for at in near)
     if best * 2 < len(quoted):
         return "absent"
-    return f"altered_{min(len(quoted) - best, MISS_ALTERED_MAX)}"
+    return f"altered_{max(1, min(len(quoted) - best, MISS_ALTERED_MAX))}"
 
 
 def log_misses(

@@ -15,6 +15,7 @@ from dodeal_ai.units.call_intelligence.alarms import words
 from dodeal_ai.units.call_intelligence.evidence import (
     CallText,
     locate,
+    own_words,
     quote_errors,
     relocated,
 )
@@ -159,7 +160,6 @@ def test_fillers_and_repeats_may_be_left_out(quote: str, said: str) -> None:
     [
         ("I did like it", "I did not like it"),
         ("I will buy", "I will never buy"),
-        ("I want the villa", "I want only the villa"),
         ("انا زرت دبي", "انا مش زرت دبي"),
         ("انا زرت دبي", "انا اه ما زرت دبي"),
         ("انا زرت", "انا لا لا زرت"),
@@ -168,6 +168,99 @@ def test_fillers_and_repeats_may_be_left_out(quote: str, said: str) -> None:
 )
 def test_anything_else_between_the_words_fails(quote: str, said: str) -> None:
     assert _check(quote, said) == [("here", "quote_not_in_segment")]
+
+
+# --- D-103: the quote locates, the transcript speaks -------------------------------
+
+# The agent's budget question as the engine wrote it on call1, and the quote
+# both of the model's answers gave for asked_budget: every word there, in
+# order, "مثلا" left out.
+BUDGET_SAID = "طيب احنا ايه البادجت مثلا اللي ممكن نكون حاطينه للاستثمار"
+BUDGET_QUOTED = "احنا ايه البادجت اللي ممكن نكون حاطينه"
+
+
+def test_a_word_left_out_of_disfluent_speech_passes_as_the_transcripts_words() -> None:
+    """The guard: the quote locates, and what is stored is the transcript's
+    own words from its first word to its last, the left-out one included."""
+    call = _one(BUDGET_SAID)
+    assert quote_errors(call, "asked_budget", BUDGET_QUOTED, "s1") == []
+    assert own_words(call, BUDGET_QUOTED, 0) == (
+        "احنا ايه البادجت مثلا اللي ممكن نكون حاطينه"
+    )
+
+
+@pytest.mark.parametrize(
+    ("quote", "said", "passes"),
+    [
+        ("I want the villa", "I want only the villa", True),
+        ("want villa", "want the villa", False),
+        ("I want villa", "I want the villa", True),
+        ("I want villa", "I want the big villa", False),
+        ("I really want that villa now", "I really do want that big villa now", True),
+        (
+            "I really want that villa now",
+            "I really do want that big sea villa now",
+            False,
+        ),
+        ("we can meet tomorrow", "we can maybe if you like meet tomorrow", False),
+    ],
+    ids=[
+        "one-of-four",
+        "two-words-none",
+        "one-of-three",
+        "two-of-three",
+        "two-of-six",
+        "three-of-six",
+        "a-run-of-four",
+    ],
+)
+def test_how_many_words_a_quote_may_leave_out(
+    quote: str, said: str, passes: bool
+) -> None:
+    """One in OMIT_EVERY (3) quote words, none under OMIT_MIN_WORDS (3), and
+    at most OMIT_RUN (3) in one gap; fillers and repeats free."""
+    assert (evidence.OMIT_MIN_WORDS, evidence.OMIT_EVERY, evidence.OMIT_RUN) == (
+        3,
+        3,
+        3,
+    )
+    assert (_check(quote, said) == []) is passes
+
+
+@pytest.mark.parametrize(
+    ("quote", "said"),
+    [
+        ("انا السعر عالي عليا", "انا ماعرفتش السعر عالي عليا"),
+        ("هيجيلك العقد كامل النهاردة", "هيجيلك العقد كامل مفيش النهاردة"),
+        ("ندفع المبلغ كله كاش", "ندفع المبلغ بدون كله كاش"),
+        ("كل الوحدات متاحة للبيع", "كل الوحدات الا متاحة للبيع"),
+        ("the unit comes furnished today", "the unit comes without furnished today"),
+    ],
+    ids=["fused-negation", "mafish", "bidoun", "illa", "without"],
+)
+def test_a_word_that_turns_the_sentence_is_never_left_out(
+    quote: str, said: str
+) -> None:
+    assert _check(quote, said) == [("here", "quote_not_in_segment")]
+
+
+@pytest.mark.parametrize(
+    ("quote", "said"),
+    [
+        ("I want the big villa", "I want the villa"),
+        ("I want the small villa", "I want the big villa"),
+        ("the villa I want", "I want the villa"),
+    ],
+    ids=["a-word-added", "a-word-changed", "reordered"],
+)
+def test_a_word_added_changed_or_moved_still_fails(quote: str, said: str) -> None:
+    assert _check(quote, said) == [("here", "quote_not_in_segment")]
+
+
+def test_the_place_leaving_out_fewest_words_is_stored() -> None:
+    """Said twice, once with a word between: the exact place is stored."""
+    call = _one("I want the big villa, yes, I want the villa")
+    assert own_words(call, "I want the villa", 0) == "I want the villa"
 
 
 def test_a_repeated_negation_may_be_left_out_once_it_is_quoted() -> None:
