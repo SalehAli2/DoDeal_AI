@@ -7542,6 +7542,16 @@ failure modes, then one stress test (sabotage in brackets).
 - D-76 prefixes (3): "وما" and "ماعرفتش" were missed. Test: both counted; "مشروع" is not.
 - Stress test: a one-word assent cited one segment off is judged on the segment it is found in, so the agent's own "تمام" never books.
 
+## Finish-up A: H4, H5, M4, M9 to M12, H6, L6, L7 (8a418c1 to e6f31fd)
+- H4 safety (RISK): staging started without production's refusals; an http LLM or STT base URL sent keys in clear. Now staging refuses alike and an http base URL refuses the start.
+- H5 workers (RISK): a stop cut a paid call short; one queue took every slot. Now running jobs get 660 s and max_jobs is set per queue.
+- M4 paid (RISK): a lost reprompt sent the first prompt again and paid twice; a run stopped mid-reprompt did too. Now the reprompt alone goes again, the first answer read back unpaid, and a marked reprompt fails as pass_interrupted.
+- M9 translation (RISK): a translation paid past the calls budget; a repeat request queued a second paid run. Now both preflight the budget and a held translation is answered done.
+- M10 logging (RISK): arq's own line carried a foreign exception's message, and arq's copied extra. Now the class name and frames only.
+- M11 M12 worker (RISK): the audio budget charged the declared seconds, not the measured; an octet-stream recording was refused. Now ffprobe's seconds, rounded up, and ffprobe decides.
+- H6 L6 L7 (low): Redis on 127.0.0.1 with appendonly, grace periods, a 1 MB re-analysis body cap, six new 100 floors.
+- Stress test: a reprompt lost twice pays for exactly two responses and fails the pass with two starts.
+
 ## Unit B review fixes A: roles, unknown voices, cascades, quote matcher, escalations, prose numbers (unit_b_prompts_v20)
 - A1 roles (1, RISK): a borrowed quote verified the wrong voice; one failed language quote threw away a good mapping. Test: two voices with one verified role map the other, three never infer, a failed language quote keeps the mapping and the script decides the languages. Sabotage: 3 of 3 fail.
 - A2 unknown voices (2, RISK): an unmapped voice read as the client; a roles-failed call booked a next step. Test: speaker_N and unknown render unknown, booked needs known roles, a loss reason from an unknown voice is unverified. Sabotage: 2 of 2 fail.
@@ -7550,3 +7560,17 @@ failure modes, then one stress test (sabotage in brackets).
 - A5 escalations (5): one bad flag is dropped alone, caps 10 and 3 price, escalations_v4. Sabotage: 1 of 1 fails. A6 (6): coaching_v5; the tail holds no rejected text. A7 prose numbers (7): number_not_in_transcript, one reprompt, prose_failed. Sabotage: 1 of 1 fails.
 - Not built: the tail listing failing paths and codes (core/prompting.py, llm_call.py) and per-pass failure sub-code counts on the outcome line (paid.py, worker.py, stage2.py).
 - Stress test: "لما وصلت" never matches "ما وصلت", while "والسعر عالي" matches "و السعر يعني عالي" and is stored as those transcript words.
+
+## Finish-up C: Q13 deal_type and the D-97 pilot label (28a39de to 160b238)
+- Q13 deal_type (RISK, scoring): a mark out of 100 with no business line given; the line reaching a prompt. Now the ds_ checks run only with the deal switch on and deal_type present, else out of 80, and deal_type reaches no prompt.
+- D-97 pilot (RISK, tenant isolation): the pilot key on another company's output; a pilot company's output without it. Now "pilot": true rides every output of a pilot company and no other company's carries the key.
+- tools pilot (low): apply_pilot.py validates both sections, refuses any PLACEHOLDER before sending, and --dry-run only validates.
+- Stress test: two companies, one a pilot: the other's judgement, brief and call status carry no pilot key at all.
+
+## Finish-up D: M5, the reprompt tail, sub-codes, per-side language, loose ends
+- D1 M5 paid (RISK): a breaker refusal, nothing sent, used up a start and failed a pass unpaid; a job ran straight back into the open breaker. Now the start is given back and the job pauses on the outage backoff (model_breaker_open). Sabotage: 5 of 5 fail.
+- D2 reprompt tail (RISK): a rejected quote or an invented key sent back in the prompt; a tail that names nothing. Now `$.path: code` lines follow the tail, in schema names and indexes only, else `*`. Sabotage: 4 of 4 fail.
+- D3 sub-codes (low): quote_failures by code per pass on both outcome lines.
+- D4 language (RISK): one failed quote threw away the other side's verified language; the failed side passed the coaching gate on the whole call's time. Now only that side reads its own segments. Sabotage: 4 of 4 fail.
+- D5 (low): unmapped voices translate as unknown; a held translation is 200; a read-back is no model call; no worker publishes 8000; OWASP at v20 and quote_fillers_v2.
+- Stress test: a model breaker open for a whole stage 2: runs pause 300, 600, 1200 and 2400 s, the fifth fails model_breaker_open, and no pass start is used.

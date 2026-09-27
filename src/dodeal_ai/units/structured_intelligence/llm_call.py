@@ -54,6 +54,7 @@ import logging
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
 from functools import cache
 
 from pydantic import BaseModel
@@ -100,6 +101,12 @@ def refused_codes() -> Iterator[list[str]]:
         yield codes
     finally:
         _REFUSED_CODES.reset(token)
+
+
+@dataclass(frozen=True, slots=True)
+class ReadBack(LLMResponse):
+    """A response received earlier, read back from memory with no tokens
+    (paid.Replay): never paid again, so complete_once counts no call for it."""
 
 
 class ModelRefused(ModelUnavailableError):
@@ -228,7 +235,9 @@ async def complete_once(
         raise ModelUnavailableError() from None
 
     # Counted on the task's spend whatever it reported: it was a paid call.
-    record_model_call(response, label)
+    # A read-back was not: its call was counted when it arrived.
+    if not isinstance(response, ReadBack):
+        record_model_call(response, label)
     # No usage reported means nothing to charge and nothing to say about it: a
     # zero-token line would read as a free call rather than an unmeasured one.
     if response.total_tokens:

@@ -1,34 +1,38 @@
 # LOCAL ONLY: a laptop's stack. Production follows the DevOps sheet (its own
 # Redis, persistence, restarts and grace periods), never this file.
+# What the api and every call worker share: the image, the env files and the
+# Redis URLs. An anchor, never `extends: api`, so no worker inherits the api's
+# port: `ports: !reset []` under extends still published 8000 (Compose v5).
+x-app: &app
+  build: .
+  # Optional, and it is the DEMO that made it optional: a clean checkout has
+  # no .env, and `required: true` made `docker compose up` fail before the
+  # service could tell anyone what was missing. Nothing is loosened by this --
+  # Settings still refuses to start without DODEAL_JWT_SIGNING_KEY, so an
+  # empty environment fails closed in the app, with a reason, as it always did.
+  env_file:
+    - path: .env
+      required: false
+  environment:
+    DODEAL_REDIS_QUEUE_URL: redis://redis:6379/0
+    DODEAL_REDIS_COST_URL: redis://redis:6379/1
+    DODEAL_REDIS_OPERATIONAL_URL: redis://redis:6379/2
+    DODEAL_REDIS_JOBS_URL: redis://redis:6379/3
+  depends_on: [redis]
+
 services:
   api:
-    build: .
+    <<: *app
     ports: ["8000:8000"]
     # Time for in-flight requests to finish after SIGTERM before SIGKILL.
     stop_grace_period: 45s
-    # Optional, and it is the DEMO that made it optional: a clean checkout has
-    # no .env, and `required: true` made `docker compose up` fail before the
-    # service could tell anyone what was missing. Nothing is loosened by this --
-    # Settings still refuses to start without DODEAL_JWT_SIGNING_KEY, so an
-    # empty environment fails closed in the app, with a reason, as it always did.
-    env_file:
-      - path: .env
-        required: false
-    environment:
-      DODEAL_REDIS_QUEUE_URL: redis://redis:6379/0
-      DODEAL_REDIS_COST_URL: redis://redis:6379/1
-      DODEAL_REDIS_OPERATIONAL_URL: redis://redis:6379/2
-      DODEAL_REDIS_JOBS_URL: redis://redis:6379/3
-    depends_on: [redis]
 
-  # The call workers (Unit B): the api service's image, env files and Redis
-  # URLs, minus its port, one container per queue so each gets its own SIGTERM
-  # and exit. Until a speech-to-text adapter exists each refuses to start.
+  # The call workers (Unit B): the api's image, env files and Redis URLs and
+  # no port, one container per queue so each gets its own SIGTERM and exit.
+  # Until a speech-to-text adapter exists each refuses to start.
   worker-priority: &call-worker
-    extends:
-      service: api
+    <<: *app
     command: ["python", "-m", "dodeal_ai.workers.calls", "priority"]
-    ports: !reset []
     # CALL_JOB_COMPLETION_WAIT_SECONDS (660) for running jobs, plus 30 s to
     # record them and close, before SIGKILL cuts a paid call short.
     stop_grace_period: 690s

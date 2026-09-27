@@ -12,6 +12,7 @@ import httpx
 import pytest
 
 from dodeal_ai.core.config import get_settings
+from dodeal_ai.core.cost.spend import spending
 from dodeal_ai.core.errors import ModelUnavailableError
 from dodeal_ai.core.jobs import (
     Job,
@@ -140,6 +141,28 @@ async def test_a_lost_reprompt_is_sent_again_alone(redis_fakes: RedisFakes) -> N
     assert kept is not None and kept.passes[NAME] == 2
     work = await read_work(job.tenant, job.job_id)
     assert "answer" in work[NAME] and REPROMPTING not in work[NAME]
+
+
+async def test_the_read_back_answer_is_no_model_call_on_the_spend(
+    redis_fakes: RedisFakes,
+) -> None:
+    """Two responses arrived and two calls are counted: the first answer read
+    back for the reprompt's retry is not a third."""
+    job = await _job()
+    llm = FakeLLM(
+        json_response(BAD, input_tokens=100, output_tokens=20),
+        ModelUnavailableError(),
+        json_response(GOOD, input_tokens=300, output_tokens=40),
+    )
+    with spending("unit_b") as spend:
+        await _run(job, llm, PassUsage())
+    assert llm.call_count == 3
+    line = spend.fields()
+    assert (line["model_calls"], line["input_tokens"], line["output_tokens"]) == (
+        2,
+        400,
+        60,
+    )
 
 
 async def test_a_lost_first_prompt_is_the_one_sent_again(

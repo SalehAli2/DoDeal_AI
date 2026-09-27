@@ -62,10 +62,11 @@ def _spent(monkeypatch: pytest.MonkeyPatch, reason: str) -> None:
 async def test_a_repeat_request_answers_from_the_held_translation(
     client: httpx.AsyncClient, enqueued: list[Any], redis_fakes: RedisFakes
 ) -> None:
+    """Nothing is accepted to do: the held translation is answered 200."""
     await case._done_call(TRANSCRIPT)
     await store_translation("tenant-a", case.JOB, "ar", HELD, ttl_seconds=60)
     held = await case._post(client, "ar")
-    assert held.status_code == 202
+    assert held.status_code == 200
     assert held.json() == {
         "job_id": case.JOB,
         "target": "ar",

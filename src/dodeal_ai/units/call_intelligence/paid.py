@@ -36,7 +36,7 @@ later run reports the same stamp without calling again.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 
 from pydantic import BaseModel
@@ -50,6 +50,7 @@ from dodeal_ai.core.prompting import AssembledPrompt
 from dodeal_ai.units.call_intelligence.evidence import SPEAKER_UNKNOWN
 from dodeal_ai.units.structured_intelligence.llm_call import (
     ModelRefused,
+    ReadBack,
     refused_codes,
 )
 
@@ -141,15 +142,18 @@ class PassUsage:
         self.reasoning[name] = self.reasoning.get(name, 0) + response.reasoning_tokens
 
 
-def _unpaid(response: LLMResponse) -> LLMResponse:
+def _unpaid(response: LLMResponse) -> ReadBack:
     """A received response read back: the same answer with no tokens, so no
-    budget, spend or metric counts them again."""
-    return replace(
-        response,
-        input_tokens=0,
-        output_tokens=0,
-        cached_input_tokens=0,
-        reasoning_tokens=0,
+    budget, spend or metric counts them again, and marked a ReadBack, so the
+    task's Spend counts no second model call for it."""
+    return ReadBack(
+        **{
+            **asdict(response),
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cached_input_tokens": 0,
+            "reasoning_tokens": 0,
+        }
     )
 
 

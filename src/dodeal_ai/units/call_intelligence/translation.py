@@ -1,7 +1,7 @@
 """Translating a done call (Unit B): the stage-1 transcript into Arabic or
 English, asked for by the CRM and sent back as call.translation.
 
-  POST /api/v1/calls/jobs/{job_id}/translation {target}  202; 409
+  POST /api/v1/calls/jobs/{job_id}/translation {target}  202, 200 held; 409
       result_expired once the stage-1 result is gone, 409 already_in_language
       for a call mostly in the target language already; 429 at the calls
       budget, 503 when the store that counts it cannot say (M9)
@@ -82,7 +82,7 @@ from dodeal_ai.units.call_intelligence.prompts import (
     build_call_prompt,
     clock,
     one_line,
-    role_of,
+    said_by,
     segment_id,
 )
 from dodeal_ai.units.call_intelligence.queues import enqueue_translation
@@ -203,7 +203,7 @@ def translate_data(call: CallText, run: Sequence[int], target: str) -> str:
     """The chunk's segments with their call-wide ids, then the target."""
     lines = "\n".join(
         f"[{segment_id(n)} {clock(call.segments[n].start_s)} "
-        f"{role_of(call.segments[n])}] {one_line(call.shown[n])}"
+        f"{said_by(call.segments[n])}] {one_line(call.shown[n])}"
         for n in run
     )
     return f"TRANSCRIPT:\n{lines}\n\nTARGET: {target}"
@@ -297,7 +297,7 @@ async def translate_call(
                     "segment": line.segment,
                     "start_s": call.segments[n].start_s,
                     "end_s": call.segments[n].end_s,
-                    "speaker": role_of(call.segments[n]),
+                    "speaker": said_by(call.segments[n]),
                     "text": line.text,
                 }
                 for n, line in zip(run, answer.segments, strict=True)

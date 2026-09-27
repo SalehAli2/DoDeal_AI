@@ -14,9 +14,10 @@ call's author as an asserted subject (`author:<author_id>`).
                              its own counter (`cost:reanalysis:tenant`); the
                              same call, stages and versions is the same job
   POST /api/v1/calls/jobs/{job_id}/translation {target: ar|en}
-                             202; 409 result_expired, 409 already_in_language;
-                             counted on the READS counter, sent back as
-                             call.translation
+                             202 queued, or 200 done with the translation
+                             already held; 409 result_expired, 409
+                             already_in_language; counted on the READS
+                             counter, sent back as call.translation
   POST /api/v1/calls/jobs/{job_id}/whatsapp {language: one of 12 codes}
                              200 {job_id, language, dialect, text}: the
                              suggestion written again in that language, one
@@ -37,7 +38,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Path
+from fastapi import APIRouter, Depends, Path, Response
 from fastapi.responses import JSONResponse
 
 from dodeal_ai.core.auth.dependencies import (
@@ -107,10 +108,15 @@ async def create_translation(
     body: TranslationRequest,
     context: Annotated[RequestContext, Depends(service_gate4_reads_cost)],
     job_id: Annotated[str, Path(pattern=r"^[0-9a-f]{32}$")],
+    response: Response,
 ) -> TranslationAccepted:
     """Translate a done call's transcript; the answer comes as
-    call.translation and through the status route."""
-    return await request_translation(context, job_id, body)
+    call.translation and through the status route. A translation already
+    held is answered here at once: 200 done, nothing accepted to do."""
+    accepted = await request_translation(context, job_id, body)
+    if accepted.status == "done":
+        response.status_code = 200
+    return accepted
 
 
 @router.post("/jobs/{job_id}/whatsapp")

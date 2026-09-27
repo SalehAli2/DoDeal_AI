@@ -89,6 +89,43 @@ async def test_segment_ids_speakers_and_times_survive_the_translation(
         )
 
 
+async def test_a_voice_no_role_mapping_named_is_translated_as_unknown(
+    redis_fakes: RedisFakes,
+) -> None:
+    """An engine's speaker_N, or unknown, is never read as the client: the
+    prompt and the held translation both say unknown."""
+    labels = ("agent", "speaker_2", "unknown", "lead")
+    voiced = Transcript.of(
+        tuple(
+            segment.model_copy(update={"speaker": label})
+            for segment, label in zip(SEGMENTS, labels, strict=True)
+        ),
+        provider="gemini",
+        model="gemini-3.5-transcribe",
+    )
+    await _done_call({"transcript": voiced.model_dump(mode="json")})
+    answer = {
+        "segments": [
+            {"segment": f"s{n + 1}", "text": text} for n, text in enumerate(ARABIC)
+        ]
+    }
+    llm = FakeLLM(json_response(answer))
+    async with httpx.AsyncClient() as http:
+        ctx = {"llm": llm, "http": http, "resolve": _resolve}
+        await translate_call(ctx, "tenant-a", JOB, "ar")
+    held = await read_translation("tenant-a", JOB, "ar")
+    assert held is not None
+    assert [s["speaker"] for s in held["segments"]] == [
+        "agent",
+        "unknown",
+        "unknown",
+        "client",
+    ]
+    sent = llm.calls[0].prompt.variable
+    assert "00:05 unknown]" in sent and "00:10 unknown]" in sent
+    assert "client]" in sent.split("00:15 ")[1]
+
+
 @pytest.fixture
 async def client(monkeypatch) -> AsyncIterator[httpx.AsyncClient]:
     monkeypatch.setenv("DODEAL_JWT_SIGNING_KEY", tokens.TEST_SECRET)
