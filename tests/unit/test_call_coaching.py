@@ -440,7 +440,9 @@ async def _wave2(*coaching_answers: Any):
     )
     llm = FakeLLM()
     llm.script_for(OBJECTIONS_TEMPLATE, json_response({"objections": []}))
-    llm.script_for(ESCALATIONS_TEMPLATE, json_response({"escalations": []}))
+    llm.script_for(
+        ESCALATIONS_TEMPLATE, json_response({"claims": [], "escalations": []})
+    )
     llm.script_for(COACHING_TEMPLATE, *coaching_answers)
     wave = await wave2(
         llm,

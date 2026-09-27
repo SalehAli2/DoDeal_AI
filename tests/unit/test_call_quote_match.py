@@ -172,11 +172,11 @@ def test_anything_else_between_the_words_fails(quote: str, said: str) -> None:
 
 # --- D-103: the quote locates, the transcript speaks -------------------------------
 
-# The agent's budget question as the engine wrote it on call1, and the quote
-# both of the model's answers gave for asked_budget: every word there, in
-# order, "مثلا" left out.
-BUDGET_SAID = "طيب احنا ايه البادجت مثلا اللي ممكن نكون حاطينه للاستثمار"
-BUDGET_QUOTED = "احنا ايه البادجت اللي ممكن نكون حاطينه"
+# An invented disfluent budget question, and a quote of it that leaves the
+# hesitation "مثلا" out -- the shape of the miss that cost a real call its
+# score: every quoted word there, in order, one left out.
+BUDGET_SAID = "طب حضرتك ناوي مثلا تحط كام في الاستثمار ده السنة دي"
+BUDGET_QUOTED = "حضرتك ناوي تحط كام في الاستثمار ده"
 
 
 def test_a_word_left_out_of_disfluent_speech_passes_as_the_transcripts_words() -> None:
@@ -185,7 +185,7 @@ def test_a_word_left_out_of_disfluent_speech_passes_as_the_transcripts_words() -
     call = _one(BUDGET_SAID)
     assert quote_errors(call, "asked_budget", BUDGET_QUOTED, "s1") == []
     assert own_words(call, BUDGET_QUOTED, 0) == (
-        "احنا ايه البادجت مثلا اللي ممكن نكون حاطينه"
+        "حضرتك ناوي مثلا تحط كام في الاستثمار ده"
     )
 
 
@@ -415,6 +415,34 @@ def test_a_proclitic_never_turns_a_negation_into_another_word(
 )
 def test_a_negation_is_never_skipped(quote: str, said: str) -> None:
     assert _check(quote, said) == MISSED
+
+
+@pytest.mark.parametrize(
+    ("quote", "said"),
+    [
+        ("i can do it", "i can't do it"),
+        ("we won sell it", "we won't sell it"),
+        ("i do know", "i don't know"),
+    ],
+)
+def test_a_contraction_negates_by_its_t_and_is_never_lost(
+    quote: str, said: str
+) -> None:
+    """The guard: "can't" is read as "can" "t"; the "t" is the negation, so
+    a quote without it fails."""
+    assert _check(quote, said) == MISSED
+    assert _check(said, said) == []
+
+
+def test_a_contractions_stem_alone_is_an_ordinary_word() -> None:
+    """ "can", "don" and "won" are words, not negations: a sentence that only
+    has them turns nothing around (D-104 reads certainty past them)."""
+    assert [evidence.turns_around(w) for w in ("can", "don", "won", "t")] == [
+        False,
+        False,
+        False,
+        True,
+    ]
 
 
 def test_the_egyptian_fillers_of_list_v2_are_skipped() -> None:

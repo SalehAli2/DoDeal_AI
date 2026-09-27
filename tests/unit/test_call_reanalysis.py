@@ -231,8 +231,9 @@ async def test_stage_2_alone_skips_stage_1s_passes_and_no_transcript_fails(
 async def test_a_reanalysis_marks_the_score_again_once_the_escalations_answer(
     ctx: dict[str, Any], redis_fakes: RedisFakes
 ) -> None:
-    """D-75 on the same path: stage 2 of a re-analysis fails no_over_promise
-    on the agent's verified promise, and stamps call_rubric_v2."""
+    """D-104 on the same path: stage 2 of a re-analysis fails
+    no_over_promise on the agent's verified certain claim, and stamps
+    call_rubric_v3."""
     await set_override(
         "tenant-a",
         UNIT_B_SECTION,
@@ -249,7 +250,8 @@ async def test_a_reanalysis_marks_the_score_again_once_the_escalations_answer(
     )
     await process_call(ctx, "tenant-a", accepted.job_id)
     flag = {
-        "issue": "over_promise_or_guarantee",
+        "about": "price",
+        "said_as": "certain",
         "quote": "I guarantee this villa doubles in value",
         "segment": "s3",
     }
@@ -257,14 +259,16 @@ async def test_a_reanalysis_marks_the_score_again_once_the_escalations_answer(
         json_response({"objections": []}),
         json_response(_checks(courteous="Good morning")),
     )
-    llm.script_for(ESCALATIONS_TEMPLATE, json_response({"escalations": [flag]}))
+    llm.script_for(
+        ESCALATIONS_TEMPLATE, json_response({"claims": [flag], "escalations": []})
+    )
     llm.script_for(COACHING_TEMPLATE, json_response(coaching_answer(said[0].text)))
     llm.script_for(EXTRAS_TEMPLATE, json_response(extras_answer()))
 
     await analyse_stage2({"llm": llm}, "tenant-a", accepted.job_id)
 
     held = await read_stage2_result("tenant-a", accepted.job_id)
-    assert held is not None and held["versions"]["rubric"] == "call_rubric_v2"
+    assert held is not None and held["versions"]["rubric"] == "call_rubric_v3"
     professionalism = held["score"]["components"]["professionalism"]
     assert professionalism["checks"]["no_over_promise"] == {
         "answer": "no",

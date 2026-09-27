@@ -64,6 +64,7 @@ from dodeal_ai.units.call_intelligence.evidence import (
     in_language,
     log_misses,
     mostly_failed,
+    quote_at,
     quote_errors,
     relocated,
 )
@@ -296,28 +297,12 @@ def coaching_failures(call: CallText, answer: Coaching) -> Errors:
     return []
 
 
-def _quote_at(answer: Coaching) -> Callable[[str], tuple[str | None, str | None]]:
-    """An observation's or a stage's quote and segment by where it is
-    (coaching_quotes' paths), for log_misses."""
-
-    def at(where: str) -> tuple[str | None, str | None]:
-        kind, _, rest = where.partition(".")
-        found: Observation | Stage = (
-            answer.observations[int(rest)]
-            if kind == "observations"
-            else getattr(answer.stages, rest)
-        )
-        return found.quote, found.segment
-
-    return at
-
-
 def refused_coaching(call: CallText) -> Callable[[Coaching], Errors]:
     """coaching_failures for mend, each quote not found logged as a quote_miss."""
 
     def failures(answer: Coaching) -> Errors:
         errors = coaching_failures(call, answer)
-        log_misses(COACHING_LABEL, call, errors, _quote_at(answer))
+        log_misses(COACHING_LABEL, call, errors, quote_at(answer))
         return errors
 
     return failures

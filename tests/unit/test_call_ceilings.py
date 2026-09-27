@@ -93,7 +93,7 @@ PASSES: dict[str, tuple[Runner, str, dict[str, Any], int, int]] = {
     "escalations": (
         escalations.find_flags,
         "unit_b.escalations",
-        {"escalations": []},
+        {"claims": [], "escalations": []},
         2500,
         6000,
     ),
@@ -198,7 +198,7 @@ async def test_no_reasoning_reaches_a_stage2_part(monkeypatch) -> None:
     for template, answer in (
         (OBJECTIONS_TEMPLATE, {"objections": []}),
         (SCORE_TEMPLATE, PASSES["score"][2]),
-        (ESCALATIONS_TEMPLATE, {"escalations": []}),
+        (ESCALATIONS_TEMPLATE, {"claims": [], "escalations": []}),
         (COACHING_TEMPLATE, PASSES["coaching"][2]),
         (EXTRAS_TEMPLATE, extras_answer()),
     ):

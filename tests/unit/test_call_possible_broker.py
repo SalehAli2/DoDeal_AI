@@ -60,7 +60,7 @@ def _flag(quote: str, segment: str, issue: str = POSSIBLE_BROKER) -> dict:
 
 
 async def _found(call: CallText, flags: list[dict]) -> dict:
-    llm = FakeLLM(json_response({"escalations": flags}))
+    llm = FakeLLM(json_response({"claims": [], "escalations": flags}))
     answer, _ = await find_flags(llm, call, scope=SCOPE, settings=get_settings())
     assert llm.call_count == 1
     return escalations_part(call, answer, [])
@@ -104,7 +104,7 @@ async def test_my_client_is_interested_raises_possible_broker() -> None:
 async def test_a_genuine_investor_raises_nothing() -> None:
     """The guard: several units for the client's own family is an investor;
     nothing is flagged and nothing goes out."""
-    assert await _found(INVESTOR, []) == {"items": []}
+    assert await _found(INVESTOR, []) == {"items": [], "claims": []}
 
 
 # --- the rules ---------------------------------------------------------------------
@@ -124,5 +124,5 @@ def test_possible_broker_rests_on_the_clients_own_words(
     assert evidence_errors(call, "x", flag["quote"], flag["segment"], speaker="client") == [
         ("x", error)
     ]  # fmt: skip
-    kept = kept_flags(call, Flags.model_validate({"escalations": [flag]}))
+    kept = kept_flags(call, Flags.model_validate({"claims": [], "escalations": [flag]}))
     assert kept.escalations == []

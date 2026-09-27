@@ -8,8 +8,7 @@ from typing import Any
 
 
 def extras_answer() -> dict[str, Any]:
-    """A unit_b.extras answer that quotes nothing: every check a no."""
-    check = {"answer": "no", "reason": "Not said on the call.", "quote": None}
+    """A unit_b.extras answer (extras_v9) that quotes nothing."""
     return {
         "keywords": [],
         "tags": {
@@ -18,16 +17,6 @@ def extras_answer() -> dict[str, Any]:
             "client_type": "unknown",
         },
         "whatsapp": "Thank you for your time today. When suits you for a call?",
-        "seriousness": {
-            name: {**check, "segment": None}
-            for name in (
-                "budget_stated",
-                "timeline_stated",
-                "decision_maker_named",
-                "next_step_agreed",
-                "client_engaged",
-            )
-        },
     }
 
 

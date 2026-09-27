@@ -211,11 +211,13 @@ def test_the_when_quote_is_checked_among_the_extractions_quotes() -> None:
 
 def test_booked_needs_a_time_given_and_a_verified_agreement() -> None:
     """The guard (A3): a booking with no time, or resting on an agreement
-    quote that failed, is not one -- the latter with booked_reason
-    agreement_unverified -- and the time stands on its own quote alone:
-    stated, whatever became of the agreement."""
+    quote that failed, is not one -- with booked_reason time_missing and
+    agreement_unverified (D-105) -- and the time stands on its own quote
+    alone: stated, whatever became of the agreement."""
     no_time = _kept(_step(when=None, booked=True))
-    assert (no_time["booked"], no_time["booked_reason"]) == (False, None)
+    assert (no_time["booked"], no_time["booked_reason"]) == (False, "time_missing")
+    never = _kept(_step(when=None, booked=False))
+    assert (never["booked"], never["booked_reason"]) == (False, None)
     unverified = _kept(
         _timed("2026-09-27T17:00:00+04:00", booked=True, quote="we never met")
     )
@@ -680,9 +682,22 @@ def test_call1s_pattern_the_agent_names_the_time_the_client_says_okay() -> None:
 def test_both_quotes_from_the_agent_are_not_a_booking() -> None:
     """The guard: an agent agreeing with themself books nothing."""
     call = _turns(s56=("agent", TIME), s58=("agent", "تمام"))
-    assert _booked(call, _booking("s56", "s58", "تمام"))["booked"] is False
+    apart = _booked(call, _booking("s56", "s58", "تمام"))
+    assert (apart["booked"], apart["booked_reason"]) == (False, "same_voice")
     same = _booked(call, _booking("s56", "s56", "تمام، بكلمك"))
-    assert (same["unverified"], same["booked"]) == (False, False)
+    assert (same["unverified"], same["booked"], same["booked_reason"]) == (
+        False,
+        False,
+        "same_voice",
+    )
+
+
+def test_a_time_whose_words_are_not_found_unbooks_with_its_reason() -> None:
+    """D-105: the agreement holds but the words naming the time were not
+    said where cited: time_unverified."""
+    call = _turns(s56=("agent", "كلام تاني خالص"), s57=("lead", "اوكي"))
+    kept = _booked(call, _booking("s56", "s57"))
+    assert (kept["booked"], kept["booked_reason"]) == (False, "time_unverified")
 
 
 @pytest.mark.parametrize(
@@ -696,7 +711,11 @@ def test_the_agreement_must_be_within_3_segments_of_the_time(
     """The guard: an "ok" 5 segments away answered something else."""
     assert MAX_BOOKING_GAP_SEGMENTS == 3
     call = _turns(s56=("agent", TIME), **{agreed: ("lead", "اوكي")})
-    assert _booked(call, _booking("s56", agreed))["booked"] is booked
+    kept = _booked(call, _booking("s56", agreed))
+    assert (kept["booked"], kept["booked_reason"]) == (
+        booked,
+        None if booked else "too_far_apart",
+    )
 
 
 def test_the_client_names_the_time_and_the_agent_agrees() -> None:
@@ -714,6 +733,7 @@ def test_an_unverified_agreement_is_not_a_booking(assent: str, agreed: str) -> N
     call = _turns(s56=("agent", TIME), s57=("lead", "اوكي"))
     kept = _booked(call, _booking("s56", agreed, assent))
     assert (kept["unverified"], kept["booked"]) == (True, False)
+    assert kept["booked_reason"] == "agreement_unverified"
 
 
 @pytest.mark.parametrize(
@@ -730,6 +750,7 @@ def test_the_segment_an_assent_is_found_in_decides(
     call = _turns(s56=("agent", TIME), s57=("lead", "اوكي"))
     kept = _booked(call, _booking("s56", cited, assent))
     assert (kept["unverified"], kept["booked"]) == (False, booked)
+    assert kept["booked_reason"] == (None if booked else "same_voice")
 
 
 @pytest.mark.parametrize(
@@ -755,7 +776,11 @@ def test_two_known_voices_are_needed(namer: str, agreer: str, booked: bool) -> N
     """The guard (A2): booked needs the roles applied. The engine's labels
     left as they were name no one, like unknown, so they book nothing."""
     call = _turns(s56=(namer, TIME), s57=(agreer, "اوكي"))
-    assert _booked(call, _booking("s56", "s57"))["booked"] is booked
+    kept = _booked(call, _booking("s56", "s57"))
+    assert (kept["booked"], kept["booked_reason"]) == (
+        booked,
+        None if booked else "voice_unknown",
+    )
 
 
 def test_the_extract_prompt_asks_for_the_other_speakers_short_assent() -> None:
@@ -767,7 +792,7 @@ def test_the_extract_prompt_asks_for_the_other_speakers_short_assent() -> None:
 
     assert (EXTRACT_TEMPLATE, PROMPT_SET_VERSION) == (
         "call_intelligence/extract_v10.txt",
-        "unit_b_prompts_v20",
+        "unit_b_prompts_v22",
     )
     text = " ".join(build_prompt(EXTRACT_TEMPLATE, caller_data="").stable.split())
     assert "the other speaker's own short assent" in text

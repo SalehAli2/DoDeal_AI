@@ -45,9 +45,9 @@ EXTRACT_TEMPLATE = "call_intelligence/extract_v10.txt"
 PROSE_TEMPLATE = "call_intelligence/prose_v3.txt"
 OBJECTIONS_TEMPLATE = "call_intelligence/objections_v2.txt"
 SCORE_TEMPLATE = "call_intelligence/score_v2.txt"
-ESCALATIONS_TEMPLATE = "call_intelligence/escalations_v4.txt"
+ESCALATIONS_TEMPLATE = "call_intelligence/escalations_v5.txt"
 COACHING_TEMPLATE = "call_intelligence/coaching_v5.txt"
-EXTRAS_TEMPLATE = "call_intelligence/extras_v8.txt"
+EXTRAS_TEMPLATE = "call_intelligence/extras_v9.txt"
 TRANSLATE_TEMPLATE = "call_intelligence/translate_v2.txt"
 WHATSAPP_TEMPLATE = "call_intelligence/whatsapp_v4.txt"
 REPROMPT_TAIL_TEMPLATE = "call_intelligence/reprompt_tail_v1.txt"
@@ -95,7 +95,11 @@ REPROMPT_TAILS: Mapping[str, str] = MappingProxyType(
 # unit_b_prompts_v19, then extract_v9, prose_v2 and whatsapp_v3 by the three
 # that name a voice no role mapping named unknown, and escalations_v3 by
 # escalations_v4 (over_promise against wrong_price), and coaching_v4 by
-# coaching_v5 (a moment has no quote), unit_b_prompts_v20; never sent again.
+# coaching_v5 (a moment has no quote), unit_b_prompts_v20, then escalations_v4
+# by escalations_v5 (the agent's claims recorded as facts, the over-promise
+# decided in code, D-104), unit_b_prompts_v21, then extras_v8 by extras_v9
+# (the seriousness read in code from stage 1, D-105), unit_b_prompts_v22;
+# never sent again.
 RETIRED_TEMPLATES: tuple[str, ...] = (
     "call_intelligence/extract_v1.txt",
     "call_intelligence/extras_v1.txt",
@@ -131,11 +135,13 @@ RETIRED_TEMPLATES: tuple[str, ...] = (
     "call_intelligence/whatsapp_v3.txt",
     "call_intelligence/escalations_v3.txt",
     "call_intelligence/coaching_v4.txt",
+    "call_intelligence/escalations_v4.txt",
+    "call_intelligence/extras_v8.txt",
 )
 
 # The stamp stage 1 carries under versions.prompt. Move it with the digest
 # in the stamp test whenever one of UNIT_B_TEMPLATES changes.
-PROMPT_SET_VERSION = "unit_b_prompts_v20"
+PROMPT_SET_VERSION = "unit_b_prompts_v22"
 
 # Every template Unit B can send, in pass order, then the retired ones; the
 # worker preloads them all.
@@ -160,7 +166,8 @@ UNIT_B_TEMPLATES: tuple[str, ...] = (
 
 # The templates whose answer may be written in Arabic: each names the agent
 # "الوكيل" (or "مندوب المبيعات") and the client "العميل", never the reverse;
-# and the one that reads Arabic but writes none (the roles pass answers codes).
+# and the ones that read Arabic but write none (the roles pass answers codes;
+# the escalations pass codes and quotes copied as said, D-104).
 ARABIC_WRITING_TEMPLATES: tuple[str, ...] = (
     EXTRACT_TEMPLATE,
     PROSE_TEMPLATE,
@@ -169,7 +176,7 @@ ARABIC_WRITING_TEMPLATES: tuple[str, ...] = (
     TRANSLATE_TEMPLATE,
     WHATSAPP_TEMPLATE,
 )
-ARABIC_READING_ONLY: tuple[str, ...] = (ROLES_TEMPLATE,)
+ARABIC_READING_ONLY: tuple[str, ...] = (ROLES_TEMPLATE, ESCALATIONS_TEMPLATE)
 
 # The templates that write the WhatsApp message: each shows example phrasings
 # of the Egyptian, Gulf and Levantine dialects, so a message to an Arabic

@@ -75,6 +75,7 @@ from dodeal_ai.core.logging_config import job_log_context
 from dodeal_ai.units.call_intelligence.analysis import NO_CLIENT
 from dodeal_ai.units.call_intelligence.coaching import NO_NEXT_STEP, NextStepSeen
 from dodeal_ai.units.call_intelligence.config import resolve_calls_config
+from dodeal_ai.units.call_intelligence.extras import facts_of
 from dodeal_ai.units.call_intelligence.language import spoken_of
 from dodeal_ai.units.call_intelligence.paid import JobGone, PassRefused, PassUsage
 from dodeal_ai.units.call_intelligence.transcriber import Transcript
@@ -212,6 +213,7 @@ async def _analyse(
             spoken=spoken_of(result.get("languages")),
             loss_reason=_loss_reason(result),
             next_step=_next_step(result),
+            facts=facts_of(result.get("analysis")),
         )
     except JobGone:
         return

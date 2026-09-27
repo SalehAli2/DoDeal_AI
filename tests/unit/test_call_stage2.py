@@ -254,7 +254,9 @@ def _stage2_ctx(
     *answers: object, job_try: int = 1, extras: object = None
 ) -> dict[str, Any]:
     llm = FakeLLM(*(json_response(a) for a in answers or (NONE_RAISED,)))
-    llm.script_for(ESCALATIONS_TEMPLATE, json_response({"escalations": []}))
+    llm.script_for(
+        ESCALATIONS_TEMPLATE, json_response({"claims": [], "escalations": []})
+    )
     llm.script_for(COACHING_TEMPLATE, json_response(coaching_answer(SEGMENTS[0].text)))
     llm.script_for(EXTRAS_TEMPLATE, json_response(extras or extras_answer()))
     return {"llm": llm, "job_try": job_try}
@@ -378,10 +380,10 @@ async def test_stage2_is_held_and_delivered_as_call_stage2(
     assert all(held[name] is not None for name in parts if name != "score")
     assert held["reasons"] == {"score": "scoring_off"}
     assert held["versions"] == {
-        "prompt": "unit_b_prompts_v20",
+        "prompt": "unit_b_prompts_v22",
         "quote_fillers": "quote_fillers_v2",
         "objection_list": "objection_list_v1",
-        "rubric": "call_rubric_v2",
+        "rubric": "call_rubric_v3",
         "tone_list": "tone_list_v1",
         "model": dict.fromkeys(
             ("objections", "escalations", "coaching", "extras"), "fake-model-pinned"
@@ -795,6 +797,73 @@ async def test_the_coaching_pass_is_told_stage_1s_next_step(
     assert lines in sent.prompt.variable
 
 
+async def test_the_seriousness_is_read_from_stage_1s_stored_analysis(
+    ctx: dict,
+) -> None:
+    """D-105: one judge per fact. Stage 1's stored budget and next step are
+    the seriousness checks, on their own quotes; the extras pass is asked
+    nothing about the client; the client engaged by the talk itself."""
+    await _done_and_pending(ctx)
+    result = await read_result("tenant-a", JOB)
+    assert result is not None
+    budget = {
+        "value": "1,200,000 AED",
+        "state": "stated",
+        "quote": "my budget is 1,200,000 AED",
+        "segment": "s2",
+        "evidence_failed": False,
+    }
+    step = {"action": "Call back", "quote": None, "segment": None, "unverified": True}
+    result["analysis"] = {
+        "details": {"budget": budget},
+        "elements": {"next_step": step},
+    }
+    await store_result("tenant-a", JOB, result, ttl_seconds=600)
+    stage2_ctx = _stage2_ctx()
+
+    await analyse_stage2(stage2_ctx, "tenant-a", JOB)
+
+    held = await read_stage2_result("tenant-a", JOB)
+    assert held is not None
+    serious = held["extras"]["seriousness"]
+    checks = serious["checks"]
+    assert checks["budget_stated"] == {
+        "answer": "yes",
+        "source": "analysis",
+        "quote": "my budget is 1,200,000 AED",
+        "segment": "s2",
+        "unverified": False,
+    }
+    assert (
+        checks["next_step_agreed"]["answer"],
+        checks["next_step_agreed"]["unverified"],
+    ) == ("yes", True)
+    assert (checks["client_engaged"]["answer"], checks["client_engaged"]["source"]) == (
+        "yes",
+        "code",
+    )
+    assert (serious["yes"], serious["band"]) == (2, "B")
+    (sent,) = [c for c in stage2_ctx["llm"].calls if c.profile == "unit_b.extras"]
+    assert "seriousness" not in sent.prompt.stable
+
+
+async def test_with_stage_1s_analysis_null_the_seriousness_is_null(ctx: dict) -> None:
+    await _done_and_pending(ctx)
+    result = await read_result("tenant-a", JOB)
+    assert result is not None
+    result["analysis"] = None
+    await store_result("tenant-a", JOB, result, ttl_seconds=600)
+
+    await analyse_stage2(_stage2_ctx(), "tenant-a", JOB)
+
+    held = await read_stage2_result("tenant-a", JOB)
+    assert held is not None
+    assert (held["extras"]["seriousness"], held["extras"]["seriousness_reason"]) == (
+        None,
+        "analysis_unavailable",
+    )
+
+
 async def test_the_stage2_outcome_line_carries_its_cost_and_price_table(
     ctx: dict, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -860,22 +929,25 @@ async def test_three_invented_keyword_quotes_give_evidence_dropped_3(
     ctx: dict, caplog: pytest.LogCaptureFixture
 ) -> None:
     """The guard: the outcome line counts what the extras' failed quotes cost,
-    per pass -- three keywords dropped, one check kept unverified; four of
-    eight quotes failing is not more than half, so the part is delivered."""
+    per pass -- three keywords dropped, the agent dialect kept unverified;
+    four of eight quotes failing is not more than half, so the part is
+    delivered."""
     await _done_and_pending(ctx)
     extras = extras_answer()
+    invented = ("Marina Heights", "Palm Towers", "Creek Vista")
+    true = ("the sales office", "the villa", "Good morning", "a villa")
     extras["keywords"] = [
         {"kind": "project", "said": name, "english": None, "segment": "s1"}
-        for name in ("Marina Heights", "Palm Towers", "Creek Vista")
+        for name in invented
+    ] + [
+        {"kind": "topic", "said": said, "english": None, "segment": segment}
+        for said, segment in zip(true, ("s1", "s1", "s1", "s2"), strict=True)
     ]
-    extras["seriousness"]["budget_stated"].update(
-        answer="yes", quote="money is no object", segment="s1"
-    )
-    others = ("timeline_stated", "decision_maker_named", "next_step_agreed")
-    for name in (*others, "client_engaged"):
-        extras["seriousness"][name].update(
-            answer="yes", quote=SEGMENTS[0].text, segment="s1"
-        )
+    extras["agent_dialect"] = {
+        "dialect": "gulf_ar",
+        "quote": "money is no object",
+        "segment": "s1",
+    }
     stage2_ctx = _stage2_ctx(extras=extras)
 
     with caplog.at_level(logging.INFO, logger="dodeal_ai.unit_b"):
@@ -887,7 +959,8 @@ async def test_three_invented_keyword_quotes_give_evidence_dropped_3(
         {"coaching": 0, "extras": 1},
     )
     held = await read_stage2_result("tenant-a", JOB)
-    assert held is not None and held["extras"]["keywords"] == []
+    assert held is not None
+    assert [k["said"] for k in held["extras"]["keywords"]] == list(true)
 
 
 async def test_a_run_with_no_extras_answer_counts_no_evidence(

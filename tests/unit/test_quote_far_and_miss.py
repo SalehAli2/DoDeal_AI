@@ -20,6 +20,7 @@ from dodeal_ai.units.call_intelligence.evidence import (
     locate,
     log_misses,
     miss_kind,
+    quote_at,
     quote_errors,
 )
 from dodeal_ai.units.call_intelligence.score import (
@@ -127,22 +128,69 @@ def test_a_negation_in_the_gap_is_named() -> None:
 def test_a_miss_is_logged_by_where_and_why_never_its_words(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The guard: one quote_miss line per quote_not_in_segment -- the label,
-    the path, the kind and the word count -- and not one word of the quote."""
+    """The guard: one quote_miss line per quote check failure -- the label,
+    the path, the kind (miss_kind's, or the failure's own code, D-105) and
+    the word count -- not one word of the quote, and nothing for a failure
+    that is not a quote's."""
     quotes = {
         "courteous": ("Shall I book a visit on Tuesday at four", "s3"),
         "asked_budget": (None, None),
+        "observations": (None, None),
     }
     errors = [
         ("courteous", "quote_not_in_segment"),
         ("asked_budget", "quote_missing"),
+        ("observations", "no_strength"),
     ]
     with caplog.at_level(logging.WARNING, logger="dodeal_ai.unit_b"):
         log_misses(SCORE_LABEL, _call(), errors, quotes.__getitem__)
     assert [r.getMessage() for r in caplog.records] == [
-        "quote_miss label=llm.unit_b.score where=courteous kind=altered_1 words=9"
+        "quote_miss label=llm.unit_b.score where=courteous kind=altered_1 words=9",
+        "quote_miss label=llm.unit_b.score where=asked_budget kind=quote_missing words=0",
     ]
     assert "visit" not in caplog.text
+
+
+def test_quote_at_reads_a_quote_by_the_path_the_checks_name_it() -> None:
+    """D-105: one resolver for every pass's paths -- a field, a list index, a
+    said, and a name whose <name>_quote the model before it holds."""
+    from dodeal_ai.units.call_intelligence.passes import Extraction
+    from tests.unit.test_call_next_step import _booking
+
+    answer = Extraction.model_validate(_booking("s56", "s57"))
+    at = quote_at(answer)
+    assert at("next_step") == ("اوكي", "s57")
+    assert at("next_step.when") == ("بكرة الساعة 5", "s56")
+    assert at("details.budget") == (
+        answer.details.budget.quote,
+        answer.details.budget.segment,
+    )
+    assert at("agreed.9") == (None, None)
+    assert at("nowhere.at.all") == (None, None)
+    assert at("observations") == (None, None)
+    assert (at("details"), at("agreed")) == ((None, None), (None, None))
+
+
+def test_the_extraction_logs_its_misses_kept_or_refused(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """D-105: the extraction's failing quotes are logged as the score's and
+    coaching's are, whether the answer is kept or refused."""
+    from dodeal_ai.units.call_intelligence.passes import (
+        EXTRACT_LABEL,
+        Extraction,
+        check_extraction,
+    )
+    from tests.unit.test_call_next_step import _booked, _booking, _turns
+
+    call = _turns(s56=("agent", "تمام، بكلمك بكرة الساعة 5"), s57=("lead", "اوكي"))
+    assert _booked(call, _booking("s56", "s57"))["booked"] is True
+    answer = Extraction.model_validate(_booking("s56", "s57", "موافق"))
+    with caplog.at_level(logging.WARNING, logger="dodeal_ai.unit_b"):
+        check_extraction(call)(answer)
+    assert [r.getMessage() for r in caplog.records] == [
+        f"quote_miss label={EXTRACT_LABEL} where=next_step kind=absent words=1"
+    ]
 
 
 def test_the_score_logs_the_first_answers_misses_and_the_seconds_left(

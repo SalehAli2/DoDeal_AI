@@ -10,9 +10,10 @@ another, each on its own profile.
                                  off_channel_contact (escalations.py)
   coaching    unit_b.coaching    observations, moments, a plan and the call's
                                  stages, tone-checked in code (coaching.py)
-  extras      unit_b.extras      keywords, tags, a WhatsApp suggestion never
-                                 sent by us, and seriousness, banded in code
-                                 (extras.py)
+  extras      unit_b.extras      keywords, tags and a WhatsApp suggestion
+                                 never sent by us; beside them the
+                                 seriousness, read in code from stage 1's
+                                 analysis and the talk (extras.py, D-105)
 
 EACH PASS STANDS ALONE. Its answer becomes its part; a pass that fails --
 twice unanswered, or malformed after its one reprompt -- leaves its part null
@@ -63,6 +64,7 @@ from dodeal_ai.units.call_intelligence.evidence import (
 )
 from dodeal_ai.units.call_intelligence.extras import (
     Extras,
+    Facts,
     extras_evidence,
     extras_part,
     find_extras,
@@ -95,6 +97,7 @@ from dodeal_ai.units.call_intelligence.score import (
     RUBRIC_VERSION,
     ScoreChecks,
     ask_checks,
+    engaged,
     reconciled,
     score_call,
     score_gate,
@@ -156,13 +159,15 @@ async def wave2(
     spoken: Spoken = UNHEARD,
     loss_reason: str | None = None,
     next_step: NextStepSeen = NO_NEXT_STEP,
+    facts: Facts | None = None,
 ) -> Wave2:
     """Wave 2 for one transcript. JobGone when stage 2 stopped under it.
     `eligible` is the call's eligibility for full analysis, as it is now;
     `stage1_escalations` are the ones stage 1 found in code; `spoken` each
     side's language as stage 1's roles pass heard it; `loss_reason` the
     category of stage 1's loss reason, None when it gave none; `next_step`
-    stage 1's next step, booked and its kind, for the coaching pass."""
+    stage 1's next step, booked and its kind, for the coaching pass; `facts`
+    what the seriousness reads of stage 1's analysis, None with none."""
     call = CallText.of(
         transcript, country_code=config.phone_country_code, spoken=spoken
     )
@@ -234,7 +239,17 @@ async def wave2(
         None
         if extras is None
         else extras_part(
-            call, extras, config.whatsapp_default_dialect, config.keyword_vocabulary
+            call,
+            extras,
+            config.whatsapp_default_dialect,
+            config.keyword_vocabulary,
+            facts=facts,
+            engaged=engaged(
+                talk_share(call.segments, CLIENT),
+                substantive_turns(call.segments, CLIENT),
+                share=config.engaged_share,
+                turns=config.engaged_turns,
+            ),
         )
     )
     return wave

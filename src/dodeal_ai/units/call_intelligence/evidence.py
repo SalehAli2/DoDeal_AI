@@ -223,7 +223,10 @@ def quote_words(text: str) -> list[str]:
     return [word for word, _, _ in _tokens(text)]
 
 
-_NEGATION_WORDS = frozenset(quote_words(" ".join(NEGATIONS)))
+# The word that negates, of each: a contraction's "t" ("can't" is read as
+# "can" "t"), never its stem, so "can", "don" and "won" are ordinary words
+# while the "t" after them is never skipped, added or matched to another word.
+_NEGATION_WORDS = frozenset(quote_words(negation)[-1] for negation in NEGATIONS)
 _FILLER_WORDS = frozenset(quote_words(" ".join(QUOTE_FILLERS))) - _NEGATION_WORDS
 # Words a quote may never leave out, beside the negations (D-103): "without",
 # "except", "unless" and "don't" in Arabic and English. A word that turns a
@@ -579,21 +582,85 @@ def log_misses(
     errors: Iterable[tuple[str, str]],
     quote_at: Callable[[str], tuple[str | None, str | None]],
 ) -> None:
-    """One quote_miss line per quote_not_in_segment in `errors`: the label,
-    where it is (a path code built), why it missed (miss_kind) and its word
-    count. Codes and counts only, never the quote (D-102)."""
+    """One quote_miss line per quote check failure in `errors` (QUOTE_CODES;
+    any other code, such as no_strength, is not a quote's): the label, where
+    it is (a path code built), why it missed and its word count. Why is
+    miss_kind's for a quote_not_in_segment, else the failure's own code
+    (quote_missing, segment_unknown, quote_wrong_speaker and the like,
+    D-105). Codes and counts only, never the quote (D-102)."""
     for where, code in errors:
-        if code != "quote_not_in_segment":
+        if code not in QUOTE_CODES:
             continue
         quote, segment = quote_at(where)
         quoted = [] if quote is None else quote_words(quote)
+        kind = (
+            miss_kind(call, quote, segment) if code == "quote_not_in_segment" else code
+        )
         _logger.warning(
             "quote_miss label=%s where=%s kind=%s words=%d",
             label,
             where,
-            miss_kind(call, quote, segment),
+            kind,
             len(quoted),
         )
+
+
+# Every failure the quote check gives (quote_errors, evidence_errors).
+QUOTE_CODES = frozenset(
+    {
+        "quote_missing",
+        "quote_without_segment",
+        "segment_unknown",
+        "quote_length",
+        "quote_not_in_segment",
+        SPEAKER_UNKNOWN,
+        "quote_wrong_speaker",
+    }
+)
+
+# The quote field and segment field a quote check reads on an answer's model,
+# in the order looked for (quote_at).
+_QUOTE_PAIRS = (("quote", "segment"), ("said", "segment"))
+
+
+def quote_at(answer: BaseModel) -> Callable[[str], tuple[str | None, str | None]]:
+    """A quote and its segment by the path the quote checks name it (D-105),
+    for log_misses: dotted fields and list indexes ("details.budget",
+    "agreed.0"), the last a model with a quote, or a said, and a segment; or
+    a name whose <name>_quote and <name>_segment the model before it holds
+    ("next_step.when"). (None, None) for a path that names none."""
+
+    def at(where: str) -> tuple[str | None, str | None]:
+        node: object = answer
+        for part in where.split("."):
+            if (
+                isinstance(node, BaseModel)
+                and f"{part}_quote" in type(node).model_fields
+            ):
+                return _text(getattr(node, f"{part}_quote")), _text(
+                    getattr(node, f"{part}_segment", None)
+                )
+            if isinstance(node, list) and part.isdigit() and int(part) < len(node):
+                node = node[int(part)]
+            elif isinstance(node, BaseModel) and part in type(node).model_fields:
+                node = getattr(node, part)
+            else:
+                return None, None
+        if isinstance(node, BaseModel):
+            fields = type(node).model_fields
+            for quote_field, segment_field in _QUOTE_PAIRS:
+                if quote_field in fields:
+                    return _text(getattr(node, quote_field)), _text(
+                        getattr(node, segment_field, None)
+                    )
+        return None, None
+
+    return at
+
+
+def _text(value: object) -> str | None:
+    """A field read for quote_at: its text, or None for anything else."""
+    return value if isinstance(value, str) else None
 
 
 def _measured(quote: str) -> list[str] | None:

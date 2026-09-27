@@ -57,8 +57,11 @@ a time it gave, the when_quote and the agreement quote both found, said by
 two different voices whose roles are known (prompts.said_by: never on a call
 whose roles were not applied), within MAX_BOOKING_GAP_SEGMENTS of each
 other; code dropping a time out of range or with no anchor never changes it.
-A booking whose agreement quote failed is false with booked_reason
-agreement_unverified.
+A booking the model gave and code refused is false with booked_reason saying
+which rule refused it (D-105): agreement_unverified, time_missing,
+time_unverified, voice_unknown, same_voice or too_far_apart. same_voice is
+what a transcript that ran two voices into one segment gives, so a report
+can tell it from a model's slip. A step the model never booked has none.
 
 The prose pass reads the transcript and the SETTLED extraction -- validated
 and quote-checked output with every failed quote removed, in the data half
@@ -91,8 +94,10 @@ from dodeal_ai.units.call_intelligence.evidence import (
     failed_quotes,
     found_at,
     in_language,
+    log_misses,
     mostly_failed,
     numbers_in,
+    quote_at,
     quote_errors,
     relocated,
 )
@@ -169,9 +174,17 @@ WHEN_NO_ANCHOR = "when_no_anchor"
 # A number the prose wrote that the masked transcript does not show (A7).
 NUMBER_NOT_IN_TRANSCRIPT = "number_not_in_transcript"
 
-# Why code unbooked a next step the model said was booked: its agreement
-# quote failed the quote check.
+# Why code unbooked a next step the model said was booked (D-77, D-105), in
+# the order the rules are read: its agreement quote failed the quote check;
+# it gave no time; the words naming the time were not found; either was said
+# in a voice no role mapping named; both were said in one voice; or they were
+# more than MAX_BOOKING_GAP_SEGMENTS apart.
 AGREEMENT_UNVERIFIED = "agreement_unverified"
+TIME_MISSING = "time_missing"
+TIME_UNVERIFIED = "time_unverified"
+VOICE_UNKNOWN = "voice_unknown"
+SAME_VOICE = "same_voice"
+TOO_FAR_APART = "too_far_apart"
 
 # The furthest apart, in segments either way, the agreement quote and the
 # words naming the time may be found and still book it: an assent answers
@@ -514,10 +527,13 @@ def _shape_errors(answer: Extraction) -> Errors:
 
 def check_extraction(call: CallText) -> Callable[[Extraction], None]:
     """The rules the schema cannot hold (module docstring), for call_model:
-    malformed on a broken shape or when more than half of the quotes fail."""
+    malformed on a broken shape or when more than half of the quotes fail.
+    Every quote that fails, in either answer, is logged as quote_miss with
+    why (D-105), whether the answer is kept or refused."""
 
     def check(answer: Extraction) -> None:
         quotes = extraction_quotes(call, answer)
+        log_misses(EXTRACT_LABEL, call, failed_quotes(quotes), quote_at(answer))
         shape = _shape_errors(answer)
         if shape or mostly_failed(quotes):
             raise output_rejected(EXTRACT_LABEL, tuple(shape + failed_quotes(quotes)))
@@ -605,24 +621,27 @@ def _found(call: CallText, quote: str | None, segment: str | None) -> int | None
     return found_at(call, quote, segment)
 
 
-def _booked(call: CallText, step: NextStep) -> bool:
-    """D-77: booked only when the model said so and gave a time, the words
-    naming the time and the agreement both found, in segments of two
-    different voices whose roles are known (said_by, A2), at most
+def _unbooked(call: CallText, step: NextStep, failed: bool) -> str | None:
+    """D-77: why code refuses the booking the model gave, None when it holds.
+    It holds only with a time the model gave, the agreement quote (`failed`
+    is its quote check) and the words naming the time both found, in segments
+    of two different voices whose roles are known (said_by, A2), at most
     MAX_BOOKING_GAP_SEGMENTS apart. Code dropping a time out of range or with
     no anchor never unbooks it; a when_quote not found does."""
-    if not step.booked or step.when is None:
-        return False
-    agreed = _found(call, step.quote, step.segment)
+    agreed = None if failed else _found(call, step.quote, step.segment)
+    if agreed is None:
+        return AGREEMENT_UNVERIFIED
+    if step.when is None:
+        return TIME_MISSING
     named = _found(call, step.when_quote, step.when_segment)
-    if agreed is None or named is None:
-        return False
+    if named is None:
+        return TIME_UNVERIFIED
     voices = (call.segments[agreed], call.segments[named])
     if UNKNOWN in {said_by(voice) for voice in voices}:
-        return False
+        return VOICE_UNKNOWN
     if voices[0].speaker == voices[1].speaker:
-        return False
-    return abs(agreed - named) <= MAX_BOOKING_GAP_SEGMENTS
+        return SAME_VOICE
+    return None if abs(agreed - named) <= MAX_BOOKING_GAP_SEGMENTS else TOO_FAR_APART
 
 
 def _settled_step(
@@ -636,10 +655,10 @@ def _settled_step(
     said (_held_when), with when_reason when code dropped a time given;
     when_state stated for a held time -- the time's alone, never the
     agreement's (A3) -- uncertain for a time said but vague, dropped or
-    unverified, else not_mentioned. booked is _booked's, on the time the
-    MODEL gave (step.when, never the held one); false with booked_reason
-    agreement_unverified when the model booked it on an agreement quote that
-    failed. A failed when_quote is removed, as every failed quote is."""
+    unverified, else not_mentioned. booked is the model's, unless code
+    refuses it (_unbooked, on the time the MODEL gave, step.when, never the
+    held one): then false, with booked_reason saying why. A failed
+    when_quote is removed, as every failed quote is."""
     kept = _settled_item(step, failed)
     if when_failed:
         kept.update(when_quote=None, when_segment=None)
@@ -648,14 +667,14 @@ def _settled_step(
     state = NOT_MENTIONED if not timed else UNCERTAIN
     if when is not None:
         state = STATED
-    unbooked = step.booked and failed
+    unbooked = _unbooked(call, step, failed) if step.booked else None
     return {
         **kept,
         "when": None if when is None else when.isoformat(),
         "when_state": state,
         "when_reason": reason,
-        "booked": False if unbooked else _booked(call, step),
-        "booked_reason": AGREEMENT_UNVERIFIED if unbooked else None,
+        "booked": step.booked and unbooked is None,
+        "booked_reason": unbooked,
     }
 
 

@@ -469,7 +469,9 @@ async def test_stage2_goes_signed_as_call_stage2_on_its_own_delivery(
     await process_call(ctx, "tenant-a", JOB)
     llm = FakeLLM()
     llm.script_for(OBJECTIONS_TEMPLATE, json_response({"objections": []}))
-    llm.script_for(ESCALATIONS_TEMPLATE, json_response({"escalations": []}))
+    llm.script_for(
+        ESCALATIONS_TEMPLATE, json_response({"claims": [], "escalations": []})
+    )
     llm.script_for(COACHING_TEMPLATE, json_response(coaching_answer(said[0].text)))
     llm.script_for(EXTRAS_TEMPLATE, json_response(extras_answer()))
     await analyse_stage2({**ctx, "llm": llm}, "tenant-a", JOB)

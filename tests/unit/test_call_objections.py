@@ -263,7 +263,9 @@ async def _done_job():
 
 
 async def _wave2(llm: FakeLLM, job, work: dict | None = None, usage=None):
-    llm.script_for(ESCALATIONS_TEMPLATE, json_response({"escalations": []}))
+    llm.script_for(
+        ESCALATIONS_TEMPLATE, json_response({"claims": [], "escalations": []})
+    )
     llm.script_for(COACHING_TEMPLATE, json_response(coaching_answer(SEGMENTS[0].text)))
     llm.script_for(EXTRAS_TEMPLATE, json_response(extras_answer()))
     return await wave2(

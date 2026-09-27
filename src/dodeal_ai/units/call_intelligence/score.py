@@ -1,4 +1,4 @@
-"""unit_b.score (wave 2) and call_rubric_v2: the model answers yes-or-no checks
+"""unit_b.score (wave 2) and call_rubric_v3: the model answers yes-or-no checks
 with quotes; code computes every mark, the total and the band.
 
 THE RUBRIC, the BRD's weights, each component's checks:
@@ -43,12 +43,17 @@ re-asked and thrown away. Any owed quote still failing after that: no score,
 as before. Every check scored stands on its own verified quote, whichever of
 the two answers it came from.
 
-THE ESCALATIONS AGREE (D-75, call_rubric_v2). Once wave 2 has both parts, a
-verified escalation the agent said answers the professionalism check it is an
-exact match for (ESCALATION_CHECKS) no, source code, with its quote and
-segment, and code marks the component, the total and the band again
-(reconciled). Nothing changes for one the client or an unknown voice said,
-one unverified, or with the escalations pass failed: the score stays strict.
+ONE JUDGE FOR A PROMISE (D-104, call_rubric_v3). Once wave 2 has both parts,
+the escalations part alone answers the professionalism check each escalation
+type is an exact match for (ESCALATION_CHECKS): no, source code, with the
+quote and segment of the first such escalation the agent said and code
+verifies again; yes, source code, with no quote, when there is none. The
+score pass's own answer for that check is replaced either way, and code marks
+the component, the total and the band again (reconciled). Under D-75
+(call_rubric_v2) only a yes could be overturned, so two models judged one
+promise and the score followed whichever said no that run; now the claims
+code reads (escalations.py) are the only judge. With the escalations pass
+failed, the score pass's answer stands, strict as before.
 """
 
 from __future__ import annotations
@@ -74,6 +79,7 @@ from dodeal_ai.units.call_intelligence.evidence import (
     SegmentId,
     evidence_errors,
     log_misses,
+    quote_at,
     quote_errors,
     relocated,
 )
@@ -94,7 +100,7 @@ from dodeal_ai.units.structured_intelligence.llm_call import (
 )
 
 SCORE_LABEL = "llm.unit_b.score"
-RUBRIC_VERSION = "call_rubric_v2"
+RUBRIC_VERSION = "call_rubric_v3"
 
 # What the answer may cost (register item 15): thirteen checks with a quote
 # each, sized against an Arabic call on a non-reasoning model.
@@ -137,8 +143,9 @@ BANDS = ((85, "excellent"), (70, "good"), (50, "needs_work"), (0, "coaching_requ
 # The checks whose quote is owed on a no: the promise, or the pressure.
 _EVIDENCE_ON_NO = frozenset({"no_over_promise", "no_pressure"})
 
-# The professionalism check each escalation type fails, exact matches only
-# (D-75). rudeness_or_pressure is left out: it may be rudeness alone, which
+# The professionalism check each escalation type answers, exact matches only
+# (D-75), and alone once the escalations part exists (D-104).
+# rudeness_or_pressure is left out: it may be rudeness alone, which
 # no_pressure does not judge, or pressure alone, which courteous does not.
 ESCALATION_CHECKS = {OVER_PROMISE: "no_over_promise"}
 
@@ -229,22 +236,12 @@ def _holds(call: CallText, name: str, found: Check) -> bool:
     )
 
 
-def _quote_at(answer: ScoreChecks) -> Callable[[str], tuple[str | None, str | None]]:
-    """A check's quote and segment by its name, for log_misses."""
-
-    def at(name: str) -> tuple[str | None, str | None]:
-        found: Check = getattr(answer, name)
-        return found.quote, found.segment
-
-    return at
-
-
 def refused_checks(call: CallText) -> Callable[[ScoreChecks], Errors]:
     """owed_failures for mend, each quote not found logged as a quote_miss."""
 
     def failures(answer: ScoreChecks) -> Errors:
         errors = owed_failures(call, answer)
-        log_misses(SCORE_LABEL, call, errors, _quote_at(answer))
+        log_misses(SCORE_LABEL, call, errors, quote_at(answer))
         return errors
 
     return failures
@@ -265,7 +262,7 @@ def merged_checks(call: CallText) -> Callable[[ScoreChecks, ScoreChecks], ScoreC
             if _holds(call, name, getattr(second, name))
         }
         still = [e for e in owed_failures(call, second) if e[0] in failed - set(update)]
-        log_misses(SCORE_LABEL, call, still, _quote_at(second))
+        log_misses(SCORE_LABEL, call, still, quote_at(second))
         return first.model_copy(update=update) if update else first
 
     return merge
@@ -518,13 +515,19 @@ def _agents_verified(call: CallText, item: dict[str, object]) -> bool:
 def escalated_checks(
     call: CallText, items: Sequence[dict[str, object]]
 ) -> dict[str, dict[str, object]]:
-    """Each check an escalation answers (ESCALATION_CHECKS), decided no in
-    code with the quote and segment of the first such escalation in time
-    that is the agent's and verified (_agents_verified)."""
-    answers: dict[str, dict[str, object]] = {}
+    """Each check an escalation type answers (ESCALATION_CHECKS), decided in
+    code (D-104): no with the quote and segment of the first such escalation
+    in time that is the agent's and verified (_agents_verified), else yes with
+    no quote."""
+    answers: dict[str, dict[str, object]] = {
+        check: {"answer": YES, "source": "code", "quote": None, "segment": None}
+        for check in ESCALATION_CHECKS.values()
+    }
     for item in items:
         check = ESCALATION_CHECKS.get(str(item.get("type")))
-        if check is None or check in answers or not _agents_verified(call, item):
+        if check is None or answers[check]["answer"] == NO:
+            continue
+        if not _agents_verified(call, item):
             continue
         answers[check] = {
             "answer": NO,
@@ -540,17 +543,15 @@ def reconciled(
     score: dict[str, object] | None,
     escalations: dict[str, object] | None,
 ) -> dict[str, object] | None:
-    """The score part once the escalations part agrees with it (D-75): each
-    check an escalation answers set no (escalated_checks), and the
-    professionalism mark, the total and the band marked again in code. The
-    score as it was with either part null, or nothing to set."""
+    """The score part once the escalations part answers its checks (D-104):
+    each check an escalation type answers set as escalated_checks decides it,
+    and the professionalism mark, the total and the band marked again in
+    code. The score as it was with either part null."""
     if score is None or escalations is None:
         return score
     # escalations_part's and score_call's own parts, built in this process.
     items = cast(list[dict[str, object]], escalations["items"])
     answers = escalated_checks(call, items)
-    if not answers:
-        return score
     components = dict(cast(dict[str, dict[str, object]], score["components"]))
     kept = components[PROFESSIONALISM.name]
     shown = {**cast(dict[str, dict[str, object]], kept["checks"]), **answers}
