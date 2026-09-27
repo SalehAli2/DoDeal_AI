@@ -16,6 +16,11 @@ a pass is counted in db3 before the paid call:
     first answer is read back from memory, unpaid (Replay), never asked
     again. The reprompt is marked in the work before it is sent, so a run cut
     off during it fails the pass rather than send the first prompt again.
+  - A REFUSAL (M5, D-82): the provider's breaker was open and nothing was
+    sent. Its start is given back and PassRefused pauses the job with the
+    outage backoff, stage 1 or stage 2. Only while no answer of the pass has
+    arrived in this run: a refused reprompt goes the lost-reprompt way above,
+    since a pause would drop the answer held in memory.
 
 The tokens each pass spent in a run are counted per pass for its outcome line,
 both answers of a reprompt included, and apart from them the reasoning tokens
@@ -36,10 +41,11 @@ from pydantic import BaseModel
 
 from dodeal_ai.core.config import ModelProfile
 from dodeal_ai.core.errors import MalformedOutputError, ModelUnavailableError
-from dodeal_ai.core.jobs import Job, store_work
+from dodeal_ai.core.jobs import Job, give_back_pass, store_work
 from dodeal_ai.core.llm import LLMClient, LLMResponse
 from dodeal_ai.core.llm.profiles import ProfileSource
 from dodeal_ai.core.prompting import AssembledPrompt
+from dodeal_ai.units.structured_intelligence.llm_call import ModelRefused
 
 # Starts a pass may make, each paid: the first and ONE more when the first
 # response never arrived (BRD B6, the lead's override). Never a third.
@@ -51,6 +57,8 @@ REPROMPTING = "reprompting"
 # Counts one more start of a pass before its paid call: its starts after this
 # one, or None when the job has moved on and nothing is left to finish.
 type Starter = Callable[..., Awaitable[int | None]]
+# Gives back one start of a pass whose call was refused with nothing sent.
+type GiveBack = Callable[[Job, str], Awaitable[int | None]]
 
 
 class PassFailed(Exception):
@@ -71,6 +79,11 @@ class Stamp:
 
 class JobGone(Exception):
     """The job moved on or expired while its passes ran: nothing to finish."""
+
+
+class PassRefused(Exception):
+    """An open breaker refused a pass's call with nothing sent: its start was
+    given back, and the job pauses with the outage backoff (M5, D-82)."""
 
 
 @dataclass(slots=True)
@@ -232,6 +245,7 @@ class PassRun:
     client: LLMClient
     usage: PassUsage
     start: Starter
+    give_back: GiveBack = give_back_pass
 
 
 async def _keep(run: PassRun, name: str, outcome: dict[str, object]) -> None:
@@ -277,7 +291,11 @@ async def run_pass[M: BaseModel](
         starts = counted
         try:
             answer, response = await call(metered)
-        except ModelUnavailableError:
+        except ModelUnavailableError as lost:
+            if isinstance(lost, ModelRefused) and not metered.received:
+                # Nothing sent and nothing held: the start was not used.
+                await run.give_back(run.job, name)
+                raise PassRefused() from None
             if starts >= PASS_TRIES:
                 raise await _failed(run, name, "model_unavailable")
             metered.rewind()

@@ -513,6 +513,19 @@ end
 return redis.call('HINCRBY', KEYS[1], ARGV[1], 1)
 """
 
+# KEYS: the job. ARGV: the pass's field. -1 when the job is gone, else the
+# pass's starts after this: one start given back, never below zero, when an
+# open breaker refused its call with nothing sent (D-82).
+_GIVE_BACK_SCRIPT = """
+if redis.call('EXISTS', KEYS[1]) == 0 then
+  return -1
+end
+if tonumber(redis.call('HGET', KEYS[1], ARGV[1]) or '0') > 0 then
+  return redis.call('HINCRBY', KEYS[1], ARGV[1], -1)
+end
+return 0
+"""
+
 # KEYS: the work hash. ARGV: the field, its JSON, the TTL. One step, so the
 # hash never holds a field without its expiry.
 _WORK_SCRIPT = """
@@ -903,6 +916,22 @@ async def start_stage2_pass(job: Job, name: str, *, now: datetime) -> int | None
         )
     )
     return int(count) if int(count) > 0 else None
+
+
+async def give_back_pass(job: Job, name: str) -> int | None:
+    """Give back one start of pass `name`, stage 1 or stage 2: its call was
+    refused with nothing sent. The pass's starts after this, or None when the
+    job is gone."""
+    client = get_jobs_client()
+    count = await _call(
+        lambda: client.eval(
+            _GIVE_BACK_SCRIPT,
+            1,
+            job_key(job.tenant, job.job_id),
+            f"{_PASS_FIELD}{name}",
+        )
+    )
+    return int(count) if int(count) >= 0 else None
 
 
 async def pause(

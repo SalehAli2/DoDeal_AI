@@ -61,7 +61,13 @@ from dodeal_ai.core.context import TenantScope
 from dodeal_ai.core.cost.limiter import enforce_token_cost
 from dodeal_ai.core.cost.spend import record_model_call
 from dodeal_ai.core.errors import MalformedOutputError, ModelUnavailableError
-from dodeal_ai.core.llm import FinishReason, LLMClient, LLMProviderError, LLMResponse
+from dodeal_ai.core.llm import (
+    FinishReason,
+    LLMClient,
+    LLMErrorReason,
+    LLMProviderError,
+    LLMResponse,
+)
 from dodeal_ai.core.log_safety import safe_error_fields
 from dodeal_ai.core.prompting import AssembledPrompt, with_tail
 from dodeal_ai.core.resilience import ExternalCallError, call_with_watchdog
@@ -74,6 +80,11 @@ _logger = logging.getLogger("dodeal_ai.unit_a")
 # same whichever object was asked for, and a per-task tail would be three files
 # saying it three ways.
 REPROMPT_TAIL_TEMPLATE = "structured_intelligence/reprompt_tail_v1.txt"
+
+
+class ModelRefused(ModelUnavailableError):
+    """The provider's breaker was open: refused with nothing sent (D-82).
+    Still a 503 model_unavailable to every caller that only knows the parent."""
 
 
 def output_rejected(
@@ -185,6 +196,11 @@ async def complete_once(
         metrics.MODEL_CALLS.labels(
             **{"pass": metrics.pass_name(label), "outcome": "unavailable"}
         ).inc()
+        if (
+            isinstance(exc.cause, LLMProviderError)
+            and exc.cause.reason is LLMErrorReason.BREAKER_OPEN
+        ):
+            raise ModelRefused() from None
         raise ModelUnavailableError() from None
 
     # Counted on the task's spend whatever it reported: it was a paid call.

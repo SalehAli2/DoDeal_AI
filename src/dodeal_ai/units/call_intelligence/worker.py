@@ -21,6 +21,8 @@ THE ORDER, and what each step may cost:
      PAUSES. Over budget it waits out the cost window; a store outage retries
      after 300 s, doubling per outage to 3600 s. A pause never costs an
      attempt, even one taken at the charge. Nothing is spent blind.
+     A pass's call refused by an open model breaker, nothing sent, pauses the
+     job the same outage way (model_breaker_open) and costs no start (M5).
   6. One attempt is claimed, the recording downloaded (core/audio_download.py),
      probed, inspected and converted (audio.py) before any paid call: a file
      ffprobe cannot decode, over 3600 s, unreadable, or not two channels under
@@ -123,7 +125,7 @@ from dodeal_ai.units.call_intelligence.audio import (
     side_roles,
 )
 from dodeal_ai.units.call_intelligence.config import CallsConfig, resolve_calls_config
-from dodeal_ai.units.call_intelligence.paid import JobGone, PassUsage
+from dodeal_ai.units.call_intelligence.paid import JobGone, PassRefused, PassUsage
 from dodeal_ai.units.call_intelligence.queues import enqueue_call, enqueue_stage2
 from dodeal_ai.units.call_intelligence.reanalysis import (
     NO_TRANSCRIPT as REANALYSIS_NO_TRANSCRIPT,
@@ -160,6 +162,10 @@ INTERRUPTED = "transcription_interrupted"
 OUTAGE_DELAY_SECONDS = 300
 OUTAGE_DELAY_CAP_SECONDS = 3600
 STORE_DOWN = "cost_store_unavailable"
+# A pass's call refused by an open model breaker with nothing sent (M5, D-82).
+MODEL_REFUSED = "model_breaker_open"
+# The pauses that back off per outage; any other waits out the cost window.
+OUTAGES = frozenset({STORE_DOWN, MODEL_REFUSED})
 
 # process_call's own deadline is arq's job timeout less this: the time left to
 # record the interrupted path before arq cancels the run and records nothing.
@@ -541,6 +547,9 @@ async def _stage1(
             )
         except JobGone:
             return False
+        except PassRefused:
+            await _pause(job, MODEL_REFUSED, run=run)
+            return False
         finally:
             run.analyse_ms = _ms_since(started)
         if not stage1:
@@ -921,7 +930,7 @@ async def _fail(
 def pause_delay(reason: str, outages: int, *, window_seconds: int) -> int:
     """Seconds until a paused job runs again: the cost window when over
     budget, else 300 s doubled per outage so far, capped at 3600 s."""
-    if reason != STORE_DOWN:
+    if reason not in OUTAGES:
         return window_seconds
     # The exponent's own cap only keeps the number small; the delay cap decides.
     doublings = min(max(outages - 1, 0), 8)
@@ -936,7 +945,7 @@ async def _pause(
     took: a pause never costs one."""
     settings = get_settings()
     counts = await pause(
-        job, now=_now(), reason=reason, claimed=claimed, outage=reason == STORE_DOWN
+        job, now=_now(), reason=reason, claimed=claimed, outage=reason in OUTAGES
     )
     if counts is None:
         return

@@ -25,6 +25,7 @@ from dodeal_ai.core.jobs import (
     claim_attempt,
     clear_work,
     create_job,
+    give_back_pass,
     job_key,
     mark_stage2_requeued,
     mark_swept,
@@ -408,6 +409,7 @@ async def test_every_operation_fails_closed_on_a_dead_store(dead_store) -> None:
         note_wake(job, wake_at=NOW),
         settle_stage2(job, Stage2State.DONE, now=NOW),
         start_stage2_pass(job, "objections", now=NOW),
+        give_back_pass(job, "objections"),
         stale_stage2(NOW, limit=10),
         stage2_stuck("tenant-a", "job-1", now=NOW, wait_seconds=0),
         mark_stage2_requeued("tenant-a", "job-1", now=NOW),
@@ -565,6 +567,22 @@ async def test_a_stage2_pass_is_counted_on_a_done_job_only_while_pending(
     assert await start_stage2_pass(job, "objections", now=NOW) is None
     await jobs.get_jobs_client().delete(job_key("tenant-a", "job-1"))
     assert await start_stage2_pass(job, "objections", now=NOW) is None
+
+
+async def test_a_refused_start_is_given_back_never_below_zero(
+    redis_fakes: RedisFakes,
+) -> None:
+    """M5: one start back per refusal, a count at zero stays there, and a
+    job gone is None."""
+    await _create()
+    job = await _job()
+    assert await give_back_pass(job, "extract") == 0
+    assert await start_pass(job, "extract", now=NOW) == 1
+    assert await start_pass(job, "extract", now=NOW) == 2
+    assert await give_back_pass(job, "extract") == 1
+    assert (await _job()).passes == {"extract": 1}
+    await jobs.get_jobs_client().delete(job_key("tenant-a", "job-1"))
+    assert await give_back_pass(job, "extract") is None
 
 
 async def test_a_pending_stage2_is_indexed_until_it_settles(

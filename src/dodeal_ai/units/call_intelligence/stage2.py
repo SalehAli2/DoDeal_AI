@@ -14,6 +14,8 @@ is pending, and this task settles it:
           token_budget_exceeded,  a calls budget spent, or the store that
           audio_budget_exceeded,  counts it down, on the last of the task's
           cost_store_unavailable  runs
+          model_breaker_open      a pass's call refused by an open model
+                                  breaker, nothing sent, on the last run
           job_deadline_exceeded   cut off by its deadline on the last run
           and call.failed goes for stage 2 only: the job stays done, stage 1
           stands (delivery.py)
@@ -25,7 +27,8 @@ pending -- the last run died between the two -- sends it again.
 
 BUDGETS BEFORE SPEND, as process_call: over a calls budget, or with its store
 down, nothing is paid for and arq runs the task again after the pause delay
-(worker.pause_delay). THE DEADLINE is process_call's too: a run stops itself
+(worker.pause_delay). A pass refused by an open model breaker, nothing sent,
+costs no start and runs again after the outage backoff (M5). THE DEADLINE is process_call's too: a run stops itself
 before arq cancels it and is run again. Either way the re-run resumes from the
 passes kept (paid.py), and only on the task's last run does stage 2 fail.
 
@@ -72,11 +75,12 @@ from dodeal_ai.units.call_intelligence.analysis import NO_CLIENT
 from dodeal_ai.units.call_intelligence.coaching import NO_NEXT_STEP, NextStepSeen
 from dodeal_ai.units.call_intelligence.config import resolve_calls_config
 from dodeal_ai.units.call_intelligence.language import spoken_of
-from dodeal_ai.units.call_intelligence.paid import JobGone, PassUsage
+from dodeal_ai.units.call_intelligence.paid import JobGone, PassRefused, PassUsage
 from dodeal_ai.units.call_intelligence.transcriber import Transcript
 from dodeal_ai.units.call_intelligence.wave2 import Wave2, stage2_result, wave2
 from dodeal_ai.units.call_intelligence.worker import (
     DEADLINE,
+    MODEL_REFUSED,
     Deliver,
     deadline_seconds,
     deliver_nothing,
@@ -189,10 +193,7 @@ async def _analyse(
     try:
         await calls_budget_preflight(scope)
     except CallsBudgetPaused as paused:
-        outages = int(ctx.get("job_try", 1))
-        window = get_settings().cost_window_seconds
-        delay = pause_delay(paused.reason_code, outages, window_seconds=window)
-        await _again_or_fail(ctx, run, paused.reason_code, delay)
+        await _pause(ctx, run, paused.reason_code)
         return
     transcript = Transcript.model_validate(kept)
     try:
@@ -212,6 +213,9 @@ async def _analyse(
             next_step=_next_step(result),
         )
     except JobGone:
+        return
+    except PassRefused:
+        await _pause(ctx, run, MODEL_REFUSED)
         return
     await store_stage2_result(
         tenant,
@@ -251,6 +255,15 @@ def _next_step(result: dict[str, object]) -> NextStepSeen:
     return NextStepSeen(
         booked=step.get("booked") is True, kind=kind if isinstance(kind, str) else None
     )
+
+
+async def _pause(ctx: dict[str, Any], run: Stage2Run, reason: str) -> None:
+    """Run again after worker.pause_delay for `reason`, each of arq's runs so
+    far counted as an outage, or on the last run fail."""
+    outages = int(ctx.get("job_try", 1))
+    window = get_settings().cost_window_seconds
+    delay = pause_delay(reason, outages, window_seconds=window)
+    await _again_or_fail(ctx, run, reason, delay)
 
 
 async def _again_or_fail(
