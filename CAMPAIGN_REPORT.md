@@ -7581,3 +7581,8 @@ failure modes, then one stress test (sabotage in brackets).
 - coaching (RISK, model output): one bad stage quote or moment lost the whole coaching. Now observations stand one by one, a failing stage yes is kept unverified, a bad moment dropped, the reprompt earned only with no verified strength or improvement. Sabotage: gate off fails 2; failing observations kept fails 1; stage kept verified fails 1.
 - evidence.Answer (RISK, model output): an invented key reprompted coaching. Now score and coaching drop it unread; every Answer field required, held by a guard test. Sabotage: forbid restored fails 3.
 - Stress test: coaching whose first answer's strength is invented and whose second's improvement is: two calls, the part carries the first's improvement and the second's strength, and the reprompt names the failed paths, never the words.
+
+## Fix F: quotes the model cited off by a few segments; why a quote missed (D-102)
+- evidence far search (RISK, model output): a true phrase cited three segments away was refused and re-asked; a short "ok" moved to any other "ok". Now a quote of 4 words or more not next door is looked for in every other segment, nearest first, still word for word, still held to its speaker. Sabotage: search off fails 5; any length fails 3; farthest first fails 1.
+- quote_miss log (RISK, logging): a refused quote could not be diagnosed; a diagnosis that printed the quote. Now one line per miss with the pass, the path, elsewhere/joined/altered_N/absent and the word count, and call_e2e prints it. Sabotage: the quote in the line fails 3; altered called absent fails 4.
+- Stress test: the phrase said in s1 and s7, cited at s5, is stored at s7; a dropped negation is found nowhere, near or far.
