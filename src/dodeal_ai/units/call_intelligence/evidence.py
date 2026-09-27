@@ -27,7 +27,8 @@ back out. Where a pass names who must have said it, the segment it is found in
 is that speaker's: a voice no role mapping named (prompts.said_by) is no one's,
 so such a check fails there (quote_speaker_unknown). Any failure is a
 malformed answer: the pass is reprompted once, then fails -- except where a
-pass says otherwise (passes.py). A quote failing only on an unknown voice is
+pass says otherwise (passes.py, extras.py; score.py and coaching.py keep the
+verified parts of both answers, D-101). A quote failing only on an unknown voice is
 never the model's slip, so it never counts toward mostly_failed.
 
 THE LANGUAGE SHARE: a text is in the language asked for when at least 60 % of
@@ -272,6 +273,15 @@ class Strict(BaseModel):
     """An answer's shape, exactly: no field it does not name, never changed."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class Answer(Strict):
+    """An answer whose every field is required (a guard test holds it): a
+    key it does not name is dropped unread, never a reprompt (D-101). Safe
+    only because none has a default -- a misspelled key is then a missing
+    field and still refused, never quietly read as a default."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
 
 
 @dataclass(frozen=True, slots=True)

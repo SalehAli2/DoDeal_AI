@@ -32,7 +32,16 @@ not_engaged or objections_unavailable -- and the pass is not run.
 
 THE EVIDENCE: each check's quote goes through the quote check; one is owed
 wherever the answer says something was said -- every yes, but for
-no_over_promise and no_pressure, where it is every no.
+no_over_promise and no_pressure, where it is every no. A quote given where
+none is owed and failing is dropped (quote and segment null), never a
+reprompt: nothing rests on it.
+
+STRICT, CHECK BY CHECK (D-101). An owed quote that fails earns the one
+reprompt; the second answer's checks are taken only where the first's owed
+quote failed and the second's holds (merged_checks), so a true check is never
+re-asked and thrown away. Any owed quote still failing after that: no score,
+as before. Every check scored stands on its own verified quote, whichever of
+the two answers it came from.
 
 THE ESCALATIONS AGREE (D-75, call_rubric_v2). Once wave 2 has both parts, a
 verified escalation the agent said answers the professionalism check it is an
@@ -52,15 +61,17 @@ from typing import Literal, cast
 
 from dodeal_ai.core.config import Settings
 from dodeal_ai.core.context import TenantScope
+from dodeal_ai.core.errors import MalformedOutputError
 from dodeal_ai.core.llm import LLMClient, LLMResponse
 from dodeal_ai.core.llm.profiles import PROFILE_UNIT_B_SCORE, task_ceiling
+from dodeal_ai.core.validation import OutputValidationError
 from dodeal_ai.units.call_intelligence.escalations import OVER_PROMISE
 from dodeal_ai.units.call_intelligence.evidence import (
+    Answer,
     CallText,
     Errors,
     Quote,
     SegmentId,
-    Strict,
     evidence_errors,
     quote_errors,
     relocated,
@@ -76,6 +87,7 @@ from dodeal_ai.units.call_intelligence.prompts import (
 )
 from dodeal_ai.units.call_intelligence.transcriber import Segment
 from dodeal_ai.units.structured_intelligence.llm_call import (
+    Mend,
     call_model,
     output_rejected,
 )
@@ -130,7 +142,7 @@ _EVIDENCE_ON_NO = frozenset({"no_over_promise", "no_pressure"})
 ESCALATION_CHECKS = {OVER_PROMISE: "no_over_promise"}
 
 
-class Check(Strict):
+class Check(Answer):
     """One yes-or-no check, and the quote that shows it."""
 
     answer: Literal["yes", "no"]
@@ -138,7 +150,7 @@ class Check(Strict):
     segment: SegmentId
 
 
-class ScoreChecks(Strict):
+class ScoreChecks(Answer):
     """unit_b.score's answer, exactly."""
 
     asked_budget: Check
@@ -194,16 +206,61 @@ PRODUCT_KNOWLEDGE = Component(
 RUBRIC = (UNDERSTANDING, OBJECTIONS, NEXT_STEP, PROFESSIONALISM, PRODUCT_KNOWLEDGE)
 
 
+def _owed(name: str, found: Check) -> bool:
+    """Whether the check's answer says something was said, so its quote is owed."""
+    return found.answer == (NO if name in _EVIDENCE_ON_NO else YES)
+
+
+def owed_failures(call: CallText, answer: ScoreChecks) -> Errors:
+    """The owed quotes that fail the quote check, by check name."""
+    errors: Errors = []
+    for name in CHECK_NAMES:
+        found: Check = getattr(answer, name)
+        if _owed(name, found):
+            errors += evidence_errors(call, name, found.quote, found.segment)
+    return errors
+
+
+def _holds(call: CallText, name: str, found: Check) -> bool:
+    """Whether a check stands: nothing owed, or its owed quote holds."""
+    return not _owed(name, found) or not evidence_errors(
+        call, name, found.quote, found.segment
+    )
+
+
+def merged_checks(call: CallText) -> Callable[[ScoreChecks, ScoreChecks], ScoreChecks]:
+    """The first answer, each check whose owed quote failed replaced by the
+    second answer's same check where that one holds (D-101)."""
+
+    def merge(first: ScoreChecks, second: ScoreChecks) -> ScoreChecks:
+        update = {
+            name: getattr(second, name)
+            for name in CHECK_NAMES
+            if not _holds(call, name, getattr(first, name))
+            and _holds(call, name, getattr(second, name))
+        }
+        return first.model_copy(update=update) if update else first
+
+    return merge
+
+
+def settled(call: CallText, answer: ScoreChecks) -> ScoreChecks:
+    """The answer with every quote given where none was owed, and failing,
+    dropped: its quote and segment null, its answer as it was."""
+    update = {
+        name: Check(answer=found.answer, quote=None, segment=None)
+        for name in CHECK_NAMES
+        if not _owed(name, found := getattr(answer, name))
+        and quote_errors(call, name, found.quote, found.segment)
+    }
+    return answer.model_copy(update=update) if update else answer
+
+
 def check_score(call: CallText) -> Callable[[ScoreChecks], None]:
-    """Each check's quote, owed where its answer says something was said."""
+    """The score's final gate: every owed quote holds, else refused."""
 
     def check(answer: ScoreChecks) -> None:
-        errors: Errors = []
-        for name in CHECK_NAMES:
-            found: Check = getattr(answer, name)
-            said = NO if name in _EVIDENCE_ON_NO else YES
-            owed = evidence_errors if found.answer == said else quote_errors
-            errors += owed(call, name, found.quote, found.segment)
+        errors = owed_failures(call, answer)
         if errors:
             raise output_rejected(SCORE_LABEL, tuple(errors))
 
@@ -213,7 +270,9 @@ def check_score(call: CallText) -> Callable[[ScoreChecks], None]:
 async def ask_checks(
     client: LLMClient, call: CallText, *, scope: TenantScope, settings: Settings
 ) -> tuple[ScoreChecks, LLMResponse]:
-    """unit_b.score: one call, or two when the first answer is malformed."""
+    """unit_b.score: one call, or two when an owed quote failed, the second
+    answer's checks taken only where the first's failed (merged_checks).
+    MalformedOutputError when an owed quote still fails: no score."""
     answer, response = await call_model(
         client,
         build_call_prompt(SCORE_TEMPLATE, call.data()),
@@ -229,11 +288,15 @@ async def ask_checks(
             reasoning=SCORE_REASONING_MAX_OUTPUT_TOKENS,
             client=client,
         ),
-        check=check_score(call),
         reprompt_tail=REPROMPT_TAIL_TEMPLATE,
         tail_by_error=REPROMPT_TAILS,
+        mend=Mend(lambda found: owed_failures(call, found), merged_checks(call)),
     )
-    return relocated(call, answer), response
+    try:
+        check_score(call)(answer)
+    except OutputValidationError:
+        raise MalformedOutputError() from None
+    return relocated(call, settled(call, answer)), response
 
 
 def round_half_up(value: Fraction) -> int:

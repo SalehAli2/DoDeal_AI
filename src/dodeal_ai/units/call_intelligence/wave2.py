@@ -48,6 +48,7 @@ from dodeal_ai.units.call_intelligence.coaching import (
     Coaching,
     NextStepSeen,
     coach,
+    coaching_evidence,
     coaching_part,
 )
 from dodeal_ai.units.call_intelligence.config import CallsConfig
@@ -203,6 +204,9 @@ async def wave2(
                 metered, call, scope=scope, settings=settings, next_step=next_step
             ),
         )
+        if coaching is not None:
+            dropped, unverified = coaching_evidence(call, coaching)
+            run.usage.evidence(COACHING, dropped=dropped, unverified=unverified)
         wave.parts[COACHING] = (
             None if coaching is None else coaching_part(call, coaching, loss_reason)
         )

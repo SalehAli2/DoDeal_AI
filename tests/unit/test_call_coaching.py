@@ -22,8 +22,11 @@ from dodeal_ai.units.call_intelligence.coaching import (
     NextStepSeen,
     check_coaching,
     coach,
+    coaching_evidence,
+    coaching_failures,
     coaching_part,
     harsh,
+    merged_coaching,
 )
 from dodeal_ai.units.call_intelligence.config import CallsConfig
 from dodeal_ai.units.call_intelligence.evidence import CallText
@@ -138,10 +141,12 @@ def _refused(answer: dict[str, Any], call: CallText | None = None):
     ],
     ids=["no-strength", "no-improvement"],
 )
-def test_coaching_with_no_strength_or_no_improvement_is_malformed(
+def test_coaching_with_no_strength_or_no_improvement_earns_the_reprompt(
     observations: list, error: tuple[str, str]
 ) -> None:
-    assert _refused(_answer(observations=observations)) == (error,)
+    answer = Coaching.model_validate(_answer(observations=observations))
+    check_coaching(_call())(answer)
+    assert coaching_failures(_call(), answer) == [error]
 
 
 @pytest.mark.parametrize(
@@ -203,14 +208,24 @@ def test_a_true_answer_passes_and_its_moments_are_timed_in_code() -> None:
         {"timestamp": "00:20", "start_s": 20.0, **ANSWER["moments"][0]}
     ]
     assert part["plan"] == ANSWER["plan"]
-    assert part["stages"]["opening"] == ANSWER["stages"]["opening"]
+    assert part["stages"]["opening"] == {
+        **ANSWER["stages"]["opening"],
+        "unverified": False,
+    }
     assert part["observations"] == [STRENGTH, IMPROVEMENT]
+    assert coaching_failures(_call(), answer) == []
+    assert coaching_evidence(_call(), answer) == (0, 0)
 
 
-def test_an_improvement_without_a_way_to_say_it_is_malformed() -> None:
+def test_an_improvement_without_a_way_to_say_it_does_not_stand() -> None:
     answer = _answer()
     answer["observations"][1]["say_it_like_this"] = None
-    assert _refused(answer) == (("observations.1", "say_it_like_this_missing"),)
+    found = Coaching.model_validate(answer)
+    assert coaching_failures(_call(), found) == [
+        ("observations", "no_improvement"),
+        ("observations.1", "say_it_like_this_missing"),
+    ]
+    assert coaching_part(_call(), found)["observations"] == [STRENGTH]
 
 
 def test_every_quote_is_checked() -> None:
@@ -218,17 +233,57 @@ def test_every_quote_is_checked() -> None:
     answer["observations"][0]["quote"] = "a lovely warm greeting"
     answer["stages"]["close"] = _stage("yes", None, None)
     answer["stages"]["rapport"] = _stage("no", "so nice to meet you", "s1")
-    assert _refused(answer) == (
+    assert coaching_failures(_call(), Coaching.model_validate(answer)) == [
+        ("observations", "no_strength"),
         ("observations.0", "quote_not_in_segment"),
         ("stages.rapport", "quote_not_in_segment"),
         ("stages.close", "quote_missing"),
-    )
+    ]
 
 
-def test_a_moment_on_a_segment_that_does_not_exist_is_malformed() -> None:
+def test_a_failing_stage_quote_is_kept_unverified_never_a_reprompt() -> None:
+    """D-101: with a verified strength and improvement, stage quotes that
+    fail cost nothing: a yes stays yes, unverified, its quote null; a quote
+    given on a no is dropped."""
+    answer = _answer()
+    answer["stages"]["close"] = _stage("yes", None, None)
+    answer["stages"]["rapport"] = _stage("no", "so nice to meet you", "s1")
+    found = Coaching.model_validate(answer)
+    assert coaching_failures(_call(), found) == []
+    stages = coaching_part(_call(), found)["stages"]
+    assert stages["close"] == {
+        "done": "yes",
+        "quote": None,
+        "segment": None,
+        "unverified": True,
+    }
+    assert stages["rapport"] == {
+        "done": "no",
+        "quote": None,
+        "segment": None,
+        "unverified": False,
+    }
+    assert coaching_evidence(_call(), found) == (0, 1)
+
+
+def test_more_than_half_the_quotes_failing_earns_the_reprompt() -> None:
+    answer = _answer()
+    for name in ("rapport", "presentation", "objections", "close"):
+        answer["stages"][name] = _stage("yes", "never said on this call", "s2")
+    answer["stages"]["discovery"] = _stage("yes", "never said either", "s2")
+    failures = coaching_failures(_call(), Coaching.model_validate(answer))
+    assert ("stages.close", "quote_not_in_segment") in failures
+    assert not any(where == "observations" for where, _ in failures)
+
+
+def test_a_moment_on_a_segment_that_does_not_exist_is_dropped() -> None:
     answer = _answer()
     answer["moments"][0]["segment"] = "s9"
-    assert _refused(answer) == (("moments.0", "segment_unknown"),)
+    found = Coaching.model_validate(answer)
+    check_coaching(_call())(found)
+    assert coaching_failures(_call(), found) == []
+    assert coaching_part(_call(), found)["moments"] == []
+    assert coaching_evidence(_call(), found) == (1, 0)
 
 
 def test_coaching_in_the_wrong_language_is_malformed() -> None:
@@ -253,6 +308,116 @@ def test_the_counts_are_held_by_the_schema(change: dict) -> None:
 
     with pytest.raises(ValidationError):
         Coaching.model_validate(_answer(**change))
+
+
+# --- D-101: kept item by item, filled from the second answer --------------------------
+
+BAD_STRENGTH = {**STRENGTH, "quote": "a lovely warm greeting"}
+BAD_IMPROVEMENT = {**IMPROVEMENT, "quote": "you must sign now"}
+
+
+async def test_a_second_answer_fills_the_kind_the_first_lacked() -> None:
+    """The guard: the first answer's strength fails, so the one reprompt is
+    sent; the second's strength is taken, the first's improvement kept, and
+    the reprompt lists what failed, never the answer."""
+    first = _answer(observations=[BAD_STRENGTH, IMPROVEMENT])
+    second = _answer(observations=[STRENGTH, BAD_IMPROVEMENT])
+    llm = FakeLLM(json_response(first), json_response(second))
+
+    found, _ = await coach(llm, _call(), scope=SCOPE, settings=get_settings())
+
+    assert llm.call_count == 2
+    assert coaching_part(_call(), found)["observations"] == [IMPROVEMENT, STRENGTH]
+    tail = llm.calls[1].prompt.tail
+    assert "$.observations: no_strength" in tail
+    assert "$.observations.0: quote_not_in_segment" in tail
+    assert "a lovely warm greeting" not in llm.calls[1].prompt.text
+
+
+async def test_with_no_verified_strength_in_either_answer_the_pass_fails() -> None:
+    lacking = _answer(observations=[BAD_STRENGTH, IMPROVEMENT])
+    llm = FakeLLM(json_response(lacking), json_response(lacking))
+    with pytest.raises(MalformedOutputError):
+        await coach(llm, _call(), scope=SCOPE, settings=get_settings())
+    assert llm.call_count == 2
+
+
+async def test_an_unshaped_second_answer_leaves_the_first_and_fails() -> None:
+    llm = FakeLLM(
+        json_response(_answer(observations=[BAD_STRENGTH, IMPROVEMENT])),
+        json_response({}),
+    )
+    with pytest.raises(MalformedOutputError):
+        await coach(llm, _call(), scope=SCOPE, settings=get_settings())
+    assert llm.call_count == 2
+
+
+async def test_a_key_the_schema_does_not_name_is_dropped_never_reprompted() -> None:
+    """An Answer schema: a quote the model added to a moment is dropped
+    unread, and the answer costs one call."""
+    answer = _answer()
+    answer["moments"][0]["quote"] = "You have to decide today"
+    llm = FakeLLM(json_response(answer))
+
+    found, _ = await coach(llm, _call(), scope=SCOPE, settings=get_settings())
+
+    assert llm.call_count == 1
+    assert "quote" not in coaching_part(_call(), found)["moments"][0]
+
+
+def test_the_merge_keeps_two_observations_and_takes_only_holding_stages() -> None:
+    merge = merged_coaching(_call())
+    first = Coaching.model_validate(_answer(observations=[STRENGTH, BAD_IMPROVEMENT]))
+    worse = Coaching.model_validate(
+        _answer(observations=[BAD_STRENGTH, BAD_IMPROVEMENT])
+    )
+    kept = merge(first, worse)
+    assert [seen.quote for seen in kept.observations] == [
+        STRENGTH["quote"],
+        BAD_IMPROVEMENT["quote"],
+    ]
+    failing = _answer()
+    failing["stages"]["close"] = _stage("yes", "never said on this call", "s2")
+    failing["stages"]["rapport"] = _stage("yes", "never said either", "s2")
+    holding = _answer()
+    holding["stages"]["close"] = _stage("yes", "You have to decide today", "s5")
+    holding["stages"]["rapport"] = _stage("yes", "still never said", "s2")
+    stages = merge(
+        Coaching.model_validate(failing), Coaching.model_validate(holding)
+    ).stages
+    assert stages.close.quote == "You have to decide today"
+    assert stages.rapport.quote == "never said either"
+
+
+def test_every_answer_field_is_required() -> None:
+    """The guard on Answer (D-101): a key it does not name is dropped only
+    because none of its fields has a default, so a misspelled key is still a
+    missing field, never a default read as the model's answer."""
+    import importlib
+    import pkgutil
+
+    import dodeal_ai.units.call_intelligence as package
+    from dodeal_ai.units.call_intelligence.evidence import Answer
+
+    for module in pkgutil.iter_modules(package.__path__):
+        importlib.import_module(f"{package.__name__}.{module.name}")
+
+    def below(cls: type) -> list[type]:
+        return [c for sub in cls.__subclasses__() for c in (sub, *below(sub))]
+
+    answers = below(Answer)
+    assert {cls.__name__ for cls in answers} >= {
+        "Coaching",
+        "Observation",
+        "Moment",
+        "Stage",
+        "Stages",
+        "ScoreChecks",
+        "Check",
+    }
+    for cls in answers:
+        optional = [n for n, f in cls.model_fields.items() if not f.is_required()]
+        assert optional == [], cls.__name__
 
 
 # --- in wave 2 -----------------------------------------------------------------------------

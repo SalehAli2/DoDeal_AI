@@ -28,6 +28,7 @@ from dodeal_ai.units.call_intelligence.prompts import (
     COACHING_TEMPLATE,
     ESCALATIONS_TEMPLATE,
     EXTRAS_TEMPLATE,
+    QUOTE_EXACT_TAIL_TEMPLATE,
 )
 from dodeal_ai.units.call_intelligence.score import (
     CHECK_NAMES,
@@ -39,10 +40,13 @@ from dodeal_ai.units.call_intelligence.score import (
     band_of,
     check_score,
     mark,
+    merged_checks,
+    owed_failures,
     reconciled,
     round_half_up,
     score_call,
     score_gate,
+    settled,
     substantive_turns,
 )
 from dodeal_ai.units.call_intelligence.transcriber import Segment, Transcript
@@ -53,6 +57,7 @@ from dodeal_ai.units.call_intelligence.wave2 import (
     wave2,
 )
 from tests.helpers.fake_llm import FakeLLM, json_response
+from tests.helpers.reprompt_tails import tail_with
 from tests.helpers.wave2_answers import coaching_answer, extras_answer
 
 SCOPE = RequestContext.for_admitted_job(
@@ -373,18 +378,49 @@ def test_a_quoted_yes_passes() -> None:
             {"answer": "yes", "quote": "when do you move", "segment": "s1"},
             "quote_not_in_segment",
         ),
-        (
-            "no_over_promise",
-            {"answer": "yes", "quote": "prices will double", "segment": "s3"},
-            "quote_not_in_segment",
-        ),
     ],
-    ids=["yes-unquoted", "pressure-unquoted", "yes-invented", "stray-invented"],
+    ids=["yes-unquoted", "pressure-unquoted", "yes-invented"],
 )
 def test_a_quote_is_owed_where_the_answer_says_something_was_said(
     name: str, given: dict[str, Any], error: str
 ) -> None:
     assert _refused(_checks(**{name: given})) == ((name, error),)
+
+
+def test_a_stray_quote_nothing_rests_on_is_dropped_never_refused() -> None:
+    """D-101: a failing quote given where none is owed costs no reprompt and
+    no score; it is dropped, the answer kept as it was."""
+    stray = {"answer": "yes", "quote": "prices will double", "segment": "s3"}
+    answer = ScoreChecks.model_validate(_checks(no_over_promise=stray))
+    check_score(_call())(answer)
+    kept = settled(_call(), answer).no_over_promise
+    assert (kept.answer, kept.quote, kept.segment) == ("yes", None, None)
+    assert settled(_call(), answer).asked_budget == answer.asked_budget
+
+
+def test_a_check_is_taken_from_the_second_answer_only_where_the_first_failed() -> None:
+    """D-101, the guard: the second answer fills only the checks whose owed
+    quote failed in the first, and only with a check that holds."""
+    first = ScoreChecks.model_validate(
+        _checks(
+            asked_budget="what budget do you have",
+            courteous="a lovely warm greeting",
+            asked_purpose="an invented purpose",
+        )
+    )
+    second = ScoreChecks.model_validate(
+        _checks(
+            asked_budget={"answer": "no", "quote": None, "segment": None},
+            courteous="Good morning",
+            asked_purpose="still invented",
+        )
+    )
+    merged = merged_checks(_call())(first, second)
+    assert merged.asked_budget == first.asked_budget
+    assert merged.courteous == second.courteous
+    assert merged.asked_purpose == first.asked_purpose
+    assert owed_failures(_call(), merged) == [("asked_purpose", "quote_not_in_segment")]
+    assert merged_checks(_call())(merged, merged) is merged
 
 
 # --- in wave 2 ------------------------------------------------------------------------------
@@ -522,6 +558,54 @@ async def test_one_failing_quote_among_true_ones_still_leaves_no_score() -> None
     llm = FakeLLM(
         json_response(NO_OBJECTIONS), json_response(one_bad), json_response(one_bad)
     )
+
+    wave = await _wave2(llm)
+
+    assert wave.parts[SCORE] is None
+    assert wave.reasons == {SCORE: "score_malformed_output"}
+    assert llm.profiles[:3] == [
+        "unit_b.objections",
+        PROFILE_UNIT_B_SCORE,
+        PROFILE_UNIT_B_SCORE,
+    ]
+
+
+async def test_a_second_answer_fills_only_what_the_first_got_wrong() -> None:
+    """D-101: the first answer's one bad quote is reprompted; the second
+    answer holds that check but invents another. Merged check by check, every
+    owed quote holds, so the call is scored -- from two calls, never three --
+    and the reprompt lists only the failed check."""
+    first = _checks(
+        asked_budget="what budget do you have in mind",
+        courteous="a lovely warm greeting",
+    )
+    second = _checks(
+        asked_budget="an invented question",
+        courteous="Good morning",
+    )
+    llm = FakeLLM(
+        json_response(NO_OBJECTIONS), json_response(first), json_response(second)
+    )
+
+    wave = await _wave2(llm)
+
+    part = wave.parts[SCORE]
+    assert part is not None and SCORE not in wave.reasons
+    checks = part["components"]
+    assert checks["understanding"]["checks"]["asked_budget"]["quote"] == (
+        "what budget do you have in mind"
+    )
+    assert checks["professionalism"]["checks"]["courteous"]["quote"] == "Good morning"
+    scored = [c for c in llm.calls if c.profile == PROFILE_UNIT_B_SCORE]
+    assert len(scored) == 2
+    assert scored[1].prompt.tail == tail_with(
+        QUOTE_EXACT_TAIL_TEMPLATE, "$.courteous: quote_not_in_segment"
+    )
+
+
+async def test_an_unshaped_second_answer_leaves_the_first_and_no_score() -> None:
+    first = _checks(courteous="a lovely warm greeting")
+    llm = FakeLLM(json_response(NO_OBJECTIONS), json_response(first), json_response({}))
 
     wave = await _wave2(llm)
 

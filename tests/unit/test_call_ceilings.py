@@ -221,18 +221,25 @@ async def test_no_reasoning_reaches_a_stage2_part(monkeypatch) -> None:
 
 @pytest.mark.parametrize(
     "schema",
-    [
-        objections.Objections,
-        score.ScoreChecks,
-        escalations.Flags,
-        coaching.Coaching,
-        extras.Extras,
-    ],
+    [objections.Objections, escalations.Flags, extras.Extras],
 )
 def test_an_answer_carrying_its_reasoning_is_refused(schema: type[BaseModel]) -> None:
     name = next(k for k, v in PASSES.items() if v[0].__module__ == schema.__module__)
     with pytest.raises(ValidationError):
         schema.model_validate({**PASSES[name][2], "reasoning": "hidden thoughts"})
+
+
+@pytest.mark.parametrize("schema", [score.ScoreChecks, coaching.Coaching])
+def test_an_answer_carrying_its_reasoning_has_it_dropped_unread(
+    schema: type[BaseModel],
+) -> None:
+    """An Answer schema (D-101) drops a key it does not name at validation:
+    the reasoning is never kept, dumped, stored or delivered, and costs no
+    reprompt."""
+    name = next(k for k, v in PASSES.items() if v[0].__module__ == schema.__module__)
+    answer = schema.model_validate({**PASSES[name][2], "reasoning": "hidden thoughts"})
+    assert "hidden thoughts" not in json.dumps(answer.model_dump())
+    assert answer == schema.model_validate(PASSES[name][2])
 
 
 def test_reasoning_is_counted_per_pass_and_never_kept() -> None:

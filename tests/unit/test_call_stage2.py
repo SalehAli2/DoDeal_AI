@@ -883,8 +883,8 @@ async def test_three_invented_keyword_quotes_give_evidence_dropped_3(
 
     (line,) = [r for r in caplog.records if r.getMessage() == "call_stage2_outcome"]
     assert (line.evidence_dropped, line.evidence_unverified) == (
-        {"extras": 3},
-        {"extras": 1},
+        {"coaching": 0, "extras": 3},
+        {"coaching": 0, "extras": 1},
     )
     held = await read_stage2_result("tenant-a", JOB)
     assert held is not None and held["extras"]["keywords"] == []
@@ -899,4 +899,7 @@ async def test_a_run_with_no_extras_answer_counts_no_evidence(
     with caplog.at_level(logging.INFO, logger="dodeal_ai.unit_b"):
         await analyse_stage2(stage2_ctx, "tenant-a", JOB)
     (line,) = [r for r in caplog.records if r.getMessage() == "call_stage2_outcome"]
-    assert (line.evidence_dropped, line.evidence_unverified) == (None, None)
+    assert (line.evidence_dropped, line.evidence_unverified) == (
+        {"coaching": 0},
+        {"coaching": 0},
+    )
