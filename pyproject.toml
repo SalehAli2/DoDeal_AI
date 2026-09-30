@@ -108,3 +108,9 @@ dev = [
     "pytest-cov>=7.1.0",
     "ruff>=0.16.1",
 ]
+# The local console (scripts/console): a page to upload calls and notes to the
+# stack on this machine. Never installed by `uv sync`, CI or the image; run it
+# with `uv run --group console python -m scripts.console`.
+console = [
+    "streamlit>=1.50",
+]

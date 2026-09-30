@@ -132,7 +132,7 @@ python -m dodeal_ai.workers.calls stage2     # worker-stage2
 ```
 
 - **The four queues.** `priority`, `normal` and `overnight` run stage 1 (`process_call`) and callback retries; `normal` also runs the stuck-job sweep every 300 s; re-analyses go on `overnight`. `stage2` runs wave 2 (`analyse_stage2`) and translations (`translate_call`), and transcribes nothing.
-- **ffmpeg and ffprobe.** In the image. A stage-1 worker checks both at start and refuses without them (`ffmpeg_not_found`), except under the demo flag. ffprobe must decode the file's start (else `audio_format_unknown`, before any paid call); ffmpeg then converts it to 16 kHz mono FLAC, two files for a stereo call, and every engine is sent that.
+- **ffmpeg and ffprobe.** In the image. A stage-1 worker checks both at start and refuses without them (`ffmpeg_not_found`), except under the demo flag. ffprobe must decode the file's start (else `audio_format_unknown`, before any paid call); ffmpeg then converts it to 16 kHz mono FLAC, a stereo call's channels mixed, and every engine is sent that, once. A stereo call whose channels carry two sides has their loudness read first, and the channels say who spoke each word (D-106, `audio_channels`, default `auto`).
 - **Model routing.** `DODEAL_LLM_*` is the `default` route. `DODEAL_LLM_PROVIDERS` adds providers (key from the variable each names), `DODEAL_LLM_PROFILES` points a pass at one, `DODEAL_MODEL_ROUTES` names routes (pass → profile). A company picks one with `unit_a.model_route` / `unit_b.model_route`.
 - **Speech-to-text.** `DODEAL_CALL_STT_PROVIDER` / `_MODEL` / `_API_KEY` / `_BASE_URL` are the `default` STT profile (Gemini's `gemini-3.5-transcribe`). `DODEAL_CALL_STT_PROFILES` adds named ones (`gemini`, `openai_compatible`, `diarized_http`). A company picks one with `unit_b.stt_profile`. A profile that cannot be built stops the worker. The fake is handed in only by `scripts/call_demo.py --worker` under `DODEAL_CALL_DEMO_ALLOW_LOCAL_AUDIO=true`.
 - **Keyword vocabulary.** `unit_b.keyword_vocabulary` (up to 100 names) is used after transcription only: spotted in code into stage 1 `signals.keywords`, and mapped by the extras pass to `canonical`. It is never sent to the STT engine.
@@ -169,6 +169,23 @@ uv run python scripts/mint_demo_token.py                  # the primary fetch ro
 ```
 
 The `Host` header in that line is the load-bearing part: the connection goes to `localhost:8000`, but Gate 2 only ever reads the header. The `fetch` route additionally needs the fake CRM (register item 79, a separate repository) listening on port **8001** of the Docker host; `docker-compose.demo.yml` maps `tenant-a.crm.demo.invalid` there through `extra_hosts`, and `.invalid` never resolves in DNS, so if that mapping is ever removed the call fails immediately instead of reaching somebody else's host.
+
+#### The local console
+
+A page on this machine to upload recorded calls and notes and read what the service made of them. It runs the real service path, as `scripts/call_e2e.py` does: the API, the normal and stage-2 call workers, and one server that serves the uploads and takes the callbacks.
+
+```bash
+docker compose up -d redis
+uv run --group console python -m scripts.console        # opens http://127.0.0.1:8501
+```
+
+- **Start the stack** in the sidebar once; it needs what `call_e2e` needs: Redis, a real speech-to-text engine (`DODEAL_CALL_STT_PROVIDER`, or a profile named in the sidebar), `DODEAL_LLM_*` in `.env`, `.env.demo`'s service signing key and `ffprobe`. It refuses production, and refuses to start while other workers consume the call queues.
+- **Calls:** upload one or more recordings (mp3, wav, m4a, flac, ogg, opus, aac, amr) with a language hint. Each is pushed as the CRM pushes it and followed; its report (the same `report.html` as `call_e2e`) opens on the page, with `status.json` to download. The score shown is a local test, never for judging a person.
+- **Notes:** one note in a form, or a CSV file with a header row (`note_text` required; `lead_id`, `author_id`, `leadType`, `enquiryType`, `project`, `status`, `deal_type`, `stage_change_to` optional), at most 20 per click. Each goes to `POST /api/v1/notes/judgements/direct` and is paid for; none is retried.
+- **Where things go:** every upload, report, judgement and log is kept in the console folder, `--dir` or `DODEAL_CONSOLE_DIR`, default `~/dodeal-console`, refused inside this repository. Nothing is logged. The page listens on 127.0.0.1 only, with Streamlit's usage statistics off.
+- **Stop the stack** in the sidebar, or stop the console with Ctrl+C: both stop every child and release the workers' health-check keys. Closing the terminal window kills the console without that; stop the leftover `python` processes before the next start.
+
+Streamlit is in the `console` dependency group, so `uv sync`, CI and the image never install it. `tests/unit/test_console_page.py` runs with `uv run --group console pytest` and is skipped elsewhere.
 
 See `CONTRIBUTING.md` for the architectural rules and deliberate decisions that apply to any change in this repository.
 
@@ -286,6 +303,7 @@ dodeal-ai/
 | `real_fetch_check.py` | A manual, one-shot script for the real, credentialed verification call against the live backend, run by hand for the joint session with the backend team. Not a pytest test and never runs in CI. Dry-runs by default against a guaranteed-unreachable fake host (no real network call); the real call requires an explicit `--live` flag, with a defense-in-depth guard that refuses to target a `dodealcrm.com` host without it. |
 | `mint_demo_token.py` | Mints one demo token and prints the `curl` line that uses it, including the `Host` header Gate 2 requires. Makes no network call and never prints the signing key. Reads the signing key, the algorithm, the three claim **names** and the inbound base domain from `Settings`, over the same `.env` → `.env.demo` stack Compose gives the container, so a token it mints cannot be signed with a different key from the one the service verifies against. `--route` picks the curl line: `fetch` (the primary route, needs the fake CRM), `direct` (note in the body, needs no CRM) or `probe` (the gate chain alone). Every default is invented. |
 | `check_coverage_floors.py` | Enforces per-**file** coverage minimums for the modules on a deny path (`core/auth/**`, `core/tenancy.py`, `core/cost/**`, `core/errors.py`, `core/validation.py`, `core/log_safety.py`). Reads `coverage.json` written by the pytest run. The repo-wide 92% gate is an average and can be paid for by well-covered code elsewhere; these cannot. Fails closed when a pattern matches no file, so a rename cannot silently drop a floor. stdlib only. |
+| `console/` | The local console (above): `__main__.py` starts Streamlit on 127.0.0.1, `app.py` is the page, `stack.py` starts the stack and sends every call and note, `files.py` serves the uploads and takes the callbacks. Needs the `console` dependency group. |
 | `verify_wheel.py` | Installs a built wheel into a throwaway venv and, from a temp directory outside the repo, imports every module under `dodeal_ai` and confirms the packaged prompts directory exists and holds `unit_a_v1.txt`. Runs in CI after the wheel is built; proves an installed copy actually works, not just the editable dev install. |
 
 ### `src/dodeal_ai/` (top level)
